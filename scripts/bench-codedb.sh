@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # === CodeDB Benchmark (ox port) ===
-# Compares Rust, standalone Go, and ox codedb implementations.
+# Compares Rust, standalone Go, and ox code implementations.
 
 RUST_BIN="${RUST_BIN:-/home/ajit/src/codedb/CodeDB/target/release/codedb-cli}"
 GO_BIN="${GO_BIN:-/home/ajit/src/codedb/CodeDBGo/bin/codedb}"
@@ -121,7 +121,7 @@ measure_db_stats() {
 
   _sql_count() {
     if [[ "$tool" == "ox" ]]; then
-      XDG_DATA_HOME="$bench_root/xdg" "$bin" codedb sql "$1" 2>/dev/null | tail -1 | grep -oP '\d+'
+      XDG_DATA_HOME="$bench_root/xdg" "$bin" code sql "$1" 2>/dev/null | tail -1 | grep -oP '\d+'
     else
       "$bin" --root "$root" sql "$1" 2>/dev/null | tail -1 | grep -oP '\d+'
     fi
@@ -140,8 +140,8 @@ run_index_cmd() {
   bin=$(get_bin "$tool")
 
   if [[ "$tool" == "ox" ]]; then
-    # ox codedb uses XDG data dir; override via env
-    XDG_DATA_HOME="$root/xdg" "$bin" codedb index "$url"
+    # ox code uses XDG data dir; override via env
+    XDG_DATA_HOME="$root/xdg" "$bin" code index "$url"
   else
     "$bin" --root "$root" index "$url"
   fi
@@ -153,7 +153,7 @@ run_search_cmd() {
   bin=$(get_bin "$tool")
 
   if [[ "$tool" == "ox" ]]; then
-    XDG_DATA_HOME="$root/xdg" "$bin" codedb search "$query"
+    XDG_DATA_HOME="$root/xdg" "$bin" code search "$query"
   else
     "$bin" --root "$root" search "$query"
   fi
@@ -172,7 +172,7 @@ run_searches() {
       t_start=$(date +%s%N)
       set +e
       if [[ "$tool" == "ox" ]]; then
-        XDG_DATA_HOME="$root/xdg" "$bin" codedb search "$query" >/dev/null 2>&1
+        XDG_DATA_HOME="$root/xdg" "$bin" code search "$query" >/dev/null 2>&1
       else
         "$bin" --root "$root" search "$query" >/dev/null 2>&1
       fi
@@ -206,7 +206,7 @@ bench_one() {
   bin=$(get_bin "$tool")
   local index_cmd
   if [[ "$tool" == "ox" ]]; then
-    index_cmd="XDG_DATA_HOME='$root/xdg' '$bin' codedb index '$url'"
+    index_cmd="XDG_DATA_HOME='$root/xdg' '$bin' code index '$url'"
   else
     index_cmd="'$bin' --root '$root' index '$url'"
   fi

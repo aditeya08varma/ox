@@ -134,11 +134,9 @@ func StateDir() string {
 }
 
 // CodeDBDataDir returns the directory for CodeDB indexes (SQLite + Bleve).
-//
-// XDG mode (default): $XDG_DATA_HOME/sageox/codedb (default: ~/.local/share/sageox/codedb)
-// Legacy mode (OX_XDG_DISABLE=1): ~/.sageox/data/codedb
-func CodeDBDataDir() string {
-	return filepath.Join(DataDir(), "codedb")
+// Stored per-project in .sageox/cache/codedb/ — gitignored, shared across worktrees.
+func CodeDBDataDir(projectRoot string) string {
+	return filepath.Join(projectRoot, ".sageox", "cache", "codedb")
 }
 
 // -----------------------------------------------------------------------------

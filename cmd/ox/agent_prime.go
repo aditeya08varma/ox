@@ -286,6 +286,8 @@ type agentPrimeOutput struct {
 	// Doctor agent marker
 	NeedsDoctorAgent bool   `json:"needs_doctor_agent,omitempty"` // true if .needs-doctor-agent marker exists
 	DoctorHint       string `json:"doctor_hint,omitempty"`        // hint for agent to run ox agent doctor
+	// Code search availability
+	CodeSearchTip string `json:"code_search_tip,omitempty"` // guidance on code search availability for this repo
 	// Hook auto-install
 	HooksInstalled     bool   `json:"hooks_installed,omitempty"`      // true if hooks were newly installed this prime
 	HooksRestartNotice string `json:"hooks_restart_notice,omitempty"` // message for agent to relay to user about restarting
@@ -540,7 +542,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// build intent-to-command guidance for agent consumption
-	guidance := buildGuidance(agentID, teamCtx, ledgerStatus)
+	guidance := buildGuidance(agentID, projectRoot, teamCtx, ledgerStatus)
 	timing["guidance_build"] = time.Since(phaseStart).Milliseconds()
 
 	// check for team context notifications using mtime-based approach
@@ -804,6 +806,14 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		_ = WriteToAgentEnvFile(envVars)
 	}
 
+	// append code search tip to AgentTip based on index availability
+	codeDBDir := paths.CodeDBDataDir(projectRoot)
+	if _, statErr := os.Stat(codeDBDir); statErr == nil {
+		output.CodeSearchTip = "ox code search is available for this repo. Use it for code/symbol/diff search. Use ox query for team discussions and session history."
+	} else {
+		output.CodeSearchTip = "Run ox code index to enable local code search (symbols, diffs, git history) for this repo."
+	}
+
 	output.ElapsedMs = time.Since(primeStart).Milliseconds()
 	output.Timing = timing
 
@@ -943,7 +953,7 @@ EOF`, agentID, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339),
 
 // buildGuidance constructs state-aware command guidance for agent consumption.
 // Only includes entries when the underlying resource is available.
-func buildGuidance(agentID string, teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance {
+func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance {
 	var cmds []intentCommand
 
 	// team discussions — only when team context exists
@@ -979,6 +989,20 @@ func buildGuidance(agentID string, teamCtx *teamContextInfo, ledger *ledgerInfo)
 		cmds = append(cmds, intentCommand{
 			Intent:  "deep search team discussions, session recordings, team context: use when MEMORY.md and its links don't answer",
 			Command: "ox query \"<your question>\"",
+		})
+	}
+
+	// code search — when local code index is available
+	codeDBDir := paths.CodeDBDataDir(projectRoot)
+	if _, statErr := os.Stat(codeDBDir); statErr == nil {
+		cmds = append(cmds, intentCommand{
+			Intent:  "code search (this repo only): search git history, symbols, file contents, and diffs",
+			Command: `ox code search "<pattern>"`,
+		})
+	} else {
+		cmds = append(cmds, intentCommand{
+			Intent:  "code search (not indexed yet): index this repo first, then search code, symbols, and diffs",
+			Command: "ox code index",
 		})
 	}
 
@@ -1101,6 +1125,9 @@ func startSessionRecording(projectRoot, agentID, agentType string) *sessionStatu
 func outputAgentPrime(cmd *cobra.Command, textMode, reviewMode bool, output agentPrimeOutput) error {
 	// always include tips: one for the agent, one for the agent to relay to the user
 	output.AgentTip = tips.GetTip("prime")
+	if output.CodeSearchTip != "" {
+		output.AgentTip += " " + output.CodeSearchTip
+	}
 	if userTip := tips.GetPrimeUserTip(output.AgentType); userTip != "" {
 		if output.UserNotification != "" {
 			output.UserNotification += "\n\nTip: " + userTip

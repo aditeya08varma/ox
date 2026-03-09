@@ -14,12 +14,13 @@ import (
 var queryCmd = &cobra.Command{
 	Use:   "query",
 	Short: "Search team knowledge",
-	Long: `Search across team discussions, docs, and session history.
+	Long: `Search across team discussions, docs, session history, and local code.
 
 Examples:
   ox query "how do we handle authentication?"
   ox query "database migration patterns" --limit 10
-  ox query "deployment process" --team team_abc123`,
+  ox query "deployment process" --team team_abc123
+  ox query "func handleAuth" --source=code`,
 	Args: cobra.ExactArgs(1),
 	RunE: runQuery,
 }
@@ -77,7 +78,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	}
 
 	if agentID != "" {
-		slog.Debug("query response context cost", "agent_id", agentID, "bytes", outputBytes)
+		slog.Debug("query response context cost", "agent_id", agentID, "source", qa.source, "bytes", outputBytes)
 		trackContextBytes(int64(outputBytes))
 	}
 	return nil

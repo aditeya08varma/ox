@@ -14,18 +14,23 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var codedbCmd = &cobra.Command{
-	Use:   "codedb",
-	Short: "Local code search engine",
-	Long:  "Index git repositories and search code, commits, symbols, and diffs using Sourcegraph-style queries.",
+var codeCmd = &cobra.Command{
+	Use:   "code",
+	Short: "Search code in this repo",
+	Long:  "Search git history and current code of this repo using Sourcegraph-style queries.",
 }
 
-var codedbIndexCmd = &cobra.Command{
+var codeIndexCmd = &cobra.Command{
 	Use:   "index [url]",
 	Short: "Index a git repository (defaults to current repo)",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dataDir := paths.CodeDBDataDir()
+		root, err := repotools.FindRepoRoot(repotools.VCSGit)
+		if err != nil {
+			return fmt.Errorf("not in a git repository (specify a URL or run from a git repo)")
+		}
+
+		dataDir := paths.CodeDBDataDir(root)
 		if err := os.MkdirAll(dataDir, 0o755); err != nil {
 			return fmt.Errorf("create codedb dir: %w", err)
 		}
@@ -51,10 +56,6 @@ var codedbIndexCmd = &cobra.Command{
 			}
 		} else {
 			// No args: index current git repo in-place (including dirty files)
-			root, err := repotools.FindRepoRoot(repotools.VCSGit)
-			if err != nil {
-				return fmt.Errorf("not in a git repository (specify a URL or run from a git repo)")
-			}
 			fmt.Fprintf(os.Stderr, "Indexing local repo %s...\n", root)
 			if err := db.IndexLocalRepo(context.Background(), root, opts); err != nil {
 				return fmt.Errorf("index local: %w", err)
@@ -75,13 +76,18 @@ var codedbIndexCmd = &cobra.Command{
 	},
 }
 
-var codedbSearchCmd = &cobra.Command{
+var codeSearchCmd = &cobra.Command{
 	Use:   "search <query>",
 	Short: "Search indexed code using Sourcegraph-style queries",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := repotools.FindRepoRoot(repotools.VCSGit)
+		if err != nil {
+			return fmt.Errorf("not in a git repository")
+		}
+
 		query := strings.Join(args, " ")
-		dataDir := paths.CodeDBDataDir()
+		dataDir := paths.CodeDBDataDir(root)
 
 		db, err := codedb.Open(dataDir)
 		if err != nil {
@@ -100,12 +106,18 @@ var codedbSearchCmd = &cobra.Command{
 	},
 }
 
-var codedbSQLCmd = &cobra.Command{
-	Use:   "sql <query>",
-	Short: "Execute raw SQL against the CodeDB database",
-	Args:  cobra.ExactArgs(1),
+var codeSQLCmd = &cobra.Command{
+	Use:    "sql <query>",
+	Short:  "Execute raw SQL against the CodeDB database",
+	Hidden: true,
+	Args:   cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dataDir := paths.CodeDBDataDir()
+		root, err := repotools.FindRepoRoot(repotools.VCSGit)
+		if err != nil {
+			return fmt.Errorf("not in a git repository")
+		}
+
+		dataDir := paths.CodeDBDataDir(root)
 
 		db, err := codedb.Open(dataDir)
 		if err != nil {
@@ -128,9 +140,9 @@ var codedbSQLCmd = &cobra.Command{
 }
 
 func init() {
-	codedbCmd.AddCommand(codedbIndexCmd)
-	codedbCmd.AddCommand(codedbSearchCmd)
-	codedbCmd.AddCommand(codedbSQLCmd)
-	codedbCmd.GroupID = "dev"
-	rootCmd.AddCommand(codedbCmd)
+	codeCmd.AddCommand(codeIndexCmd)
+	codeCmd.AddCommand(codeSearchCmd)
+	codeCmd.AddCommand(codeSQLCmd)
+	codeCmd.GroupID = "dev"
+	rootCmd.AddCommand(codeCmd)
 }

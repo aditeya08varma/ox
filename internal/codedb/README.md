@@ -27,9 +27,9 @@ foo OR bar                     # disjunction
 ## CLI
 
 ```bash
-ox codedb index <url>          # clone + index a repo
-ox codedb search <query>       # search indexed code
-ox codedb sql <sql>            # raw SQL against the DB
+ox code index <url>          # clone + index a repo
+ox code search <query>       # search indexed code
+ox code sql <sql>            # raw SQL against the DB
 ```
 
 Data lives in `~/.local/share/sageox/codedb/` (XDG).
