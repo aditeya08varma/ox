@@ -38,7 +38,7 @@ func parseQueryArgs(args []string) (*queryArgs, error) {
 	qa := &queryArgs{
 		mode:   "hybrid",
 		limit:  5,
-		source: "all",
+		source: "teamctx",
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -111,15 +111,15 @@ Flags:
   --mode MODE    Search mode: hybrid, knn, or bm25 (default: hybrid)
   --team ID      Team ID to search (default: from project config)
   --repo ID      Repo ID to search (default: from project config)
-  --source SRC   Search source: all (default), teamctx, code
+  --source SRC   Search source: teamctx (default), code, all
 
 Sources:
-  all       Search both team context and local code index
-  teamctx   Search team discussions, docs, and session history only
+  teamctx   Search team discussions, docs, and session history (default)
   code      Search local code index only (Sourcegraph-style queries)
+  all       Search both team context and local code index
 
-Searches across team discussions, docs, session history, and local code.
-Use when MEMORY.md or AGENTS.md don't have the answer.
+Searches across team discussions, docs, and session history.
+For code search, use: ox code search "<pattern>" or --source=code
 
 Also available as: ox agent <id> query "search text"`
 

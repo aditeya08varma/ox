@@ -14,13 +14,14 @@ import (
 var queryCmd = &cobra.Command{
 	Use:   "query",
 	Short: "Search team knowledge",
-	Long: `Search across team discussions, docs, session history, and local code.
+	Long: `Search across team discussions, docs, and session history.
+
+For code search, use: ox code search "<pattern>"
 
 Examples:
   ox query "how do we handle authentication?"
   ox query "database migration patterns" --limit 10
-  ox query "deployment process" --team team_abc123
-  ox query "func handleAuth" --source=code`,
+  ox query "deployment process" --team team_abc123`,
 	Args: cobra.ExactArgs(1),
 	RunE: runQuery,
 }
@@ -30,7 +31,6 @@ func init() {
 	queryCmd.Flags().String("team", "", "team ID to search (default: from project config)")
 	queryCmd.Flags().String("repo", "", "repo ID to search (default: from project config)")
 	queryCmd.Flags().String("mode", "hybrid", "search mode: hybrid, knn, or bm25")
-	queryCmd.Flags().String("source", "all", "search source: all, teamctx, or code")
 }
 
 // runQuery handles the top-level `ox query "search text"` command.
@@ -40,7 +40,6 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	teamID, _ := cmd.Flags().GetString("team")
 	repoID, _ := cmd.Flags().GetString("repo")
 	mode, _ := cmd.Flags().GetString("mode")
-	source, _ := cmd.Flags().GetString("source")
 
 	query := strings.TrimSpace(args[0])
 	if query == "" {
@@ -53,7 +52,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		limit:  limit,
 		teamID: teamID,
 		repoID: repoID,
-		source: source,
+		source: "teamctx",
 	}
 
 	switch qa.mode {
@@ -61,13 +60,6 @@ func runQuery(cmd *cobra.Command, args []string) error {
 		// ok
 	default:
 		return fmt.Errorf("invalid mode %q: must be hybrid, knn, or bm25", qa.mode)
-	}
-
-	switch qa.source {
-	case "all", "teamctx", "code":
-		// ok
-	default:
-		return fmt.Errorf("invalid source %q: must be all, teamctx, or code", qa.source)
 	}
 
 	agentID, agentType := detectAgentContext()
@@ -78,7 +70,7 @@ func runQuery(cmd *cobra.Command, args []string) error {
 	}
 
 	if agentID != "" {
-		slog.Debug("query response context cost", "agent_id", agentID, "source", qa.source, "bytes", outputBytes)
+		slog.Debug("query response context cost", "agent_id", agentID, "bytes", outputBytes)
 		trackContextBytes(int64(outputBytes))
 	}
 	return nil
