@@ -154,6 +154,114 @@ var codeSQLCmd = &cobra.Command{
 	},
 }
 
+var codeStatsCmd = &cobra.Command{
+	Use:   "stats",
+	Short: "Show code index statistics",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		root, err := repotools.FindRepoRoot(repotools.VCSGit)
+		if err != nil {
+			return fmt.Errorf("not in a git repository")
+		}
+
+		dataDir := paths.CodeDBDataDir(root)
+		if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+			fmt.Println("No code index found. Run 'ox code index' to create one.")
+			return nil
+		}
+
+		db, err := codedb.Open(dataDir)
+		if err != nil {
+			return fmt.Errorf("open codedb: %w", err)
+		}
+		defer db.Close()
+
+		var totalCommits, totalBlobs, totalSymbols int
+		_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&totalCommits)
+		_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&totalBlobs)
+		_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&totalSymbols)
+
+		// per-repo breakdown
+		type repoRow struct {
+			name    string
+			path    string
+			commits int
+			blobs   int
+		}
+		var repos []repoRow
+		rows, err := db.Store().Query(`
+			SELECT r.name, r.path, COUNT(DISTINCT c.id), COUNT(DISTINCT fr.blob_id)
+			FROM repos r
+			LEFT JOIN commits c ON c.repo_id = r.id
+			LEFT JOIN file_revs fr ON fr.commit_id = c.id
+			GROUP BY r.id ORDER BY r.name`)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var r repoRow
+				if rows.Scan(&r.name, &r.path, &r.commits, &r.blobs) == nil {
+					repos = append(repos, r)
+				}
+			}
+		}
+
+		raw, _ := cmd.Flags().GetBool("json")
+		if raw {
+			type jsonStats struct {
+				Commits int `json:"commits"`
+				Blobs   int `json:"blobs"`
+				Symbols int `json:"symbols"`
+				Repos   []struct {
+					Name    string `json:"name"`
+					Path    string `json:"path"`
+					Commits int    `json:"commits"`
+					Blobs   int    `json:"blobs"`
+				} `json:"repos"`
+				DataDir string `json:"data_dir"`
+			}
+			out := jsonStats{
+				Commits: totalCommits,
+				Blobs:   totalBlobs,
+				Symbols: totalSymbols,
+				DataDir: dataDir,
+			}
+			for _, r := range repos {
+				out.Repos = append(out.Repos, struct {
+					Name    string `json:"name"`
+					Path    string `json:"path"`
+					Commits int    `json:"commits"`
+					Blobs   int    `json:"blobs"`
+				}{Name: r.name, Path: r.path, Commits: r.commits, Blobs: r.blobs})
+			}
+			enc := json.NewEncoder(os.Stdout)
+			enc.SetIndent("", "  ")
+			return enc.Encode(out)
+		}
+
+		// human-readable output
+		fmt.Printf("Code Index: %s\n\n", dataDir)
+
+		if len(repos) > 1 {
+			for _, r := range repos {
+				fmt.Printf("  %s\n", r.name)
+				fmt.Printf("    Path:    %s\n", r.path)
+				fmt.Printf("    Commits: %d\n", r.commits)
+				fmt.Printf("    Blobs:   %d\n", r.blobs)
+				fmt.Println()
+			}
+			fmt.Println("  Totals")
+		} else if len(repos) == 1 {
+			fmt.Printf("  Repo: %s\n", repos[0].name)
+			fmt.Printf("  Path: %s\n\n", repos[0].path)
+		}
+
+		fmt.Printf("  Commits: %d\n", totalCommits)
+		fmt.Printf("  Blobs:   %d\n", totalBlobs)
+		fmt.Printf("  Symbols: %d\n", totalSymbols)
+
+		return nil
+	},
+}
+
 func init() {
 	codeSearchCmd.Flags().Bool("raw", false, "output raw results array instead of combined response")
 	_ = codeSearchCmd.Flags().MarkHidden("raw")
@@ -161,10 +269,13 @@ func init() {
 	codeQueryCmd.Flags().Bool("raw", false, "output raw results array instead of combined response")
 	_ = codeQueryCmd.Flags().MarkHidden("raw")
 
+	codeStatsCmd.Flags().Bool("json", false, "output as JSON")
+
 	codeCmd.AddCommand(codeIndexCmd)
 	codeCmd.AddCommand(codeSearchCmd)
 	codeCmd.AddCommand(codeQueryCmd)
 	codeCmd.AddCommand(codeSQLCmd)
+	codeCmd.AddCommand(codeStatsCmd)
 	codeCmd.GroupID = "dev"
 	rootCmd.AddCommand(codeCmd)
 }

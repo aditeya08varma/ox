@@ -40,11 +40,20 @@ type CodeDBStats struct {
 	Commits     int       `json:"commits"`
 	Blobs       int       `json:"blobs"`
 	Symbols     int       `json:"symbols"`
+	Repos       []RepoStats `json:"repos,omitempty"`
 	LastIndexed time.Time `json:"last_indexed,omitempty"`
 	IndexingNow bool      `json:"indexing_now"`
 	LastError   string    `json:"last_error,omitempty"`
 	DataDir     string    `json:"data_dir"`
 	IndexExists bool      `json:"index_exists"`
+}
+
+// RepoStats tracks per-repo statistics within the index.
+type RepoStats struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Commits int    `json:"commits"`
+	Blobs   int    `json:"blobs"`
 }
 
 // CodeIndexPayload is the IPC payload for code_index requests.
@@ -211,6 +220,25 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 			_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&stats.Commits)
 			_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&stats.Blobs)
 			_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&stats.Symbols)
+
+			// per-repo breakdown
+			rows, err := db.Store().Query(`
+				SELECT r.name, r.path, COUNT(DISTINCT c.id) as commits,
+				       COUNT(DISTINCT fr.blob_id) as blobs
+				FROM repos r
+				LEFT JOIN commits c ON c.repo_id = r.id
+				LEFT JOIN file_revs fr ON fr.commit_id = c.id
+				GROUP BY r.id
+				ORDER BY r.name`)
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var rs RepoStats
+					if rows.Scan(&rs.Name, &rs.Path, &rs.Commits, &rs.Blobs) == nil {
+						stats.Repos = append(stats.Repos, rs)
+					}
+				}
+			}
 		}
 	}
 
