@@ -28,7 +28,7 @@ type queryArgs struct {
 	limit  int
 	teamID string
 	repoID string
-	source string // "all" (default), "teamctx", "code"
+	source string // "team" (default), "code", "all"
 }
 
 // parseQueryArgs extracts flags and the positional query from raw args.
@@ -38,7 +38,7 @@ func parseQueryArgs(args []string) (*queryArgs, error) {
 	qa := &queryArgs{
 		mode:   "hybrid",
 		limit:  5,
-		source: "teamctx",
+		source: "team",
 	}
 
 	for i := 0; i < len(args); i++ {
@@ -94,11 +94,16 @@ func parseQueryArgs(args []string) (*queryArgs, error) {
 		return nil, fmt.Errorf("invalid mode %q: must be hybrid, knn, or bm25", qa.mode)
 	}
 
+	// normalize alias: teamctx is shorthand agents may use
+	if qa.source == "teamctx" {
+		qa.source = "team"
+	}
+
 	switch qa.source {
-	case "all", "teamctx", "code":
+	case "all", "team", "code":
 		// ok
 	default:
-		return nil, fmt.Errorf("invalid source %q: must be all, teamctx, or code", qa.source)
+		return nil, fmt.Errorf("invalid source %q: must be all, team, or code", qa.source)
 	}
 
 	return qa, nil
@@ -111,10 +116,10 @@ Flags:
   --mode MODE    Search mode: hybrid, knn, or bm25 (default: hybrid)
   --team ID      Team ID to search (default: from project config)
   --repo ID      Repo ID to search (default: from project config)
-  --source SRC   Search source: teamctx (default), code, all
+  --source SRC   Search source: team (default), code, all
 
 Sources:
-  teamctx   Search team discussions, docs, and session history (default)
+  team      Search team discussions, docs, and session history (default)
   code      Search local code index only (Sourcegraph-style queries)
   all       Search both team context and local code index
 
@@ -179,7 +184,7 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 
 	// query local code index if source is "all" or "code"
 	if qa.source == "all" || qa.source == "code" {
-		results, err := queryCodeDB(qa)
+		results, err := queryCodeDB(qa, projectRoot)
 		if err != nil {
 			if qa.source == "code" {
 				return 0, fmt.Errorf("code search failed: %w", err)
@@ -259,8 +264,8 @@ func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*a
 }
 
 // queryCodeDB searches the local code index.
-func queryCodeDB(qa *queryArgs) ([]search.Result, error) {
-	dataDir := paths.CodeDBDataDir()
+func queryCodeDB(qa *queryArgs, projectRoot string) ([]search.Result, error) {
+	dataDir := paths.CodeDBDataDir(projectRoot)
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		return nil, nil // no index yet, return empty
 	}

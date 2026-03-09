@@ -538,7 +538,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	needsDoctorAgent := doctor.NeedsDoctorAgent(projectRoot)
 	var doctorHint string
 	if needsDoctorAgent {
-		doctorHint = "Run 'ox agent doctor' to finalize incomplete sessions"
+		doctorHint = "Run 'ox agent doctor' to finalize incomplete sessions" // quote command names in prose for scannability
 	}
 
 	// build intent-to-command guidance for agent consumption
@@ -686,9 +686,10 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	// always-present disambiguation of knowledge sources
+	// quote command names in prose for scannability
 	output.Important = "SageOx has two SEPARATE knowledge sources. " +
-		"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. Read with: ox agent team-ctx. " +
-		"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. Browse with: ox session list. " +
+		"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. Read with: 'ox agent team-ctx'. " +
+		"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. Browse with: 'ox session list'. " +
 		"These are unrelated — sessions are NOT discussions, and the ledger is NOT team context."
 
 	// discover other team contexts (non-primary)
@@ -708,9 +709,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	if totalTeams > 1 {
 		output.Important = fmt.Sprintf("SageOx has two SEPARATE knowledge sources. "+
 			"(1) TEAM CONTEXT: team-wide meetings, architecture decisions, and conventions shared across ALL repos. "+
-			"You have access to %d team contexts. Read with: ox agent team-ctx [slug]. "+
+			"You have access to %d team contexts. Read with: 'ox agent team-ctx [slug]'. "+
 			"(2) SESSIONS/LEDGER: repo-specific archive of prior AI coworker coding sessions for THIS repo only. "+
-			"Browse with: ox session list. "+
+			"Browse with: 'ox session list'. "+
 			"These are unrelated — sessions are NOT discussions, and the ledger is NOT team context.", totalTeams)
 	}
 
@@ -809,9 +810,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// append code search tip to AgentTip based on index availability
 	codeDBDir := paths.CodeDBDataDir(projectRoot)
 	if _, statErr := os.Stat(codeDBDir); statErr == nil {
-		output.CodeSearchTip = "ox code search is available for this repo. Use it for code/symbol/diff search. Use ox query for team discussions and session history."
+		output.CodeSearchTip = "'ox code search' is available for this repo. Use it for code/symbol/diff search. Use 'ox query' for team discussions and session history."
 	} else {
-		output.CodeSearchTip = "Run ox code index to enable local code search (symbols, diffs, git history) for this repo."
+		output.CodeSearchTip = "Run 'ox code index' to enable local code search (symbols, diffs, git history) for this repo."
 	}
 
 	output.ElapsedMs = time.Since(primeStart).Milliseconds()
@@ -953,6 +954,10 @@ EOF`, agentID, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339),
 
 // buildGuidance constructs state-aware command guidance for agent consumption.
 // Only includes entries when the underlying resource is available.
+//
+// Convention: Command fields are machine-parsed (no quoting). Prose fields
+// (Hint, Important, CodeSearchTip, etc.) must single-quote command names
+// (e.g. 'ox query') for scannability by both humans and agents.
 func buildGuidance(agentID, projectRoot string, teamCtx *teamContextInfo, ledger *ledgerInfo) *agentGuidance {
 	var cmds []intentCommand
 
@@ -1708,7 +1713,7 @@ func discoverTeamContext(projectRoot string) *teamContextInfo {
 		TeamName:    tc.TeamName,
 		IsRepoTeam:  isRepoTeam,
 		Path:        tc.Path,
-		ReadCommand: "ox agent team-ctx",
+		ReadCommand: "ox agent team-ctx", // not quoted: this is a machine-parsed command field
 	}
 
 	// if team context directory hasn't synced yet, return partial info
@@ -1972,7 +1977,7 @@ func discoverOtherTeamContexts(projectRoot string, primaryTeamID string) *otherT
 
 	return &otherTeams{
 		Root:  root,
-		Hint:  "Only read when user asks about a specific team by name: ox agent team-ctx <slug>",
+		Hint:  "Only read when user asks about a specific team by name: 'ox agent team-ctx <slug>'",
 		Teams: entries,
 	}
 }
@@ -2091,7 +2096,7 @@ func discoverLedger(teamCtx *teamContextInfo) *ledgerInfo {
 		return &ledgerInfo{Exists: false}
 	}
 
-	hint := "The ledger is a repo-specific archive of prior AI coworker coding sessions. It is NOT team context. Only consult when explicitly asked to review prior sessions. Use 'ox session list' to browse and 'ox session view <name> --text' to view one. Do not read ledger files directly (LFS stubs)."
+	hint := "The ledger is a repo-specific archive of prior AI coworker coding sessions. It is NOT team context. Only consult when explicitly asked to review prior sessions. Use 'ox session list' to browse and 'ox session view <name> --text' to view one. Do not read ledger files directly (LFS stubs)." // commands already quoted
 
 	return &ledgerInfo{
 		Exists: true,

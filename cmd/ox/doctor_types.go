@@ -192,4 +192,7 @@ const (
 	// Authentication checks (credential health)
 	CheckSlugGitCredsFreshness   = "git-creds-freshness"
 	CheckSlugCredentialIntegrity = "credential-integrity"
+
+	// Code Search checks
+	CheckSlugCodeIndex = "code-index"
 )

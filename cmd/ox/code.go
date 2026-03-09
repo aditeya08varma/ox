@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -100,10 +102,44 @@ var codeSearchCmd = &cobra.Command{
 			return fmt.Errorf("search: %w", err)
 		}
 
-		enc := json.NewEncoder(os.Stdout)
+		raw, _ := cmd.Flags().GetBool("raw")
+
+		var buf bytes.Buffer
+		enc := json.NewEncoder(&buf)
 		enc.SetIndent("", "  ")
-		return enc.Encode(results)
+
+		if raw {
+			if err := enc.Encode(results); err != nil {
+				return fmt.Errorf("encode: %w", err)
+			}
+		} else {
+			resp := &combinedQueryResponse{CodeResults: results}
+			if err := enc.Encode(resp); err != nil {
+				return fmt.Errorf("encode: %w", err)
+			}
+		}
+
+		outputBytes := buf.Len()
+		if _, err := buf.WriteTo(os.Stdout); err != nil {
+			return err
+		}
+
+		agentID, _ := detectAgentContext()
+		if agentID != "" {
+			slog.Debug("code search context cost", "agent_id", agentID, "bytes", outputBytes)
+			trackContextBytes(int64(outputBytes))
+		}
+		return nil
 	},
+}
+
+// codeQueryCmd is a hidden alias for codeSearchCmd — agents try "query" as a search verb
+var codeQueryCmd = &cobra.Command{
+	Use:    "query <query>",
+	Short:  codeSearchCmd.Short,
+	Hidden: true,
+	Args:   cobra.MinimumNArgs(1),
+	RunE:   codeSearchCmd.RunE,
 }
 
 var codeSQLCmd = &cobra.Command{
@@ -140,8 +176,15 @@ var codeSQLCmd = &cobra.Command{
 }
 
 func init() {
+	codeSearchCmd.Flags().Bool("raw", false, "output raw results array instead of combined response")
+	_ = codeSearchCmd.Flags().MarkHidden("raw")
+
+	codeQueryCmd.Flags().Bool("raw", false, "output raw results array instead of combined response")
+	_ = codeQueryCmd.Flags().MarkHidden("raw")
+
 	codeCmd.AddCommand(codeIndexCmd)
 	codeCmd.AddCommand(codeSearchCmd)
+	codeCmd.AddCommand(codeQueryCmd)
 	codeCmd.AddCommand(codeSQLCmd)
 	codeCmd.GroupID = "dev"
 	rootCmd.AddCommand(codeCmd)

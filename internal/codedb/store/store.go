@@ -5,12 +5,16 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/blevesearch/bleve/v2"
 	_ "modernc.org/sqlite"
 )
+
+// ErrCorrupt indicates the index is corrupted and needs re-indexing.
+var ErrCorrupt = fmt.Errorf("codedb index is corrupt")
 
 // Store wraps a SQLite database and Bleve full-text search indexes.
 // All SQL access goes through the convenience methods below.
@@ -23,6 +27,8 @@ type Store struct {
 
 // Open opens (or creates) a Store at the given root directory.
 // It creates the directory structure, initializes SQLite and Bleve indexes.
+// If SQLite corruption is detected, the database is removed and ErrCorrupt is returned
+// so the caller can trigger a full re-index.
 func Open(root string) (*Store, error) {
 	reposDir := filepath.Join(root, "repos")
 	bleveDir := filepath.Join(root, "bleve")
@@ -40,6 +46,15 @@ func Open(root string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+
+	// integrity check before schema creation
+	if err := checkSQLiteIntegrity(db); err != nil {
+		db.Close()
+		slog.Warn("sqlite corruption detected, removing database", "path", dbPath, "err", err)
+		removeSQLiteFiles(dbPath)
+		return nil, fmt.Errorf("sqlite integrity check failed: %w", ErrCorrupt)
+	}
+
 	if err := CreateSchema(db); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("create schema: %w", err)
@@ -86,13 +101,65 @@ func (s *Store) Close() error {
 	return firstErr
 }
 
+// CheckIntegrity validates that the SQLite database and both Bleve indexes
+// are healthy. Returns nil if everything is fine, ErrCorrupt otherwise.
+func (s *Store) CheckIntegrity() error {
+	if err := checkSQLiteIntegrity(s.db); err != nil {
+		return fmt.Errorf("sqlite: %w", ErrCorrupt)
+	}
+
+	// validate bleve indexes can serve a basic query
+	for name, idx := range map[string]bleve.Index{"code": s.CodeIndex, "diff": s.DiffIndex} {
+		q := bleve.NewMatchNoneQuery()
+		req := bleve.NewSearchRequest(q)
+		req.Size = 0
+		if _, err := idx.Search(req); err != nil {
+			return fmt.Errorf("bleve %s index: %w", name, ErrCorrupt)
+		}
+	}
+
+	return nil
+}
+
+// checkSQLiteIntegrity runs PRAGMA integrity_check and returns an error if the database is corrupt.
+func checkSQLiteIntegrity(db *sql.DB) error {
+	var result string
+	if err := db.QueryRow("PRAGMA integrity_check").Scan(&result); err != nil {
+		return fmt.Errorf("integrity_check query failed: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("integrity_check returned: %s", result)
+	}
+	return nil
+}
+
+// removeSQLiteFiles removes the database file and its WAL/SHM sidecars.
+func removeSQLiteFiles(dbPath string) {
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		p := dbPath + suffix
+		if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("failed to remove sqlite file", "path", p, "err", err)
+		}
+	}
+}
+
 func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 	idx, err := bleve.Open(path)
-	if errors.Is(err, bleve.ErrorIndexPathDoesNotExist) {
+	if err == nil {
+		return idx, nil
+	}
+	if err == bleve.ErrorIndexPathDoesNotExist {
 		mapping := bleve.NewIndexMapping()
 		return bleve.New(path, mapping)
 	}
-	return idx, err
+
+	// any other error indicates corruption; nuke and recreate
+	slog.Warn("bleve index corrupt, recreating", "path", path, "err", err)
+	if removeErr := os.RemoveAll(path); removeErr != nil {
+		return nil, fmt.Errorf("remove corrupt bleve index %s: %w", path, removeErr)
+	}
+	mapping := bleve.NewIndexMapping()
+	return bleve.New(path, mapping)
 }
 
 // --- SQL convenience methods ---
