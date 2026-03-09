@@ -153,6 +153,7 @@ type Daemon struct {
 	telemetry *TelemetryCollector
 	friction  *FrictionCollector
 	issues    *IssueTracker
+	codedb    *CodeDBManager
 
 	// state
 	mu           sync.Mutex
@@ -304,12 +305,22 @@ func (d *Daemon) Start() error {
 	// start sync scheduler
 	d.scheduler = NewSyncScheduler(d.config, d.logger)
 
+	// initialize code index manager (if project root is set)
+	if d.config.ProjectRoot != "" {
+		d.codedb = NewCodeDBManager(d.config.ProjectRoot, d.logger)
+	}
+
 	// wire auth token getter so scheduler and friction can authenticate API calls
 	d.scheduler.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
 	d.friction.SetAuthTokenGetter(d.heartbeat.GetAuthToken)
 
 	// wire issue tracker so scheduler can report issues needing LLM reasoning
 	d.scheduler.SetIssueTracker(d.issues)
+
+	// wire code index manager into scheduler for periodic freshness checks
+	if d.codedb != nil {
+		d.scheduler.SetCodeDBManager(d.codedb)
+	}
 
 	// set telemetry callback on scheduler for sync:complete events
 	d.scheduler.SetTelemetryCallback(func(syncType, operation, status string, duration time.Duration) {
@@ -351,6 +362,13 @@ func (d *Daemon) Start() error {
 			if d.issues != nil {
 				issues = d.issues.GetIssues()
 				needsHelp = d.issues.NeedsHelp()
+			}
+
+			// get code index stats
+			var codeDBStats *CodeDBStats
+			if d.codedb != nil {
+				stats := d.codedb.Stats()
+				codeDBStats = &stats
 			}
 
 			// get all workspaces being synced (ledger + team contexts)
@@ -409,6 +427,7 @@ func (d *Daemon) Start() error {
 				Issues:             issues,
 				StartupDurationMs:  d.startupDurationMs.Load(),
 				ThrottleDurationMs: d.throttleDurationMs.Load(),
+				CodeDB:             codeDBStats,
 			}
 		},
 	)
@@ -446,6 +465,17 @@ func (d *Daemon) Start() error {
 	d.server.SetCheckoutHandler(func(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error) {
 		return d.scheduler.Checkout(payload, progress)
 	})
+
+	// set code index handler for indexing via IPC
+	if d.codedb != nil {
+		d.server.SetCodeIndexHandler(func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) {
+			return d.codedb.Index(d.ctx, payload, progress)
+		})
+		d.server.SetCodeStatusHandler(func() *CodeDBStats {
+			stats := d.codedb.Stats()
+			return &stats
+		})
+	}
 
 	// set telemetry handler for CLI events
 	d.server.SetTelemetryHandler(func(payload json.RawMessage) {
@@ -503,6 +533,11 @@ func (d *Daemon) Start() error {
 				d.scheduler.TriggerSync()
 			})
 		}()
+	}
+
+	// check code index freshness on startup (non-blocking)
+	if d.codedb != nil {
+		go d.codedb.CheckFreshness(d.ctx)
 	}
 
 	// set activity callback on server (IPC requests = activity)

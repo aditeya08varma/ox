@@ -42,6 +42,8 @@ const (
 	MsgTypeInstances   = "instances"   // get active agent instances
 	MsgTypeDoctor      = "doctor"      // trigger daemon health checks (anti-entropy, etc.)
 	MsgTypeTriggerGC   = "trigger_gc"  // force GC reclone for team contexts
+	MsgTypeCodeIndex   = "code_index"   // index local code with progress
+	MsgTypeCodeStatus  = "code_status"  // get code index status/stats
 )
 
 // Protocol Design Decision: NDJSON (Newline-Delimited JSON)
@@ -130,6 +132,9 @@ type StatusData struct {
 	// startup timing (how long the daemon took to start)
 	StartupDurationMs  int64 `json:"startup_duration_ms,omitempty"`
 	ThrottleDurationMs int64 `json:"throttle_duration_ms,omitempty"`
+
+	// code index status
+	CodeDB *CodeDBStats `json:"code_db,omitempty"`
 }
 
 // ExtendedStatus provides additional status info for diagnostics.
@@ -453,6 +458,8 @@ type Server struct {
 	onSyncHistory      func() []SyncEvent                                                               // get sync history
 	onDoctor           func() *DoctorResponse                                                           // trigger health checks
 	onTriggerGC        func() *TriggerGCResponse                                                        // force GC reclone
+	onCodeIndex         func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error) // index local code
+	onCodeStatus        func() *CodeDBStats                                                               // get code index stats
 
 	startTime time.Time
 }
@@ -489,6 +496,8 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeInstances, handleInstances)
 	router.Register(MsgTypeDoctor, handleDoctor)
 	router.Register(MsgTypeTriggerGC, handleTriggerGC)
+	router.Register(MsgTypeCodeIndex, handleCodeIndex)
+	router.Register(MsgTypeCodeStatus, handleCodeStatus)
 
 	return router
 }
@@ -788,6 +797,51 @@ func handleTriggerGC(s *Server, _ Message, _ net.Conn) HandlerResult {
 	return HandlerResult{Response: marshalResponse(resp)}
 }
 
+func handleCodeIndex(s *Server, msg Message, conn net.Conn) HandlerResult {
+	s.mu.Lock()
+	handler := s.onCodeIndex
+	s.mu.Unlock()
+
+	if handler == nil {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: "code index handler not set"},
+		}
+	}
+
+	var payload CodeIndexPayload
+	if len(msg.Payload) > 0 {
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			return HandlerResult{
+				Response: &Response{Success: false, Error: fmt.Sprintf("invalid code_index payload: %v", err)},
+			}
+		}
+	}
+
+	pw := &ProgressWriter{conn: conn}
+	result, err := handler(payload, pw)
+	if err != nil {
+		return HandlerResult{
+			Response: &Response{Success: false, Error: err.Error()},
+		}
+	}
+
+	return HandlerResult{Response: marshalResponse(result)}
+}
+
+func handleCodeStatus(s *Server, _ Message, _ net.Conn) HandlerResult {
+	s.mu.Lock()
+	handler := s.onCodeStatus
+	s.mu.Unlock()
+
+	if handler != nil {
+		stats := handler()
+		return HandlerResult{Response: marshalResponse(stats)}
+	}
+	return HandlerResult{
+		Response: &Response{Success: true, Data: json.RawMessage(`{}`)},
+	}
+}
+
 // SetHandlers sets the message handlers.
 func (s *Server) SetHandlers(onSync func() error, onStop func(), onStatus func() *StatusData) {
 	s.mu.Lock()
@@ -892,6 +946,21 @@ func (s *Server) SetTriggerGCHandler(handler func() *TriggerGCResponse) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onTriggerGC = handler
+}
+
+// SetCodeIndexHandler sets the handler for code indexing requests.
+// The handler receives a ProgressWriter to send progress updates during indexing.
+func (s *Server) SetCodeIndexHandler(cb func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onCodeIndex = cb
+}
+
+// SetCodeStatusHandler sets the handler for code index status requests.
+func (s *Server) SetCodeStatusHandler(cb func() *CodeDBStats) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onCodeStatus = cb
 }
 
 // Start starts the IPC server.
@@ -1526,6 +1595,81 @@ func (c *Client) MarkErrorsViewed(ids []string) error {
 		return errors.New(resp.Error)
 	}
 	return nil
+}
+
+// CodeIndex requests the daemon to index code with progress updates.
+// Uses a long timeout (5 minutes) since indexing can take time for large repos.
+func (c *Client) CodeIndex(payload CodeIndexPayload, onProgress ProgressCallback) (*CodeIndexResult, error) {
+	conn, err := c.Connect()
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	// indexing can take minutes for large repos
+	indexTimeout := 5 * time.Minute
+	conn.SetDeadline(time.Now().Add(indexTimeout))
+
+	payloadData, _ := json.Marshal(payload)
+	msg := Message{
+		Type:        MsgTypeCodeIndex,
+		WorkspaceID: CurrentWorkspaceID(),
+		Payload:     payloadData,
+	}
+
+	data, _ := json.Marshal(msg)
+	data = append(data, '\n')
+	if _, err := conn.Write(data); err != nil {
+		return nil, fmt.Errorf("write: %w", err)
+	}
+
+	reader := bufio.NewReader(conn)
+	for {
+		line, err := reader.ReadBytes('\n')
+		if err != nil {
+			return nil, fmt.Errorf("read: %w", err)
+		}
+
+		var resp ProgressResponse
+		if err := json.Unmarshal(line, &resp); err != nil {
+			return nil, fmt.Errorf("unmarshal response: %w", err)
+		}
+
+		if resp.Progress != nil {
+			if onProgress != nil {
+				onProgress(resp.Progress.Stage, resp.Progress.Percent, resp.Progress.Message)
+			}
+			continue
+		}
+
+		if !resp.Success {
+			return nil, errors.New(resp.Error)
+		}
+
+		var result CodeIndexResult
+		if len(resp.Data) > 0 {
+			if err := json.Unmarshal(resp.Data, &result); err != nil {
+				return nil, fmt.Errorf("unmarshal result: %w", err)
+			}
+		}
+		return &result, nil
+	}
+}
+
+// CodeStatus requests the current code index status from the daemon.
+func (c *Client) CodeStatus() (*CodeDBStats, error) {
+	resp, err := c.sendMessage(Message{Type: MsgTypeCodeStatus})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+	var stats CodeDBStats
+	if err := json.Unmarshal(resp.Data, &stats); err != nil {
+		return nil, fmt.Errorf("unmarshal code status: %w", err)
+	}
+	return &stats, nil
 }
 
 // TryConnectForCheckout attempts to connect for checkout operations.

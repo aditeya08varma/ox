@@ -49,7 +49,7 @@ func (db *DB) ParseSymbols(ctx context.Context, progress func(string)) (index.Pa
 	return index.ParseSymbols(ctx, db.store, index.ProgressFunc(progress))
 }
 
-// Search parses and executes a Sourcegraph-style query.
+// Search parses and executes a query.
 func (db *DB) Search(ctx context.Context, input string) ([]search.Result, error) {
 	query, err := search.ParseQuery(input)
 	if err != nil {

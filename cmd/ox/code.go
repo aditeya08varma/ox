@@ -8,9 +8,10 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/codedb"
-	"github.com/sageox/ox/internal/codedb/index"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
@@ -19,7 +20,7 @@ import (
 var codeCmd = &cobra.Command{
 	Use:   "code",
 	Short: "Search code in this repo",
-	Long:  "Search git history and current code of this repo using Sourcegraph-style queries.",
+	Long:  "Search git history and current code of this repo using queries.",
 }
 
 var codeIndexCmd = &cobra.Command{
@@ -27,60 +28,38 @@ var codeIndexCmd = &cobra.Command{
 	Short: "Index a git repository (defaults to current repo)",
 	Args:  cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		root, err := repotools.FindRepoRoot(repotools.VCSGit)
-		if err != nil {
-			return fmt.Errorf("not in a git repository (specify a URL or run from a git repo)")
+		// ensure daemon is running — indexing happens in the daemon
+		if err := daemon.EnsureDaemon(); err != nil {
+			return fmt.Errorf("daemon required for indexing: %w", err)
 		}
 
-		dataDir := paths.CodeDBDataDir(root)
-		if err := os.MkdirAll(dataDir, 0o755); err != nil {
-			return fmt.Errorf("create codedb dir: %w", err)
-		}
-
-		db, err := codedb.Open(dataDir)
-		if err != nil {
-			return fmt.Errorf("open codedb: %w", err)
-		}
-		defer db.Close()
-
-		opts := index.IndexOptions{
-			Progress: func(msg string) {
-				fmt.Fprintf(os.Stderr, "  %s\n", msg)
-			},
-		}
-
+		payload := daemon.CodeIndexPayload{}
 		if len(args) > 0 {
-			// Remote URL: clone/fetch and index
-			url := args[0]
-			fmt.Fprintf(os.Stderr, "Indexing %s...\n", url)
-			if err := db.IndexRepo(context.Background(), url, opts); err != nil {
-				return fmt.Errorf("index: %w", err)
-			}
+			payload.URL = args[0]
+			fmt.Fprintf(os.Stderr, "Indexing %s...\n", args[0])
 		} else {
-			// No args: index current git repo in-place (including dirty files)
-			fmt.Fprintf(os.Stderr, "Indexing local repo %s...\n", root)
-			if err := db.IndexLocalRepo(context.Background(), root, opts); err != nil {
-				return fmt.Errorf("index local: %w", err)
-			}
+			fmt.Fprintf(os.Stderr, "Indexing local repo...\n")
 		}
 
-		fmt.Fprintf(os.Stderr, "Parsing symbols...\n")
-		stats, err := db.ParseSymbols(context.Background(), func(msg string) {
-			fmt.Fprintf(os.Stderr, "  %s\n", msg)
+		client := daemon.NewClientWithTimeout(5 * time.Minute)
+		result, err := client.CodeIndex(payload, func(stage string, percent *int, message string) {
+			if message != "" {
+				fmt.Fprintf(os.Stderr, "  %s\n", message)
+			}
 		})
 		if err != nil {
-			return fmt.Errorf("parse symbols: %w", err)
+			return fmt.Errorf("index: %w", err)
 		}
 
 		fmt.Fprintf(os.Stderr, "Done. Parsed %d blobs, %d symbols\n",
-			stats.BlobsParsed, stats.SymbolsExtracted)
+			result.BlobsParsed, result.SymbolsExtracted)
 		return nil
 	},
 }
 
 var codeSearchCmd = &cobra.Command{
 	Use:   "search <query>",
-	Short: "Search indexed code using Sourcegraph-style queries",
+	Short: "Search indexed code using queries",
 	Args:  cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := repotools.FindRepoRoot(repotools.VCSGit)

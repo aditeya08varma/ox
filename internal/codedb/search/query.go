@@ -65,7 +65,7 @@ func parseSelect(value string) (SelectType, string, error) {
 	}
 }
 
-// ParseQuery parses a Sourcegraph-style query string.
+// ParseQuery parses a query string.
 func ParseQuery(input string) (*ParsedQuery, error) {
 	tokens := tokenize(input)
 	var filters Filters

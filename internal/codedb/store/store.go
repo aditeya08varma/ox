@@ -42,7 +42,11 @@ func Open(root string) (*Store, error) {
 	}
 
 	dbPath := filepath.Join(root, "metadata.db")
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	// WAL: concurrent readers + one writer. busy_timeout: wait up to 5s for
+	// write locks instead of failing immediately. This matters when multiple
+	// daemons (one per worktree) share the same index. Long-term fix is
+	// one-daemon-per-repo; until then busy_timeout provides best-effort safety.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}

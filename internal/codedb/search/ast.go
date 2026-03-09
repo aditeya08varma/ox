@@ -60,7 +60,7 @@ type Filters struct {
 	Returns    string
 }
 
-// ParsedQuery is the result of parsing a Sourcegraph-style query string.
+// ParsedQuery is the result of parsing a query string.
 type ParsedQuery struct {
 	// SearchTerms grouped by OR. Each group is space-joined AND terms.
 	SearchTerms []string

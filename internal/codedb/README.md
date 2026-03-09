@@ -1,6 +1,6 @@
 # codedb
 
-Local code search engine integrated into ox. Indexes git repositories into SQLite + Bleve and supports Sourcegraph-style queries.
+Local code search engine integrated into ox. Indexes git repositories into SQLite + Bleve and supports queries.
 
 ## Packages
 

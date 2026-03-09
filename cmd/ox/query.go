@@ -18,7 +18,7 @@ var queryCmd = &cobra.Command{
 
 Sources:
   team      Search team discussions, docs, and session history (default)
-  code      Search local code index only (Sourcegraph-style queries)
+  code      Search local code index only (queries)
   all       Search both team context and local code index
 
 Examples:

@@ -287,6 +287,9 @@ type SyncScheduler struct {
 
 	// version cache for GitHub release checks
 	versionCache *VersionCache
+
+	// code index manager for periodic freshness checks
+	codedb *CodeDBManager
 }
 
 // syncError tracks a sync error with timestamp.
@@ -364,6 +367,13 @@ func (s *SyncScheduler) SetIssueTracker(tracker *IssueTracker) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.issues = tracker
+}
+
+// SetCodeDBManager sets the CodeDB manager for periodic freshness checks.
+func (s *SyncScheduler) SetCodeDBManager(m *CodeDBManager) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.codedb = m
 }
 
 // Metrics returns the sync metrics for observability.
@@ -666,6 +676,11 @@ func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	// anti-entropy: ensure missing workspaces get cloned
 	s.triggerMissingClones()
 	_ = s.doPull(ctx, nil, false)
+
+	// check code index freshness (non-blocking)
+	if s.codedb != nil {
+		s.codedb.CheckFreshness(ctx)
+	}
 }
 
 // checkLatestVersion fetches the latest GitHub release using ETag conditional requests.
