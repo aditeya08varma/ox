@@ -1,5 +1,7 @@
 package config
 
+import "log/slog"
+
 // MemoryImport mode constants.
 // Default is "manual" (empty string normalizes to manual).
 const (
@@ -49,7 +51,11 @@ func GetMemoryImport(projectRoot string) string {
 		return MemoryImportManual
 	}
 	cfg, err := LoadProjectConfig(projectRoot)
-	if err != nil || cfg == nil {
+	if err != nil {
+		slog.Debug("could not load project config for memory_import, defaulting to manual", "error", err)
+		return MemoryImportManual
+	}
+	if cfg == nil {
 		return MemoryImportManual
 	}
 	return NormalizeMemoryImport(cfg.MemoryImport)

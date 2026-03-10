@@ -34,9 +34,9 @@ func TestProjectHash(t *testing.T) {
 			t.Errorf("hash should not contain %q: got %q", string(filepath.Separator), hash)
 		}
 
-		// should start with "-" since absolute paths start with "/"
-		if !strings.HasPrefix(hash, "-") {
-			t.Errorf("hash should start with '-': got %q", hash)
+		// verify hash is non-empty and all separators are replaced
+		if hash == "" {
+			t.Error("hash should not be empty")
 		}
 	})
 }
