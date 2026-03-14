@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,12 @@ import (
 	"github.com/sageox/ox/internal/logger"
 	"github.com/sageox/ox/internal/useragent"
 )
+
+// ErrGitHubAuth indicates a 401/403 authentication or authorization failure.
+var ErrGitHubAuth = errors.New("github authentication failed")
+
+// ErrGitHubRateLimited indicates a 429 rate limit response.
+var ErrGitHubRateLimited = errors.New("github rate limited")
 
 // Client is a minimal GitHub REST API client for fetching PR data.
 type Client struct {
@@ -150,6 +157,29 @@ func (c *Client) doRequest(ctx context.Context, method, path string, result inte
 		logger.Warn("github rate limit low", "remaining", rl.Remaining, "limit", rl.Limit, "reset", rl.Reset.Format(time.RFC3339))
 	}
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		resetTime := ""
+		if rl != nil {
+			resetTime = rl.Reset.Format(time.RFC3339)
+		}
+		return rl, fmt.Errorf("%w: retry after %s", ErrGitHubRateLimited, resetTime)
+	}
+	if resp.StatusCode == http.StatusForbidden {
+		body, _ := io.ReadAll(resp.Body)
+		// GitHub returns 403 for rate limiting too — check headers before treating as auth failure
+		if rl != nil && rl.Remaining == 0 {
+			resetTime := rl.Reset.Format(time.RFC3339)
+			return rl, fmt.Errorf("%w: retry after %s", ErrGitHubRateLimited, resetTime)
+		}
+		if resp.Header.Get("Retry-After") != "" {
+			return rl, fmt.Errorf("%w: retry after header present", ErrGitHubRateLimited)
+		}
+		return rl, fmt.Errorf("%w: status %d: %s", ErrGitHubAuth, resp.StatusCode, string(body))
+	}
+	if resp.StatusCode == http.StatusUnauthorized {
+		body, _ := io.ReadAll(resp.Body)
+		return rl, fmt.Errorf("%w: status %d: %s", ErrGitHubAuth, resp.StatusCode, string(body))
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return rl, fmt.Errorf("github api status %d: %s", resp.StatusCode, string(body))
