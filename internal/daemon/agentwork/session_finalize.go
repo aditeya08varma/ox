@@ -100,6 +100,12 @@ func (h *SessionFinalizeHandler) Type() string { return sessionFinalizeType }
 func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 
+	// ghost cleanup: remove abandoned recordings with dead parent PID and no data.
+	// runs on every detect cycle (hourly) for automatic hygiene.
+	if ghostResult := session.CleanupGhostSessionsInDir(sessionsDir); ghostResult.Removed > 0 {
+		h.logger.Info("ghost cleanup: removed abandoned recordings", "count", ghostResult.Removed, "sessions", ghostResult.Names)
+	}
+
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -168,6 +174,12 @@ func (h *SessionFinalizeHandler) Detect(ledgerPath string) ([]*WorkItem, error) 
 		}
 
 		if !hasRaw {
+			continue
+		}
+
+		// skip raw.jsonl files with zero substantive entries (header-only)
+		if !session.HasSubstantiveEntries(rawPath) {
+			h.logger.Debug("skipping header-only session", "session", name)
 			continue
 		}
 

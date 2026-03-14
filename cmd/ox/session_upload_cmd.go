@@ -13,6 +13,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -78,6 +79,11 @@ Example:
 		meta, err := buildSessionMeta(sessionPath, sessionName, nil, uploadEndpoint)
 		if err != nil {
 			return fmt.Errorf("build meta.json: %w", err)
+		}
+
+		// guard: never upload a session with zero substantive entries
+		if !session.HasSubstantiveEntries(rawPath) {
+			return fmt.Errorf("session %s has no substantive entries (only metadata header) — nothing to upload", sessionName)
 		}
 
 		if err := lfs.WriteSessionMeta(sessionPath, meta); err != nil {

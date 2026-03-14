@@ -79,13 +79,16 @@ type sessionListOutput struct {
 
 // sessionListEntry is a single session in JSON output.
 type sessionListEntry struct {
-	Name      string `json:"name"`
-	Date      string `json:"date"`
-	Time      string `json:"time"`
-	User      string `json:"user,omitempty"`
-	Status    string `json:"status"`
-	Recording bool   `json:"recording,omitempty"`
-	Summary   string `json:"summary,omitempty"`
+	Name       string `json:"name"`
+	Date       string `json:"date"`
+	Time       string `json:"time"`
+	User       string `json:"user,omitempty"`
+	Status     string `json:"status"`
+	Recording  bool   `json:"recording,omitempty"`
+	Summary    string `json:"summary,omitempty"`
+	EntryCount int    `json:"entry_count,omitempty"`
+	IsSubagent bool   `json:"is_subagent,omitempty"`
+	Origin     string `json:"origin,omitempty"`
 }
 
 func runSessionList(cmd *cobra.Command, args []string) error {
@@ -221,24 +224,22 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		entries := make([]sessionListEntry, 0, len(sessions))
 		for _, t := range sessions {
 			uploaded := uploadedSessions[t.SessionName]
-			status := "local"
-			if t.Recording {
-				status = "recording"
-			} else if uploaded {
-				status = "uploaded"
-			}
+			status := string(session.ClassifySession(t, uploaded))
 			user := t.Username
 			if user == "" {
 				user = localUser
 			}
 			entries = append(entries, sessionListEntry{
-				Name:      t.SessionName,
-				Date:      t.CreatedAt.Format("2006-01-02"),
-				Time:      t.CreatedAt.Format("15:04"),
-				User:      user,
-				Status:    status,
-				Recording: t.Recording,
-				Summary:   t.Summary,
+				Name:       t.SessionName,
+				Date:       t.CreatedAt.Format("2006-01-02"),
+				Time:       t.CreatedAt.Format("15:04"),
+				User:       user,
+				Status:     status,
+				Recording:  t.Recording,
+				Summary:    t.Summary,
+				EntryCount: t.EntryCount,
+				IsSubagent: t.IsSubagent,
+				Origin:     t.Origin,
 			})
 		}
 		return outputJSON(sessionListOutput{
@@ -283,14 +284,15 @@ func printSessionTableHeader() {
 	dateCol := fmt.Sprintf("%-12s", "DATE")
 	timeCol := fmt.Sprintf("%-8s", "TIME")
 	userCol := fmt.Sprintf("%-16s", "USER")
+	turnsCol := fmt.Sprintf("%-8s", "TURNS")
 	statusCol := fmt.Sprintf("%-14s", "STATUS")
 	nameCol := "SESSION"
 
-	header := sessionHeaderStyle.Render(dateCol + timeCol + userCol + statusCol + nameCol)
+	header := sessionHeaderStyle.Render(dateCol + timeCol + userCol + turnsCol + statusCol + nameCol)
 	fmt.Println("  " + header)
 
 	// underline
-	underline := strings.Repeat("-", 120)
+	underline := strings.Repeat("-", 128)
 	fmt.Println("  " + cli.StyleDim.Render(underline))
 }
 
@@ -305,18 +307,43 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 		name = t.Filename
 	}
 
-	// status: recording > uploaded > local only
+	// subagent indicator
+	if t.IsSubagent {
+		name = "↳ " + name
+	}
+
+	// status via canonical classifier
+	sessionStatus := session.ClassifySession(t, uploaded)
 	var statusStr string
-	var statusStyle string // "recording", "uploaded", or "local"
-	if t.Recording {
+	var statusStyle string
+	switch sessionStatus {
+	case session.StatusRecording:
 		statusStr = "● recording"
 		statusStyle = "recording"
-	} else if uploaded {
+	case session.StatusPaused:
+		statusStr = "⏸ paused"
+		statusStyle = "local"
+	case session.StatusGhost:
+		statusStr = "⊘ ghost"
+		statusStyle = "ghost"
+	case session.StatusOrphan:
+		statusStr = "⊘ orphan"
+		statusStyle = "orphan"
+	case session.StatusUploaded:
 		statusStr = "✓ uploaded"
 		statusStyle = "uploaded"
-	} else {
+	case session.StatusCanceled:
+		statusStr = "✗ canceled"
+		statusStyle = "ghost" // dim — discarded
+	default:
 		statusStr = "✗ local only"
 		statusStyle = "local"
+	}
+
+	// turns column
+	turnsStr := "-"
+	if t.EntryCount > 0 {
+		turnsStr = fmt.Sprintf("%d", t.EntryCount)
 	}
 
 	// user display: prefer meta.json username, fallback to local user
@@ -339,15 +366,27 @@ func printSessionRow(t session.SessionInfo, uploaded bool, localUser string) {
 	dateCol := fmt.Sprintf("%-12s", dateStr)
 	timeCol := fmt.Sprintf("%-8s", timeStr)
 	userCol := fmt.Sprintf("%-16s", userStr)
+	turnsCol := fmt.Sprintf("%-8s", turnsStr)
 	statusCol := fmt.Sprintf("%-14s", statusStr)
 
 	row := sessionDateStyle.Render(dateCol) +
 		sessionDurationStyle.Render(timeCol) +
 		sessionSummaryStyle.Render(userCol)
 
+	// dim turns when zero
+	if t.EntryCount == 0 {
+		row += sessionEmptyStyle.Render(turnsCol)
+	} else {
+		row += sessionDurationStyle.Render(turnsCol)
+	}
+
 	switch statusStyle {
 	case "recording":
 		row += sessionTypeStyle.Render(statusCol)
+	case "ghost":
+		row += sessionEmptyStyle.Render(statusCol) // dim italic — useless, auto-cleanable
+	case "orphan":
+		row += sessionHydrationStyle.Render(statusCol) // warning color — has data, needs recovery
 	case "uploaded":
 		row += sessionDurationStyle.Render(statusCol)
 	default:
@@ -379,3 +418,4 @@ func formatSessionDuration(d time.Duration) string {
 	}
 	return fmt.Sprintf("%dh%dm", hours, mins)
 }
+

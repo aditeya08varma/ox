@@ -311,6 +311,12 @@ type SessionInfo struct {
 	Summary         string              `json:"summary,omitempty"`          // from meta.json
 	Recording       bool                `json:"recording,omitempty"`        // true if session is actively being recorded
 	AgentID         string              `json:"agent_id,omitempty"`         // from .recording.json when recording
+	EntryCount      int                 `json:"entry_count,omitempty"`      // from .recording.json or meta.json
+	IsSubagent      bool                `json:"is_subagent,omitempty"`      // true if spawned by a parent session
+	ParentPID       int                 `json:"parent_pid,omitempty"`       // from .recording.json for liveness detection
+	Origin          string              `json:"origin,omitempty"`           // session origin: "human", "subagent", "agent"
+	HasRawData      bool                `json:"has_raw_data,omitempty"`     // true if raw.jsonl exists with content on disk
+	StopReason      string              `json:"stop_reason,omitempty"`      // how session ended: "stopped", "aborted", "recovered"
 }
 
 // ListSessions returns session files from the last 7 days, sorted by date descending.
@@ -397,6 +403,10 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var isRecording bool
 		var recordingAgentID string
 		var recordingStartedAt time.Time
+		var recordingEntryCount int
+		var isSubagent bool
+		var parentPID int
+		var origin string
 		recPath := filepath.Join(sessionPath, recordingFile)
 		if recData, recErr := os.ReadFile(recPath); recErr == nil {
 			var recState RecordingState
@@ -404,6 +414,10 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 				isRecording = true
 				recordingAgentID = recState.AgentID
 				recordingStartedAt = recState.StartedAt
+				recordingEntryCount = recState.EntryCount
+				isSubagent = recState.IsSubagent()
+				parentPID = recState.ParentPID
+				origin = recState.Origin
 				if !recState.StartedAt.IsZero() && createdAt.IsZero() {
 					createdAt = recState.StartedAt
 				}
@@ -424,11 +438,13 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var filePath string
 		var fileSize int64
 		var modTime time.Time
+		var hasRawData bool
 
 		if info, err := os.Stat(rawPath); err == nil {
 			// raw.jsonl exists (hydrated or recording in progress)
 			filePath = rawPath
 			fileSize = info.Size()
+			hasRawData = info.Size() > 0
 			modTime = info.ModTime()
 			if createdAt.IsZero() {
 				createdAt = info.ModTime()
@@ -474,10 +490,37 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			Summary:         summary,
 			Recording:       isRecording,
 			AgentID:         recordingAgentID,
+			EntryCount:      entryCount(isRecording, recordingEntryCount, meta),
+			IsSubagent:      isSubagent,
+			ParentPID:       parentPID,
+			Origin:          origin,
+			HasRawData:      hasRawData,
+			StopReason:      stopReason(meta),
 		})
 	}
 
 	return sessions, nil
+}
+
+// stopReason extracts the stop reason from meta.json, if present.
+func stopReason(meta *lfs.SessionMeta) string {
+	if meta != nil {
+		return meta.StopReason
+	}
+	return ""
+}
+
+// entryCount returns the best available entry count for a session.
+// For active recordings, uses the live count from .recording.json.
+// For uploaded sessions, uses the count stored in meta.json.
+func entryCount(isRecording bool, recordingCount int, meta *lfs.SessionMeta) int {
+	if isRecording {
+		return recordingCount
+	}
+	if meta != nil {
+		return meta.EntryCount
+	}
+	return 0
 }
 
 // ListRawSessionsSince returns only raw session files created after the given time.
