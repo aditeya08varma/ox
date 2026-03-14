@@ -108,10 +108,10 @@ func runMemoryImport(cmd *cobra.Command, args []string) error {
 	}
 	// if explicit --source, derive hash from source path parent
 	if memoryImportSource != "" {
-		projectHash, err = projectHashFromSource(memoryImportSource)
-		if err != nil {
-			slog.Debug("could not derive project hash from source", "error", err)
-			// fall back to git root hash
+		if h, err := projectHashFromSource(memoryImportSource); err != nil {
+			slog.Debug("could not derive project hash from source, using git root hash", "error", err)
+		} else {
+			projectHash = h
 		}
 	}
 

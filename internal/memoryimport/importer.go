@@ -101,6 +101,13 @@ func ImportMemory(ctx context.Context, opts ImportOptions) (*ImportResult, error
 		return result, nil
 	}
 
+	// remove stale files before writing (merge may drop or consolidate files)
+	if strategy == "merge" {
+		if err := removeStaleFiles(targetDir, filesToWrite); err != nil {
+			slog.Debug("remove stale files failed", "error", err)
+		}
+	}
+
 	// write files to ledger
 	result, err := writeMemoryFiles(targetDir, filesToWrite)
 	if err != nil {
@@ -179,13 +186,39 @@ func readLedgerMemory(targetDir string) (map[string][]byte, error) {
 	return files, nil
 }
 
+// removeStaleFiles deletes files in targetDir that are not in the new file set.
+// This prevents ghost files from accumulating after a merge consolidates or drops files.
+func removeStaleFiles(targetDir string, newFiles map[string][]byte) error {
+	existing, err := readLedgerMemory(targetDir)
+	if err != nil {
+		return err
+	}
+	for name := range existing {
+		if _, keep := newFiles[name]; !keep {
+			if err := os.Remove(filepath.Join(targetDir, name)); err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("remove stale file %s: %w", name, err)
+			}
+		}
+	}
+	return nil
+}
+
 // writeMemoryFiles writes the given files to the target directory.
 // Creates the directory if it doesn't exist. Overwrites existing files.
+// Validates filenames to prevent path traversal from untrusted sources (e.g. LLM output).
 func writeMemoryFiles(targetDir string, files map[string][]byte) (*ImportResult, error) {
 	result := &ImportResult{}
+	cleanTargetDir := filepath.Clean(targetDir) + string(filepath.Separator)
 
 	for relPath, content := range files {
-		fullPath := filepath.Join(targetDir, relPath)
+		cleaned := filepath.Clean(relPath)
+		if strings.HasPrefix(cleaned, "..") || filepath.IsAbs(cleaned) {
+			return nil, fmt.Errorf("invalid filename (path traversal): %s", relPath)
+		}
+		fullPath := filepath.Join(targetDir, cleaned)
+		if !strings.HasPrefix(fullPath, cleanTargetDir) {
+			return nil, fmt.Errorf("path escapes target directory: %s", relPath)
+		}
 
 		if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
 			return nil, fmt.Errorf("create directory for %s: %w", relPath, err)
@@ -237,7 +270,9 @@ func commitAndPush(ctx context.Context, opts ImportOptions) error {
 	}
 
 	// push with retry
-	return gitutil.PushWithRetry(ctx, ledger, opts.CredRefresh)
+	return gitutil.PushWithRetry(ctx, ledger, gitutil.PushOpts{
+		PrePush: opts.CredRefresh,
+	})
 }
 
 // SourceMtime returns the latest mtime across all files in a directory.
