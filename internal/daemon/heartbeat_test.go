@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -941,7 +942,7 @@ func TestHeartbeatHandler_CallerEviction(t *testing.T) {
 
 	// fill remaining slots
 	for i := 1; i <= maxCallers; i++ {
-		callerID := "caller-" + testing_itoa(i)
+		callerID := "caller-" + strconv.Itoa(i)
 		handler.Handle(callerID, mustMarshal(HeartbeatPayload{
 			CallerPath: "/workspace/" + callerID,
 			Timestamp:  time.Now(),
@@ -963,18 +964,6 @@ func TestHeartbeatHandler_CallerEviction(t *testing.T) {
 	}
 }
 
-// testing_itoa converts int to string for test IDs (avoids import)
-func testing_itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	result := ""
-	for n > 0 {
-		result = string(rune('0'+n%10)) + result
-		n /= 10
-	}
-	return result
-}
 
 func TestReadHeartbeatsFromPath_DirectoryPath(t *testing.T) {
 	dirPath := t.TempDir()
