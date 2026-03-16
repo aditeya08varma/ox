@@ -291,19 +291,19 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	}
 	sb.WriteString("</session-context>\n")
 
-	// immediate actions: time-sensitive directives the agent should act on now
+	// user notices: messages that agents must relay to the user (upgrade, restart, support)
+	if len(output.UserNotices) > 0 {
+		sb.WriteString("\n<user-notices hint=\"Show each notice to the user\">\n")
+		for _, n := range output.UserNotices {
+			sb.WriteString(fmt.Sprintf("<notice type=%q>%s</notice>\n", n.Type, n.Message))
+		}
+		sb.WriteString("</user-notices>\n")
+	}
+
+	// immediate actions: agent-only directives (doctor, excessive prime, tips)
 	var actions []string
 	if output.NeedsDoctorAgent && output.DoctorHint != "" {
 		actions = append(actions, fmt.Sprintf("<action priority=\"high\">%s</action>", output.DoctorHint))
-	}
-	if output.HooksInstalled && output.HooksRestartNotice != "" {
-		actions = append(actions, fmt.Sprintf("<action priority=\"high\">%s</action>", output.HooksRestartNotice))
-	}
-	if output.UpdateAvailable && output.UpdateHint != "" {
-		actions = append(actions, fmt.Sprintf("<action priority=\"warn\">%s</action>", output.UpdateHint))
-	}
-	if output.SupportNotice != "" {
-		actions = append(actions, fmt.Sprintf("<action priority=\"warn\">%s</action>", output.SupportNotice))
 	}
 	if output.PrimeExcessiveNotice != "" {
 		actions = append(actions, fmt.Sprintf("<action priority=\"warn\">%s</action>", output.PrimeExcessiveNotice))

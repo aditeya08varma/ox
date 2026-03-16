@@ -256,6 +256,12 @@ type agentGuidance struct {
 	Commands []intentCommand `json:"commands"` // ordered by query frequency
 }
 
+// UserNotice is a notice that agents must relay to the user (upgrade, restart, support).
+type UserNotice struct {
+	Type    string `json:"type"`    // "upgrade", "restart", "support"
+	Message string `json:"message"`
+}
+
 // agentPrimeOutput is the structured response for agent bootstrap (prime)
 type agentPrimeOutput struct {
 	Status            string                     `json:"status"` // fresh, unavailable
@@ -302,6 +308,8 @@ type agentPrimeOutput struct {
 	UpdateAvailable bool   `json:"update_available,omitempty"` // true if newer ox version exists
 	LatestVersion   string `json:"latest_version,omitempty"`   // latest available version (without v prefix)
 	UpdateHint      string `json:"update_hint,omitempty"`      // human-readable update instruction
+	// Structured user notices (XML <user-notices> block)
+	UserNotices []UserNotice `json:"user_notices,omitempty"` // notices that agents must relay to the user
 	// Per-step timing instrumentation
 	ElapsedMs int64            `json:"elapsed_ms,omitempty"` // total prime execution time
 	Timing    map[string]int64 `json:"timing,omitempty"`     // per-phase timing (ms)
@@ -744,6 +752,10 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	if hooksInstalled {
 		output.HooksRestartNotice = "SageOx hooks were just installed. Tell the user to exit this session and start a new one so the hooks take effect."
+		output.UserNotices = append(output.UserNotices, UserNotice{
+			Type:    "restart",
+			Message: "SageOx hooks were just installed. Exit this session and start a new one so the hooks take effect.",
+		})
 	}
 
 	// check for version updates from daemon cache (pure file read, ~0ms)
@@ -754,10 +766,18 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			"v%s -> v%s available. Run 'brew upgrade sageox' or visit https://github.com/sageox/ox/releases",
 			vResult.CurrentVersion, vResult.LatestVersion,
 		)
-		// append to user notification
-		if output.UserNotification != "" {
-			output.UserNotification += " " + output.UpdateHint + "."
-		}
+		output.UserNotices = append(output.UserNotices, UserNotice{
+			Type:    "upgrade",
+			Message: output.UpdateHint,
+		})
+	}
+
+	// add support notice to user notices if present
+	if output.SupportNotice != "" {
+		output.UserNotices = append(output.UserNotices, UserNotice{
+			Type:    "support",
+			Message: output.SupportNotice,
+		})
 	}
 
 	// write session marker for idempotent behavior (graceful failure)
