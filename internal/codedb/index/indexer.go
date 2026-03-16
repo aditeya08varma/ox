@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -93,6 +94,7 @@ type indexState struct {
 	diffBatchN   int
 	knownCommits map[string]bool
 	treeCache    map[plumbing.Hash]map[string]plumbing.Hash
+	blobIDCache  map[string]int64 // content_hash -> blob DB ID; avoids repeated SQL lookups
 	newCommits   int
 	newBlobs     int
 	report       func(string)
@@ -193,6 +195,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 		diffBatch:    s.DiffIndex.NewBatch(),
 		knownCommits: knownCommits,
 		treeCache:    make(map[plumbing.Hash]map[string]plumbing.Hash),
+		blobIDCache:  make(map[string]int64),
 		report:       report,
 	}
 
@@ -298,6 +301,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 		diffBatch:    s.DiffIndex.NewBatch(),
 		knownCommits: knownCommits,
 		treeCache:    make(map[plumbing.Hash]map[string]plumbing.Hash),
+		blobIDCache:  make(map[string]int64),
 		report:       report,
 	}
 
@@ -877,7 +881,7 @@ func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.
 
 	diffText := generateDiffText(st.repo, path, oldOID, newOID, hasOld, hasNew)
 	if diffText != "" {
-		st.diffBatch.Index(fmt.Sprintf("diff_%d", diffDBID), BleveDiffDoc{Content: diffText})
+		st.diffBatch.Index("diff_"+strconv.FormatInt(diffDBID, 10), BleveDiffDoc{Content: diffText})
 		st.diffBatchN++
 		if err := st.flushDiffBatch(false); err != nil {
 			return err
@@ -959,20 +963,26 @@ func getTreeEntries(repo *git.Repository, treeHash plumbing.Hash, cache map[plum
 }
 
 // ensureBlob inserts a blob record if not already present and indexes its content
-// in Bleve only for newly inserted blobs.
+// in Bleve only for newly inserted blobs. Uses an in-memory cache to avoid
+// repeated SQL lookups for the same content_hash within a single indexing run.
 // Returns (blobDBID, indexedInBleve, error).
 func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, bool, error) {
 	contentHash := blobOID.String()
 
-	// Fast path: check if blob already exists
+	// fast path: check in-memory cache first (avoids SQL roundtrip)
+	if cachedID, ok := st.blobIDCache[contentHash]; ok {
+		return cachedID, false, nil
+	}
+
+	// check SQL
 	var blobDBID int64
 	err := st.tx.QueryRow("SELECT id FROM blobs WHERE content_hash = ?", contentHash).Scan(&blobDBID)
 	if err == nil {
-		// Blob already exists — no need to re-read or re-index
+		st.blobIDCache[contentHash] = blobDBID
 		return blobDBID, false, nil
 	}
 
-	// New blob — insert and index in Bleve
+	// new blob — insert and index in Bleve
 	lang := language.Detect(path)
 	var langPtr *string
 	if lang != "" {
@@ -992,6 +1002,8 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, boo
 		return 0, false, fmt.Errorf("get blob id: %w", err)
 	}
 
+	st.blobIDCache[contentHash] = blobDBID
+
 	indexed := false
 	blobObj, bErr := st.repo.BlobObject(blobOID)
 	if bErr == nil {
@@ -1000,7 +1012,7 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, boo
 			content, readErr := io.ReadAll(reader)
 			reader.Close()
 			if readErr == nil && utf8.Valid(content) && len(content) > 0 {
-				st.codeBatch.Index(fmt.Sprintf("blob_%d", blobDBID), BleveCodeDoc{Content: string(content)})
+				st.codeBatch.Index("blob_"+strconv.FormatInt(blobDBID, 10), BleveCodeDoc{Content: string(content)})
 				st.codeBatchN++
 				indexed = true
 				if err := st.flushCodeBatch(false); err != nil {
@@ -1419,7 +1431,7 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 				return stats, fmt.Errorf("insert comment: %w", err)
 			}
 			commentID, _ := res.LastInsertId()
-			commentBatch.Index(fmt.Sprintf("comment_%d", commentID), BleveCommentDoc{Content: cm.Text})
+			commentBatch.Index("comment_"+strconv.FormatInt(commentID, 10), BleveCommentDoc{Content: cm.Text})
 			commentBatchN++
 			stats.CommentsExtracted++
 

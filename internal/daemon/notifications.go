@@ -34,9 +34,15 @@ type ChangeEntry struct {
 type NotificationStore struct {
 	mu         sync.RWMutex
 	entries    []ChangeEntry        // sorted by ChangedAt ascending, capped at maxEntries
+	index      map[string]int       // notifKey(path, teamID) -> index in entries for O(1) dedup
 	cursors    map[string]time.Time // agentID -> last checked timestamp
 	maxEntries int
 	evicted    bool // true if any entries have been evicted due to capacity
+}
+
+// notifKey returns the dedup key for a (path, teamID) pair.
+func notifKey(path, teamID string) string {
+	return path + "\x00" + teamID
 }
 
 // NewNotificationStore creates a new notification store with the given capacity.
@@ -46,6 +52,7 @@ func NewNotificationStore(maxEntries int) *NotificationStore {
 	}
 	return &NotificationStore{
 		entries:    make([]ChangeEntry, 0, maxEntries),
+		index:      make(map[string]int, maxEntries),
 		cursors:    make(map[string]time.Time),
 		maxEntries: maxEntries,
 	}
@@ -63,25 +70,28 @@ func (ns *NotificationStore) RecordChanges(files []string, teamID, teamName stri
 	defer ns.mu.Unlock()
 
 	now := time.Now()
+	changed := false
 
 	for _, f := range files {
-		updated := false
-		for i := range ns.entries {
-			if ns.entries[i].Path == f && ns.entries[i].TeamID == teamID {
-				ns.entries[i].ChangedAt = now
-				ns.entries[i].TeamName = teamName
-				updated = true
-				break
-			}
-		}
-		if !updated {
+		key := notifKey(f, teamID)
+		if idx, ok := ns.index[key]; ok {
+			ns.entries[idx].ChangedAt = now
+			ns.entries[idx].TeamName = teamName
+			changed = true
+		} else {
+			ns.index[key] = len(ns.entries)
 			ns.entries = append(ns.entries, ChangeEntry{
 				Path:      f,
 				ChangedAt: now,
 				TeamID:    teamID,
 				TeamName:  teamName,
 			})
+			changed = true
 		}
+	}
+
+	if !changed {
+		return
 	}
 
 	// re-sort by ChangedAt ascending after updates may have moved entries
@@ -95,7 +105,19 @@ func (ns *NotificationStore) RecordChanges(files []string, teamID, teamName stri
 		ns.evicted = true
 	}
 
+	// rebuild index after sort (and possible eviction) reordered entries
+	ns.rebuildIndex()
+
 	slog.Debug("notification changes recorded", "team", teamName, "count", len(files))
+}
+
+// rebuildIndex reconstructs the index map from the current entries slice.
+// Must be called under write lock.
+func (ns *NotificationStore) rebuildIndex() {
+	clear(ns.index)
+	for i, e := range ns.entries {
+		ns.index[notifKey(e.Path, e.TeamID)] = i
+	}
 }
 
 // GetNotifications returns change entries newer than the agent's cursor.

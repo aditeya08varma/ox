@@ -243,10 +243,13 @@ func (r *Redactor) RedactString(input string) (output string, found []string) {
 			continue
 		}
 
-		matches := p.Pattern.FindAllString(output, -1)
-		if len(matches) > 0 {
+		matched := false
+		output = p.Pattern.ReplaceAllStringFunc(output, func(match string) string {
+			matched = true
+			return p.Redact
+		})
+		if matched {
 			foundMap[p.Name] = true
-			output = p.Pattern.ReplaceAllString(output, p.Redact)
 		}
 	}
 

@@ -443,6 +443,141 @@ func TestConcurrentAccess(t *testing.T) {
 	}
 }
 
+// ======
+// Index Consistency Tests (verifies perf optimization doesn't break behavior)
+// ======
+
+func TestIndexConsistency_AfterEviction(t *testing.T) {
+	ns := NewNotificationStore(3)
+
+	// fill beyond capacity
+	for i := 0; i < 5; i++ {
+		ns.RecordChanges([]string{fmt.Sprintf("file-%d.md", i)}, "team-1", "T")
+		time.Sleep(time.Millisecond)
+	}
+
+	// index should be consistent: every entry findable via index
+	ns.mu.RLock()
+	for i, e := range ns.entries {
+		key := notifKey(e.Path, e.TeamID)
+		idx, ok := ns.index[key]
+		if !ok {
+			ns.mu.RUnlock()
+			t.Fatalf("entry %d (%s) not found in index", i, e.Path)
+		}
+		if idx != i {
+			ns.mu.RUnlock()
+			t.Fatalf("entry %d (%s) has index %d, expected %d", i, e.Path, idx, i)
+		}
+	}
+	// index should have exactly as many entries as the slice
+	if len(ns.index) != len(ns.entries) {
+		ns.mu.RUnlock()
+		t.Fatalf("index has %d entries, slice has %d", len(ns.index), len(ns.entries))
+	}
+	ns.mu.RUnlock()
+}
+
+func TestIndexConsistency_AfterDedup(t *testing.T) {
+	ns := NewNotificationStore(100)
+
+	ns.RecordChanges([]string{"a.md", "b.md", "c.md"}, "team-1", "T")
+	time.Sleep(time.Millisecond)
+
+	// dedup a.md — this reorders after sort
+	ns.RecordChanges([]string{"a.md"}, "team-1", "T")
+
+	// verify index is consistent after reorder
+	ns.mu.RLock()
+	for i, e := range ns.entries {
+		key := notifKey(e.Path, e.TeamID)
+		idx, ok := ns.index[key]
+		if !ok {
+			ns.mu.RUnlock()
+			t.Fatalf("entry %d (%s) missing from index after dedup", i, e.Path)
+		}
+		if idx != i {
+			ns.mu.RUnlock()
+			t.Fatalf("entry %d (%s) index mismatch: got %d", i, e.Path, idx)
+		}
+	}
+	if len(ns.index) != len(ns.entries) {
+		ns.mu.RUnlock()
+		t.Fatalf("index size %d != entries size %d", len(ns.index), len(ns.entries))
+	}
+	ns.mu.RUnlock()
+}
+
+func TestIndexConsistency_DedupThenEvict(t *testing.T) {
+	ns := NewNotificationStore(3)
+
+	// fill: a, b, c
+	ns.RecordChanges([]string{"a.md"}, "team-1", "T")
+	time.Sleep(time.Millisecond)
+	ns.RecordChanges([]string{"b.md"}, "team-1", "T")
+	time.Sleep(time.Millisecond)
+	ns.RecordChanges([]string{"c.md"}, "team-1", "T")
+	time.Sleep(time.Millisecond)
+
+	// dedup a (moves timestamp to newest), then add d (triggers eviction of b)
+	ns.RecordChanges([]string{"a.md"}, "team-1", "T")
+	time.Sleep(time.Millisecond)
+	ns.RecordChanges([]string{"d.md"}, "team-1", "T")
+
+	// verify index consistency
+	ns.mu.RLock()
+	defer ns.mu.RUnlock()
+
+	if len(ns.entries) != 3 {
+		t.Fatalf("expected 3 entries, got %d", len(ns.entries))
+	}
+	if len(ns.index) != 3 {
+		t.Fatalf("index has %d entries, expected 3", len(ns.index))
+	}
+
+	// b.md should be evicted, NOT in index
+	if _, ok := ns.index[notifKey("b.md", "team-1")]; ok {
+		t.Fatal("b.md should have been evicted from index")
+	}
+
+	// remaining entries should all be in index at correct positions
+	for i, e := range ns.entries {
+		key := notifKey(e.Path, e.TeamID)
+		idx := ns.index[key]
+		if idx != i {
+			t.Fatalf("entry %d (%s) index mismatch: got %d", i, e.Path, idx)
+		}
+	}
+}
+
+func TestIndexConsistency_MultiTeamDedup(t *testing.T) {
+	ns := NewNotificationStore(100)
+
+	// same file, different teams
+	ns.RecordChanges([]string{"shared.md"}, "team-a", "A")
+	ns.RecordChanges([]string{"shared.md"}, "team-b", "B")
+
+	if ns.EntryCount() != 2 {
+		t.Fatalf("expected 2 entries (different teams), got %d", ns.EntryCount())
+	}
+
+	ns.mu.RLock()
+	// both should have distinct index entries
+	if len(ns.index) != 2 {
+		ns.mu.RUnlock()
+		t.Fatalf("expected 2 index entries, got %d", len(ns.index))
+	}
+	ns.mu.RUnlock()
+
+	// dedup team-a entry
+	ns.RecordChanges([]string{"shared.md"}, "team-a", "A")
+
+	// should still be 2 entries
+	if ns.EntryCount() != 2 {
+		t.Fatalf("expected still 2 entries after dedup, got %d", ns.EntryCount())
+	}
+}
+
 // getEntriesDirectly reads entries under lock for test assertions.
 func getEntriesDirectly(t *testing.T, ns *NotificationStore) ([]ChangeEntry, map[string]time.Time) {
 	t.Helper()
