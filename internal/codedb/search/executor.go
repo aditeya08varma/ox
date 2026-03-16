@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/blevesearch/bleve/v2"
@@ -78,13 +79,15 @@ func executePlanSQL(ctx context.Context, s *store.Store, plan *ExecutionPlan) ([
 		return nil, err
 	}
 
+	// pre-allocate scan buffers once; reused across all rows
+	values := make([]sql.NullString, len(cols))
+	ptrs := make([]interface{}, len(cols))
+	for i := range values {
+		ptrs[i] = &values[i]
+	}
+
 	var results []Result
 	for rows.Next() {
-		values := make([]sql.NullString, len(cols))
-		ptrs := make([]interface{}, len(cols))
-		for i := range values {
-			ptrs[i] = &values[i]
-		}
 		if err := rows.Scan(ptrs...); err != nil {
 			slog.Warn("scan error, skipping row", "err", err)
 			continue
@@ -101,7 +104,7 @@ func executePlanSQL(ctx context.Context, s *store.Store, plan *ExecutionPlan) ([
 			case "kind":
 				r.SymbolKind = val
 			case "line":
-				fmt.Sscanf(val, "%d", &r.Line)
+				r.Line, _ = strconv.Atoi(val)
 			case "hash":
 				r.CommitHash = val
 			case "author":
@@ -109,13 +112,13 @@ func executePlanSQL(ctx context.Context, s *store.Store, plan *ExecutionPlan) ([
 			case "message":
 				r.Message = val
 			case "score":
-				fmt.Sscanf(val, "%f", &r.Score)
+				r.Score, _ = strconv.ParseFloat(val, 64)
 			case "snippet":
 				r.Content = val
 			case "language":
 				r.Language = val
 			case "number":
-				fmt.Sscanf(val, "%d", &r.Number)
+				r.Number, _ = strconv.Atoi(val)
 			case "title":
 				r.Title = val
 				r.Content = val
@@ -194,7 +197,7 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 			continue
 		}
 		for _, r := range hitResults {
-			key := fmt.Sprintf("%s:%d:%s", r.FilePath, r.Line, r.Content)
+			key := r.FilePath + ":" + strconv.Itoa(r.Line) + ":" + r.Content
 			if seen[key] {
 				continue
 			}

@@ -169,6 +169,10 @@ type HeartbeatHandler struct {
 	onVersionMismatch func(cliVersion, daemonVersion string) // triggers daemon restart
 }
 
+// maxCallers limits the callers map to prevent unbounded growth.
+// When exceeded, the entry with the oldest LastSeen is evicted.
+const maxCallers = 200
+
 // NewHeartbeatHandler creates a new heartbeat handler.
 func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
 	// 100 entries per key (~2.4KB per key) provides good sparkline resolution.
@@ -342,6 +346,21 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 			info.AgentID = hb.AgentID
 		}
 		h.callers[callerID] = info
+
+		// evict oldest entry when over capacity
+		if len(h.callers) > maxCallers {
+			var oldestID string
+			var oldestTime time.Time
+			for id, ci := range h.callers {
+				if oldestID == "" || ci.LastSeen.Before(oldestTime) {
+					oldestID = id
+					oldestTime = ci.LastSeen
+				}
+			}
+			if oldestID != "" {
+				delete(h.callers, oldestID)
+			}
+		}
 		h.callerMu.Unlock()
 	}
 
@@ -537,6 +556,43 @@ func (h *HeartbeatHandler) GetAgentPID(agentID string) int {
 	h.metaMu.RLock()
 	defer h.metaMu.RUnlock()
 	return h.agentPID[agentID]
+}
+
+// CleanupStaleAgents removes entries from all agent-keyed maps for agents
+// not in the active set. Call periodically (e.g., after liveness checks) to
+// prevent unbounded growth of context and metadata maps.
+func (h *HeartbeatHandler) CleanupStaleAgents(activeIDs []string) {
+	active := make(map[string]struct{}, len(activeIDs))
+	for _, id := range activeIDs {
+		active[id] = struct{}{}
+	}
+
+	h.ctxMu.Lock()
+	for id := range h.agentContextTokens {
+		if _, ok := active[id]; !ok {
+			delete(h.agentContextTokens, id)
+			delete(h.agentCommandCount, id)
+		}
+	}
+	h.ctxMu.Unlock()
+
+	h.metaMu.Lock()
+	for id := range h.agentParentID {
+		if _, ok := active[id]; !ok {
+			delete(h.agentParentID, id)
+		}
+	}
+	for id := range h.agentType {
+		if _, ok := active[id]; !ok {
+			delete(h.agentType, id)
+		}
+	}
+	for id := range h.agentPID {
+		if _, ok := active[id]; !ok {
+			delete(h.agentPID, id)
+		}
+	}
+	h.metaMu.Unlock()
 }
 
 // ActivitySummary returns a summary of all activity for status display.

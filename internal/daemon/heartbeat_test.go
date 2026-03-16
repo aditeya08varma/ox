@@ -805,6 +805,177 @@ func TestHeartbeatHandler_CallerTracking(t *testing.T) {
 	}
 }
 
+// ======
+// CleanupStaleAgents Tests
+// ======
+
+func TestHeartbeatHandler_CleanupStaleAgents(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	// register three agents with context tokens and metadata
+	for _, id := range []string{"Ox-a", "Ox-b", "Ox-c"} {
+		handler.Handle("", mustMarshal(HeartbeatPayload{
+			AgentID:       id,
+			ContextTokens: 500,
+			AgentType:     "claude-code",
+			ParentPID:     1234,
+			Timestamp:     time.Now(),
+		}))
+	}
+
+	// verify all three have context stats
+	for _, id := range []string{"Ox-a", "Ox-b", "Ox-c"} {
+		stats := handler.GetAgentContextStats(id)
+		if stats.ContextTokens != 500 {
+			t.Errorf("expected 500 tokens for %s, got %d", id, stats.ContextTokens)
+		}
+	}
+
+	// cleanup, keeping only Ox-b active
+	handler.CleanupStaleAgents([]string{"Ox-b"})
+
+	// Ox-b should still have stats
+	stats := handler.GetAgentContextStats("Ox-b")
+	if stats.ContextTokens != 500 {
+		t.Errorf("expected 500 tokens for active agent Ox-b, got %d", stats.ContextTokens)
+	}
+
+	// Ox-a and Ox-c should be cleaned up
+	for _, id := range []string{"Ox-a", "Ox-c"} {
+		stats := handler.GetAgentContextStats(id)
+		if stats.ContextTokens != 0 {
+			t.Errorf("expected 0 tokens for stale agent %s, got %d", id, stats.ContextTokens)
+		}
+		if stats.CommandCount != 0 {
+			t.Errorf("expected 0 commands for stale agent %s, got %d", id, stats.CommandCount)
+		}
+	}
+
+	// metadata maps should also be cleaned
+	for _, id := range []string{"Ox-a", "Ox-c"} {
+		if got := handler.GetAgentType(id); got != "" {
+			t.Errorf("expected empty agent type for stale %s, got %q", id, got)
+		}
+		if got := handler.GetAgentPID(id); got != 0 {
+			t.Errorf("expected 0 PID for stale %s, got %d", id, got)
+		}
+	}
+
+	// Ox-b metadata should survive
+	if got := handler.GetAgentType("Ox-b"); got != "claude-code" {
+		t.Errorf("expected agent type claude-code for active Ox-b, got %q", got)
+	}
+}
+
+func TestHeartbeatHandler_CleanupStaleAgents_EmptyActiveList(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	handler.Handle("", mustMarshal(HeartbeatPayload{
+		AgentID:       "Ox-x",
+		ContextTokens: 100,
+		AgentType:     "test",
+		Timestamp:     time.Now(),
+	}))
+
+	// cleanup with empty list should remove all
+	handler.CleanupStaleAgents(nil)
+
+	stats := handler.GetAgentContextStats("Ox-x")
+	if stats.ContextTokens != 0 {
+		t.Errorf("expected 0 tokens after cleanup with empty list, got %d", stats.ContextTokens)
+	}
+}
+
+func TestHeartbeatHandler_CleanupStaleAgents_ConcurrentSafe(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	var wg sync.WaitGroup
+
+	// concurrent heartbeats
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				handler.Handle("", mustMarshal(HeartbeatPayload{
+					AgentID:       "Ox-concurrent",
+					ContextTokens: 10,
+					Timestamp:     time.Now(),
+				}))
+			}
+		}(i)
+	}
+
+	// concurrent cleanups
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				handler.CleanupStaleAgents([]string{"Ox-concurrent"})
+			}
+		}()
+	}
+
+	wg.Wait() // should not panic or deadlock
+}
+
+// ======
+// Caller Eviction Tests
+// ======
+
+func TestHeartbeatHandler_CallerEviction(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	handler := NewHeartbeatHandler(logger)
+
+	// fill callers up to maxCallers+1 to trigger eviction
+	// first caller is the oldest
+	handler.Handle("oldest-caller", mustMarshal(HeartbeatPayload{
+		CallerPath: "/workspace/oldest",
+		Timestamp:  time.Now(),
+	}))
+	time.Sleep(time.Millisecond) // ensure distinct timestamps
+
+	// fill remaining slots
+	for i := 1; i <= maxCallers; i++ {
+		callerID := "caller-" + testing_itoa(i)
+		handler.Handle(callerID, mustMarshal(HeartbeatPayload{
+			CallerPath: "/workspace/" + callerID,
+			Timestamp:  time.Now(),
+		}))
+	}
+
+	callers := handler.GetCallers()
+
+	// should have exactly maxCallers (oldest evicted)
+	if len(callers) != maxCallers {
+		t.Fatalf("expected %d callers after eviction, got %d", maxCallers, len(callers))
+	}
+
+	// oldest-caller should have been evicted
+	for _, c := range callers {
+		if c.ID == "oldest-caller" {
+			t.Fatal("expected oldest-caller to be evicted")
+		}
+	}
+}
+
+// testing_itoa converts int to string for test IDs (avoids import)
+func testing_itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	result := ""
+	for n > 0 {
+		result = string(rune('0'+n%10)) + result
+		n /= 10
+	}
+	return result
+}
+
 func TestReadHeartbeatsFromPath_DirectoryPath(t *testing.T) {
 	dirPath := t.TempDir()
 	_, err := readHeartbeatsFromPath(dirPath)

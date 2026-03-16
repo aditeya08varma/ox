@@ -206,6 +206,20 @@ func SaveCache(cache *VerificationCache) error {
 	return nil
 }
 
+// cacheKey builds a lookup key from file path and content hash
+func cacheKey(filePath, contentHash string) string {
+	return filePath + "\x00" + contentHash
+}
+
+// buildCacheIndex returns a map from cacheKey to slice index for O(1) lookups
+func buildCacheIndex(entries []CacheEntry) map[string]int {
+	idx := make(map[string]int, len(entries))
+	for i, e := range entries {
+		idx[cacheKey(e.FilePath, e.ContentHash)] = i
+	}
+	return idx
+}
+
 // GetCachedResult looks up a cached verification result by file path and content hash
 func GetCachedResult(filePath, contentHash string) (*CacheEntry, error) {
 	cache, err := LoadCache()
@@ -213,11 +227,10 @@ func GetCachedResult(filePath, contentHash string) (*CacheEntry, error) {
 		return nil, err
 	}
 
-	// search for matching entry
-	for _, entry := range cache.Entries {
-		if entry.FilePath == filePath && entry.ContentHash == contentHash {
-			return &entry, nil
-		}
+	idx := buildCacheIndex(cache.Entries)
+	if i, ok := idx[cacheKey(filePath, contentHash)]; ok {
+		entry := cache.Entries[i]
+		return &entry, nil
 	}
 
 	return nil, nil // not found
@@ -230,19 +243,13 @@ func SetCachedResult(filePath, contentHash string, verified bool) error {
 		return err
 	}
 
-	// check if entry already exists
-	found := false
-	for i, entry := range cache.Entries {
-		if entry.FilePath == filePath && entry.ContentHash == contentHash {
-			// update existing entry
-			cache.Entries[i].Verified = verified
-			cache.Entries[i].Timestamp = time.Now()
-			found = true
-			break
-		}
-	}
-
-	if !found {
+	// check if entry already exists via O(1) lookup
+	idx := buildCacheIndex(cache.Entries)
+	if i, ok := idx[cacheKey(filePath, contentHash)]; ok {
+		// update existing entry
+		cache.Entries[i].Verified = verified
+		cache.Entries[i].Timestamp = time.Now()
+	} else {
 		// add new entry
 		cache.Entries = append(cache.Entries, CacheEntry{
 			FilePath:    filePath,
