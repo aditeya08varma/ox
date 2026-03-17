@@ -8,11 +8,15 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -63,7 +67,7 @@ type refInfo struct {
 	tipOID plumbing.Hash
 }
 
-const bleveBatchSize = 200
+const bleveBatchSize = 500
 
 // defaultSkipDirs is the default set of directories to skip when indexing a working tree.
 // Override via IndexOptions.SkipDirs.
@@ -749,9 +753,9 @@ func (st *indexState) indexCommit(cd commitData) error {
 	}
 
 	// Evict tree cache periodically to bound memory usage.
-	// 32 entries ~ 32 full tree snapshots; keeps memory reasonable for large repos
-	// while avoiding re-parsing recently seen trees.
-	if len(st.treeCache) >= 32 {
+	// 256 entries keeps memory reasonable while preserving cache hits across
+	// adjacent commits that share tree objects.
+	if len(st.treeCache) >= 256 {
 		st.treeCache = make(map[plumbing.Hash]map[string]plumbing.Hash)
 	}
 
@@ -1078,6 +1082,148 @@ func readBlobText(repo *git.Repository, oid plumbing.Hash) string {
 	return string(content)
 }
 
+// repoPool wraps git repos with per-repo mutexes for thread-safe blob access.
+// go-git's packfile reader is not safe for concurrent access from the same repo.
+type repoPool struct {
+	repos []*git.Repository
+	locks []sync.Mutex
+}
+
+func newRepoPool(repos []*git.Repository) *repoPool {
+	return &repoPool{
+		repos: repos,
+		locks: make([]sync.Mutex, len(repos)),
+	}
+}
+
+// maxPrefetchBlobSize caps individual blob reads during prefetch to prevent OOM.
+// Matches the maxBlobSize used in ParseComments.
+const maxPrefetchBlobSize = 1 << 20 // 1 MB
+
+// readBlob reads blob content from one of the repos, thread-safe.
+// Returns nil if unreadable, binary, or larger than maxPrefetchBlobSize.
+func (rp *repoPool) readBlob(contentHash string) []byte {
+	oid := plumbing.NewHash(contentHash)
+	for i, r := range rp.repos {
+		rp.locks[i].Lock()
+		blobObj, err := r.BlobObject(oid)
+		if err != nil {
+			rp.locks[i].Unlock()
+			continue
+		}
+		reader, err := blobObj.Reader()
+		if err != nil {
+			rp.locks[i].Unlock()
+			continue
+		}
+		content, err := io.ReadAll(io.LimitReader(reader, maxPrefetchBlobSize+1))
+		reader.Close()
+		rp.locks[i].Unlock()
+		if err != nil {
+			continue
+		}
+		if len(content) > maxPrefetchBlobSize {
+			return nil // too large
+		}
+		if !utf8.Valid(content) {
+			return nil
+		}
+		return content
+	}
+	return nil
+}
+
+// prefetchBlobContents reads blob content in parallel using a worker pool.
+// Returns a map of content_hash -> content for all successfully read blobs.
+func prefetchBlobContents(ctx context.Context, repos []*git.Repository, hashes []string, report func(string)) map[string][]byte {
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(hashes) {
+		workers = len(hashes)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	pool := newRepoPool(repos)
+	result := make(map[string][]byte, len(hashes))
+	var mu sync.Mutex
+
+	ch := make(chan string, workers*2)
+
+	var wg sync.WaitGroup
+	var fetched atomic.Int64
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for hash := range ch {
+				if ctx.Err() != nil {
+					return
+				}
+				content := pool.readBlob(hash)
+				if content != nil {
+					mu.Lock()
+					result[hash] = content
+					mu.Unlock()
+				}
+				n := fetched.Add(1)
+				if n%500 == 0 {
+					report(fmt.Sprintf("  prefetching blob content: %d/%d...", n, len(hashes)))
+				}
+			}
+		}()
+	}
+
+sendLoop:
+	for _, h := range hashes {
+		select {
+		case <-ctx.Done():
+			break sendLoop
+		case ch <- h:
+		}
+	}
+	close(ch)
+	wg.Wait()
+
+	return result
+}
+
+// openReposFromDB queries repo paths from the store and opens them.
+func openReposFromDB(s *store.Store) ([]*git.Repository, error) {
+	repoRows, err := s.Query("SELECT path FROM repos")
+	if err != nil {
+		return nil, fmt.Errorf("query repo paths: %w", err)
+	}
+	var repos []*git.Repository
+	var pathCount int
+	for repoRows.Next() {
+		var p string
+		if err := repoRows.Scan(&p); err != nil {
+			repoRows.Close()
+			return nil, fmt.Errorf("scan repo path: %w", err)
+		}
+		pathCount++
+		r, err := plainOpenTolerant(p)
+		if err != nil {
+			slog.Debug("skipping repo that failed to open", "path", p, "err", err)
+			continue
+		}
+		repos = append(repos, r)
+	}
+	repoRows.Close()
+	if err := repoRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate repo paths: %w", err)
+	}
+	if pathCount == 0 {
+		return nil, fmt.Errorf("no repos found in database")
+	}
+	if len(repos) == 0 {
+		return nil, fmt.Errorf("could not open any of %d git repos from database", pathCount)
+	}
+	return repos, nil
+}
+
 // ParseStats holds statistics from the symbol parsing phase.
 type ParseStats struct {
 	BlobsParsed      uint64
@@ -1086,6 +1232,7 @@ type ParseStats struct {
 
 // ParseSymbols extracts symbols and references from all unparsed blobs with
 // supported languages and inserts them into the symbols and symbol_refs tables.
+// Uses parallel blob reading and batched SQL inserts for performance.
 func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (ParseStats, error) {
 	report := func(msg string) {
 		if progress != nil {
@@ -1139,39 +1286,18 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 	}
 	report(fmt.Sprintf("Found %d unparsed blobs with supported languages.", len(blobs)))
 
-	repoRows, err := s.Query("SELECT path FROM repos")
+	repos, err := openReposFromDB(s)
 	if err != nil {
-		return stats, fmt.Errorf("query repo paths: %w", err)
-	}
-	var repoPaths []string
-	for repoRows.Next() {
-		var p string
-		if err := repoRows.Scan(&p); err != nil {
-			repoRows.Close()
-			return stats, fmt.Errorf("scan repo path: %w", err)
-		}
-		repoPaths = append(repoPaths, p)
-	}
-	repoRows.Close()
-	if err := repoRows.Err(); err != nil {
-		return stats, fmt.Errorf("iterate repo paths: %w", err)
+		return stats, fmt.Errorf("open repos for symbol parsing: %w", err)
 	}
 
-	if len(repoPaths) == 0 {
-		return stats, fmt.Errorf("no repos found in database")
+	// Prefetch all blob content in parallel
+	hashes := make([]string, len(blobs))
+	for i, b := range blobs {
+		hashes[i] = b.contentHash
 	}
-
-	var repos []*git.Repository
-	for _, rp := range repoPaths {
-		r, err := plainOpenTolerant(rp)
-		if err != nil {
-			continue
-		}
-		repos = append(repos, r)
-	}
-	if len(repos) == 0 {
-		return stats, fmt.Errorf("could not open any git repos")
-	}
+	blobCache := prefetchBlobContents(ctx, repos, hashes, report)
+	report(fmt.Sprintf("  prefetched %d/%d blobs", len(blobCache), len(blobs)))
 
 	tx, err := s.Begin()
 	if err != nil {
@@ -1187,46 +1313,69 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 			report(fmt.Sprintf("Parsing symbols: %d/%d blobs...", i+1, len(blobs)))
 		}
 
-		var content []byte
-		oid := plumbing.NewHash(blob.contentHash)
-		for _, r := range repos {
-			blobObj, bErr := r.BlobObject(oid)
-			if bErr != nil {
-				continue
-			}
-			reader, rErr := blobObj.Reader()
-			if rErr != nil {
-				continue
-			}
-			var readErr error
-			content, readErr = io.ReadAll(reader)
-			reader.Close()
-			if readErr != nil {
-				content = nil
-				continue
-			}
-			break
+		content, ok := blobCache[blob.contentHash]
+		if !ok {
+			// prefetch miss — may be transient (packfile lock, I/O error);
+			// leave parsed=0 so the blob is retried on the next index run.
+			continue
 		}
-		if content == nil || !utf8.Valid(content) {
-			tx.Exec("UPDATE blobs SET parsed = 1 WHERE id = ?", blob.id)
+		if len(content) == 0 {
+			// genuinely empty file — mark parsed so we don't retry
+			if _, err := tx.Exec("UPDATE blobs SET parsed = 1 WHERE id = ?", blob.id); err != nil {
+				slog.Warn("mark empty blob parsed", "blob_id", blob.id, "err", err)
+			}
 			continue
 		}
 
 		syms, refs := symbols.Extract(string(content), blob.language)
 
+		// Batch insert symbols
 		symDBIDs := make([]int64, len(syms))
-		for j, sym := range syms {
-			res, err := tx.Exec(
-				`INSERT INTO symbols (blob_id, parent_id, name, kind, line, col, end_line, end_col, signature, return_type, params) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-				blob.id, sym.Name, sym.Kind, sym.Line, sym.Col, sym.EndLine, sym.EndCol, sym.Signature, sym.ReturnType, sym.Params,
-			)
-			if err != nil {
-				return stats, fmt.Errorf("insert symbol: %w", err)
+		const symBatchSize = 50
+		for batchStart := 0; batchStart < len(syms); batchStart += symBatchSize {
+			batchEnd := batchStart + symBatchSize
+			if batchEnd > len(syms) {
+				batchEnd = len(syms)
 			}
-			symDBIDs[j], _ = res.LastInsertId()
-			stats.SymbolsExtracted++
+			batch := syms[batchStart:batchEnd]
+
+			var sb strings.Builder
+			sb.WriteString("INSERT INTO symbols (blob_id, parent_id, name, kind, line, col, end_line, end_col, signature, return_type, params) VALUES ")
+			sqlArgs := make([]interface{}, 0, len(batch)*11)
+			for k, sym := range batch {
+				if k > 0 {
+					sb.WriteByte(',')
+				}
+				sb.WriteString("(?,NULL,?,?,?,?,?,?,?,?,?)")
+				sqlArgs = append(sqlArgs, blob.id, sym.Name, sym.Kind, sym.Line, sym.Col, sym.EndLine, sym.EndCol, sym.Signature, sym.ReturnType, sym.Params)
+			}
+			sb.WriteString(" RETURNING id")
+			rows, err := tx.Query(sb.String(), sqlArgs...)
+			if err != nil {
+				return stats, fmt.Errorf("batch insert symbols: %w", err)
+			}
+			k := 0
+			for rows.Next() {
+				var id int64
+				if err := rows.Scan(&id); err != nil {
+					rows.Close()
+					return stats, fmt.Errorf("scan inserted symbol id: %w", err)
+				}
+				symDBIDs[batchStart+k] = id
+				k++
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return stats, fmt.Errorf("iterate inserted symbol ids: %w", err)
+			}
+			rows.Close()
+			if k != len(batch) {
+				return stats, fmt.Errorf("symbols batch: expected %d returned ids, got %d", len(batch), k)
+			}
+			stats.SymbolsExtracted += uint64(len(batch))
 		}
 
+		// Batch update parent IDs
 		for j, sym := range syms {
 			if sym.ParentIdx >= 0 && sym.ParentIdx < len(symDBIDs) {
 				_, err := tx.Exec("UPDATE symbols SET parent_id = ? WHERE id = ?",
@@ -1237,17 +1386,31 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 			}
 		}
 
-		for _, ref := range refs {
-			var symbolID int64
-			if ref.ContainingSymIdx >= 0 && ref.ContainingSymIdx < len(symDBIDs) {
-				symbolID = symDBIDs[ref.ContainingSymIdx]
+		// Batch insert symbol refs
+		const refBatchSize = 50
+		for batchStart := 0; batchStart < len(refs); batchStart += refBatchSize {
+			batchEnd := batchStart + refBatchSize
+			if batchEnd > len(refs) {
+				batchEnd = len(refs)
 			}
-			_, err := tx.Exec(
-				`INSERT INTO symbol_refs (blob_id, symbol_id, ref_name, kind, line, col) VALUES (?, ?, ?, ?, ?, ?)`,
-				blob.id, symbolID, ref.RefName, ref.Kind, ref.Line, ref.Col,
-			)
-			if err != nil {
-				return stats, fmt.Errorf("insert symbol ref: %w", err)
+			batch := refs[batchStart:batchEnd]
+
+			var sb strings.Builder
+			sb.WriteString("INSERT INTO symbol_refs (blob_id, symbol_id, ref_name, kind, line, col) VALUES ")
+			sqlArgs := make([]interface{}, 0, len(batch)*6)
+			for k, ref := range batch {
+				if k > 0 {
+					sb.WriteByte(',')
+				}
+				sb.WriteString("(?,?,?,?,?,?)")
+				var symbolID interface{} // nil → SQL NULL when ContainingSymIdx is invalid
+				if ref.ContainingSymIdx >= 0 && ref.ContainingSymIdx < len(symDBIDs) {
+					symbolID = symDBIDs[ref.ContainingSymIdx]
+				}
+				sqlArgs = append(sqlArgs, blob.id, symbolID, ref.RefName, ref.Kind, ref.Line, ref.Col)
+			}
+			if _, err := tx.Exec(sb.String(), sqlArgs...); err != nil {
+				return stats, fmt.Errorf("batch insert symbol refs: %w", err)
 			}
 		}
 
@@ -1280,8 +1443,18 @@ type BleveCommentDoc struct {
 	Content string `json:"content"`
 }
 
+// commentResult holds the extraction result for a single blob, produced by
+// a worker goroutine and consumed by the single-writer SQL/Bleve path.
+type commentResult struct {
+	blobID   int64
+	comments []comments.Comment
+	skip     bool // true if blob was empty/too large (permanent — mark parsed)
+	miss     bool // true if blob was not in cache (transient — leave unparsed for retry)
+}
+
 // ParseComments extracts comments from all blobs that haven't been comment-parsed
 // yet and inserts them into the comments table and CommentIndex.
+// Uses parallel prefetch + extraction and batched SQL inserts for performance.
 func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (CommentStats, error) {
 	report := func(msg string) {
 		if progress != nil {
@@ -1335,116 +1508,174 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 	}
 	report(fmt.Sprintf("Parsing comments from %d blobs...", len(blobs)))
 
-	repoRows, err := s.Query("SELECT path FROM repos")
+	repos, err := openReposFromDB(s)
 	if err != nil {
-		return stats, fmt.Errorf("query repo paths: %w", err)
+		return stats, fmt.Errorf("open repos for comment parsing: %w", err)
 	}
-	var repoPaths []string
-	for repoRows.Next() {
-		var p string
-		if err := repoRows.Scan(&p); err != nil {
-			repoRows.Close()
-			return stats, fmt.Errorf("scan repo path: %w", err)
+
+	// Prefetch all blob content in parallel
+	hashes := make([]string, len(blobs))
+	for i, b := range blobs {
+		hashes[i] = b.contentHash
+	}
+	blobCache := prefetchBlobContents(ctx, repos, hashes, report)
+	report(fmt.Sprintf("  prefetched %d/%d blobs", len(blobCache), len(blobs)))
+
+	const maxCommentsPerBlob = 1000
+	const maxBlobSize = 1 << 20 // 1MB
+
+	// Phase 2: Extract comments in parallel
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(blobs) {
+		workers = len(blobs)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	results := make([]commentResult, len(blobs))
+	var wg sync.WaitGroup
+	ch := make(chan int, workers*2)
+	var extracted atomic.Int64
+
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for idx := range ch {
+				if ctx.Err() != nil {
+					return
+				}
+				blob := blobs[idx]
+				content, ok := blobCache[blob.contentHash]
+				if !ok {
+					results[idx] = commentResult{blobID: blob.id, miss: true}
+				} else if len(content) == 0 || len(content) > maxBlobSize {
+					results[idx] = commentResult{blobID: blob.id, skip: true}
+				} else {
+					cms := comments.Extract(string(content), blob.language)
+					if len(cms) > maxCommentsPerBlob {
+						cms = cms[:maxCommentsPerBlob]
+					}
+					results[idx] = commentResult{blobID: blob.id, comments: cms}
+				}
+				n := extracted.Add(1)
+				if n%500 == 0 {
+					report(fmt.Sprintf("  extracting comments: %d/%d blobs...", n, len(blobs)))
+				}
+			}
+		}()
+	}
+
+sendLoop:
+	for i := range blobs {
+		select {
+		case <-ctx.Done():
+			break sendLoop
+		case ch <- i:
 		}
-		repoPaths = append(repoPaths, p)
 	}
-	repoRows.Close()
-	if err := repoRows.Err(); err != nil {
-		return stats, fmt.Errorf("iterate repo paths: %w", err)
+	close(ch)
+	wg.Wait()
+
+	if err := ctx.Err(); err != nil {
+		return stats, err
 	}
 
-	if len(repoPaths) == 0 {
-		return stats, fmt.Errorf("no repos found in database")
-	}
+	// Free blob cache before SQL phase to reduce memory pressure
+	blobCache = nil
 
-	var repos []*git.Repository
-	for _, rp := range repoPaths {
-		r, err := plainOpenTolerant(rp)
-		if err != nil {
-			continue
-		}
-		repos = append(repos, r)
-	}
-	if len(repos) == 0 {
-		return stats, fmt.Errorf("could not open any git repos")
-	}
-
+	// Phase 3: Single-writer SQL + Bleve insertion with batched INSERTs
 	tx, err := s.Begin()
 	if err != nil {
 		return stats, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	const maxCommentsPerBlob = 1000
-	const maxBlobSize = 1 << 20 // 1MB
-
 	commentBatch := s.CommentIndex.NewBatch()
 	commentBatchN := 0
+	const commentSQLBatchSize = 100
 
-	for i, blob := range blobs {
+	for i, result := range results {
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
-		if (i+1)%100 == 0 {
-			report(fmt.Sprintf("Parsing comments: %d/%d blobs...", i+1, len(blobs)))
+		if (i+1)%500 == 0 {
+			report(fmt.Sprintf("  inserting comments: %d/%d blobs...", i+1, len(results)))
 		}
 
-		var content []byte
-		oid := plumbing.NewHash(blob.contentHash)
-		for _, r := range repos {
-			blobObj, bErr := r.BlobObject(oid)
-			if bErr != nil {
-				continue
-			}
-			reader, rErr := blobObj.Reader()
-			if rErr != nil {
-				continue
-			}
-			var readErr error
-			content, readErr = io.ReadAll(reader)
-			reader.Close()
-			if readErr != nil {
-				content = nil
-				continue
-			}
-			break
+		if result.miss {
+			// prefetch miss — may be transient; leave comments_parsed=0 for retry
+			continue
 		}
-		if content == nil || !utf8.Valid(content) || len(content) > maxBlobSize {
-			tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", blob.id)
+		if result.skip || len(result.comments) == 0 {
+			if _, err := tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", result.blobID); err != nil {
+				slog.Warn("mark blob comments_parsed", "blob_id", result.blobID, "err", err)
+			}
+			if !result.skip {
+				stats.BlobsParsed++
+			}
 			continue
 		}
 
-		extracted := comments.Extract(string(content), blob.language)
-
-		count := len(extracted)
-		if count > maxCommentsPerBlob {
-			count = maxCommentsPerBlob
-		}
-
-		for j := 0; j < count; j++ {
-			cm := extracted[j]
-			res, err := tx.Exec(
-				`INSERT INTO comments (blob_id, text, kind, line, end_line, col, end_col) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-				blob.id, cm.Text, cm.Kind, cm.Line, cm.EndLine, cm.Col, cm.EndCol,
-			)
-			if err != nil {
-				return stats, fmt.Errorf("insert comment: %w", err)
+		// Batch insert comments for this blob
+		cms := result.comments
+		for batchStart := 0; batchStart < len(cms); batchStart += commentSQLBatchSize {
+			batchEnd := batchStart + commentSQLBatchSize
+			if batchEnd > len(cms) {
+				batchEnd = len(cms)
 			}
-			commentID, _ := res.LastInsertId()
-			commentBatch.Index("comment_"+strconv.FormatInt(commentID, 10), BleveCommentDoc{Content: cm.Text})
-			commentBatchN++
-			stats.CommentsExtracted++
+			batch := cms[batchStart:batchEnd]
 
-			if commentBatchN >= 200 {
-				if err := s.CommentIndex.Batch(commentBatch); err != nil {
-					return stats, fmt.Errorf("flush comment batch: %w", err)
+			var sb strings.Builder
+			sb.WriteString("INSERT INTO comments (blob_id, text, kind, line, end_line, col, end_col) VALUES ")
+			sqlArgs := make([]interface{}, 0, len(batch)*7)
+			for k, cm := range batch {
+				if k > 0 {
+					sb.WriteByte(',')
 				}
-				commentBatch = s.CommentIndex.NewBatch()
-				commentBatchN = 0
+				sb.WriteString("(?,?,?,?,?,?,?)")
+				sqlArgs = append(sqlArgs, result.blobID, cm.Text, cm.Kind, cm.Line, cm.EndLine, cm.Col, cm.EndCol)
+			}
+			sb.WriteString(" RETURNING id")
+			rows, err := tx.Query(sb.String(), sqlArgs...)
+			if err != nil {
+				return stats, fmt.Errorf("batch insert comments: %w", err)
+			}
+			cmIdx := 0
+			for rows.Next() {
+				var commentID int64
+				if err := rows.Scan(&commentID); err != nil {
+					rows.Close()
+					return stats, fmt.Errorf("scan inserted comment id: %w", err)
+				}
+				if cmIdx < len(batch) {
+					commentBatch.Index("comment_"+strconv.FormatInt(commentID, 10), BleveCommentDoc{Content: batch[cmIdx].Text})
+				}
+				cmIdx++
+				commentBatchN++
+				stats.CommentsExtracted++
+
+				if commentBatchN >= bleveBatchSize {
+					if err := s.CommentIndex.Batch(commentBatch); err != nil {
+						rows.Close()
+						return stats, fmt.Errorf("flush comment batch: %w", err)
+					}
+					commentBatch = s.CommentIndex.NewBatch()
+					commentBatchN = 0
+				}
+			}
+			if err := rows.Err(); err != nil {
+				rows.Close()
+				return stats, fmt.Errorf("iterate inserted comment ids: %w", err)
+			}
+			rows.Close()
+			if cmIdx != len(batch) {
+				return stats, fmt.Errorf("comments batch: expected %d returned ids, got %d", len(batch), cmIdx)
 			}
 		}
 
-		_, err = tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", blob.id)
+		_, err = tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", result.blobID)
 		if err != nil {
 			return stats, fmt.Errorf("mark blob comments_parsed: %w", err)
 		}
