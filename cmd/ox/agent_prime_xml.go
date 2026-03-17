@@ -295,7 +295,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 	if len(output.UserNotices) > 0 {
 		sb.WriteString("\n<user-notices hint=\"Show each notice to the user\">\n")
 		for _, n := range output.UserNotices {
-			sb.WriteString(fmt.Sprintf("<notice type=%q>%s</notice>\n", n.Type, n.Message))
+			sb.WriteString(fmt.Sprintf(
+				"<notice type=\"%s\">%s</notice>\n",
+				escapeXML(n.Type),
+				escapeXML(n.Message),
+			))
 		}
 		sb.WriteString("</user-notices>\n")
 	}
@@ -352,4 +356,17 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) error {
 		sendContextHeartbeat(output.AgentID, bytes, "prime")
 	}
 	return nil
+}
+
+// xmlEscaper replaces XML-special characters with their entity references.
+var xmlEscaper = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+	"\"", "&quot;",
+	"'", "&apos;",
+)
+
+func escapeXML(s string) string {
+	return xmlEscaper.Replace(s)
 }

@@ -30,7 +30,7 @@ func TestOutputAgentPrimeXML_UserNotices(t *testing.T) {
 			},
 			wantUserNoticesBlock: true,
 			wantNoticeTypes:      []string{"upgrade"},
-			wantNoticeMessages:   []string{"v0.5.0 -> v0.5.1"},
+			wantNoticeMessages:   []string{"v0.5.0 -&gt; v0.5.1"},
 		},
 		{
 			name: "restart notice in user-notices",
