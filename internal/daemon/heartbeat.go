@@ -167,6 +167,7 @@ type HeartbeatHandler struct {
 	onTeamNeeded      func(teamID string)
 	onActivity        func()
 	onVersionMismatch func(cliVersion, daemonVersion string) // triggers daemon restart
+	onCallerPath      func(path string)                      // fires when CallerPath changes
 }
 
 // maxCallers limits the callers map to prevent unbounded growth.
@@ -221,6 +222,15 @@ func (h *HeartbeatHandler) SetActivityCallback(cb func()) {
 func (h *HeartbeatHandler) SetVersionMismatchCallback(cb func(cliVersion, daemonVersion string)) {
 	h.cbMu.Lock()
 	h.onVersionMismatch = cb
+	h.cbMu.Unlock()
+}
+
+// SetCallerPathCallback sets the callback for when a heartbeat arrives with a
+// CallerPath. Used to update components (e.g., CodeDBManager) when the active
+// workspace changes (common with Conductor which creates new workspace dirs).
+func (h *HeartbeatHandler) SetCallerPathCallback(cb func(path string)) {
+	h.cbMu.Lock()
+	h.onCallerPath = cb
 	h.cbMu.Unlock()
 }
 
@@ -334,6 +344,8 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 	}
 
 	// track caller clone/worktree identity
+	var callerPathCb func(string)
+	var callerPath string
 	if callerID != "" {
 		h.callerMu.Lock()
 		info := h.callers[callerID]
@@ -341,6 +353,10 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 		info.LastSeen = time.Now()
 		if hb.CallerPath != "" {
 			info.Path = hb.CallerPath
+			callerPath = hb.CallerPath
+			h.cbMu.RLock()
+			callerPathCb = h.onCallerPath
+			h.cbMu.RUnlock()
 		}
 		if hb.AgentID != "" {
 			info.AgentID = hb.AgentID
@@ -362,6 +378,11 @@ func (h *HeartbeatHandler) Handle(callerID string, payload json.RawMessage) {
 			}
 		}
 		h.callerMu.Unlock()
+
+		// notify after releasing callerMu to avoid lock-coupling with callback targets
+		if callerPathCb != nil {
+			callerPathCb(callerPath)
+		}
 	}
 
 	// record activity by repo
