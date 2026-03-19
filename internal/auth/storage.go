@@ -473,19 +473,22 @@ func (c *AuthClient) IsAuthenticated() (bool, error) {
 	return c.IsAuthenticatedForEndpoint(ep)
 }
 
-// IsAuthenticatedForEndpoint checks if a valid non-expired token exists for a specific endpoint
+// IsAuthenticatedForEndpoint checks if a valid token exists for a specific endpoint.
+// If the access token is expired but a refresh token exists, attempts auto-refresh
+// before reporting unauthenticated.
 func (c *AuthClient) IsAuthenticatedForEndpoint(ep string) (bool, error) {
-	token, err := c.GetTokenForEndpoint(ep)
+	token, err := c.EnsureValidTokenForEndpoint(ep, 0)
 	if err != nil {
-		return false, err
-	}
-
-	if token == nil {
+		// refresh failed — check if we at least have a stored token (expired)
+		// to distinguish "not logged in" from "token refresh failed"
+		raw, _ := c.GetTokenForEndpoint(ep)
+		if raw != nil {
+			return false, fmt.Errorf("token refresh failed: %w", err)
+		}
 		return false, nil
 	}
 
-	// check if token is expired
-	if time.Now().After(token.ExpiresAt) {
+	if token == nil {
 		return false, nil
 	}
 

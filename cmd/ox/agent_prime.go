@@ -514,7 +514,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	// check if user is authenticated — degraded mode if not (recording continues locally)
 	if auth.IsAuthRequired() {
-		authenticated, _ := auth.IsAuthenticatedForEndpoint(projectEndpoint)
+		authenticated, authErr := auth.IsAuthenticatedForEndpoint(projectEndpoint)
 		if !authenticated {
 			endpointSlug := endpoint.NormalizeSlug(projectEndpoint)
 
@@ -531,11 +531,16 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				}
 			}
 
+			// distinguish "never logged in" from "token expired/refresh failed"
+			msg := "Not logged in."
+			if authErr != nil {
+				msg = "Authentication expired."
+			}
 			output := agentPrimeOutput{
 				Status:  "degraded",
 				AgentID: agentID,
 				Session: sessionStat,
-				Message: fmt.Sprintf("Authentication expired. Run 'ox login' to re-authenticate with %s. Session recording is active locally — data will be uploaded after re-authentication.", endpointSlug),
+				Message: fmt.Sprintf("%s Run 'ox login' to authenticate with %s. Session recording is active locally — data will be uploaded after authentication.", msg, endpointSlug),
 			}
 			if sessionStat != nil && sessionStat.UserNotification != "" {
 				output.UserNotification = sessionStat.UserNotification
