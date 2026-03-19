@@ -264,7 +264,7 @@ type UserNotice struct {
 
 // agentPrimeOutput is the structured response for agent bootstrap (prime)
 type agentPrimeOutput struct {
-	Status            string                     `json:"status"` // fresh, unavailable
+	Status            string                     `json:"status"` // fresh, degraded, unavailable
 	AgentID           string                     `json:"agent_id"`
 	Guidance          *agentGuidance             `json:"guidance,omitempty"` // intent-to-command lookup (scan first)
 	SessionID         string                     `json:"session_id,omitempty"`
@@ -478,19 +478,8 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 
-	// check if user is authenticated
-	if auth.IsAuthRequired() {
-		authenticated, _ := auth.IsAuthenticatedForEndpoint(projectEndpoint)
-		if !authenticated {
-			endpointSlug := endpoint.NormalizeSlug(projectEndpoint)
-			output := agentPrimeOutput{
-				Status:  "unavailable",
-				Message: fmt.Sprintf("Authentication required. The user needs to run 'ox login' to authenticate with %s before using agent commands.", endpointSlug),
-			}
-			return outputAgentPrime(cmd, textMode, reviewMode, output)
-		}
-	}
-
+	// generate agentID and start recording BEFORE auth check — recording is local,
+	// auth is only needed for upload and cloud features
 	store, err := getInstanceStore(projectRoot)
 	if err != nil {
 		return fmt.Errorf("failed to initialize instance store: %w", err)
@@ -518,10 +507,42 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// attempt to start session recording if enabled
+	// attempt to start session recording if enabled (local, no auth needed)
 	phaseStart = time.Now()
 	sessionStat := startSessionRecording(projectRoot, agentID, agentType)
 	timing["session_start"] = time.Since(phaseStart).Milliseconds()
+
+	// check if user is authenticated — degraded mode if not (recording continues locally)
+	if auth.IsAuthRequired() {
+		authenticated, _ := auth.IsAuthenticatedForEndpoint(projectEndpoint)
+		if !authenticated {
+			endpointSlug := endpoint.NormalizeSlug(projectEndpoint)
+
+			// write session marker so hooks can discover session file and continue recording
+			if agentSessionID != "" {
+				marker := &SessionMarker{
+					AgentID:        agentID,
+					AgentSessionID: agentSessionID,
+					PrimedAt:       time.Now(),
+					ParentPID:      os.Getppid(),
+				}
+				if writeErr := WriteSessionMarker(marker); writeErr != nil {
+					slog.Warn("failed to write session marker in degraded mode", "error", writeErr)
+				}
+			}
+
+			output := agentPrimeOutput{
+				Status:  "degraded",
+				AgentID: agentID,
+				Session: sessionStat,
+				Message: fmt.Sprintf("Authentication expired. Run 'ox login' to re-authenticate with %s. Session recording is active locally — data will be uploaded after re-authentication.", endpointSlug),
+			}
+			if sessionStat != nil && sessionStat.UserNotification != "" {
+				output.UserNotification = sessionStat.UserNotification
+			}
+			return outputAgentPrime(cmd, textMode, reviewMode, output)
+		}
+	}
 
 	// discover team context if configured
 	phaseStart = time.Now()

@@ -176,6 +176,38 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		slog.Debug("ledger not available for session list", "err", ledgerErr)
 	}
 
+	// scan ledger cache for in-progress or unuploaded sessions
+	// recordings are initially written to {ledger}/.sageox/cache/sessions/ before upload
+	if ledgerAvailable {
+		ledgerCachePath := filepath.Join(ledgerPath, ".sageox", "cache")
+		cacheStore, cacheErr := session.NewStore(ledgerCachePath)
+		if cacheErr == nil {
+			var cacheSessions []session.SessionInfo
+			if showAll {
+				cacheSessions, _ = cacheStore.ListAllSessions()
+			} else {
+				cacheSessions, _ = cacheStore.ListSessions()
+			}
+
+			existing := make(map[string]bool)
+			for _, s := range sessions {
+				existing[s.SessionName] = true
+			}
+
+			for _, cs := range cacheSessions {
+				if !existing[cs.SessionName] {
+					sessions = append(sessions, cs)
+				}
+			}
+
+			if len(cacheSessions) > 0 {
+				sort.Slice(sessions, func(i, j int) bool {
+					return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
+				})
+			}
+		}
+	}
+
 	// handle empty case
 	if len(sessions) == 0 {
 		if jsonOutput {
