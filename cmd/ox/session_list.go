@@ -151,7 +151,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 				ledgerSessions, _ = ledgerStore.ListSessions()
 			}
 
-			// build lookup of existing session names
+			// build lookup of existing session names (reused for cache dedup below)
 			existing := make(map[string]bool)
 			for _, s := range sessions {
 				existing[s.SessionName] = true
@@ -160,6 +160,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			for _, ls := range ledgerSessions {
 				uploadedSessions[ls.SessionName] = true
 				if !existing[ls.SessionName] {
+					existing[ls.SessionName] = true
 					sessions = append(sessions, ls)
 				}
 			}
@@ -168,6 +169,32 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 			sort.Slice(sessions, func(i, j int) bool {
 				return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
 			})
+
+			// scan ledger cache for in-progress or unuploaded sessions
+			// recordings are initially written to {ledger}/.sageox/cache/sessions/ before upload
+			ledgerCachePath := filepath.Join(ledgerPath, ".sageox", "cache")
+			cacheStore, cacheErr := session.NewStore(ledgerCachePath)
+			if cacheErr == nil {
+				var cacheSessions []session.SessionInfo
+				if showAll {
+					cacheSessions, _ = cacheStore.ListAllSessions()
+				} else {
+					cacheSessions, _ = cacheStore.ListSessions()
+				}
+
+				for _, cs := range cacheSessions {
+					if !existing[cs.SessionName] {
+						existing[cs.SessionName] = true
+						sessions = append(sessions, cs)
+					}
+				}
+
+				if len(cacheSessions) > 0 {
+					sort.Slice(sessions, func(i, j int) bool {
+						return sessions[i].CreatedAt.After(sessions[j].CreatedAt)
+					})
+				}
+			}
 		} else {
 			slog.Debug("skipping ledger sessions", "err", storeErr)
 			ledgerAvailable = false

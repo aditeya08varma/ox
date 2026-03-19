@@ -280,8 +280,8 @@ func TestIsAuthenticated(t *testing.T) {
 				require.NoError(t, client.SaveToken(token))
 			},
 			want:        false,
-			wantErr:     false,
-			description: "returns false for expired token",
+			wantErr:     true,
+			description: "returns false with error for expired token (refresh attempted)",
 		},
 		{
 			name: "token expiring soon",
