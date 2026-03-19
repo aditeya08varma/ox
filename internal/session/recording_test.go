@@ -1645,6 +1645,58 @@ func TestCleanupGhostSessionsInDir_DoubleCleanupIsIdempotent(t *testing.T) {
 	assert.Equal(t, 0, r2.Removed, "second cleanup should find nothing — idempotent")
 }
 
+// --- P0: Recording state corruption resilience ---
+
+func TestLoadRecordingState_TruncatedJSON(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionsDir := filepath.Join(tmpDir, "sessions")
+	sessionPath := filepath.Join(sessionsDir, "2026-01-01T00-00-user-OxCrash")
+	require.NoError(t, os.MkdirAll(sessionPath, 0755))
+
+	// write truncated JSON simulating crash during write
+	require.NoError(t, os.WriteFile(
+		filepath.Join(sessionPath, recordingFile),
+		[]byte(`{"agent_id":"Ox`), 0600))
+
+	state, err := LoadRecordingState(tmpDir)
+	// truncated JSON must never produce a partial state
+	if err != nil {
+		assert.Contains(t, err.Error(), "parse", "error should mention parsing")
+		assert.Nil(t, state, "state must be nil when parse fails")
+		return
+	}
+	assert.Nil(t, state, "truncated JSON must not produce a partial state")
+}
+
+func TestSaveRecordingState_PersistsAndLeavesNoArtifacts(t *testing.T) {
+	tmpDir := t.TempDir()
+	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxAtomic")
+
+	state := &RecordingState{
+		AgentID:     "OxAtomic",
+		StartedAt:   time.Now(),
+		SessionPath: sessionPath,
+		ParentPID:   os.Getpid(),
+	}
+
+	require.NoError(t, SaveRecordingState(tmpDir, state))
+
+	// verify only the recording file exists — no temp artifacts
+	entries, err := os.ReadDir(sessionPath)
+	require.NoError(t, err)
+	for _, e := range entries {
+		assert.False(t, strings.HasSuffix(e.Name(), ".tmp"),
+			"temp file should not remain after successful save: %s", e.Name())
+	}
+
+	// verify the state round-trips correctly
+	loaded, err := LoadRecordingStateForAgent(tmpDir, "OxAtomic")
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, "OxAtomic", loaded.AgentID)
+	assert.Equal(t, state.SessionPath, loaded.SessionPath)
+}
+
 // TestCrossEnvRecordingStateRoundTrip verifies that a recording state written
 // with one XDG_CACHE_HOME can be found by a process with a different XDG_CACHE_HOME.
 // This is the exact scenario that caused the split-path bug: Conductor GUI (no
