@@ -24,6 +24,17 @@ type PRFile struct {
 	MergeCommit string      `json:"merge_commit,omitempty"`
 	URL         string      `json:"url"`
 	Comments    []PRComment `json:"comments,omitempty"`
+	Commits     []PRCommit  `json:"commits,omitempty"`
+}
+
+// PRCommit represents a commit from a PR's branch, fetched via the GitHub
+// /repos/{owner}/{repo}/pulls/{number}/commits endpoint.
+// Only fetched for merged PRs (immutable once merged).
+type PRCommit struct {
+	SHA    string    `json:"sha"`
+	Author string    `json:"author"`
+	Date   time.Time `json:"date"`
+	Msg    string    `json:"message"`
 }
 
 // PRComment represents a comment on a pull request (issue comment or review comment).

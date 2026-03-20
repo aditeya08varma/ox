@@ -151,6 +151,15 @@ CREATE INDEX IF NOT EXISTS idx_issues_author ON issues(author);
 CREATE INDEX IF NOT EXISTS idx_issue_comments_issue ON issue_comments(issue_id);
 CREATE INDEX IF NOT EXISTS idx_blobs_parsed_lang ON blobs(parsed, language);
 
+CREATE TABLE IF NOT EXISTS pr_commits (
+    id    INTEGER PRIMARY KEY,
+    pr_id INTEGER NOT NULL REFERENCES pull_requests(id),
+    sha   TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_pr_commits_pr ON pr_commits(pr_id);
+CREATE INDEX IF NOT EXISTS idx_pr_commits_sha ON pr_commits(sha);
+
 CREATE TABLE IF NOT EXISTS github_file_mtimes (
     source_path TEXT NOT NULL PRIMARY KEY,
     mtime_unix  INTEGER NOT NULL
@@ -169,7 +178,10 @@ func CreateSchema(db *sql.DB) error {
 	if err := migrateAddComments(db); err != nil {
 		return err
 	}
-	return migrateAddGitHubTables(db)
+	if err := migrateAddGitHubTables(db); err != nil {
+		return err
+	}
+	return migrateAddPRCommits(db)
 }
 
 // migrateAddTypeInfo adds signature, return_type, and params columns to the
@@ -319,6 +331,35 @@ func migrateAddGitHubTables(db *sql.DB) error {
 			source_path TEXT NOT NULL PRIMARY KEY,
 			mtime_unix  INTEGER NOT NULL
 		)`,
+	}
+	for _, s := range stmts {
+		if _, err := db.Exec(s); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// migrateAddPRCommits creates the pr_commits table for databases created
+// before PR commit indexing existed.
+func migrateAddPRCommits(db *sql.DB) error {
+	var exists bool
+	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name='pr_commits'`).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS pr_commits (
+			id    INTEGER PRIMARY KEY,
+			pr_id INTEGER NOT NULL REFERENCES pull_requests(id),
+			sha   TEXT NOT NULL
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_commits_pr ON pr_commits(pr_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_pr_commits_sha ON pr_commits(sha)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {

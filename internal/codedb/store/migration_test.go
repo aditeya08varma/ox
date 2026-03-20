@@ -273,6 +273,80 @@ func TestMigrateAddGitHubTables_Idempotent(t *testing.T) {
 	}
 }
 
+func TestMigrateAddPRCommits_FromOlderSchema(t *testing.T) {
+	t.Parallel()
+	db, _ := createOldSchemaDB(t)
+	defer db.Close()
+
+	// run prerequisite migration first
+	if err := migrateAddGitHubTables(db); err != nil {
+		t.Fatalf("migrateAddGitHubTables: %v", err)
+	}
+
+	if tableExists(t, db, "pr_commits") {
+		t.Fatal("pr_commits should NOT exist before migration")
+	}
+
+	if err := migrateAddPRCommits(db); err != nil {
+		t.Fatalf("migrateAddPRCommits: %v", err)
+	}
+
+	if !tableExists(t, db, "pr_commits") {
+		t.Error("pr_commits table should exist after migration")
+	}
+
+	// verify columns
+	for _, col := range []string{"id", "pr_id", "sha"} {
+		if !columnExists(t, db, "pr_commits", col) {
+			t.Errorf("pr_commits.%s should exist", col)
+		}
+	}
+
+	// verify we can insert and query with FK
+	_, err := db.Exec(`INSERT INTO pull_requests (number, title, state) VALUES (42, 'test', 'merged')`)
+	if err != nil {
+		t.Fatalf("insert PR: %v", err)
+	}
+	_, err = db.Exec(`INSERT INTO pr_commits (pr_id, sha) VALUES (1, 'abc123')`)
+	if err != nil {
+		t.Errorf("insert pr_commits: %v", err)
+	}
+
+	var sha string
+	db.QueryRow(`SELECT sha FROM pr_commits WHERE pr_id = 1`).Scan(&sha)
+	if sha != "abc123" {
+		t.Errorf("expected sha 'abc123', got %q", sha)
+	}
+}
+
+func TestMigrateAddPRCommits_Idempotent(t *testing.T) {
+	t.Parallel()
+	db, _ := createOldSchemaDB(t)
+	defer db.Close()
+
+	if err := migrateAddGitHubTables(db); err != nil {
+		t.Fatalf("migrateAddGitHubTables: %v", err)
+	}
+
+	if err := migrateAddPRCommits(db); err != nil {
+		t.Fatalf("first migration: %v", err)
+	}
+
+	// insert data
+	db.Exec(`INSERT INTO pull_requests (number, title, state) VALUES (1, 'test', 'merged')`)
+	db.Exec(`INSERT INTO pr_commits (pr_id, sha) VALUES (1, 'sha1')`)
+
+	if err := migrateAddPRCommits(db); err != nil {
+		t.Fatalf("second migration should be idempotent: %v", err)
+	}
+
+	var count int
+	db.QueryRow(`SELECT COUNT(*) FROM pr_commits`).Scan(&count)
+	if count != 1 {
+		t.Error("idempotent migration should not affect existing data")
+	}
+}
+
 func TestCreateSchema_AllMigrations(t *testing.T) {
 	t.Parallel()
 	db, _ := createOldSchemaDB(t)
@@ -296,6 +370,7 @@ func TestCreateSchema_AllMigrations(t *testing.T) {
 		{"pull_requests", "number"},
 		{"issues", "number"},
 		{"github_file_mtimes", "source_path"},
+		{"pr_commits", "sha"},
 	}
 	for _, c := range checks {
 		if c.column != "" {
@@ -347,5 +422,8 @@ func TestOpenExistingDB_TriggersAllMigrations(t *testing.T) {
 	}
 	if !tableExists(t, s.db, "pull_requests") {
 		t.Error("migrateAddGitHubTables did not run")
+	}
+	if !tableExists(t, s.db, "pr_commits") {
+		t.Error("migrateAddPRCommits did not run")
 	}
 }
