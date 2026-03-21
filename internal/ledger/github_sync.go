@@ -145,8 +145,15 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 		// fetch commits for merged PRs — only when first seen as merged
 		// (commit list is immutable once merged, no need to re-fetch)
 		var commits []PRCommit
-		if prState == "merged" && (!known || stateChanged) {
-			commits = fetchPRCommits(ctx, fetcher, owner, repo, pr.Number, logger)
+		if prState == "merged" {
+			if !known || stateChanged {
+				commits = fetchPRCommits(ctx, fetcher, owner, repo, pr.Number, logger)
+			} else {
+				// carry forward existing commits to avoid omitempty dropping them on re-write
+				if existing, err := ReadGitHubPR(ledgerPath, pr.Number, pr.CreatedAt); err == nil {
+					commits = existing.Commits
+				}
+			}
 		}
 
 		prFile := &PRFile{

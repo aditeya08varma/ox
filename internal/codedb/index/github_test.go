@@ -98,7 +98,9 @@ func TestIndexGitHubData_PRWithCommits(t *testing.T) {
 
 	// verify comments were also indexed
 	var commentCount int
-	s.QueryRow("SELECT COUNT(*) FROM pr_comments WHERE pr_id = ?", prID).Scan(&commentCount)
+	if err := s.QueryRow("SELECT COUNT(*) FROM pr_comments WHERE pr_id = ?", prID).Scan(&commentCount); err != nil {
+		t.Fatalf("query comment count: %v", err)
+	}
 	if commentCount != 1 {
 		t.Errorf("expected 1 comment, got %d", commentCount)
 	}
@@ -138,9 +140,13 @@ func TestIndexGitHubData_PRWithoutCommits(t *testing.T) {
 
 	// verify no commits indexed
 	var prID int64
-	s.QueryRow("SELECT id FROM pull_requests WHERE number = 43").Scan(&prID)
+	if err := s.QueryRow("SELECT id FROM pull_requests WHERE number = 43").Scan(&prID); err != nil {
+		t.Fatalf("query PR id: %v", err)
+	}
 	var count int
-	s.QueryRow("SELECT COUNT(*) FROM pr_commits WHERE pr_id = ?", prID).Scan(&count)
+	if err := s.QueryRow("SELECT COUNT(*) FROM pr_commits WHERE pr_id = ?", prID).Scan(&count); err != nil {
+		t.Fatalf("query commit count: %v", err)
+	}
 	if count != 0 {
 		t.Errorf("expected 0 commits for open PR, got %d", count)
 	}
@@ -171,7 +177,9 @@ func TestIndexGitHubData_UpsertReplacesCommits(t *testing.T) {
 		t.Fatalf("write PR: %v", err)
 	}
 
-	IndexGitHubData(context.Background(), s, ledgerPath, nil)
+	if _, err := IndexGitHubData(context.Background(), s, ledgerPath, nil); err != nil {
+		t.Fatalf("IndexGitHubData first pass: %v", err)
+	}
 
 	// update file (touch it to change mtime)
 	pr.Commits = []ledger.PRCommit{
@@ -185,19 +193,27 @@ func TestIndexGitHubData_UpsertReplacesCommits(t *testing.T) {
 	}
 
 	// re-index
-	IndexGitHubData(context.Background(), s, ledgerPath, nil)
+	if _, err := IndexGitHubData(context.Background(), s, ledgerPath, nil); err != nil {
+		t.Fatalf("IndexGitHubData second pass: %v", err)
+	}
 
 	// verify commits were replaced
 	var prID int64
-	s.QueryRow("SELECT id FROM pull_requests WHERE number = 44").Scan(&prID)
+	if err := s.QueryRow("SELECT id FROM pull_requests WHERE number = 44").Scan(&prID); err != nil {
+		t.Fatalf("query PR id: %v", err)
+	}
 	var count int
-	s.QueryRow("SELECT COUNT(*) FROM pr_commits WHERE pr_id = ?", prID).Scan(&count)
+	if err := s.QueryRow("SELECT COUNT(*) FROM pr_commits WHERE pr_id = ?", prID).Scan(&count); err != nil {
+		t.Fatalf("query commit count: %v", err)
+	}
 	if count != 2 {
 		t.Errorf("expected 2 commits after upsert, got %d", count)
 	}
 
 	var sha string
-	s.QueryRow("SELECT sha FROM pr_commits WHERE pr_id = ? ORDER BY rowid LIMIT 1", prID).Scan(&sha)
+	if err := s.QueryRow("SELECT sha FROM pr_commits WHERE pr_id = ? ORDER BY rowid LIMIT 1", prID).Scan(&sha); err != nil {
+		t.Fatalf("query first commit SHA: %v", err)
+	}
 	if sha != "new1" {
 		t.Errorf("expected SHA 'new1' after upsert, got %q", sha)
 	}
@@ -218,7 +234,9 @@ func TestIndexGitHubData_BackwardCompatOldJSON(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	dir := filepath.Join(ledgerPath, "data", "github",
 		now.Format("2006"), now.Format("01"), now.Format("02"), "pr")
-	os.MkdirAll(dir, 0755)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir old-format dir: %v", err)
+	}
 
 	oldJSON := `{
 		"number": 99,
@@ -231,7 +249,9 @@ func TestIndexGitHubData_BackwardCompatOldJSON(t *testing.T) {
 		"merge_commit": "old999",
 		"url": "https://github.com/org/repo/pull/99"
 	}`
-	os.WriteFile(filepath.Join(dir, "99.json"), []byte(oldJSON), 0644)
+	if err := os.WriteFile(filepath.Join(dir, "99.json"), []byte(oldJSON), 0o644); err != nil {
+		t.Fatalf("write old-format JSON: %v", err)
+	}
 
 	stats, err := IndexGitHubData(context.Background(), s, ledgerPath, nil)
 	if err != nil {
@@ -243,9 +263,13 @@ func TestIndexGitHubData_BackwardCompatOldJSON(t *testing.T) {
 
 	// verify PR was indexed correctly with no commits
 	var prID int64
-	s.QueryRow("SELECT id FROM pull_requests WHERE number = 99").Scan(&prID)
+	if err := s.QueryRow("SELECT id FROM pull_requests WHERE number = 99").Scan(&prID); err != nil {
+		t.Fatalf("query PR id: %v", err)
+	}
 	var count int
-	s.QueryRow("SELECT COUNT(*) FROM pr_commits WHERE pr_id = ?", prID).Scan(&count)
+	if err := s.QueryRow("SELECT COUNT(*) FROM pr_commits WHERE pr_id = ?", prID).Scan(&count); err != nil {
+		t.Fatalf("query commit count: %v", err)
+	}
 	if count != 0 {
 		t.Errorf("expected 0 commits from old JSON, got %d", count)
 	}

@@ -164,6 +164,22 @@ func WriteGitHubIssue(ledgerPath string, issue *IssueFile) error {
 	return nil
 }
 
+// ReadGitHubPR reads an existing PR JSON file from the ledger by number and creation date.
+// Returns os.ErrNotExist if the file does not exist.
+func ReadGitHubPR(ledgerPath string, number int, createdAt time.Time) (*PRFile, error) {
+	dir := DateDir(ledgerPath, createdAt, "pr")
+	path := filepath.Join(dir, fmt.Sprintf("%d.json", number))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read PR %d: %w", number, err)
+	}
+	var pr PRFile
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return nil, fmt.Errorf("unmarshal PR %d: %w", number, err)
+	}
+	return &pr, nil
+}
+
 // GitHubSyncCacheDir returns the local cache directory for GitHub sync state.
 // Path: <ledger>/.sageox/cache/github_sync/ — gitignored, local-only, not committed.
 // Uses the ledger path (not project root) so the cursor is shared across worktrees.

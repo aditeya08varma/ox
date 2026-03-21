@@ -3,6 +3,7 @@ package ledger
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -13,13 +14,14 @@ import (
 
 // mockFetcher implements GitHubFetcher for testing.
 type mockFetcher struct {
-	prs       []FetchedPR
-	issues    []FetchedIssue
-	comments  map[int][]FetchedComment  // keyed by issue/PR number
-	prCommits map[int][]FetchedPRCommit // keyed by PR number
-	prRL      *FetchRateLimit
-	issueRL   *FetchRateLimit
-	err       error
+	prs          []FetchedPR
+	issues       []FetchedIssue
+	comments     map[int][]FetchedComment  // keyed by issue/PR number
+	prCommits    map[int][]FetchedPRCommit // keyed by PR number
+	prRL         *FetchRateLimit
+	issueRL      *FetchRateLimit
+	err          error
+	prCommitsErr error // independent error for ListPRCommits
 }
 
 func (m *mockFetcher) ListPullRequests(_ context.Context, _, _ string, _ ListPRsOptions) ([]FetchedPR, *FetchRateLimit, error) {
@@ -39,6 +41,9 @@ func (m *mockFetcher) ListIssueComments(_ context.Context, _, _ string, number i
 }
 
 func (m *mockFetcher) ListPRCommits(_ context.Context, _, _ string, number int) ([]FetchedPRCommit, error) {
+	if m.prCommitsErr != nil {
+		return nil, m.prCommitsErr
+	}
 	if m.prCommits != nil {
 		return m.prCommits[number], m.err
 	}
@@ -384,6 +389,100 @@ func TestSyncPRs_StateTransitionToMergedGetsCommits(t *testing.T) {
 
 	if len(pr.Commits) != 1 {
 		t.Errorf("expected 1 commit after merge transition, got %d", len(pr.Commits))
+	}
+}
+
+func TestSyncPRs_ReplayedMergedPRPreservesCommits(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// first sync: merged PR with commits
+	fetcher1 := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 450, Title: "Feature", State: "closed", Author: "alice",
+			CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeSHA: "abc123",
+		}},
+		comments: map[int][]FetchedComment{},
+		prCommits: map[int][]FetchedPRCommit{
+			450: {
+				{SHA: "commit1", Author: "alice", Date: now, Msg: "first"},
+				{SHA: "commit2", Author: "alice", Date: now, Msg: "second"},
+			},
+		},
+	}
+	_, err := SyncPRs(context.Background(), fetcher1, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	// verify commits were stored
+	existing, err := ReadGitHubPR(ledgerPath, 450, now)
+	if err != nil {
+		t.Fatalf("read PR after first sync: %v", err)
+	}
+	if len(existing.Commits) != 2 {
+		t.Fatalf("expected 2 commits after first sync, got %d", len(existing.Commits))
+	}
+
+	// second sync: same PR replayed (simulates --full / cursor reset)
+	// fetcher should NOT be called for commits since state hasn't changed
+	fetcher2 := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 450, Title: "Feature", State: "closed", Author: "alice",
+			CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeSHA: "abc123",
+		}},
+		comments:  map[int][]FetchedComment{},
+		prCommits: map[int][]FetchedPRCommit{}, // empty — shouldn't be called
+	}
+	_, err = SyncPRs(context.Background(), fetcher2, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	// verify commits are preserved (not dropped by omitempty)
+	replayed, err := ReadGitHubPR(ledgerPath, 450, now)
+	if err != nil {
+		t.Fatalf("read PR after second sync: %v", err)
+	}
+	if len(replayed.Commits) != 2 {
+		t.Errorf("expected 2 commits preserved after replay, got %d", len(replayed.Commits))
+	}
+	if replayed.Commits[0].SHA != "commit1" {
+		t.Errorf("expected first commit SHA 'commit1', got %q", replayed.Commits[0].SHA)
+	}
+}
+
+func TestSyncPRs_CommitFetchErrorIsBestEffort(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	fetcher := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 460, Title: "Merged PR", State: "closed", Author: "alice",
+			CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeSHA: "def456",
+		}},
+		comments:     map[int][]FetchedComment{},
+		prCommitsErr: fmt.Errorf("GitHub API rate limited"),
+	}
+
+	result, err := SyncPRs(context.Background(), fetcher, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("SyncPRs should succeed despite commit fetch error: %v", err)
+	}
+	if result.PRCreated != 1 {
+		t.Errorf("expected 1 created, got %d", result.PRCreated)
+	}
+
+	// PR should be written without commits (best-effort)
+	pr, err := ReadGitHubPR(ledgerPath, 460, now)
+	if err != nil {
+		t.Fatalf("read PR: %v", err)
+	}
+	if len(pr.Commits) != 0 {
+		t.Errorf("expected 0 commits when fetch fails, got %d", len(pr.Commits))
 	}
 }
 
