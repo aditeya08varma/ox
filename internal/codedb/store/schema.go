@@ -164,6 +164,13 @@ CREATE TABLE IF NOT EXISTS github_file_mtimes (
     source_path TEXT NOT NULL PRIMARY KEY,
     mtime_unix  INTEGER NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_pull_requests_updated_at ON pull_requests(updated_at);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_merged_at ON pull_requests(merged_at);
+CREATE INDEX IF NOT EXISTS idx_pull_requests_created_at ON pull_requests(created_at);
+CREATE INDEX IF NOT EXISTS idx_issues_updated_at ON issues(updated_at);
+CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at);
+CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON commits(timestamp);
 `
 
 // CreateSchema initializes the SQLite tables and indexes.
@@ -331,6 +338,12 @@ func migrateAddGitHubTables(db *sql.DB) error {
 			source_path TEXT NOT NULL PRIMARY KEY,
 			mtime_unix  INTEGER NOT NULL
 		)`,
+		`CREATE INDEX IF NOT EXISTS idx_pull_requests_updated_at ON pull_requests(updated_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_pull_requests_merged_at ON pull_requests(merged_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_pull_requests_created_at ON pull_requests(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_updated_at ON issues(updated_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON commits(timestamp)`,
 	}
 	for _, s := range stmts {
 		if _, err := db.Exec(s); err != nil {
