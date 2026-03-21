@@ -380,13 +380,15 @@ func queryStandaloneCommits(ctx context.Context, s *store.Store, sinceUnix, unti
 	var commits []StandaloneCommit
 	for rows.Next() {
 		var c StandaloneCommit
-		var ts int64
+		var ts sql.NullInt64
 
 		if err := rows.Scan(&c.SHA, &c.Message, &c.Author, &ts); err != nil {
 			return nil, fmt.Errorf("scan commit: %w", err)
 		}
 
-		c.Timestamp = time.Unix(ts, 0).UTC().Format(time.RFC3339)
+		if ts.Valid {
+			c.Timestamp = time.Unix(ts.Int64, 0).UTC().Format(time.RFC3339)
+		}
 		commits = append(commits, c)
 	}
 

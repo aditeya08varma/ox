@@ -69,11 +69,11 @@ func TestCodeActivityE2E(t *testing.T) {
 		repoDir, envVars := setupActivityTestProject(t, oxBin)
 
 		output, exitCode, _ := testguard.RunOx(t, oxBin, repoDir, envVars,
-			"code", "activity", "--since", "7d", "--json")
+			"code", "activity", "--since", "7d", "--pretty")
 
 		assert.Equal(t, 0, exitCode, "exit code should be 0, output: %s", output)
 
-		// --json flag should produce indented output
+		// --pretty flag should produce indented output
 		trimmed := strings.TrimSpace(output)
 		assert.True(t, strings.Contains(trimmed, "\n"), "pretty-printed output should have newlines")
 		assert.True(t, strings.Contains(trimmed, "  "), "pretty-printed output should have indentation")

@@ -700,6 +700,9 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		slog.Warn("failed to read github facts", "error", err)
 	}
 	// merge github facts into discussion facts map
+	if factsByDay == nil {
+		factsByDay = make(map[string][]discussionFactEntry)
+	}
 	for day, facts := range ghFactsByDay {
 		factsByDay[day] = append(factsByDay[day], facts...)
 	}
