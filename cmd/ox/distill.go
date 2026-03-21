@@ -357,6 +357,8 @@ type distillStateV2 struct {
 	// Key: directory name, Value: content hash at time of processing.
 	// Map-based (not timestamp cursor) because discussions arrive out of order via daemon sync.
 	ProcessedDiscussions map[string]string `json:"processed_discussions,omitempty"`
+	// LastGitHubFacts is the RFC3339 timestamp of the last successful GitHub fact extraction.
+	LastGitHubFacts string `json:"last_github_facts,omitempty"`
 	// v1 compat fields (read for migration, not written)
 	LastDistilled    string `json:"last_distilled,omitempty"`
 	ObservationCount int    `json:"observation_count,omitempty"`
@@ -465,6 +467,17 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		} else if !distillDryRun {
 			if err := saveDistillStateV2(projectRoot, state); err != nil {
 				slog.Warn("failed to save distill state after discussion extraction", "error", err)
+			}
+		}
+	}
+
+	// extract facts from GitHub activity before daily distill
+	if plan.Daily {
+		if err := extractGitHubFacts(ctx, cmd, backend, tc, state, projectRoot); err != nil {
+			slog.Warn("github fact extraction failed", "error", err)
+		} else if !distillDryRun {
+			if err := saveDistillStateV2(projectRoot, state); err != nil {
+				slog.Warn("failed to save distill state after github extraction", "error", err)
 			}
 		}
 	}
@@ -681,8 +694,21 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		slog.Warn("failed to read discussion facts", "error", err)
 	}
 
+	// read github facts grouped by date
+	ghFactsByDay, err := readPendingGitHubFacts(tc.Path, since)
+	if err != nil {
+		slog.Warn("failed to read github facts", "error", err)
+	}
+	// merge github facts into discussion facts map
+	if factsByDay == nil {
+		factsByDay = make(map[string][]discussionFactEntry)
+	}
+	for day, facts := range ghFactsByDay {
+		factsByDay[day] = append(factsByDay[day], facts...)
+	}
+
 	if len(observations) == 0 && len(factsByDay) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "No pending observations or discussion facts for daily distill")
+		fmt.Fprintln(cmd.OutOrStdout(), "No pending observations or facts for daily distill")
 		return nil
 	}
 
