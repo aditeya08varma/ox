@@ -2,6 +2,8 @@ package ledger
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -12,12 +14,14 @@ import (
 
 // mockFetcher implements GitHubFetcher for testing.
 type mockFetcher struct {
-	prs      []FetchedPR
-	issues   []FetchedIssue
-	comments map[int][]FetchedComment // keyed by issue/PR number
-	prRL     *FetchRateLimit
-	issueRL  *FetchRateLimit
-	err      error
+	prs          []FetchedPR
+	issues       []FetchedIssue
+	comments     map[int][]FetchedComment  // keyed by issue/PR number
+	prCommits    map[int][]FetchedPRCommit // keyed by PR number
+	prRL         *FetchRateLimit
+	issueRL      *FetchRateLimit
+	err          error
+	prCommitsErr error // independent error for ListPRCommits
 }
 
 func (m *mockFetcher) ListPullRequests(_ context.Context, _, _ string, _ ListPRsOptions) ([]FetchedPR, *FetchRateLimit, error) {
@@ -34,6 +38,16 @@ func (m *mockFetcher) ListPRComments(_ context.Context, _, _ string, number int)
 
 func (m *mockFetcher) ListIssueComments(_ context.Context, _, _ string, number int) ([]FetchedComment, error) {
 	return m.comments[number], m.err
+}
+
+func (m *mockFetcher) ListPRCommits(_ context.Context, _, _ string, number int) ([]FetchedPRCommit, error) {
+	if m.prCommitsErr != nil {
+		return nil, m.prCommitsErr
+	}
+	if m.prCommits != nil {
+		return m.prCommits[number], m.err
+	}
+	return nil, m.err
 }
 
 func TestSyncPRs_NewPRs(t *testing.T) {
@@ -223,6 +237,392 @@ func TestSyncIssues_NewIssues(t *testing.T) {
 	}
 	if len(files) != 1 {
 		t.Errorf("expected 1 issue file, got %d", len(files))
+	}
+}
+
+func TestSyncPRs_MergedPRGetsCommits(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	fetcher := &mockFetcher{
+		prs: []FetchedPR{
+			{
+				Number:    200,
+				Title:     "Merged PR with commits",
+				State:     "closed",
+				Author:    "alice",
+				CreatedAt: now,
+				UpdatedAt: now,
+				MergedAt:  &now,
+				MergeSHA:  "merge123",
+				HTMLURL:   "https://github.com/org/repo/pull/200",
+			},
+		},
+		comments: map[int][]FetchedComment{},
+		prCommits: map[int][]FetchedPRCommit{
+			200: {
+				{SHA: "aaa111", Author: "alice", Date: now.Add(-2 * time.Hour), Msg: "first commit"},
+				{SHA: "bbb222", Author: "alice", Date: now.Add(-1 * time.Hour), Msg: "second commit"},
+			},
+		},
+	}
+
+	result, err := SyncPRs(context.Background(), fetcher, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("SyncPRs: %v", err)
+	}
+
+	if result.PRCreated != 1 {
+		t.Errorf("expected 1 created, got %d", result.PRCreated)
+	}
+
+	// verify the PR file contains commits
+	files, err := ListGitHubDataFiles(ledgerPath, "pr")
+	if err != nil {
+		t.Fatalf("ListGitHubDataFiles: %v", err)
+	}
+	if len(files) != 1 {
+		t.Fatalf("expected 1 PR file, got %d", len(files))
+	}
+
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatalf("read PR file: %v", err)
+	}
+
+	var pr PRFile
+	if err := json.Unmarshal(data, &pr); err != nil {
+		t.Fatalf("unmarshal PR: %v", err)
+	}
+
+	if len(pr.Commits) != 2 {
+		t.Errorf("expected 2 commits, got %d", len(pr.Commits))
+	}
+	if pr.Commits[0].SHA != "aaa111" {
+		t.Errorf("expected first commit SHA 'aaa111', got %q", pr.Commits[0].SHA)
+	}
+	if pr.Commits[1].Msg != "second commit" {
+		t.Errorf("expected second commit message 'second commit', got %q", pr.Commits[1].Msg)
+	}
+}
+
+func TestSyncPRs_OpenPRDoesNotGetCommits(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	fetcher := &mockFetcher{
+		prs: []FetchedPR{
+			{
+				Number:    300,
+				Title:     "Open PR",
+				State:     "open",
+				Author:    "bob",
+				CreatedAt: now,
+				UpdatedAt: now,
+			},
+		},
+		comments: map[int][]FetchedComment{},
+		prCommits: map[int][]FetchedPRCommit{
+			300: {{SHA: "ccc333", Author: "bob", Date: now, Msg: "wip"}},
+		},
+	}
+
+	_, err := SyncPRs(context.Background(), fetcher, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("SyncPRs: %v", err)
+	}
+
+	files, _ := ListGitHubDataFiles(ledgerPath, "pr")
+	data, _ := os.ReadFile(files[0])
+	var pr PRFile
+	json.Unmarshal(data, &pr)
+
+	if len(pr.Commits) != 0 {
+		t.Errorf("open PR should have 0 commits, got %d", len(pr.Commits))
+	}
+}
+
+func TestSyncPRs_StateTransitionToMergedGetsCommits(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// first sync: PR is open
+	fetcher1 := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 400, Title: "Feature", State: "open", Author: "alice",
+			CreatedAt: now, UpdatedAt: now,
+		}},
+		comments:  map[int][]FetchedComment{},
+		prCommits: map[int][]FetchedPRCommit{},
+	}
+	_, err := SyncPRs(context.Background(), fetcher1, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	// second sync: PR merged (state transition)
+	merged := now.Add(time.Hour)
+	fetcher2 := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 400, Title: "Feature", State: "closed", Author: "alice",
+			CreatedAt: now, UpdatedAt: merged, MergedAt: &merged, MergeSHA: "xyz789",
+		}},
+		comments: map[int][]FetchedComment{},
+		prCommits: map[int][]FetchedPRCommit{
+			400: {{SHA: "ddd444", Author: "alice", Date: now, Msg: "the commit"}},
+		},
+	}
+	_, err = SyncPRs(context.Background(), fetcher2, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	// verify commits were fetched on state transition
+	files, _ := ListGitHubDataFiles(ledgerPath, "pr")
+	data, _ := os.ReadFile(files[0])
+	var pr PRFile
+	json.Unmarshal(data, &pr)
+
+	if len(pr.Commits) != 1 {
+		t.Errorf("expected 1 commit after merge transition, got %d", len(pr.Commits))
+	}
+}
+
+func TestSyncPRs_ReplayedMergedPRPreservesCommits(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// first sync: merged PR with commits
+	fetcher1 := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 450, Title: "Feature", State: "closed", Author: "alice",
+			CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeSHA: "abc123",
+		}},
+		comments: map[int][]FetchedComment{},
+		prCommits: map[int][]FetchedPRCommit{
+			450: {
+				{SHA: "commit1", Author: "alice", Date: now, Msg: "first"},
+				{SHA: "commit2", Author: "alice", Date: now, Msg: "second"},
+			},
+		},
+	}
+	_, err := SyncPRs(context.Background(), fetcher1, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	// verify commits were stored
+	existing, err := ReadGitHubPR(ledgerPath, 450, now)
+	if err != nil {
+		t.Fatalf("read PR after first sync: %v", err)
+	}
+	if len(existing.Commits) != 2 {
+		t.Fatalf("expected 2 commits after first sync, got %d", len(existing.Commits))
+	}
+
+	// second sync: same PR replayed (simulates --full / cursor reset)
+	// fetcher should NOT be called for commits since state hasn't changed
+	fetcher2 := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 450, Title: "Feature", State: "closed", Author: "alice",
+			CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeSHA: "abc123",
+		}},
+		comments:  map[int][]FetchedComment{},
+		prCommits: map[int][]FetchedPRCommit{}, // empty — shouldn't be called
+	}
+	_, err = SyncPRs(context.Background(), fetcher2, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	// verify commits are preserved (not dropped by omitempty)
+	replayed, err := ReadGitHubPR(ledgerPath, 450, now)
+	if err != nil {
+		t.Fatalf("read PR after second sync: %v", err)
+	}
+	if len(replayed.Commits) != 2 {
+		t.Errorf("expected 2 commits preserved after replay, got %d", len(replayed.Commits))
+	}
+	if replayed.Commits[0].SHA != "commit1" {
+		t.Errorf("expected first commit SHA 'commit1', got %q", replayed.Commits[0].SHA)
+	}
+}
+
+func TestSyncPRs_CommitFetchErrorIsBestEffort(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	fetcher := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 460, Title: "Merged PR", State: "closed", Author: "alice",
+			CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeSHA: "def456",
+		}},
+		comments:     map[int][]FetchedComment{},
+		prCommitsErr: fmt.Errorf("GitHub API rate limited"),
+	}
+
+	result, err := SyncPRs(context.Background(), fetcher, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("SyncPRs should succeed despite commit fetch error: %v", err)
+	}
+	if result.PRCreated != 1 {
+		t.Errorf("expected 1 created, got %d", result.PRCreated)
+	}
+
+	// PR should be written without commits (best-effort)
+	pr, err := ReadGitHubPR(ledgerPath, 460, now)
+	if err != nil {
+		t.Fatalf("read PR: %v", err)
+	}
+	if len(pr.Commits) != 0 {
+		t.Errorf("expected 0 commits when fetch fails, got %d", len(pr.Commits))
+	}
+}
+
+func TestBackfillPRCommits(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// write a merged PR without commits (simulating pre-feature data)
+	pr := &PRFile{
+		Number:      500,
+		Title:       "Old merged PR",
+		State:       "merged",
+		Author:      "alice",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		MergedAt:    &now,
+		MergeCommit: "old123",
+	}
+	if err := WriteGitHubPR(ledgerPath, pr); err != nil {
+		t.Fatalf("write PR: %v", err)
+	}
+
+	// also write an open PR (should not be backfilled)
+	openPR := &PRFile{
+		Number:    501,
+		Title:     "Open PR",
+		State:     "open",
+		Author:    "bob",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := WriteGitHubPR(ledgerPath, openPR); err != nil {
+		t.Fatalf("write open PR: %v", err)
+	}
+
+	fetcher := &mockFetcher{
+		prCommits: map[int][]FetchedPRCommit{
+			500: {
+				{SHA: "eee555", Author: "alice", Date: now, Msg: "backfilled commit"},
+			},
+		},
+	}
+
+	backfilled, err := BackfillPRCommits(context.Background(), fetcher, ledgerPath, "org", "repo", logger)
+	if err != nil {
+		t.Fatalf("BackfillPRCommits: %v", err)
+	}
+
+	if backfilled != 1 {
+		t.Errorf("expected 1 backfilled, got %d", backfilled)
+	}
+
+	// verify the PR file now has commits
+	files, _ := ListGitHubDataFiles(ledgerPath, "pr")
+	for _, f := range files {
+		data, _ := os.ReadFile(f)
+		var p PRFile
+		json.Unmarshal(data, &p)
+		if p.Number == 500 {
+			if len(p.Commits) != 1 {
+				t.Errorf("expected 1 commit for PR 500, got %d", len(p.Commits))
+			}
+			if p.Commits[0].SHA != "eee555" {
+				t.Errorf("expected commit SHA 'eee555', got %q", p.Commits[0].SHA)
+			}
+		}
+		if p.Number == 501 {
+			if len(p.Commits) != 0 {
+				t.Errorf("open PR should not have commits, got %d", len(p.Commits))
+			}
+		}
+	}
+}
+
+func TestBackfillPRCommits_AlreadyHasCommits(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// write a merged PR that already has commits
+	pr := &PRFile{
+		Number:      600,
+		Title:       "Already has commits",
+		State:       "merged",
+		Author:      "alice",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		MergedAt:    &now,
+		MergeCommit: "fff666",
+		Commits: []PRCommit{
+			{SHA: "existing", Author: "alice", Date: now, Msg: "existing"},
+		},
+	}
+	if err := WriteGitHubPR(ledgerPath, pr); err != nil {
+		t.Fatalf("write PR: %v", err)
+	}
+
+	fetcher := &mockFetcher{
+		prCommits: map[int][]FetchedPRCommit{
+			600: {{SHA: "new", Author: "alice", Date: now, Msg: "should not replace"}},
+		},
+	}
+
+	backfilled, err := BackfillPRCommits(context.Background(), fetcher, ledgerPath, "org", "repo", logger)
+	if err != nil {
+		t.Fatalf("BackfillPRCommits: %v", err)
+	}
+
+	if backfilled != 0 {
+		t.Errorf("expected 0 backfilled (already has commits), got %d", backfilled)
+	}
+}
+
+func TestPRFile_BackwardCompat_NoCommitsField(t *testing.T) {
+	// Simulate old JSON without commits field
+	oldJSON := `{
+		"number": 700,
+		"title": "Old PR",
+		"body": "",
+		"author": "alice",
+		"state": "merged",
+		"created_at": "2026-01-01T00:00:00Z",
+		"updated_at": "2026-01-01T00:00:00Z",
+		"merge_commit": "ggg777",
+		"url": "https://github.com/org/repo/pull/700"
+	}`
+
+	var pr PRFile
+	if err := json.Unmarshal([]byte(oldJSON), &pr); err != nil {
+		t.Fatalf("unmarshal old JSON: %v", err)
+	}
+
+	if pr.Number != 700 {
+		t.Errorf("expected number 700, got %d", pr.Number)
+	}
+	if pr.Commits != nil {
+		t.Errorf("expected nil commits from old JSON, got %v", pr.Commits)
 	}
 }
 

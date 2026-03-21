@@ -68,6 +68,30 @@ type ListIssuesOptions struct {
 	Page      int       // starting page (default: 1)
 }
 
+// PRCommit represents a commit from a pull request's commit list.
+// Returned by the /repos/{owner}/{repo}/pulls/{number}/commits endpoint.
+type PRCommit struct {
+	SHA    string    `json:"sha"`
+	Author string    // extracted from commit.author.name or author.login
+	Date   time.Time // extracted from commit.author.date
+	Msg    string    // extracted from commit.message
+}
+
+// prCommitJSON is the raw GitHub API response shape for PR commits.
+type prCommitJSON struct {
+	SHA    string `json:"sha"`
+	Commit struct {
+		Message string `json:"message"`
+		Author  struct {
+			Name string    `json:"name"`
+			Date time.Time `json:"date"`
+		} `json:"author"`
+	} `json:"commit"`
+	Author *struct {
+		Login string `json:"login"`
+	} `json:"author"`
+}
+
 // RateLimit captures GitHub API rate limit state from response headers.
 type RateLimit struct {
 	Remaining int

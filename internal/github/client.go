@@ -86,6 +86,47 @@ func (c *Client) ListPullRequests(ctx context.Context, owner, repo string, opts 
 	return allPRs, lastRL, nil
 }
 
+// ListPRCommits fetches the commits associated with a pull request.
+// Uses the /repos/{owner}/{repo}/pulls/{number}/commits endpoint.
+func (c *Client) ListPRCommits(ctx context.Context, owner, repo string, number int) ([]PRCommit, error) {
+	var all []PRCommit
+	page := 1
+
+	for {
+		path := fmt.Sprintf("/repos/%s/%s/pulls/%d/commits?per_page=100&page=%d", owner, repo, number, page)
+
+		var raw []prCommitJSON
+		if _, err := c.doRequest(ctx, "GET", path, &raw); err != nil {
+			return all, err
+		}
+
+		if len(raw) == 0 {
+			break
+		}
+
+		for _, r := range raw {
+			author := r.Commit.Author.Name
+			if r.Author != nil && r.Author.Login != "" {
+				author = r.Author.Login
+			}
+			all = append(all, PRCommit{
+				SHA:    r.SHA,
+				Author: author,
+				Date:   r.Commit.Author.Date,
+				Msg:    r.Commit.Message,
+			})
+		}
+
+		if len(raw) < 100 {
+			break
+		}
+
+		page++
+	}
+
+	return all, nil
+}
+
 // ListPRComments fetches all review comments (file-level) on a pull request.
 func (c *Client) ListPRComments(ctx context.Context, owner, repo string, number int) ([]Comment, error) {
 	return c.paginateComments(ctx, fmt.Sprintf("/repos/%s/%s/pulls/%d/comments", owner, repo, number))

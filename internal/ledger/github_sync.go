@@ -2,8 +2,10 @@ package ledger
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"time"
 )
 
@@ -15,6 +17,7 @@ type GitHubFetcher interface {
 	ListIssues(ctx context.Context, owner, repo string, opts ListIssuesOptions) ([]FetchedIssue, *FetchRateLimit, error)
 	ListPRComments(ctx context.Context, owner, repo string, number int) ([]FetchedComment, error)
 	ListIssueComments(ctx context.Context, owner, repo string, number int) ([]FetchedComment, error)
+	ListPRCommits(ctx context.Context, owner, repo string, number int) ([]FetchedPRCommit, error)
 }
 
 // FetchedPR is a GitHub pull request as returned by the fetcher.
@@ -45,6 +48,14 @@ type FetchedIssue struct {
 	UpdatedAt time.Time
 	ClosedAt  *time.Time
 	HTMLURL   string
+}
+
+// FetchedPRCommit is a commit from a PR's branch, as returned by the fetcher.
+type FetchedPRCommit struct {
+	SHA    string
+	Author string
+	Date   time.Time
+	Msg    string
 }
 
 // FetchedComment is a comment from the GitHub API.
@@ -131,6 +142,20 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 			comments = fetchPRComments(ctx, fetcher, owner, repo, pr.Number, logger)
 		}
 
+		// fetch commits for merged PRs — only when first seen as merged
+		// (commit list is immutable once merged, no need to re-fetch)
+		var commits []PRCommit
+		if prState == "merged" {
+			if !known || stateChanged {
+				commits = fetchPRCommits(ctx, fetcher, owner, repo, pr.Number, logger)
+			} else {
+				// carry forward existing commits to avoid omitempty dropping them on re-write
+				if existing, err := ReadGitHubPR(ledgerPath, pr.Number, pr.CreatedAt); err == nil {
+					commits = existing.Commits
+				}
+			}
+		}
+
 		prFile := &PRFile{
 			Number:      pr.Number,
 			Title:       pr.Title,
@@ -144,6 +169,7 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 			MergeCommit: pr.MergeSHA,
 			URL:         pr.HTMLURL,
 			Comments:    comments,
+			Commits:     commits,
 		}
 
 		if !known {
@@ -158,6 +184,15 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 
 		state.KnownStates[pr.Number] = prState
 		result.PRTotal++
+	}
+
+	// backfill commits for merged PRs synced before the commits feature
+	backfilled, bfErr := BackfillPRCommits(ctx, fetcher, ledgerPath, owner, repo, logger)
+	if bfErr != nil {
+		logger.Warn("backfill PR commits failed", "error", bfErr)
+	} else if backfilled > 0 {
+		result.PRUpdated += backfilled
+		result.PRTotal += backfilled
 	}
 
 	// persist updated state
@@ -253,6 +288,69 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 	}
 
 	return result, nil
+}
+
+// BackfillPRCommits scans existing merged PR JSON files in the ledger and
+// fetches commits for those that were synced before the commits feature existed.
+// Returns the number of PRs backfilled.
+func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo string, logger *slog.Logger) (int, error) {
+	prFiles, err := ListGitHubDataFiles(ledgerPath, "pr")
+	if err != nil {
+		return 0, fmt.Errorf("list PR files: %w", err)
+	}
+
+	var backfilled int
+	for _, path := range prFiles {
+		if err := ctx.Err(); err != nil {
+			return backfilled, err
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			logger.Warn("read PR file for backfill failed", "path", path, "error", err)
+			continue
+		}
+
+		var pr PRFile
+		if err := json.Unmarshal(data, &pr); err != nil {
+			logger.Warn("unmarshal PR file for backfill failed", "path", path, "error", err)
+			continue
+		}
+
+		// only backfill merged PRs that have no commits
+		if pr.State != "merged" || len(pr.Commits) > 0 {
+			continue
+		}
+
+		commits := fetchPRCommits(ctx, fetcher, owner, repo, pr.Number, logger)
+		if len(commits) == 0 {
+			continue
+		}
+
+		pr.Commits = commits
+		if err := WriteGitHubPR(ledgerPath, &pr); err != nil {
+			logger.Warn("write backfilled PR failed", "pr", pr.Number, "error", err)
+			continue
+		}
+
+		backfilled++
+		logger.Info("backfilled PR commits", "pr", pr.Number, "commits", len(commits))
+	}
+
+	return backfilled, nil
+}
+
+func fetchPRCommits(ctx context.Context, fetcher GitHubFetcher, owner, repo string, number int, logger *slog.Logger) []PRCommit {
+	fetched, err := fetcher.ListPRCommits(ctx, owner, repo, number)
+	if err != nil {
+		logger.Warn("fetch PR commits failed", "pr", number, "error", err)
+		return nil
+	}
+	commits := make([]PRCommit, len(fetched))
+	for i, c := range fetched {
+		commits[i] = PRCommit(c)
+	}
+	return commits
 }
 
 func fetchPRComments(ctx context.Context, fetcher GitHubFetcher, owner, repo string, number int, logger *slog.Logger) []PRComment {

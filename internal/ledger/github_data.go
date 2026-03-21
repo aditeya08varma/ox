@@ -24,6 +24,17 @@ type PRFile struct {
 	MergeCommit string      `json:"merge_commit,omitempty"`
 	URL         string      `json:"url"`
 	Comments    []PRComment `json:"comments,omitempty"`
+	Commits     []PRCommit  `json:"commits,omitempty"`
+}
+
+// PRCommit represents a commit from a PR's branch, fetched via the GitHub
+// /repos/{owner}/{repo}/pulls/{number}/commits endpoint.
+// Only fetched for merged PRs (immutable once merged).
+type PRCommit struct {
+	SHA    string    `json:"sha"`
+	Author string    `json:"author"`
+	Date   time.Time `json:"date"`
+	Msg    string    `json:"message"`
 }
 
 // PRComment represents a comment on a pull request (issue comment or review comment).
@@ -151,6 +162,22 @@ func WriteGitHubIssue(ledgerPath string, issue *IssueFile) error {
 	}
 
 	return nil
+}
+
+// ReadGitHubPR reads an existing PR JSON file from the ledger by number and creation date.
+// Returns os.ErrNotExist if the file does not exist.
+func ReadGitHubPR(ledgerPath string, number int, createdAt time.Time) (*PRFile, error) {
+	dir := DateDir(ledgerPath, createdAt, "pr")
+	path := filepath.Join(dir, fmt.Sprintf("%d.json", number))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read PR %d: %w", number, err)
+	}
+	var pr PRFile
+	if err := json.Unmarshal(data, &pr); err != nil {
+		return nil, fmt.Errorf("unmarshal PR %d: %w", number, err)
+	}
+	return &pr, nil
 }
 
 // GitHubSyncCacheDir returns the local cache directory for GitHub sync state.

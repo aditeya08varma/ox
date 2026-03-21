@@ -180,13 +180,16 @@ func indexPRFile(s *store.Store, path string) (int64, error) {
 	}
 	defer tx.Rollback()
 
-	// delete existing record + comments (upsert via delete-insert)
+	// delete existing record + comments + commits (upsert via delete-insert)
 	var existingID int64
 	err = tx.QueryRow("SELECT id FROM pull_requests WHERE number = ?", pr.Number).Scan(&existingID)
 	if err == nil {
-		// record exists — delete comments first, then the PR
+		// record exists — delete child rows first, then the PR
 		if _, err := tx.Exec("DELETE FROM pr_comments WHERE pr_id = ?", existingID); err != nil {
 			return 0, fmt.Errorf("delete pr comments: %w", err)
+		}
+		if _, err := tx.Exec("DELETE FROM pr_commits WHERE pr_id = ?", existingID); err != nil {
+			return 0, fmt.Errorf("delete pr commits: %w", err)
 		}
 		if _, err := tx.Exec("DELETE FROM pull_requests WHERE id = ?", existingID); err != nil {
 			return 0, fmt.Errorf("delete pr: %w", err)
@@ -222,6 +225,16 @@ func indexPRFile(s *store.Store, path string) (int64, error) {
 		)
 		if err != nil {
 			return 0, fmt.Errorf("insert PR %d comment: %w", pr.Number, err)
+		}
+	}
+
+	// insert commits (join table: pr_id + sha only; metadata lives in ledger JSON)
+	for _, c := range pr.Commits {
+		_, err := tx.Exec(`INSERT INTO pr_commits (pr_id, sha) VALUES (?, ?)`,
+			prID, c.SHA,
+		)
+		if err != nil {
+			return 0, fmt.Errorf("insert PR %d commit: %w", pr.Number, err)
 		}
 	}
 

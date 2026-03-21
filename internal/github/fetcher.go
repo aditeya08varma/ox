@@ -115,6 +115,24 @@ func (f *Fetcher) ListIssueComments(ctx context.Context, owner, repo string, num
 	return result, nil
 }
 
+func (f *Fetcher) ListPRCommits(ctx context.Context, owner, repo string, number int) ([]ledger.FetchedPRCommit, error) {
+	commits, err := f.client.ListPRCommits(ctx, owner, repo, number)
+	if err != nil {
+		return nil, err
+	}
+
+	result := make([]ledger.FetchedPRCommit, len(commits))
+	for i, c := range commits {
+		result[i] = ledger.FetchedPRCommit{
+			SHA:    c.SHA,
+			Author: c.Author,
+			Date:   c.Date,
+			Msg:    c.Msg,
+		}
+	}
+	return result, nil
+}
+
 func convertRL(rl *RateLimit) *ledger.FetchRateLimit {
 	if rl == nil {
 		return nil
