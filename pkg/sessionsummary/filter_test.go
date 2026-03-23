@@ -1,119 +1,18 @@
-package session
+package sessionsummary
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
-
-func TestLocalSummary_Empty(t *testing.T) {
-	assert.Equal(t, "Empty session", LocalSummary(nil))
-	assert.Equal(t, "Empty session", LocalSummary([]Entry{}))
-}
-
-func TestLocalSummary_StatsOnly(t *testing.T) {
-	entries := []Entry{
-		{Type: EntryTypeAssistant, Content: "Hello"},
-		{Type: EntryTypeTool, Content: "result", ToolName: "Bash"},
-	}
-	result := LocalSummary(entries)
-	assert.Contains(t, result, "0 user messages")
-	assert.Contains(t, result, "1 assistant responses")
-	assert.Contains(t, result, "1 tool calls")
-	assert.Contains(t, result, "Bash")
-	assert.False(t, strings.Contains(result, "\n\n"), "should not have topic separator without user messages")
-}
-
-func TestLocalSummary_WithTopicHint(t *testing.T) {
-	entries := []Entry{
-		{Type: EntryTypeUser, Content: "Add a logout button to the navbar"},
-		{Type: EntryTypeAssistant, Content: "Sure, I'll add that."},
-		{Type: EntryTypeTool, Content: "ok", ToolName: "Read"},
-	}
-	result := LocalSummary(entries)
-	assert.True(t, strings.HasPrefix(result, "Add a logout button to the navbar"))
-	assert.Contains(t, result, "\n\n")
-	assert.Contains(t, result, "1 user messages")
-}
-
-func TestLocalSummary_SkipsEmptyUserMessages(t *testing.T) {
-	entries := []Entry{
-		{Type: EntryTypeUser, Content: "   "},
-		{Type: EntryTypeUser, Content: "Fix the login bug"},
-	}
-	result := LocalSummary(entries)
-	assert.True(t, strings.HasPrefix(result, "Fix the login bug"))
-}
-
-func TestLocalSummary_ToolCountAndNames(t *testing.T) {
-	entries := []Entry{
-		{Type: EntryTypeUser, Content: "deploy"},
-		{Type: EntryTypeTool, ToolName: "Bash"},
-		{Type: EntryTypeTool, ToolName: "Read"},
-		{Type: EntryTypeTool, ToolName: "Write"},
-		{Type: EntryTypeTool, ToolName: "Glob"},
-		{Type: EntryTypeTool, ToolName: "Grep"},
-		{Type: EntryTypeTool, ToolName: "Edit"},
-	}
-	result := LocalSummary(entries)
-	assert.Contains(t, result, "6 tool calls")
-	assert.Contains(t, result, "and 1 more")
-}
-
-func TestLocalSummary_SkillInvocations(t *testing.T) {
-	tests := []struct {
-		name           string
-		entries        []Entry
-		wantPrefix     string
-		wantContains   []string
-		wantNotContain []string
-	}{
-		{
-			name: "skips skill invocation uses second user message",
-			entries: []Entry{
-				{Type: EntryTypeUser, Content: "/ox-session-start"},
-				{Type: EntryTypeUser, Content: "Fix the authentication bug in the login flow"},
-				{Type: EntryTypeAssistant, Content: "I'll fix that."},
-			},
-			wantPrefix:     "Fix the authentication bug",
-			wantNotContain: []string{"/ox-session-start"},
-		},
-		{
-			name: "all skill invocations produces stats only",
-			entries: []Entry{
-				{Type: EntryTypeUser, Content: "/ox-session-start"},
-				{Type: EntryTypeUser, Content: "/commit"},
-				{Type: EntryTypeAssistant, Content: "Done."},
-			},
-			wantContains:   []string{"2 user messages"},
-			wantNotContain: []string{"/ox-session-start", "/commit"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := LocalSummary(tt.entries)
-			if tt.wantPrefix != "" {
-				assert.True(t, strings.HasPrefix(result, tt.wantPrefix), "got: %s", result)
-			}
-			for _, s := range tt.wantContains {
-				assert.Contains(t, result, s)
-			}
-			for _, s := range tt.wantNotContain {
-				assert.NotContains(t, result, s)
-			}
-		})
-	}
-}
 
 func TestFilterForSummarization(t *testing.T) {
 	tests := []struct {
 		name      string
 		entries   []Entry
 		wantCount int
-		wantTypes []EntryType
-		wantTools []string
+		wantTypes []string   // expected types of remaining entries
+		wantTools []string   // expected tool names of remaining tool entries
 	}{
 		{
 			name:      "empty entries",
@@ -127,7 +26,7 @@ func TestFilterForSummarization(t *testing.T) {
 				{Type: EntryTypeAssistant, Content: "I'll fix it"},
 			},
 			wantCount: 2,
-			wantTypes: []EntryType{EntryTypeUser, EntryTypeAssistant},
+			wantTypes: []string{EntryTypeUser, EntryTypeAssistant},
 		},
 		{
 			name: "filters successful read-only tools",
@@ -139,7 +38,7 @@ func TestFilterForSummarization(t *testing.T) {
 				{Type: EntryTypeAssistant, Content: "Found the issue"},
 			},
 			wantCount: 2,
-			wantTypes: []EntryType{EntryTypeUser, EntryTypeAssistant},
+			wantTypes: []string{EntryTypeUser, EntryTypeAssistant},
 		},
 		{
 			name: "keeps write and edit tools",
@@ -184,7 +83,7 @@ func TestFilterForSummarization(t *testing.T) {
 				{Type: EntryTypeSystem, Content: "Session started"},
 			},
 			wantCount: 1,
-			wantTypes: []EntryType{EntryTypeSystem},
+			wantTypes: []string{EntryTypeSystem},
 		},
 		{
 			name: "realistic session with mixed entries",
@@ -200,7 +99,7 @@ func TestFilterForSummarization(t *testing.T) {
 				{Type: EntryTypeTool, ToolName: "Bash", ToolInput: "go test ./...", ToolOutput: "PASS"},
 				{Type: EntryTypeAssistant, Content: "Authentication added and tests pass"},
 			},
-			wantCount: 6,
+			wantCount: 6, // user + 2 assistant + write + edit + go test
 		},
 	}
 
@@ -246,25 +145,115 @@ func TestFilterForSummarization_PreservesOrder(t *testing.T) {
 	assert.Equal(t, "third", result[3].Content)
 }
 
-func TestFilterForSummarization_CoworkerFieldsDropped(t *testing.T) {
-	// CoworkerName/CoworkerModel exist on SessionEntry but not on pkg Entry.
-	// The round-trip through entriesToPkg/pkgToEntries intentionally drops them
-	// since the LLM summarizer doesn't need coworker attribution.
-	entries := []Entry{
+func TestIsNoiseCommand(t *testing.T) {
+	tests := []struct {
+		cmd  string
+		want bool
+	}{
+		{"ls -la", true},
+		{"pwd", true},
+		{"cat README.md", true},
+		{"head -n 10 file.go", true},
+		{"echo hello", true},
+		{"make test", false},
+		{"git commit -m 'fix'", false},
+		{"npm install", false},
+		{"go test ./...", false},
+		// leading whitespace handled by TrimSpace
+		{"  ls -la", true},
+		{"\tpwd", true},
+		// similar prefixes that should NOT match
+		{"lsof -i :8080", false},
+		{"catalog build", false},
+		{"headless-chrome run", false},
+		// empty input
+		{"", false},
+		{"   ", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.cmd, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsNoiseCommand(tt.cmd))
+		})
+	}
+}
+
+func TestHasToolError(t *testing.T) {
+	tests := []struct {
+		name  string
+		entry Entry
+		want  bool
+	}{
 		{
-			Type:          EntryTypeSystem,
-			Content:       "Loaded coworker: code-reviewer",
-			CoworkerName:  "code-reviewer",
-			CoworkerModel: "sonnet",
+			name:  "error in ToolOutput",
+			entry: Entry{Type: EntryTypeTool, ToolOutput: "Error: file not found"},
+			want:  true,
 		},
 		{
-			Type:    EntryTypeUser,
-			Content: "Review this PR",
+			name:  "error in Content when ToolOutput empty",
+			entry: Entry{Type: EntryTypeTool, Content: "fatal: bad config"},
+			want:  true,
+		},
+		{
+			name:  "ToolOutput takes precedence over Content",
+			entry: Entry{Type: EntryTypeTool, ToolOutput: "success", Content: "Error: something"},
+			want:  false,
+		},
+		{
+			name:  "both empty",
+			entry: Entry{Type: EntryTypeTool},
+			want:  false,
+		},
+		{
+			name:  "clean ToolOutput",
+			entry: Entry{Type: EntryTypeTool, ToolOutput: "file contents here"},
+			want:  false,
 		},
 	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, hasToolError(tt.entry))
+		})
+	}
+}
+
+func TestDetectError(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"error prefix", "Error: file not found", true},
+		{"fatal prefix", "fatal: not a git repository", true},
+		{"panic prefix", "panic: runtime error", true},
+		{"exception keyword", "NullPointerException at line 42", true},
+		{"failed keyword", "Build failed with 3 errors", true},
+		{"exit code non-zero", "Process exited with exit code 1", true},
+		{"exit code 127", "exit code 127", true},
+		{"empty string", "", false},
+		{"normal output", "PASS\nok  github.com/example 0.5s", false},
+		{"exit code 0", "exit code 0", false},
+		{"exit code 0 with surrounding text", "Command completed, exit code 0, output saved", false},
+		// "exit code" without a number triggers error (no "exit code 0" match)
+		{"exit code bare", "exit code", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, detectError(tt.content), "content: %q", tt.content)
+		})
+	}
+}
+
+func TestFilterForSummarization_CaseSensitiveToolNames(t *testing.T) {
+	// readOnlyTools has "read" and "Read" but not "READ"
+	entries := []Entry{
+		{Type: EntryTypeTool, ToolName: "READ", ToolOutput: "contents"},
+		{Type: EntryTypeTool, ToolName: "read", ToolOutput: "contents"},
+		{Type: EntryTypeTool, ToolName: "Read", ToolOutput: "contents"},
+	}
 	result := FilterForSummarization(entries)
-	assert.Len(t, result, 2)
-	assert.Empty(t, result[0].CoworkerName, "CoworkerName intentionally dropped in summarization round-trip")
-	assert.Empty(t, result[0].CoworkerModel, "CoworkerModel intentionally dropped in summarization round-trip")
+	assert.Len(t, result, 1)
+	assert.Equal(t, "READ", result[0].ToolName)
 }
