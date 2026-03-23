@@ -16,6 +16,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
@@ -26,36 +27,50 @@ import (
 )
 
 var importFlags struct {
-	text  string
-	date  string
-	force bool
-	team  string
+	text   string
+	date   string
+	force  bool
+	team   string
+	title  string
+	status string
+	watch  bool
+	list   bool
 }
 
 var importCmd = &cobra.Command{
-	Use:   "import <file>",
-	Short: "Import a document into team context",
-	Long: `Import a document into team context for onboarding and knowledge sharing.
+	Use:   "import <file|url>",
+	Short: "Import a document or video URL into team context",
+	Long: `Import a document or video URL into team context for onboarding and knowledge sharing.
 
-Documents are stored with LFS-backed content and git-tracked metadata.
-AI coworkers extract text before importing for indexing:
+File imports are stored with LFS-backed content and git-tracked metadata.
+URL imports submit a video for cloud processing (transcription, summarization).
+Supports Loom, Cap, and direct video URLs.
 
   ox import report.pdf --text extracted.md
   ox import notes.md --date 2026-01-15
-  ox import report.pdf --team my-team
+  ox import https://www.loom.com/share/abc123 --title "Architecture Review"
+  ox import https://cap.link/abc123 --title "Sprint Retro"
+  ox import https://example.com/meeting.mp4 --title "Team Standup"
+  ox import --list                              # find import IDs
+  ox import --status rec_01234567               # check processing once
+  ox import --status rec_01234567 --watch       # wait until complete
 
 The team is auto-discovered from the current repo. Use --team to override
 or when working outside an initialized repo.`,
-	Args: cobra.ExactArgs(1),
+	Args: cobra.MaximumNArgs(1),
 	RunE: runImport,
 }
 
 func init() {
 	importCmd.Flags().StringVar(&importFlags.text, "text", "", "path to pre-extracted text/markdown for indexing (optional)")
 	importCmd.Flags().SetAnnotation("text", "cobra_annotation_flag_value_name", []string{"file"})
-	importCmd.Flags().StringVar(&importFlags.date, "date", "", "document date for filing (YYYY-MM-DD, default: attempts to auto-detect from file metadata)")
+	importCmd.Flags().StringVar(&importFlags.date, "date", "", "date for filing (YYYY-MM-DD, default: auto-detect from metadata)")
 	importCmd.Flags().BoolVar(&importFlags.force, "force", false, "re-import even if content hash already exists")
 	importCmd.Flags().StringVar(&importFlags.team, "team", "", "team ID (or slug/name when inside a repo)")
+	importCmd.Flags().StringVar(&importFlags.title, "title", "", "display title for URL imports")
+	importCmd.Flags().StringVar(&importFlags.status, "status", "", "check processing status of a URL import (use --list to find IDs)")
+	importCmd.Flags().BoolVar(&importFlags.watch, "watch", false, "poll --status until processing completes or fails")
+	importCmd.Flags().BoolVar(&importFlags.list, "list", false, "list imports and their processing status")
 }
 
 // docMeta is the metadata.json schema for imported documents.
@@ -98,7 +113,29 @@ type sidecar struct {
 }
 
 func runImport(cmd *cobra.Command, args []string) error {
+	jsonOutput, _ := cmd.Flags().GetBool("json")
+
+	// dispatch: --status flag takes priority
+	if importFlags.status != "" {
+		return runImportStatus(cmd, jsonOutput)
+	}
+
+	// dispatch: --list flag
+	if importFlags.list {
+		return runImportList(cmd, jsonOutput)
+	}
+
+	// require an argument for file/URL import
+	if len(args) == 0 {
+		return fmt.Errorf("requires a file path or URL argument")
+	}
+
 	srcPath := args[0]
+
+	// dispatch: URL import
+	if strings.HasPrefix(srcPath, "http://") || strings.HasPrefix(srcPath, "https://") {
+		return runImportURL(cmd, srcPath, jsonOutput)
+	}
 
 	srcInfo, err := os.Stat(srcPath)
 	if err != nil {
@@ -580,6 +617,219 @@ func slugify(s string) string {
 	re := regexp.MustCompile(`-{2,}`)
 	result := re.ReplaceAllString(b.String(), "-")
 	return strings.Trim(result, "-")
+}
+
+// resolveImportTeamAndClient resolves the team context and creates an authenticated API client.
+// Shared by URL import, status, and list operations.
+func resolveImportTeamAndClient() (*config.TeamContext, *api.RepoClient, error) {
+	projectRoot, _ := findProjectRoot()
+	ep := resolveImportEndpoint(projectRoot)
+
+	var tc *config.TeamContext
+	if importFlags.team != "" {
+		if projectRoot != "" {
+			tc = resolveTeamContext(projectRoot, importFlags.team)
+		}
+		if tc == nil {
+			tc = resolveTeamContextByEndpoint(importFlags.team, ep)
+		}
+		if tc == nil {
+			return nil, nil, fmt.Errorf("team context not found: %q (use ox agent prime to see available teams)", importFlags.team)
+		}
+	} else {
+		if projectRoot != "" {
+			tc = config.FindRepoTeamContext(projectRoot)
+		}
+		if tc == nil {
+			tc = autoDiscoverSingleTeam(ep)
+		}
+		if tc == nil {
+			if projectRoot == "" {
+				return nil, nil, fmt.Errorf("no team found — use --team to specify one, or run from inside a SageOx project")
+			}
+			return nil, nil, fmt.Errorf("no team context configured — use --team to specify one, or run 'ox init' first")
+		}
+	}
+
+	storedToken, err := auth.GetTokenForEndpoint(ep)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read auth store: %w", err)
+	}
+	if storedToken == nil || storedToken.AccessToken == "" {
+		return nil, nil, fmt.Errorf("not authenticated — run 'ox login' first")
+	}
+
+	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(storedToken.AccessToken)
+	return tc, client, nil
+}
+
+// runImportURL handles importing a video/audio by URL via the cloud API.
+func runImportURL(cmd *cobra.Command, url string, jsonOutput bool) error {
+	tc, client, err := resolveImportTeamAndClient()
+	if err != nil {
+		return err
+	}
+
+	req := &api.ImportVideoURLRequest{
+		URL:   url,
+		Title: importFlags.title,
+	}
+
+	resp, err := client.ImportVideoURL(tc.TeamID, req)
+	if err != nil {
+		return fmt.Errorf("import failed: %w", err)
+	}
+	if resp == nil {
+		return fmt.Errorf("import endpoint not available (server may not support URL imports yet)")
+	}
+
+	if jsonOutput {
+		out, _ := json.MarshalIndent(resp, "", "  ")
+		fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return nil
+	}
+
+	cli.PrintSuccess("Import started")
+	fmt.Fprintf(cmd.OutOrStdout(), "  ID:        %s\n", resp.RecordingID)
+	fmt.Fprintf(cmd.OutOrStdout(), "  Status:    %s\n", resp.Status)
+	if resp.Title != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "  Title:     %s\n", resp.Title)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "\n  Track progress: ox import --status %s --watch\n", resp.RecordingID)
+	return nil
+}
+
+// runImportStatus handles checking the processing status of a recording.
+func runImportStatus(cmd *cobra.Command, jsonOutput bool) error {
+	tc, client, err := resolveImportTeamAndClient()
+	if err != nil {
+		return err
+	}
+
+	recordingID := importFlags.status
+
+	// The recording row may not exist yet: the API pre-generates the ID before
+	// starting the Temporal workflow, and the DB insert happens inside the workflow
+	// (CreateVideoRecording activity). Treat 404 as status="starting" rather than
+	// an error, since the ID is known-valid.
+	for {
+		resp, err := client.GetVideoStatus(tc.TeamID, recordingID)
+		if err != nil {
+			return fmt.Errorf("status check failed: %w", err)
+		}
+		if resp == nil {
+			// row not yet created — show as "starting"
+			if jsonOutput {
+				if importFlags.watch {
+					fmt.Fprintf(cmd.OutOrStdout(), "{\"id\":%q,\"status\":\"starting\"}\n", recordingID)
+				} else {
+					fmt.Fprintf(cmd.OutOrStdout(), "{\n  \"id\": %q,\n  \"status\": \"starting\"\n}\n", recordingID)
+				}
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "Recording: %s\nStatus:    starting\n", recordingID)
+			}
+			if !importFlags.watch {
+				return nil
+			}
+			time.Sleep(3 * time.Second)
+			continue
+		}
+
+		if jsonOutput {
+			if importFlags.watch {
+				// JSONL: one compact JSON object per line for streaming
+				out, _ := json.Marshal(resp)
+				fmt.Fprintln(cmd.OutOrStdout(), string(out))
+			} else {
+				out, _ := json.MarshalIndent(resp, "", "  ")
+				fmt.Fprintln(cmd.OutOrStdout(), string(out))
+			}
+		} else {
+			printVideoStatus(cmd, resp)
+		}
+
+		if !importFlags.watch || resp.Status == "ready" || resp.Status == "failed" {
+			return nil
+		}
+
+		time.Sleep(3 * time.Second)
+		if !jsonOutput {
+			fmt.Fprintln(cmd.OutOrStdout(), "\n---")
+		}
+	}
+}
+
+// printVideoStatus renders a human-readable status display.
+func printVideoStatus(cmd *cobra.Command, resp *api.VideoStatusResponse) {
+	fmt.Fprintf(cmd.OutOrStdout(), "Recording: %s\n", resp.ID)
+	if resp.Title != "" {
+		fmt.Fprintf(cmd.OutOrStdout(), "Title:     %s\n", resp.Title)
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "Status:    %s\n", resp.Status)
+
+	if resp.Duration != nil {
+		fmt.Fprintf(cmd.OutOrStdout(), "Duration:  %.0fs\n", *resp.Duration)
+	}
+
+	if len(resp.ProcessingSteps) > 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "\nProcessing Steps")
+		for name, step := range resp.ProcessingSteps {
+			status, _ := step["status"].(string)
+			icon := "·"
+			switch status {
+			case "complete", "completed":
+				icon = "✓"
+			case "in_progress", "processing":
+				icon = "◐"
+			case "failed":
+				icon = "✗"
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %-20s %s\n", icon, name, status)
+		}
+	}
+}
+
+// runImportList handles listing team recordings.
+func runImportList(cmd *cobra.Command, jsonOutput bool) error {
+	tc, client, err := resolveImportTeamAndClient()
+	if err != nil {
+		return err
+	}
+
+	resp, err := client.ListVideos(tc.TeamID, 50, 0)
+	if err != nil {
+		return fmt.Errorf("list recordings failed: %w", err)
+	}
+	if resp == nil {
+		return fmt.Errorf("recordings endpoint not available")
+	}
+
+	if jsonOutput {
+		out, _ := json.MarshalIndent(resp, "", "  ")
+		fmt.Fprintln(cmd.OutOrStdout(), string(out))
+		return nil
+	}
+
+	if len(resp.Recordings) == 0 {
+		fmt.Fprintln(cmd.OutOrStdout(), "No recordings found.")
+		return nil
+	}
+
+	// table header
+	fmt.Fprintf(cmd.OutOrStdout(), "%-40s %-30s %-12s %s\n", "ID", "TITLE", "STATUS", "CREATED")
+	fmt.Fprintf(cmd.OutOrStdout(), "%-40s %-30s %-12s %s\n", strings.Repeat("-", 40), strings.Repeat("-", 30), strings.Repeat("-", 12), strings.Repeat("-", 20))
+	for _, rec := range resp.Recordings {
+		title := rec.Title
+		if len(title) > 28 {
+			title = title[:28] + ".."
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "%-40s %-30s %-12s %s\n", rec.ID, title, rec.Status, rec.CreatedAt.Format("2006-01-02 15:04"))
+	}
+
+	if resp.Pagination.HasMore {
+		fmt.Fprintf(cmd.OutOrStdout(), "\n(%d of %d shown)\n", len(resp.Recordings), resp.Pagination.Total)
+	}
+	return nil
 }
 
 // notifyImport sends a fire-and-forget notification to the cloud about a new import.

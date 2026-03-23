@@ -220,6 +220,13 @@ path = %q
 	s1 := newTestScheduler(project1)
 	s2 := newTestScheduler(project2)
 
+	// drain background clone goroutines before t.TempDir() cleanup fires;
+	// registered after setup so it runs first (t.Cleanup is LIFO)
+	t.Cleanup(func() {
+		s1.cloneWg.Wait()
+		s2.cloneWg.Wait()
+	})
+
 	ctx := context.Background()
 
 	// both fire concurrently — both will see ws.Exists=false and spawn
@@ -234,11 +241,8 @@ path = %q
 		wg.Wait()
 	})
 
-	// wait for background clone goroutines to finish before temp dir cleanup
-	s1.cloneWg.Wait()
-	s2.cloneWg.Wait()
-
 	// both schedulers should at least discover the team context in their registry
+	// (even if clone hasn't completed yet, the workspace entry should exist)
 	for i, s := range []*SyncScheduler{s1, s2} {
 		tcs := s.WorkspaceRegistry().GetTeamContexts()
 		require.NotEmpty(t, tcs, "scheduler %d should have team context in registry", i+1)
@@ -383,7 +387,7 @@ path = %q
 
 	// Phase 2: manually create the clone dir (simulates another process cloning it)
 	teamBareDir := filepath.Join(t.TempDir(), "bare-backoff")
-	require.NoError(t, exec.Command("git", "init", "--bare", "--initial-branch=main", teamBareDir).Run())
+	require.NoError(t, exec.Command("git", "init", "--bare", "-b", "main", teamBareDir).Run())
 	initDir := filepath.Join(t.TempDir(), "init-backoff")
 	require.NoError(t, exec.Command("git", "clone", teamBareDir, initDir).Run())
 	gitConfig(t, initDir)
