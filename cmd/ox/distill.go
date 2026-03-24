@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/agentcli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/facts"
 	"github.com/spf13/cobra"
 )
@@ -422,6 +423,18 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	tc := config.FindRepoTeamContext(projectRoot)
 	if tc == nil {
 		return fmt.Errorf("no team context configured — run 'ox init' first")
+	}
+
+	// push team context commits to remote when we're done — even if the
+	// pipeline partially fails, earlier stages may have committed facts or
+	// distilled summaries that should be synced.
+	if !distillDryRun {
+		ep := endpoint.GetForProject(projectRoot)
+		defer func() {
+			if err := pushTeamContext(context.Background(), tc.Path, ep); err != nil {
+				slog.Warn("failed to push team context after distill", "error", err)
+			}
+		}()
 	}
 
 	// detect AI coworker CLI
