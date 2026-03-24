@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -17,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/facts"
 	"github.com/spf13/cobra"
 )
 
@@ -211,56 +211,29 @@ func scanPendingObservations(obsDir string, since time.Time) ([]distillObservati
 	return observations, dayCounts, nil
 }
 
-// parseObservationFile reads a single JSONL observation file.
-// First line is the header with schema_version and recorded_at.
-// Subsequent lines are observations with content field.
+// parseObservationFile reads a single JSONL observation file using the unified
+// facts reader. Handles both v1 (content) and v2 (headline) formats.
 func parseObservationFile(filePath string, since time.Time) ([]distillObservation, error) {
-	f, err := os.Open(filePath)
+	header, factLines, err := facts.ReadFacts(filePath)
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	lineNum := 0
-	var recordedAt time.Time
-	var observations []distillObservation
+	recordedAt, _ := time.Parse(time.RFC3339, header.Meta.RecordedAt)
+	if !since.IsZero() && !recordedAt.IsZero() && recordedAt.Before(since) {
+		return nil, nil
+	}
 
-	for scanner.Scan() {
-		lineNum++
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-
-		if lineNum == 1 {
-			var header observationHeader
-			if err := json.Unmarshal([]byte(line), &header); err != nil {
-				return nil, fmt.Errorf("invalid header: %w", err)
-			}
-			recordedAt, _ = time.Parse(time.RFC3339, header.RecordedAt)
-			if !since.IsZero() && !recordedAt.IsZero() && recordedAt.Before(since) {
-				return nil, nil
-			}
-			continue
-		}
-
-		var obs observation
-		if err := json.Unmarshal([]byte(line), &obs); err != nil {
-			continue
-		}
-		if obs.Content == "" {
-			continue
-		}
-
+	observations := make([]distillObservation, 0, len(factLines))
+	for _, f := range factLines {
 		observations = append(observations, distillObservation{
-			Content:    obs.Content,
+			Content:    f.Headline,
 			RecordedAt: recordedAt,
 			SourceFile: filePath,
 		})
 	}
 
-	return observations, scanner.Err()
+	return observations, nil
 }
 
 func loadDistillState(projectRoot string) (*distillState, error) {

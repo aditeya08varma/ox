@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/facts"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -41,9 +42,9 @@ func TestWriteObservation_NonGitDirectory(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	require.Len(t, lines, 2, "header + 1 observation")
 
-	var parsed observation
+	var parsed facts.Fact
 	require.NoError(t, json.Unmarshal([]byte(lines[1]), &parsed))
-	require.Equal(t, "orphaned observation", parsed.Content)
+	require.Equal(t, "orphaned observation", parsed.Headline)
 }
 
 func TestWriteObservation_GitAddFailure_CorruptedGit(t *testing.T) {
@@ -139,9 +140,9 @@ func TestWriteObservation_UnicodeContent(t *testing.T) {
 			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 			require.Len(t, lines, 2)
 
-			var parsed observation
+			var parsed facts.Fact
 			require.NoError(t, json.Unmarshal([]byte(lines[1]), &parsed))
-			require.Equal(t, tt.content, parsed.Content, "unicode content should round-trip exactly")
+			require.Equal(t, tt.content, parsed.Headline, "unicode content should round-trip exactly")
 		})
 	}
 }
@@ -164,9 +165,9 @@ func TestWriteObservation_ContentWithNewlinesAndSpecialChars(t *testing.T) {
 	// so the JSONL file should still be exactly 2 lines (header + 1 obs)
 	require.Len(t, lines, 2, "JSON-escaped newlines should not create extra JSONL lines")
 
-	var parsed observation
+	var parsed facts.Fact
 	require.NoError(t, json.Unmarshal([]byte(lines[1]), &parsed))
-	require.Equal(t, content, parsed.Content)
+	require.Equal(t, content, parsed.Headline)
 }
 
 func TestWriteObservation_EmptyContent(t *testing.T) {
@@ -185,9 +186,9 @@ func TestWriteObservation_EmptyContent(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	require.Len(t, lines, 2)
 
-	var parsed observation
+	var parsed facts.Fact
 	require.NoError(t, json.Unmarshal([]byte(lines[1]), &parsed))
-	require.Equal(t, "", parsed.Content)
+	require.Equal(t, "", parsed.Headline)
 }
 
 // ---------------------------------------------------------------------------
@@ -385,10 +386,10 @@ func TestWriteObservation_HeaderHasValidTimestamp(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	require.GreaterOrEqual(t, len(lines), 1)
 
-	var header observationHeader
+	var header facts.FileHeader
 	require.NoError(t, json.Unmarshal([]byte(lines[0]), &header))
 
-	recorded, err := time.Parse(time.RFC3339, header.RecordedAt)
+	recorded, err := time.Parse(time.RFC3339, header.Meta.RecordedAt)
 	require.NoError(t, err)
 
 	assert.False(t, recorded.Before(before.Truncate(time.Second)),

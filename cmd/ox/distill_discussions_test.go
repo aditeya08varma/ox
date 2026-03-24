@@ -280,6 +280,67 @@ func TestReadPendingDiscussionFactsEmptyDir(t *testing.T) {
 	}
 }
 
+func TestReadDiscussionFacts_JSONL(t *testing.T) {
+	tcPath := t.TempDir()
+	factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
+	os.MkdirAll(factsDir, 0o755)
+
+	// Write a JSONL fact file with _meta header
+	jsonlContent := `{"_meta":{"schema_version":"2","source_type":"discussion","recorded_at":"2026-03-10T14:23:00Z"}}
+{"headline":"Chose PostgreSQL","category":"decision","timestamp":"2026-03-10T14:23:00Z"}
+`
+	os.WriteFile(filepath.Join(factsDir, "2026-03-10-1423-ryan.jsonl"), []byte(jsonlContent), 0o644)
+
+	factsByDay, err := readPendingDiscussionFacts(tcPath, time.Time{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := factsByDay["2026-03-10"]; !ok {
+		t.Errorf("expected facts grouped under 2026-03-10, got keys: %v", factsByDay)
+	}
+	facts := factsByDay["2026-03-10"]
+	if len(facts) != 1 {
+		t.Errorf("expected 1 fact entry, got %d", len(facts))
+	}
+	if !strings.HasSuffix(facts[0].RelPath, ".jsonl") {
+		t.Errorf("expected .jsonl relpath, got %q", facts[0].RelPath)
+	}
+}
+
+func TestReadDiscussionFacts_MixedMDAndJSONL(t *testing.T) {
+	tcPath := t.TempDir()
+	factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
+	os.MkdirAll(factsDir, 0o755)
+
+	// Write a legacy .md fact file
+	os.WriteFile(filepath.Join(factsDir, "2026-03-10-1423-ryan.md"),
+		[]byte("Fact A\n\n---\n*Extracted from discussion: 2026-03-10-1423-ryan (created 2026-03-10)*\n"), 0o644)
+
+	// Write a new .jsonl fact file
+	jsonlContent := `{"_meta":{"schema_version":"2","source_type":"discussion","recorded_at":"2026-03-11T09:00:00Z"}}
+{"headline":"Sprint velocity increased","category":"learning","timestamp":"2026-03-11T09:00:00Z"}
+`
+	os.WriteFile(filepath.Join(factsDir, "2026-03-11-0900-alice.jsonl"), []byte(jsonlContent), 0o644)
+
+	factsByDay, err := readPendingDiscussionFacts(tcPath, time.Time{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	totalFacts := 0
+	for _, facts := range factsByDay {
+		totalFacts += len(facts)
+	}
+	if totalFacts != 2 {
+		t.Errorf("expected 2 total facts (1 md + 1 jsonl), got %d", totalFacts)
+	}
+	if _, ok := factsByDay["2026-03-10"]; !ok {
+		t.Error("expected facts for 2026-03-10 (from .md)")
+	}
+	if _, ok := factsByDay["2026-03-11"]; !ok {
+		t.Error("expected facts for 2026-03-11 (from .jsonl)")
+	}
+}
+
 func TestDiscussionContentHash(t *testing.T) {
 	dir := t.TempDir()
 
@@ -367,8 +428,8 @@ func TestFormatDailyMemoryWithDiscussions(t *testing.T) {
 		wantSource string
 	}{
 		{"observations only", 5, 0, "5 observations"},
-		{"discussions only", 0, 3, "3 discussions"},
-		{"both sources", 5, 3, "5 observations and 3 discussions"},
+		{"facts only", 0, 3, "3 facts"},
+		{"both sources", 5, 3, "5 observations and 3 facts"},
 	}
 
 	for _, tt := range tests {

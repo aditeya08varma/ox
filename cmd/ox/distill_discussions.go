@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/internal/facts"
 	"github.com/sageox/ox/internal/vtt"
 )
 
@@ -72,9 +73,14 @@ func scanPendingDiscussions(tcPath string, processed map[string]string) ([]discu
 		}
 
 		// skip if fact file already exists (covers fresh clone / deleted state)
+		// Check both .md (legacy) and .jsonl (current) formats.
 		if _, ok := processed[dirName]; !ok {
-			factFile := filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".md")
-			if _, err := os.Stat(factFile); err == nil {
+			factFileMD := filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".md")
+			factFileJSONL := filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".jsonl")
+			if _, err := os.Stat(factFileMD); err == nil {
+				continue
+			}
+			if _, err := os.Stat(factFileJSONL); err == nil {
 				continue
 			}
 		}
@@ -199,7 +205,7 @@ func readPendingDiscussionFacts(tcPath string, since time.Time) (map[string][]di
 	result := make(map[string][]discussionFactEntry)
 
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+		if entry.IsDir() || (!strings.HasSuffix(entry.Name(), ".md") && !strings.HasSuffix(entry.Name(), ".jsonl")) {
 			continue
 		}
 
@@ -236,9 +242,22 @@ func readPendingDiscussionFacts(tcPath string, since time.Time) (map[string][]di
 	return result, nil
 }
 
-// parseFactDate extracts a YYYY-MM-DD date from fact file content footer
-// or falls back to parsing the filename prefix.
+// parseFactDate extracts a YYYY-MM-DD date from fact file content.
+// Tries (in order): JSONL _meta header, markdown footer, filename prefix.
 func parseFactDate(content, filename string) string {
+	// try JSONL _meta header: {"_meta":{"recorded_at":"2026-03-10T14:23:00Z",...}}
+	if firstLine, _, ok := strings.Cut(content, "\n"); ok || content != "" {
+		if !ok {
+			firstLine = content
+		}
+		firstLine = strings.TrimSpace(firstLine)
+		var header facts.FileHeader
+		if err := json.Unmarshal([]byte(firstLine), &header); err == nil && header.Meta.RecordedAt != "" {
+			if t, err := time.Parse(time.RFC3339, header.Meta.RecordedAt); err == nil && t.Year() > 1 {
+				return t.Format("2006-01-02")
+			}
+		}
+	}
 	// try footer: "(created 2026-03-10)"
 	if m := factFooterDateRe.FindStringSubmatch(content); m != nil {
 		if t, err := time.Parse("2006-01-02", m[1]); err == nil && t.Year() > 1 {

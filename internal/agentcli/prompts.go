@@ -16,7 +16,6 @@ prior context or existing files — work ONLY from the input provided in this pr
 Your sole output is the summary or extraction described in the <task> section.
 
 Rules:
-- Output ONLY the requested summary in concise markdown.
 - Follow the format specified in the <task> section exactly.
 - Do NOT include preamble, commentary, or meta-statements about your work.
 - Do NOT say things like "Here is the summary", "I have distilled the following",
@@ -46,9 +45,9 @@ func writeGuidelines(sb *strings.Builder, guidelines string) {
 
 // DailyPrompt builds a prompt for distilling observations into a daily memory summary.
 // If guidelines is non-empty, it is prepended as team-specific distillation preferences.
-// Optional discussionFactPaths are relative file paths to discussion fact files that
-// the AI coworker should read and incorporate into the summary.
-func DailyPrompt(observations []string, date, guidelines string, discussionFactPaths ...string) string {
+// Optional factPaths are relative file paths to fact JSONL files (discussion, github, etc.)
+// that the AI coworker should read and incorporate into the summary.
+func DailyPrompt(observations []string, date, guidelines string, factPaths ...string) string {
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
@@ -57,10 +56,12 @@ func DailyPrompt(observations []string, date, guidelines string, discussionFactP
 	sb.WriteString("<task>\n")
 	sb.WriteString("Distill these team observations into a daily memory summary.\n")
 	sb.WriteString("Focus on decisions, patterns, and learnings. Omit routine actions.\n")
-	if len(discussionFactPaths) > 0 {
-		sb.WriteString("Read each discussion fact file listed below and synthesize their content\n")
+	if len(factPaths) > 0 {
+		sb.WriteString("Read each fact file listed below and synthesize their content\n")
 		sb.WriteString("together with the observations into a cohesive summary.\n")
-		sb.WriteString("Exception: You MAY use the Read tool to access the discussion fact files listed below.\n")
+		sb.WriteString("Fact files are JSONL — each line is a JSON object with a headline, summary, and category.\n")
+		sb.WriteString("Incorporate facts from ALL sources (discussions, github activity, etc.).\n")
+		sb.WriteString("Exception: You MAY use the Read tool to access the fact files listed below.\n")
 	}
 	sb.WriteString("</task>\n\n")
 
@@ -71,9 +72,9 @@ func DailyPrompt(observations []string, date, guidelines string, discussionFactP
 		}
 	}
 
-	if len(discussionFactPaths) > 0 {
-		sb.WriteString("\n## Discussion Fact Files\n\n")
-		for _, path := range discussionFactPaths {
+	if len(factPaths) > 0 {
+		sb.WriteString("\n## Fact Files\n\n")
+		for _, path := range factPaths {
 			fmt.Fprintf(&sb, "- [%s](%s)\n", path, path)
 		}
 	}
@@ -82,7 +83,8 @@ func DailyPrompt(observations []string, date, guidelines string, discussionFactP
 }
 
 // DiscussionFactsPrompt builds a prompt for extracting structured facts from a discussion.
-// The LLM extracts decisions, learnings, open questions, action items, and key context.
+// The LLM extracts decisions, learnings, open questions, action items, and key context
+// as JSONL output (one JSON object per line).
 func DiscussionFactsPrompt(title, summary, transcript, guidelines string) string {
 	var sb strings.Builder
 
@@ -90,13 +92,19 @@ func DiscussionFactsPrompt(title, summary, transcript, guidelines string) string
 	writeGuidelines(&sb, guidelines)
 
 	sb.WriteString("<task>\n")
-	sb.WriteString("Extract structured facts from this team discussion.\n")
-	sb.WriteString("Organize into these categories (omit empty categories):\n")
-	sb.WriteString("- **Decisions**: Concrete choices the team made\n")
-	sb.WriteString("- **Learnings**: New understanding or insights shared\n")
-	sb.WriteString("- **Open Questions**: Unresolved items needing follow-up\n")
-	sb.WriteString("- **Action Items**: Specific tasks someone committed to\n")
-	sb.WriteString("- **Key Context**: Important background information mentioned\n")
+	sb.WriteString("Extract structured facts from this team discussion as JSONL.\n")
+	sb.WriteString("Output one JSON object per line (NOT a JSON array). Each line is a fact with these fields:\n")
+	sb.WriteString("- \"headline\" (required): One sentence — the fact or decision\n")
+	sb.WriteString("- \"summary\" (optional): 2-3 sentences of supporting detail\n")
+	sb.WriteString("- \"category\" (required): One of: decision, learning, open_question, action_item, context\n")
+	sb.WriteString("- \"who\" (optional): Primary person involved\n")
+	sb.WriteString("- \"timestamp\" (required): ISO 8601 timestamp of the discussion\n")
+	sb.WriteString("\n")
+	sb.WriteString("Example output (two facts):\n")
+	sb.WriteString(`{"headline":"Team chose PostgreSQL for analytics","category":"decision","timestamp":"2026-03-10T14:23:00Z"}` + "\n")
+	sb.WriteString(`{"headline":"Auth module needs refactoring before launch","summary":"Current token refresh has race conditions under load.","category":"action_item","who":"Alice","timestamp":"2026-03-10T14:23:00Z"}` + "\n")
+	sb.WriteString("\n")
+	sb.WriteString("Output ONLY the JSONL lines — no markdown, no commentary, no code fences.\n")
 	sb.WriteString("</task>\n\n")
 
 	fmt.Fprintf(&sb, "## Discussion: %s\n\n", title)

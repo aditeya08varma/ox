@@ -706,6 +706,12 @@ func TestParseFactDate(t *testing.T) {
 		want     string
 	}{
 		{
+			name:     "jsonl meta header",
+			content:  "{\"_meta\":{\"schema_version\":\"2\",\"source_type\":\"discussion\",\"recorded_at\":\"2026-03-10T14:23:00Z\"}}\n{\"headline\":\"test\"}",
+			filename: "other-name.jsonl",
+			want:     "2026-03-10",
+		},
+		{
 			name:     "footer date",
 			content:  "Facts\n\n---\n*Extracted from discussion: test (created 2026-03-10)*\n",
 			filename: "other-name.md",
