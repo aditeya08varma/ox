@@ -21,7 +21,12 @@ func WriteFacts(path string, header FileHeader, facts []Fact) error {
 	if err != nil {
 		return fmt.Errorf("create file: %w", err)
 	}
-	defer f.Close()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = f.Close()
+		}
+	}()
 
 	w := bufio.NewWriter(f)
 
@@ -29,19 +34,23 @@ func WriteFacts(path string, header FileHeader, facts []Fact) error {
 	if err != nil {
 		return fmt.Errorf("marshal header: %w", err)
 	}
-	w.Write(headerBytes)
-	w.WriteByte('\n')
+	_, _ = w.Write(headerBytes)
+	_ = w.WriteByte('\n')
 
 	for _, fact := range facts {
 		line, err := json.Marshal(fact)
 		if err != nil {
 			return fmt.Errorf("marshal fact: %w", err)
 		}
-		w.Write(line)
-		w.WriteByte('\n')
+		_, _ = w.Write(line)
+		_ = w.WriteByte('\n')
 	}
 
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	closed = true
+	return f.Close()
 }
 
 // legacyV1Header is the v1 observation header format (top-level, no _meta wrapper).

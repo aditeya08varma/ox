@@ -301,7 +301,7 @@ func readPendingGitHubFacts(tcPath string, since time.Time) (map[string][]discus
 
 	for _, entry := range entries {
 		name := entry.Name()
-		if entry.IsDir() || !(strings.HasSuffix(name, ".jsonl") || strings.HasSuffix(name, ".md")) {
+		if entry.IsDir() || (!strings.HasSuffix(name, ".jsonl") && !strings.HasSuffix(name, ".md")) {
 			continue
 		}
 

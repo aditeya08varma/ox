@@ -54,10 +54,7 @@ type observation struct {
 	Content string `json:"content"`
 }
 
-type observationHeader struct {
-	SchemaVersion string `json:"schema_version"`
-	RecordedAt    string `json:"recorded_at"`
-}
+
 
 func runMemoryPut(cmd *cobra.Command, args []string) error {
 	projectRoot, err := findProjectRoot()

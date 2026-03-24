@@ -103,7 +103,7 @@ func TestReadFacts_V2Format(t *testing.T) {
 {"headline":"Chose PostgreSQL","summary":"For analytics store","source_type":"discussion","timestamp":"2026-03-10T14:23:00Z","category":"decision"}
 {"headline":"Token bucket selected","source_type":"discussion","timestamp":"2026-03-10T14:23:00Z","category":"decision","who":"Sarah"}
 `
-	os.WriteFile(path, []byte(content), 0o644)
+	_ = os.WriteFile(path, []byte(content), 0o644)
 
 	header, facts, err := ReadFacts(path)
 	if err != nil {
@@ -134,7 +134,7 @@ func TestReadFacts_V1ObservationFormat(t *testing.T) {
 {"content":"We decided to use PostgreSQL"}
 {"content":"Auth module needs refactoring"}
 `
-	os.WriteFile(path, []byte(content), 0o644)
+	_ = os.WriteFile(path, []byte(content), 0o644)
 
 	header, facts, err := ReadFacts(path)
 	if err != nil {
@@ -171,7 +171,7 @@ func TestReadFacts_NoHeader_RawJSONL(t *testing.T) {
 	content := `{"headline":"Adopted rate limiting","summary":"Token bucket","source_type":"github","source_ref":"https://github.com/org/repo/pull/152","timestamp":"2026-03-18T14:30:00Z"}
 {"headline":"Fixed auth bug","source_type":"github","timestamp":"2026-03-19T10:00:00Z"}
 `
-	os.WriteFile(path, []byte(content), 0o644)
+	_ = os.WriteFile(path, []byte(content), 0o644)
 
 	header, facts, err := ReadFacts(path)
 	if err != nil {
@@ -203,7 +203,7 @@ func TestReadFacts_BlankLinesSkipped(t *testing.T) {
 {"headline":"Second","source_type":"observation","timestamp":"2026-03-01T12:00:00Z"}
 
 `
-	os.WriteFile(path, []byte(content), 0o644)
+	_ = os.WriteFile(path, []byte(content), 0o644)
 
 	_, facts, err := ReadFacts(path)
 	if err != nil {
@@ -223,7 +223,7 @@ func TestReadFacts_MalformedLinesSkipped(t *testing.T) {
 this is not json
 {"headline":"Another valid","source_type":"github","timestamp":"2026-03-01T13:00:00Z"}
 `
-	os.WriteFile(path, []byte(content), 0o644)
+	_ = os.WriteFile(path, []byte(content), 0o644)
 
 	_, facts, err := ReadFacts(path)
 	if err != nil {
