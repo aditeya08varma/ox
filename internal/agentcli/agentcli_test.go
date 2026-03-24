@@ -103,34 +103,40 @@ func TestDailyPromptWithoutGuidelines(t *testing.T) {
 	}
 }
 
-func TestDailyPromptWithDiscussionFactPaths(t *testing.T) {
+func TestDailyPromptWithFactPaths(t *testing.T) {
 	obs := []string{"observation 1"}
-	paths := []string{"memory/.discussion-facts/2026-03-10.md", "memory/.discussion-facts/2026-03-11.md"}
+	paths := []string{"memory/.discussion-facts/2026-03-10.jsonl", "memory/.github-facts/2026-03-10-uuid.jsonl"}
 	prompt := DailyPrompt(obs, "2026-03-11", "", paths...)
 
-	if !strings.Contains(prompt, "Discussion Fact Files") {
-		t.Error("prompt should contain Discussion Fact Files section")
+	if !strings.Contains(prompt, "## Fact Files") {
+		t.Error("prompt should contain Fact Files section")
 	}
-	if !strings.Contains(prompt, "memory/.discussion-facts/2026-03-10.md") {
-		t.Error("prompt should contain file path")
+	if !strings.Contains(prompt, "memory/.discussion-facts/2026-03-10.jsonl") {
+		t.Error("prompt should contain discussion fact path")
 	}
-	if !strings.Contains(prompt, "Read each discussion fact file") {
+	if !strings.Contains(prompt, "memory/.github-facts/2026-03-10-uuid.jsonl") {
+		t.Error("prompt should contain github fact path")
+	}
+	if !strings.Contains(prompt, "Read each fact file") {
 		t.Error("prompt should instruct reading of fact files")
+	}
+	if !strings.Contains(prompt, "ALL sources") {
+		t.Error("prompt should instruct incorporating all fact sources")
 	}
 	if !strings.Contains(prompt, "1. observation 1") {
 		t.Error("prompt should still contain observations")
 	}
 }
 
-func TestDailyPromptWithoutDiscussionFacts(t *testing.T) {
+func TestDailyPromptWithoutFacts(t *testing.T) {
 	obs := []string{"observation 1"}
 	prompt := DailyPrompt(obs, "2026-03-11", "")
 
-	if strings.Contains(prompt, "Discussion Fact Files") {
-		t.Error("prompt should not contain Discussion Fact Files section when empty")
+	if strings.Contains(prompt, "Fact Files") {
+		t.Error("prompt should not contain Fact Files section when empty")
 	}
-	if strings.Contains(prompt, "Read each discussion fact file") {
-		t.Error("prompt should not mention reading files when no discussion facts")
+	if strings.Contains(prompt, "Read each fact file") {
+		t.Error("prompt should not mention reading files when no facts")
 	}
 }
 
@@ -146,11 +152,20 @@ func TestDiscussionFactsPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "Speaker 1:") {
 		t.Error("prompt should contain transcript text")
 	}
-	if !strings.Contains(prompt, "Decisions") {
-		t.Error("prompt should mention expected categories")
+	if !strings.Contains(prompt, "JSONL") {
+		t.Error("prompt should mention JSONL format")
 	}
-	if !strings.Contains(prompt, "Action Items") {
-		t.Error("prompt should mention Action Items category")
+	if !strings.Contains(prompt, "headline") {
+		t.Error("prompt should mention headline field")
+	}
+	if !strings.Contains(prompt, "category") {
+		t.Error("prompt should mention category field")
+	}
+	if !strings.Contains(prompt, "decision") {
+		t.Error("prompt should list decision as a category")
+	}
+	if !strings.Contains(prompt, "action_item") {
+		t.Error("prompt should list action_item as a category")
 	}
 }
 

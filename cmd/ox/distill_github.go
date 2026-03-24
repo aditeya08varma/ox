@@ -14,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/query"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/facts"
 	"github.com/spf13/cobra"
 )
 
@@ -83,15 +84,16 @@ For each meaningful event in the batch, produce a raw fact object:
   "who": "The primary author. If a reviewer significantly shaped the outcome, include them: 'Sarah (reviewed by Jake)'",
   "source_type": "github",
   "source_ref": "The URL of the primary GitHub object (usually the PR)",
-  "timestamp": "ISO 8601 timestamp of the most recent meaningful event (merge time for shipped PRs, latest review comment for in-progress PRs, creation time for new issues)"
+  "timestamp": "ISO 8601 timestamp of the most recent meaningful event (merge time for shipped PRs, latest review comment for in-progress PRs, creation time for new issues)",
+  "category": "ship|decision|blocker|direction_change — the type of signal (optional)"
 }
 
-If a batch contains no meaningful events, return an empty array. Do not fabricate facts to fill space.
+Output JSONL: one JSON object per line, NOT a JSON array. If a batch contains no meaningful events, return nothing. Do not fabricate facts to fill space.
 
 If you are uncertain whether something is meaningful, include it with a note in the summary: "[Uncertain significance] ..." — the downstream distiller will make the final call.`
 
 // extractGitHubFacts queries CodeDB for GitHub activity, partitions by day,
-// calls the LLM extractor per day, and writes facts to memory/.github-facts/{date}-{uuid7}.md.
+// calls the LLM extractor per day, and writes facts to memory/.github-facts/{date}-{uuid7}.jsonl.
 func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, projectRoot string) error {
 	// resolve CodeDB
 	dataDir := resolveCodeDBDir(projectRoot)
@@ -184,10 +186,28 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 			return fmt.Errorf("generate fact file ID: %w", err)
 		}
 
-		factFile := filepath.Join("memory", ".github-facts", day+"-"+id.String()+".md")
-		content := formatGitHubFacts(day, output, bucket.Metadata)
+		factFile := filepath.Join("memory", ".github-facts", day+"-"+id.String()+".jsonl")
 
-		if err := writeMemoryFile(tc.Path, factFile, content); err != nil {
+		// Parse and validate LLM output as JSONL facts
+		_, parsedFacts, err := facts.ParseFacts([]byte(output))
+		if err != nil {
+			slog.Warn("github extractor returned unparseable output, skipping", "day", day, "error", err)
+			continue
+		}
+		if len(parsedFacts) == 0 {
+			slog.Debug("github extractor returned no valid facts after parsing", "day", day)
+			continue
+		}
+
+		header := facts.FileHeader{
+			Meta: facts.FileMeta{
+				SchemaVersion: facts.SchemaVersion,
+				SourceType:    facts.SourceGitHub,
+				RecordedAt:    day + "T00:00:00Z",
+			},
+		}
+
+		if err := facts.WriteFacts(filepath.Join(tc.Path, factFile), header, parsedFacts); err != nil {
 			return fmt.Errorf("write github facts: %w", err)
 		}
 
@@ -230,10 +250,11 @@ func inferGitHubFactsHighWater(tcPath string) time.Time {
 
 	var latestDate string
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+		name := e.Name()
+		if e.IsDir() || (!strings.HasSuffix(name, ".jsonl") && !strings.HasSuffix(name, ".md")) {
 			continue
 		}
-		m := dailyDateRe.FindStringSubmatch(e.Name())
+		m := dailyDateRe.FindStringSubmatch(name)
 		if m == nil {
 			continue
 		}
@@ -268,21 +289,7 @@ func buildGitHubExtractorPrompt(clustersJSON, interval string) string {
 	sb.WriteString("<batch>\n")
 	sb.WriteString(clustersJSON)
 	sb.WriteString("\n</batch>\n\n")
-	sb.WriteString("Return a JSON array of raw fact objects. If no meaningful events exist in this batch, return [].")
-	return sb.String()
-}
-
-// formatGitHubFacts formats LLM output into a markdown fact file.
-func formatGitHubFacts(date, output string, meta query.ActivityMetadata) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "# GitHub Facts: %s\n\n", date)
-	fmt.Fprintf(&sb, "Source: %d PRs, %d issues, %d standalone commits\n\n",
-		meta.PRCount, meta.IssueCount, meta.CommitCount)
-	sb.WriteString(output)
-	if !strings.HasSuffix(output, "\n") {
-		sb.WriteByte('\n')
-	}
-	fmt.Fprintf(&sb, "\n---\n*Extracted from GitHub activity (created %s)*\n", date)
+	sb.WriteString("Return JSONL (one JSON object per line, NOT a JSON array). If no meaningful events exist in this batch, return nothing.")
 	return sb.String()
 }
 
@@ -301,7 +308,8 @@ func readPendingGitHubFacts(tcPath string, since time.Time) (map[string][]discus
 	result := make(map[string][]discussionFactEntry)
 
 	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+		name := entry.Name()
+		if entry.IsDir() || (!strings.HasSuffix(name, ".jsonl") && !strings.HasSuffix(name, ".md")) {
 			continue
 		}
 

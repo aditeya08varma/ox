@@ -252,20 +252,84 @@ func TestParseObservationFile_EmptyFile(t *testing.T) {
 	}
 }
 
-func TestParseObservationFile_InvalidHeader(t *testing.T) {
+func TestParseObservationFile_V2Format(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "test.jsonl")
 
-	content := `not valid json header
-{"content":"should not be parsed"}
+	content := `{"_meta":{"schema_version":"2","source_type":"observation","recorded_at":"2026-03-01T12:00:00Z"}}
+{"headline":"observation one","source_type":"observation","timestamp":"2026-03-01T12:00:00Z"}
+{"headline":"observation two","source_type":"observation","timestamp":"2026-03-01T12:00:00Z"}
 `
 	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	_, err := parseObservationFile(filePath, time.Time{})
-	if err == nil {
-		t.Error("expected error for invalid header, got nil")
+	obs, err := parseObservationFile(filePath, time.Time{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(obs) != 2 {
+		t.Errorf("expected 2 observations, got %d", len(obs))
+	}
+	if obs[0].Content != "observation one" {
+		t.Errorf("first content: got %q, want %q", obs[0].Content, "observation one")
+	}
+	if obs[1].Content != "observation two" {
+		t.Errorf("second content: got %q, want %q", obs[1].Content, "observation two")
+	}
+	expectedTime, _ := time.Parse(time.RFC3339, "2026-03-01T12:00:00Z")
+	if !obs[0].RecordedAt.Equal(expectedTime) {
+		t.Errorf("RecordedAt: got %v, want %v", obs[0].RecordedAt, expectedTime)
+	}
+	if obs[0].SourceFile != filePath {
+		t.Errorf("SourceFile: got %q, want %q", obs[0].SourceFile, filePath)
+	}
+}
+
+func TestParseObservationFile_V2SinceFilter(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "test.jsonl")
+
+	content := `{"_meta":{"schema_version":"2","source_type":"observation","recorded_at":"2026-02-01T12:00:00Z"}}
+{"headline":"old observation","source_type":"observation","timestamp":"2026-02-01T12:00:00Z"}
+`
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	since, _ := time.Parse(time.RFC3339, "2026-03-01T00:00:00Z")
+	obs, err := parseObservationFile(filePath, since)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(obs) != 0 {
+		t.Errorf("expected 0 observations (file before since), got %d", len(obs))
+	}
+}
+
+func TestParseObservationFile_InvalidHeader(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "test.jsonl")
+
+	// With the unified facts reader, an invalid first line is treated as a
+	// no-header raw JSONL file. The malformed line is skipped, and valid
+	// content lines are parsed as legacy observations.
+	content := `not valid json header
+{"content":"parsed as legacy observation"}
+`
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	obs, err := parseObservationFile(filePath, time.Time{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(obs) != 1 {
+		t.Errorf("expected 1 observation (malformed header skipped, content parsed), got %d", len(obs))
+	}
+	if len(obs) > 0 && obs[0].Content != "parsed as legacy observation" {
+		t.Errorf("content: got %q", obs[0].Content)
 	}
 }
 

@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/codedb/query"
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/config"
 	"github.com/spf13/cobra"
@@ -56,6 +55,9 @@ func TestBuildGitHubExtractorPrompt(t *testing.T) {
 	assert.Contains(t, prompt, "DECISIONS IN REVIEWS")
 	assert.Contains(t, prompt, "SCOPE AND IMPACT FROM THE PR")
 
+	// Output format includes category field
+	assert.Contains(t, prompt, `"category"`)
+
 	// User prompt wraps clusters in batch tags
 	assert.Contains(t, prompt, "<batch>")
 	assert.Contains(t, prompt, clustersJSON)
@@ -71,24 +73,6 @@ func TestBuildGitHubExtractorPrompt_ContainsBatchTags(t *testing.T) {
 
 	prompt := buildGitHubExtractorPrompt("[]", "24 hours")
 	assert.Contains(t, prompt, "<batch>\n[]\n</batch>")
-}
-
-func TestFormatGitHubFacts(t *testing.T) {
-	t.Parallel()
-
-	meta := query.ActivityMetadata{
-		PRCount:     3,
-		IssueCount:  2,
-		CommitCount: 5,
-	}
-
-	output := `[{"headline":"Adopted token bucket rate limiting"}]`
-	content := formatGitHubFacts("2026-03-20", output, meta)
-
-	assert.Contains(t, content, "# GitHub Facts: 2026-03-20")
-	assert.Contains(t, content, "3 PRs, 2 issues, 5 standalone commits")
-	assert.Contains(t, content, output)
-	assert.Contains(t, content, "(created 2026-03-20)")
 }
 
 func TestGitHubFactsSince_Default(t *testing.T) {
@@ -136,6 +120,28 @@ func TestReadPendingGitHubFacts_WithFactFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result["2026-03-20"], 1)
 	assert.Contains(t, result["2026-03-20"][0].Content, "GitHub Facts")
+}
+
+func TestReadPendingGitHubFacts_V2MetaHeader(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	factsDir := filepath.Join(dir, "memory", ".github-facts")
+	require.NoError(t, os.MkdirAll(factsDir, 0o755))
+
+	// v2 JSONL file with _meta header + fact lines
+	content := `{"_meta":{"schema_version":"2","source_type":"github","recorded_at":"2026-03-20T10:00:00Z"}}
+{"headline":"Adopted rate limiting","source_type":"github","timestamp":"2026-03-20T10:00:00Z"}
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(factsDir, "2026-03-20-019526a0-eeee-7abc-8def-0123456789ab.jsonl"),
+		[]byte(content), 0o644))
+
+	result, err := readPendingGitHubFacts(dir, time.Time{})
+	require.NoError(t, err)
+	require.Len(t, result["2026-03-20"], 1)
+	assert.Equal(t, "2026-03-20", result["2026-03-20"][0].Date)
+	assert.Contains(t, result["2026-03-20"][0].Content, `"_meta"`)
 }
 
 // setupExtractGitHubFacts creates a temp dir with CodeDB data and a git-initialized
@@ -191,7 +197,7 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 
 	// Set up mock backend
 	backend := &mockBackend{
-		output: `[{"headline":"Adopted token bucket rate limiting","summary":"Token bucket at 100 req/min","rationale":"Traffic growth","who":"alice","source_type":"github","source_ref":"https://github.com/org/repo/pull/42","timestamp":"2026-03-20T00:00:00Z"}]`,
+		output: `{"headline":"Adopted token bucket rate limiting","summary":"Token bucket at 100 req/min","rationale":"Traffic growth","who":"alice","source_type":"github","source_ref":"https://github.com/org/repo/pull/42","timestamp":"2026-03-20T00:00:00Z"}`,
 	}
 
 	state := &distillStateV2{}
@@ -217,13 +223,17 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 
 	var found bool
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), today) && strings.HasSuffix(e.Name(), ".md") {
+		if strings.HasPrefix(e.Name(), today) && strings.HasSuffix(e.Name(), ".jsonl") {
 			content, err := os.ReadFile(filepath.Join(factsDir, e.Name()))
 			require.NoError(t, err)
-			assert.Contains(t, string(content), "GitHub Facts")
-			assert.Contains(t, string(content), "Adopted token bucket rate limiting")
-			// UUID7 filename should be longer than just "YYYY-MM-DD.md"
-			assert.Greater(t, len(e.Name()), len(today+".md"))
+			contentStr := string(content)
+			assert.Contains(t, contentStr, "Adopted token bucket rate limiting")
+			// v2 _meta header should be present
+			assert.Contains(t, contentStr, `"_meta"`)
+			assert.Contains(t, contentStr, `"schema_version":"2"`)
+			assert.Contains(t, contentStr, `"source_type":"github"`)
+			// UUID7 filename should be longer than just "YYYY-MM-DD.jsonl"
+			assert.Greater(t, len(e.Name()), len(today+".jsonl"))
 			found = true
 		}
 	}
@@ -322,7 +332,7 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 		}
 	})
 
-	backend := &mockBackend{output: `[{"headline":"first run"}]`}
+	backend := &mockBackend{output: `{"headline":"first run","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`}
 	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
@@ -355,7 +365,7 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 
 	// Second run: should use adjusted state as window start, capturing PR #4
 	backend.promptReceived = ""
-	backend.output = `[{"headline":"second run"}]`
+	backend.output = `{"headline":"second run","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`
 	cmd.SetOut(&bytes.Buffer{})
 
 	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot)
@@ -384,7 +394,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	backend := &mockBackend{output: `[{"headline":"run 1"}]`}
+	backend := &mockBackend{output: `{"headline":"run 1","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`}
 	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
@@ -406,7 +416,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	insertPRInCodeDB(t, projectRoot, 43, "Second PR", "bob", "open", time.Now().UTC().Unix())
 
 	backend.promptReceived = ""
-	backend.output = `[{"headline":"run 2"}]`
+	backend.output = `{"headline":"run 2","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`
 	cmd.SetOut(&bytes.Buffer{})
 
 	// Second run same day
@@ -423,7 +433,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	today := time.Now().UTC().Format("2006-01-02")
 	for _, e := range entries2 {
 		assert.True(t, strings.HasPrefix(e.Name(), today), "file %s should be for today", e.Name())
-		assert.Greater(t, len(e.Name()), len(today+".md"), "file %s should have UUID7 suffix", e.Name())
+		assert.Greater(t, len(e.Name()), len(today+".jsonl"), "file %s should have UUID7 suffix", e.Name())
 	}
 }
 
@@ -447,7 +457,7 @@ func TestExtractGitHubFacts_MultiDayCatchup(t *testing.T) {
 		}
 	})
 
-	tracker := &trackingBackend{output: `[{"headline":"facts"}]`}
+	tracker := &trackingBackend{output: `{"headline":"facts","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`}
 
 	state := &distillStateV2{}
 	// Set state to before all 3 days
@@ -586,6 +596,23 @@ func TestInferGitHubFactsHighWater_Mixed(t *testing.T) {
 	hw := inferGitHubFactsHighWater(tcPath)
 	assert.Equal(t, "2026-03-20", hw.Format("2006-01-02"),
 		"should pick the latest date across mixed naming")
+}
+
+func TestInferGitHubFactsHighWater_JSONLOnly(t *testing.T) {
+	t.Parallel()
+
+	tcPath := t.TempDir()
+	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
+	require.NoError(t, os.MkdirAll(factsDir, 0o755))
+
+	// Only .jsonl files (no .md) — should still infer high-water
+	require.NoError(t, os.WriteFile(
+		filepath.Join(factsDir, "2026-03-22-019526a0-aaaa-7abc-8def-0123456789ab.jsonl"),
+		[]byte("facts"), 0o644))
+
+	hw := inferGitHubFactsHighWater(tcPath)
+	assert.Equal(t, "2026-03-22", hw.Format("2006-01-02"),
+		"should detect high-water from .jsonl files")
 }
 
 func TestReadPendingGitHubFacts_FiltersBySince(t *testing.T) {

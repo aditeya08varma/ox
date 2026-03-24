@@ -17,6 +17,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/agentcli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/facts"
 	"github.com/spf13/cobra"
 )
 
@@ -639,7 +640,7 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 			continue
 		}
 
-		factFile := filepath.Join("memory", ".discussion-facts", d.DirName+".md")
+		factFile := filepath.Join("memory", ".discussion-facts", d.DirName+".jsonl")
 		if err := writeMemoryFile(tc.Path, factFile, factContent); err != nil {
 			slog.Warn("failed to write discussion facts", "dir", d.DirName, "error", err)
 			continue
@@ -660,6 +661,7 @@ func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend age
 }
 
 // extractSingleDiscussionFacts generates facts for one discussion via LLM.
+// Returns JSONL with a _meta header line followed by the LLM-produced fact lines.
 func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, d discussionInput, guidelines string) (string, error) {
 	prompt := agentcli.DiscussionFactsPrompt(d.Title, d.Summary, d.Transcript, guidelines)
 	logPrompt(cmd, "discussion-facts: "+d.Title, prompt)
@@ -668,14 +670,36 @@ func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backe
 		return "", fmt.Errorf("AI agent: %w", err)
 	}
 
-	// format with metadata header
+	// Parse and validate LLM output as JSONL facts
+	_, parsedFacts, err := facts.ParseFacts([]byte(output))
+	if err != nil {
+		return "", fmt.Errorf("parse discussion facts: %w", err)
+	}
+	if len(parsedFacts) == 0 {
+		return "", nil // no valid facts extracted
+	}
+
+	header := facts.FileHeader{
+		Meta: facts.FileMeta{
+			SchemaVersion: facts.SchemaVersion,
+			SourceType:    facts.SourceDiscussion,
+			RecordedAt:    d.CreatedAt.Format(time.RFC3339),
+		},
+	}
+
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		return "", fmt.Errorf("marshal header: %w", err)
+	}
+
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "# Facts: %s\n\n", d.Title)
-	sb.WriteString(output)
-	if !strings.HasSuffix(output, "\n") {
+	sb.Write(headerBytes)
+	sb.WriteByte('\n')
+	for _, f := range parsedFacts {
+		line, _ := json.Marshal(f)
+		sb.Write(line)
 		sb.WriteByte('\n')
 	}
-	fmt.Fprintf(&sb, "\n---\n*Extracted from discussion: %s (created %s)*\n", d.DirName, d.CreatedAt.Format("2006-01-02"))
 	return sb.String(), nil
 }
 
@@ -735,7 +759,7 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		for _, day := range days {
 			obsCount := len(obsByDay[day])
 			factCount := len(factsByDay[day])
-			fmt.Fprintf(cmd.OutOrStdout(), "Daily distill: %d observations and %d discussion facts for %s\n",
+			fmt.Fprintf(cmd.OutOrStdout(), "Daily distill: %d observations and %d facts for %s\n",
 				obsCount, factCount, day)
 		}
 		return nil
@@ -760,7 +784,7 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 
 		prompt := agentcli.DailyPrompt(contents, day, guidelines, factPaths...)
 		logPrompt(cmd, "daily:"+day, prompt)
-		fmt.Fprintf(cmd.OutOrStdout(), "Distilling %d observations and %d discussion facts into daily summary for %s...\n",
+		fmt.Fprintf(cmd.OutOrStdout(), "Distilling %d observations and %d facts into daily summary for %s...\n",
 			len(dayObs), len(dayFacts), day)
 
 		output, err := backend.Run(ctx, prompt)
@@ -939,13 +963,13 @@ func readRecentMemoryFiles(dir string, maxFiles int) ([]string, []string, error)
 	return contents, names, nil
 }
 
-func formatDailyMemory(date, content string, obsCount, discussionCount int) string {
+func formatDailyMemory(date, content string, obsCount, factCount int) string {
 	var source string
 	switch {
-	case obsCount > 0 && discussionCount > 0:
-		source = fmt.Sprintf("%d observations and %d discussions", obsCount, discussionCount)
-	case discussionCount > 0:
-		source = fmt.Sprintf("%d discussions", discussionCount)
+	case obsCount > 0 && factCount > 0:
+		source = fmt.Sprintf("%d observations and %d facts", obsCount, factCount)
+	case factCount > 0:
+		source = fmt.Sprintf("%d facts", factCount)
 	default:
 		source = fmt.Sprintf("%d observations", obsCount)
 	}

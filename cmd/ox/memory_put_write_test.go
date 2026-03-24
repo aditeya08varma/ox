@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/facts"
 	"github.com/stretchr/testify/require"
 )
 
@@ -118,10 +119,10 @@ func TestWriteObservation_NormalPayload(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	require.Len(t, lines, 2)
 
-	// verify content round-trips
-	var parsed observation
+	// verify content round-trips via unified fact schema
+	var parsed facts.Fact
 	require.NoError(t, json.Unmarshal([]byte(lines[1]), &parsed))
-	require.Equal(t, content, parsed.Content)
+	require.Equal(t, content, parsed.Headline)
 }
 
 func TestWriteObservation_NearMaxPayload(t *testing.T) {
@@ -142,9 +143,9 @@ func TestWriteObservation_NearMaxPayload(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	require.Len(t, lines, 2)
 
-	var parsed observation
+	var parsed facts.Fact
 	require.NoError(t, json.Unmarshal([]byte(lines[1]), &parsed))
-	require.Len(t, parsed.Content, maxObservationBytes-1)
+	require.Len(t, parsed.Headline, maxObservationBytes-1)
 }
 
 func TestWriteObservation_MultipleObservations(t *testing.T) {
@@ -168,9 +169,9 @@ func TestWriteObservation_MultipleObservations(t *testing.T) {
 	require.Len(t, lines, 4, "expected header + 3 observation lines")
 
 	for i, expected := range []string{"first observation", "second observation", "third observation"} {
-		var parsed observation
+		var parsed facts.Fact
 		require.NoError(t, json.Unmarshal([]byte(lines[i+1]), &parsed))
-		require.Equal(t, expected, parsed.Content)
+		require.Equal(t, expected, parsed.Headline)
 	}
 }
 
@@ -189,20 +190,22 @@ func TestWriteObservation_FileFormat(t *testing.T) {
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
 	require.GreaterOrEqual(t, len(lines), 2)
 
-	// line 1: header with schema_version and recorded_at
-	var header observationHeader
+	// line 1: v2 header with _meta wrapper
+	var header facts.FileHeader
 	require.NoError(t, json.Unmarshal([]byte(lines[0]), &header))
-	require.Equal(t, "1", header.SchemaVersion)
-	require.NotEmpty(t, header.RecordedAt)
+	require.Equal(t, facts.SchemaVersion, header.Meta.SchemaVersion)
+	require.Equal(t, facts.SourceObservation, header.Meta.SourceType)
+	require.NotEmpty(t, header.Meta.RecordedAt)
 
 	// recorded_at should be valid RFC3339
-	_, err = time.Parse(time.RFC3339, header.RecordedAt)
+	_, err = time.Parse(time.RFC3339, header.Meta.RecordedAt)
 	require.NoError(t, err, "recorded_at should be RFC3339")
 
-	// line 2: observation with content field
-	var parsed observation
+	// line 2: fact with headline field
+	var parsed facts.Fact
 	require.NoError(t, json.Unmarshal([]byte(lines[1]), &parsed))
-	require.Equal(t, "format check", parsed.Content)
+	require.Equal(t, "format check", parsed.Headline)
+	require.Equal(t, facts.SourceObservation, parsed.SourceType)
 }
 
 func TestWriteObservation_GitCommit(t *testing.T) {

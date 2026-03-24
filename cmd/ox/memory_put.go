@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/facts"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/spf13/cobra"
 )
@@ -53,10 +54,7 @@ type observation struct {
 	Content string `json:"content"`
 }
 
-type observationHeader struct {
-	SchemaVersion string `json:"schema_version"`
-	RecordedAt    string `json:"recorded_at"`
-}
+
 
 func runMemoryPut(cmd *cobra.Command, args []string) error {
 	projectRoot, err := findProjectRoot()
@@ -135,50 +133,39 @@ func writeObservation(teamContextPath string, observations []observation) error 
 		return fmt.Errorf("generate observation ID: %w", err)
 	}
 
-	obsDir := filepath.Join(teamContextPath, "memory", observationDirName, dateDir)
-	if err := os.MkdirAll(obsDir, 0o755); err != nil {
-		return fmt.Errorf("create observations directory: %w", err)
-	}
-
 	filename := id.String() + ".jsonl"
-	filePath := filepath.Join(obsDir, filename)
+	filePath := filepath.Join(teamContextPath, "memory", observationDirName, dateDir, filename)
 
-	f, err := os.Create(filePath)
-	if err != nil {
-		return fmt.Errorf("create observation file: %w", err)
-	}
-	defer f.Close()
-
-	w := bufio.NewWriter(f)
-
-	header := observationHeader{
-		SchemaVersion: "1",
-		RecordedAt:    now.Format(time.RFC3339),
-	}
-	headerBytes, _ := json.Marshal(header)
-	w.Write(headerBytes)
-	w.WriteByte('\n')
-
-	for _, obs := range observations {
-		entryBytes, _ := json.Marshal(obs)
-		w.Write(entryBytes)
-		w.WriteByte('\n')
+	header := facts.FileHeader{
+		Meta: facts.FileMeta{
+			SchemaVersion: facts.SchemaVersion,
+			SourceType:    facts.SourceObservation,
+			RecordedAt:    now.Format(time.RFC3339),
+		},
 	}
 
-	if err := w.Flush(); err != nil {
+	factSlice := make([]facts.Fact, len(observations))
+	for i, obs := range observations {
+		factSlice[i] = facts.Fact{
+			Headline:   obs.Content,
+			SourceType: facts.SourceObservation,
+			Timestamp:  now.Format(time.RFC3339),
+		}
+	}
+
+	if err := facts.WriteFacts(filePath, header, factSlice); err != nil {
 		return fmt.Errorf("write observation file: %w", err)
 	}
-	f.Close()
 
 	// git add + commit
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	gitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	relPath := filepath.Join("memory", observationDirName, dateDir, filename)
 
 	// --sparse: team context repos use sparse-checkout; without this flag
 	// git refuses to stage files outside the sparse definition
-	if _, err := gitutil.RunGit(ctx, teamContextPath, "add", "--sparse", relPath); err != nil {
+	if _, err := gitutil.RunGit(gitCtx, teamContextPath, "add", "--sparse", relPath); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
 
@@ -188,7 +175,7 @@ func writeObservation(teamContextPath string, observations []observation) error 
 	}
 	commitMsg := fmt.Sprintf("observation: %s", summary)
 
-	if _, err := gitutil.RunGit(ctx, teamContextPath, "commit", "-m", commitMsg); err != nil {
+	if _, err := gitutil.RunGit(gitCtx, teamContextPath, "commit", "-m", commitMsg); err != nil {
 		return fmt.Errorf("git commit: %w", err)
 	}
 
