@@ -670,7 +670,15 @@ func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backe
 		return "", fmt.Errorf("AI agent: %w", err)
 	}
 
-	// Build _meta header + raw JSONL output
+	// Parse and validate LLM output as JSONL facts
+	_, parsedFacts, err := facts.ParseFacts([]byte(output))
+	if err != nil {
+		return "", fmt.Errorf("parse discussion facts: %w", err)
+	}
+	if len(parsedFacts) == 0 {
+		return "", nil // no valid facts extracted
+	}
+
 	header := facts.FileHeader{
 		Meta: facts.FileMeta{
 			SchemaVersion: facts.SchemaVersion,
@@ -678,6 +686,7 @@ func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backe
 			RecordedAt:    d.CreatedAt.Format(time.RFC3339),
 		},
 	}
+
 	headerBytes, err := json.Marshal(header)
 	if err != nil {
 		return "", fmt.Errorf("marshal header: %w", err)
@@ -686,8 +695,9 @@ func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backe
 	var sb strings.Builder
 	sb.Write(headerBytes)
 	sb.WriteByte('\n')
-	sb.WriteString(output)
-	if !strings.HasSuffix(output, "\n") {
+	for _, f := range parsedFacts {
+		line, _ := json.Marshal(f)
+		sb.Write(line)
 		sb.WriteByte('\n')
 	}
 	return sb.String(), nil

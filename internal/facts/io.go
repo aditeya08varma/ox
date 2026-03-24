@@ -82,13 +82,20 @@ func ReadFacts(path string) (FileHeader, []Fact, error) {
 // ParseFacts parses JSONL fact data from bytes. See ReadFacts for format details.
 func ParseFacts(data []byte) (FileHeader, []Fact, error) {
 	scanner := bufio.NewScanner(bytes.NewReader(data))
-	if !scanner.Scan() {
-		return FileHeader{}, nil, nil // empty file
-	}
 
-	firstLine := strings.TrimSpace(scanner.Text())
+	// Skip leading blank lines to find the first non-empty line.
+	var firstLine string
+	for scanner.Scan() {
+		firstLine = strings.TrimSpace(scanner.Text())
+		if firstLine != "" {
+			break
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return FileHeader{}, nil, err
+	}
 	if firstLine == "" {
-		return FileHeader{}, nil, nil
+		return FileHeader{}, nil, nil // empty or all-blank file
 	}
 
 	header, headerParsed := parseHeader([]byte(firstLine))

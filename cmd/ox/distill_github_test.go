@@ -129,23 +129,18 @@ func TestReadPendingGitHubFacts_V2MetaHeader(t *testing.T) {
 	factsDir := filepath.Join(dir, "memory", ".github-facts")
 	require.NoError(t, os.MkdirAll(factsDir, 0o755))
 
-	// v2 file: _meta header line followed by markdown content
+	// v2 JSONL file with _meta header + fact lines
 	content := `{"_meta":{"schema_version":"2","source_type":"github","recorded_at":"2026-03-20T10:00:00Z"}}
-# GitHub Facts: 2026-03-20
-
-Some facts
-
----
-*Extracted from GitHub activity (created 2026-03-20)*
+{"headline":"Adopted rate limiting","source_type":"github","timestamp":"2026-03-20T10:00:00Z"}
 `
 	require.NoError(t, os.WriteFile(
-		filepath.Join(factsDir, "2026-03-20-019526a0-eeee-7abc-8def-0123456789ab.md"),
+		filepath.Join(factsDir, "2026-03-20-019526a0-eeee-7abc-8def-0123456789ab.jsonl"),
 		[]byte(content), 0o644))
 
 	result, err := readPendingGitHubFacts(dir, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, result["2026-03-20"], 1)
-	assert.Contains(t, result["2026-03-20"][0].Content, "GitHub Facts")
+	assert.Equal(t, "2026-03-20", result["2026-03-20"][0].Date)
 	assert.Contains(t, result["2026-03-20"][0].Content, `"_meta"`)
 }
 
@@ -202,7 +197,7 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 
 	// Set up mock backend
 	backend := &mockBackend{
-		output: `[{"headline":"Adopted token bucket rate limiting","summary":"Token bucket at 100 req/min","rationale":"Traffic growth","who":"alice","source_type":"github","source_ref":"https://github.com/org/repo/pull/42","timestamp":"2026-03-20T00:00:00Z"}]`,
+		output: `{"headline":"Adopted token bucket rate limiting","summary":"Token bucket at 100 req/min","rationale":"Traffic growth","who":"alice","source_type":"github","source_ref":"https://github.com/org/repo/pull/42","timestamp":"2026-03-20T00:00:00Z"}`,
 	}
 
 	state := &distillStateV2{}
@@ -337,7 +332,7 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 		}
 	})
 
-	backend := &mockBackend{output: `[{"headline":"first run"}]`}
+	backend := &mockBackend{output: `{"headline":"first run","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`}
 	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
@@ -370,7 +365,7 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 
 	// Second run: should use adjusted state as window start, capturing PR #4
 	backend.promptReceived = ""
-	backend.output = `[{"headline":"second run"}]`
+	backend.output = `{"headline":"second run","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`
 	cmd.SetOut(&bytes.Buffer{})
 
 	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot)
@@ -399,7 +394,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	backend := &mockBackend{output: `[{"headline":"run 1"}]`}
+	backend := &mockBackend{output: `{"headline":"run 1","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`}
 	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
@@ -421,7 +416,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	insertPRInCodeDB(t, projectRoot, 43, "Second PR", "bob", "open", time.Now().UTC().Unix())
 
 	backend.promptReceived = ""
-	backend.output = `[{"headline":"run 2"}]`
+	backend.output = `{"headline":"run 2","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`
 	cmd.SetOut(&bytes.Buffer{})
 
 	// Second run same day
@@ -462,7 +457,7 @@ func TestExtractGitHubFacts_MultiDayCatchup(t *testing.T) {
 		}
 	})
 
-	tracker := &trackingBackend{output: `[{"headline":"facts"}]`}
+	tracker := &trackingBackend{output: `{"headline":"facts","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`}
 
 	state := &distillStateV2{}
 	// Set state to before all 3 days
@@ -601,6 +596,23 @@ func TestInferGitHubFactsHighWater_Mixed(t *testing.T) {
 	hw := inferGitHubFactsHighWater(tcPath)
 	assert.Equal(t, "2026-03-20", hw.Format("2006-01-02"),
 		"should pick the latest date across mixed naming")
+}
+
+func TestInferGitHubFactsHighWater_JSONLOnly(t *testing.T) {
+	t.Parallel()
+
+	tcPath := t.TempDir()
+	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
+	require.NoError(t, os.MkdirAll(factsDir, 0o755))
+
+	// Only .jsonl files (no .md) — should still infer high-water
+	require.NoError(t, os.WriteFile(
+		filepath.Join(factsDir, "2026-03-22-019526a0-aaaa-7abc-8def-0123456789ab.jsonl"),
+		[]byte("facts"), 0o644))
+
+	hw := inferGitHubFactsHighWater(tcPath)
+	assert.Equal(t, "2026-03-22", hw.Format("2006-01-02"),
+		"should detect high-water from .jsonl files")
 }
 
 func TestReadPendingGitHubFacts_FiltersBySince(t *testing.T) {

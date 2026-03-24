@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -189,7 +188,17 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 
 		factFile := filepath.Join("memory", ".github-facts", day+"-"+id.String()+".jsonl")
 
-		// Prepend _meta header for v2 fact files
+		// Parse and validate LLM output as JSONL facts
+		_, parsedFacts, err := facts.ParseFacts([]byte(output))
+		if err != nil {
+			slog.Warn("github extractor returned unparseable output, skipping", "day", day, "error", err)
+			continue
+		}
+		if len(parsedFacts) == 0 {
+			slog.Debug("github extractor returned no valid facts after parsing", "day", day)
+			continue
+		}
+
 		header := facts.FileHeader{
 			Meta: facts.FileMeta{
 				SchemaVersion: facts.SchemaVersion,
@@ -197,10 +206,8 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 				RecordedAt:    day + "T00:00:00Z",
 			},
 		}
-		headerBytes, _ := json.Marshal(header)
-		content := string(headerBytes) + "\n" + output + "\n"
 
-		if err := writeMemoryFile(tc.Path, factFile, content); err != nil {
+		if err := facts.WriteFacts(filepath.Join(tc.Path, factFile), header, parsedFacts); err != nil {
 			return fmt.Errorf("write github facts: %w", err)
 		}
 
@@ -243,10 +250,11 @@ func inferGitHubFactsHighWater(tcPath string) time.Time {
 
 	var latestDate string
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".md") {
+		name := e.Name()
+		if e.IsDir() || (!strings.HasSuffix(name, ".jsonl") && !strings.HasSuffix(name, ".md")) {
 			continue
 		}
-		m := dailyDateRe.FindStringSubmatch(e.Name())
+		m := dailyDateRe.FindStringSubmatch(name)
 		if m == nil {
 			continue
 		}
