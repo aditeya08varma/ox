@@ -14,6 +14,7 @@ import (
 
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/pkg/sessionsummary"
 )
 
 // createTestSession creates a session directory with raw.jsonl and optional artifacts.
@@ -383,7 +384,7 @@ func TestParseSummaryJSON(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp, err := parseSummaryJSON(tt.input)
+			resp, err := sessionsummary.ParseSummaryJSON(tt.input)
 			if tt.wantErr {
 				if err == nil {
 					t.Error("expected error, got nil")
