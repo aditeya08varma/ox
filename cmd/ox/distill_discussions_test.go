@@ -157,6 +157,46 @@ func TestScanPendingDiscussionsParsesContent(t *testing.T) {
 	}
 }
 
+func TestScanPendingDiscussionsLegacyHashMigration(t *testing.T) {
+	tcPath := t.TempDir()
+	discussionsDir := filepath.Join(tcPath, "discussions")
+
+	dirName := "2026-03-10-1423-ryan"
+	createDiscussionDir(t, discussionsDir, dirName, "Arch Review", "2026-03-10T14:23:00Z")
+
+	dirPath := filepath.Join(discussionsDir, dirName)
+
+	// Simulate: old CLI stored a core-only hash (metadata.json only, since
+	// createDiscussionDir doesn't write summary.md or transcript.vtt).
+	legacyHash := discussionCoreHash(dirPath)
+
+	// Now add a server-generated summary.json — this changes the full hash
+	// but not the core hash.
+	os.WriteFile(filepath.Join(dirPath, "summary.json"), []byte(`{"schema_version":2}`), 0o644)
+
+	// The full hash now differs from the legacy hash.
+	fullHash := discussionContentHash(dirPath)
+	if fullHash == legacyHash {
+		t.Fatal("expected full hash to differ from core hash after adding summary.json")
+	}
+
+	// With the legacy hash stored, scanPendingDiscussions should detect the
+	// migration case: core hash matches stored → update stored hash, skip re-processing.
+	processed := map[string]string{dirName: legacyHash}
+	pending, err := scanPendingDiscussions(tcPath, processed)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Errorf("expected 0 pending (legacy hash migration), got %d", len(pending))
+	}
+
+	// The stored hash should have been updated to the full hash.
+	if processed[dirName] != fullHash {
+		t.Errorf("stored hash not migrated: got %q, want %q", processed[dirName], fullHash)
+	}
+}
+
 func TestReadPendingDiscussionFacts(t *testing.T) {
 	tcPath := t.TempDir()
 	factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
@@ -572,28 +612,54 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 		assertContains(t, output, "latency budget is 50ms")
 	})
 
-	t.Run("wrong schema version — returns error for LLM fallback", func(t *testing.T) {
+	t.Run("v1 summary with categorized facts — succeeds without chapters", func(t *testing.T) {
 		dir := t.TempDir()
 		writeSummaryJSON(t, dir, map[string]any{
 			"schema_version": 1,
 			"recording_id":   "rec-test",
 			"title":          "Old",
 			"human_summary":  "summary",
+			"decisions":      []map[string]any{{"description": "use postgres"}},
+			"learnings":      []map[string]any{{"description": "caching helps"}},
+		})
+
+		d := discussionInput{
+			DirName:        "2026-03-20-1423-person",
+			Title:          "V1 Schema",
+			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
+			SummaryJSONDir: dir,
+		}
+
+		output, err := extractFactsFromSummaryJSON(d)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertContains(t, output, "use postgres")
+		assertContains(t, output, "caching helps")
+	})
+
+	t.Run("no categorized facts — returns error for LLM fallback", func(t *testing.T) {
+		dir := t.TempDir()
+		writeSummaryJSON(t, dir, map[string]any{
+			"schema_version": 2,
+			"recording_id":   "rec-test",
+			"title":          "Empty",
+			"human_summary":  "summary",
 			"chapters":       []map[string]any{},
 		})
 
 		d := discussionInput{
 			DirName:        "2026-03-20-1423-person",
-			Title:          "Old Schema",
+			Title:          "No Facts",
 			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
 			SummaryJSONDir: dir,
 		}
 
 		_, err := extractFactsFromSummaryJSON(d)
 		if err == nil {
-			t.Fatal("expected error for unsupported schema version")
+			t.Fatal("expected error for empty facts")
 		}
-		assertContains(t, err.Error(), "unsupported schema version")
+		assertContains(t, err.Error(), "no categorized facts")
 	})
 
 	t.Run("missing summary.json — returns error", func(t *testing.T) {
@@ -609,6 +675,41 @@ func TestExtractFactsFromSummaryJSON(t *testing.T) {
 		_, err := extractFactsFromSummaryJSON(d)
 		if err == nil {
 			t.Fatal("expected error for missing summary.json")
+		}
+	})
+
+	t.Run("v1 summary excludes chapters from key context", func(t *testing.T) {
+		dir := t.TempDir()
+		writeSummaryJSON(t, dir, map[string]any{
+			"schema_version":    1,
+			"recording_id":     "rec-test",
+			"title":            "V1 With Chapters",
+			"human_summary":    "summary",
+			"decisions":        []map[string]any{{"description": "keep monolith"}},
+			"constraints":      []string{"budget limited"},
+			"technical_context": map[string]any{"notes": []string{"uses AWS"}},
+			// chapters might be present in v1 JSON but should not be used
+			"chapters": []map[string]any{
+				{"id": "ch-1", "title": "Planning", "summary": "Should be excluded", "importance": 0.9, "time_range": []float64{0, 60}, "cue_range": []int{0, 10}},
+			},
+		})
+
+		d := discussionInput{
+			DirName:        "2026-03-20-1423-person",
+			Title:          "V1 Chapters Test",
+			CreatedAt:      time.Date(2026, 3, 20, 14, 23, 0, 0, time.UTC),
+			SummaryJSONDir: dir,
+		}
+
+		output, err := extractFactsFromSummaryJSON(d)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertContains(t, output, "keep monolith")
+		assertContains(t, output, "budget limited")
+		assertContains(t, output, "uses AWS")
+		if strings.Contains(output, "Should be excluded") {
+			t.Error("v1 summary should not include chapters in key context")
 		}
 	})
 
