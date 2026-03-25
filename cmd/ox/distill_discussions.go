@@ -74,32 +74,27 @@ func scanPendingDiscussions(tcPath string, processed map[string]string) ([]discu
 
 		// compute content hash for change detection
 		currentHash := discussionContentHash(dirPath)
+		factFileExists := fileExists(filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".md")) ||
+			fileExists(filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".jsonl"))
 
-		// skip if already processed with same hash
-		if prevHash, ok := processed[dirName]; ok && prevHash == currentHash {
+		// skip if already processed with same hash and fact file exists
+		if prevHash, ok := processed[dirName]; ok && prevHash == currentHash && factFileExists {
 			continue
 		}
 
 		// legacy hash migration: older CLI versions hashed only core files
 		// (metadata.json, summary.md, transcript.vtt). If the core hash matches
 		// the stored hash, the discussion content hasn't changed — only the hash
-		// function expanded. Update the stored hash and skip re-processing.
-		if prevHash, ok := processed[dirName]; ok && prevHash == discussionCoreHash(dirPath) {
+		// function expanded. Update the stored hash and skip re-processing,
+		// but only if the fact file still exists on disk.
+		if prevHash, ok := processed[dirName]; ok && prevHash == discussionCoreHash(dirPath) && factFileExists {
 			processed[dirName] = currentHash
 			continue
 		}
 
 		// skip if fact file already exists (covers fresh clone / deleted state)
-		// Check both .md (legacy) and .jsonl (current) formats.
-		if _, ok := processed[dirName]; !ok {
-			factFileMD := filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".md")
-			factFileJSONL := filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".jsonl")
-			if _, err := os.Stat(factFileMD); err == nil {
-				continue
-			}
-			if _, err := os.Stat(factFileJSONL); err == nil {
-				continue
-			}
+		if _, ok := processed[dirName]; !ok && factFileExists {
+			continue
 		}
 
 		createdAt, err := time.Parse(time.RFC3339, meta.CreatedAt)

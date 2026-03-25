@@ -12,54 +12,85 @@ import (
 )
 
 func TestScanPendingDiscussions(t *testing.T) {
-	tcPath := t.TempDir()
-	discussionsDir := filepath.Join(tcPath, "discussions")
-
-	// create two discussion dirs
-	createDiscussionDir(t, discussionsDir, "2026-03-10-1423-ryan", "Architecture Review", "2026-03-10T14:23:00Z")
-	createDiscussionDir(t, discussionsDir, "2026-03-11-0900-alice", "Sprint Planning", "2026-03-11T09:00:00Z")
-
-	tests := []struct {
-		name      string
-		processed map[string]string
-		wantCount int
-	}{
-		{
-			name:      "no processed — finds all",
-			processed: nil,
-			wantCount: 2,
-		},
-		{
-			name:      "one processed — finds remaining",
-			processed: map[string]string{"2026-03-10-1423-ryan": discussionContentHash(filepath.Join(discussionsDir, "2026-03-10-1423-ryan"))},
-			wantCount: 1,
-		},
-		{
-			name: "all processed — finds none",
-			processed: map[string]string{
-				"2026-03-10-1423-ryan":  discussionContentHash(filepath.Join(discussionsDir, "2026-03-10-1423-ryan")),
-				"2026-03-11-0900-alice": discussionContentHash(filepath.Join(discussionsDir, "2026-03-11-0900-alice")),
-			},
-			wantCount: 0,
-		},
-		{
-			name:      "stale hash triggers re-scan",
-			processed: map[string]string{"2026-03-10-1423-ryan": "stale-hash"},
-			wantCount: 2,
-		},
+	// helper: set up a tcPath with two discussions and optional fact files
+	setup := func(t *testing.T, withFactFiles bool) (string, string) {
+		t.Helper()
+		tcPath := t.TempDir()
+		discussionsDir := filepath.Join(tcPath, "discussions")
+		createDiscussionDir(t, discussionsDir, "2026-03-10-1423-ryan", "Architecture Review", "2026-03-10T14:23:00Z")
+		createDiscussionDir(t, discussionsDir, "2026-03-11-0900-alice", "Sprint Planning", "2026-03-11T09:00:00Z")
+		if withFactFiles {
+			factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
+			os.MkdirAll(factsDir, 0o755)
+			os.WriteFile(filepath.Join(factsDir, "2026-03-10-1423-ryan.jsonl"), []byte(`{"_meta":{"schema_version":"2"}}`), 0o644)
+			os.WriteFile(filepath.Join(factsDir, "2026-03-11-0900-alice.jsonl"), []byte(`{"_meta":{"schema_version":"2"}}`), 0o644)
+		}
+		return tcPath, discussionsDir
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pending, err := scanPendingDiscussions(tcPath, tt.processed)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(pending) != tt.wantCount {
-				t.Errorf("got %d pending, want %d", len(pending), tt.wantCount)
-			}
-		})
-	}
+	t.Run("no processed — finds all", func(t *testing.T) {
+		tcPath, _ := setup(t, false)
+		pending, err := scanPendingDiscussions(tcPath, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 2 {
+			t.Errorf("got %d pending, want 2", len(pending))
+		}
+	})
+
+	t.Run("one processed with fact file — finds remaining", func(t *testing.T) {
+		tcPath, discussionsDir := setup(t, true)
+		processed := map[string]string{"2026-03-10-1423-ryan": discussionContentHash(filepath.Join(discussionsDir, "2026-03-10-1423-ryan"))}
+		pending, err := scanPendingDiscussions(tcPath, processed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// alice is not in processed map but her fact file exists → skipped
+		if len(pending) != 0 {
+			t.Errorf("got %d pending, want 0 (both have fact files)", len(pending))
+		}
+	})
+
+	t.Run("all processed with fact files — finds none", func(t *testing.T) {
+		tcPath, discussionsDir := setup(t, true)
+		processed := map[string]string{
+			"2026-03-10-1423-ryan":  discussionContentHash(filepath.Join(discussionsDir, "2026-03-10-1423-ryan")),
+			"2026-03-11-0900-alice": discussionContentHash(filepath.Join(discussionsDir, "2026-03-11-0900-alice")),
+		}
+		pending, err := scanPendingDiscussions(tcPath, processed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 0 {
+			t.Errorf("got %d pending, want 0", len(pending))
+		}
+	})
+
+	t.Run("stale hash + no fact file — re-processes", func(t *testing.T) {
+		tcPath, _ := setup(t, false)
+		processed := map[string]string{"2026-03-10-1423-ryan": "stale-hash"}
+		pending, err := scanPendingDiscussions(tcPath, processed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 2 {
+			t.Errorf("got %d pending, want 2", len(pending))
+		}
+	})
+
+	t.Run("stale hash + fact file exists — re-processes changed discussion", func(t *testing.T) {
+		tcPath, _ := setup(t, true)
+		processed := map[string]string{"2026-03-10-1423-ryan": "stale-hash"}
+		pending, err := scanPendingDiscussions(tcPath, processed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		// ryan has stale hash → re-process; alice not in processed but fact file exists → skip
+		if len(pending) != 1 {
+			t.Errorf("got %d pending, want 1", len(pending))
+		}
+	})
 }
 
 func TestScanPendingDiscussionsSorted(t *testing.T) {
@@ -158,43 +189,64 @@ func TestScanPendingDiscussionsParsesContent(t *testing.T) {
 }
 
 func TestScanPendingDiscussionsLegacyHashMigration(t *testing.T) {
-	tcPath := t.TempDir()
-	discussionsDir := filepath.Join(tcPath, "discussions")
+	t.Run("legacy hash + fact file exists — migrates and skips", func(t *testing.T) {
+		tcPath := t.TempDir()
+		discussionsDir := filepath.Join(tcPath, "discussions")
 
-	dirName := "2026-03-10-1423-ryan"
-	createDiscussionDir(t, discussionsDir, dirName, "Arch Review", "2026-03-10T14:23:00Z")
+		dirName := "2026-03-10-1423-ryan"
+		createDiscussionDir(t, discussionsDir, dirName, "Arch Review", "2026-03-10T14:23:00Z")
 
-	dirPath := filepath.Join(discussionsDir, dirName)
+		dirPath := filepath.Join(discussionsDir, dirName)
+		legacyHash := discussionCoreHash(dirPath)
 
-	// Simulate: old CLI stored a core-only hash (metadata.json only, since
-	// createDiscussionDir doesn't write summary.md or transcript.vtt).
-	legacyHash := discussionCoreHash(dirPath)
+		// Add server-generated summary.json — changes the full hash but not the core hash.
+		os.WriteFile(filepath.Join(dirPath, "summary.json"), []byte(`{"schema_version":2}`), 0o644)
 
-	// Now add a server-generated summary.json — this changes the full hash
-	// but not the core hash.
-	os.WriteFile(filepath.Join(dirPath, "summary.json"), []byte(`{"schema_version":2}`), 0o644)
+		fullHash := discussionContentHash(dirPath)
+		if fullHash == legacyHash {
+			t.Fatal("expected full hash to differ from core hash after adding summary.json")
+		}
 
-	// The full hash now differs from the legacy hash.
-	fullHash := discussionContentHash(dirPath)
-	if fullHash == legacyHash {
-		t.Fatal("expected full hash to differ from core hash after adding summary.json")
-	}
+		// Create the fact file that the old CLI would have written.
+		factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
+		os.MkdirAll(factsDir, 0o755)
+		os.WriteFile(filepath.Join(factsDir, dirName+".jsonl"), []byte(`{"_meta":{"schema_version":"2"}}`), 0o644)
 
-	// With the legacy hash stored, scanPendingDiscussions should detect the
-	// migration case: core hash matches stored → update stored hash, skip re-processing.
-	processed := map[string]string{dirName: legacyHash}
-	pending, err := scanPendingDiscussions(tcPath, processed)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(pending) != 0 {
-		t.Errorf("expected 0 pending (legacy hash migration), got %d", len(pending))
-	}
+		processed := map[string]string{dirName: legacyHash}
+		pending, err := scanPendingDiscussions(tcPath, processed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 0 {
+			t.Errorf("expected 0 pending (legacy hash migration), got %d", len(pending))
+		}
+		if processed[dirName] != fullHash {
+			t.Errorf("stored hash not migrated: got %q, want %q", processed[dirName], fullHash)
+		}
+	})
 
-	// The stored hash should have been updated to the full hash.
-	if processed[dirName] != fullHash {
-		t.Errorf("stored hash not migrated: got %q, want %q", processed[dirName], fullHash)
-	}
+	t.Run("legacy hash + missing fact file — re-processes", func(t *testing.T) {
+		tcPath := t.TempDir()
+		discussionsDir := filepath.Join(tcPath, "discussions")
+
+		dirName := "2026-03-10-1423-ryan"
+		createDiscussionDir(t, discussionsDir, dirName, "Arch Review", "2026-03-10T14:23:00Z")
+
+		dirPath := filepath.Join(discussionsDir, dirName)
+		legacyHash := discussionCoreHash(dirPath)
+
+		// Add server artifact but do NOT create the fact file.
+		os.WriteFile(filepath.Join(dirPath, "summary.json"), []byte(`{"schema_version":2}`), 0o644)
+
+		processed := map[string]string{dirName: legacyHash}
+		pending, err := scanPendingDiscussions(tcPath, processed)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 1 {
+			t.Errorf("expected 1 pending (missing fact file), got %d", len(pending))
+		}
+	})
 }
 
 func TestReadPendingDiscussionFacts(t *testing.T) {
