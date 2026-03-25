@@ -74,23 +74,27 @@ func scanPendingDiscussions(tcPath string, processed map[string]string) ([]discu
 
 		// compute content hash for change detection
 		currentHash := discussionContentHash(dirPath)
+		factFileExists := fileExists(filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".md")) ||
+			fileExists(filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".jsonl"))
 
-		// skip if already processed with same hash
-		if prevHash, ok := processed[dirName]; ok && prevHash == currentHash {
+		// skip if already processed with same hash and fact file exists
+		if prevHash, ok := processed[dirName]; ok && prevHash == currentHash && factFileExists {
+			continue
+		}
+
+		// legacy hash migration: older CLI versions hashed only core files
+		// (metadata.json, summary.md, transcript.vtt). If the core hash matches
+		// the stored hash, the discussion content hasn't changed — only the hash
+		// function expanded. Update the stored hash and skip re-processing,
+		// but only if the fact file still exists on disk.
+		if prevHash, ok := processed[dirName]; ok && prevHash == discussionCoreHash(dirPath) && factFileExists {
+			processed[dirName] = currentHash
 			continue
 		}
 
 		// skip if fact file already exists (covers fresh clone / deleted state)
-		// Check both .md (legacy) and .jsonl (current) formats.
-		if _, ok := processed[dirName]; !ok {
-			factFileMD := filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".md")
-			factFileJSONL := filepath.Join(tcPath, "memory", ".discussion-facts", dirName+".jsonl")
-			if _, err := os.Stat(factFileMD); err == nil {
-				continue
-			}
-			if _, err := os.Stat(factFileJSONL); err == nil {
-				continue
-			}
+		if _, ok := processed[dirName]; !ok && factFileExists {
+			continue
 		}
 
 		createdAt, err := time.Parse(time.RFC3339, meta.CreatedAt)
@@ -192,25 +196,40 @@ func loadDiscussionAnnotations(dirPath string) string {
 	return strings.TrimSpace(sb.String())
 }
 
+// coreDiscussionFiles are the original files used for content hashing before PR #293.
+// Used for legacy hash fallback when migrating from the old 3-file hash to the full hash.
+var coreDiscussionFiles = []string{"metadata.json", "summary.md", "transcript.vtt"}
+
+// serverDiscussionFiles are server-generated artifacts added to hashing in PR #293.
+var serverDiscussionFiles = []string{"keyframes.json", "summary.json", "annotations.json"}
+
 // discussionContentHash computes a hash of a discussion's content files
 // for change detection. Includes core files and server-generated artifacts.
 func discussionContentHash(dirPath string) string {
 	var parts []string
-
-	// core discussion files
-	for _, name := range []string{"metadata.json", "summary.md", "transcript.vtt"} {
+	for _, name := range coreDiscussionFiles {
 		if data, err := os.ReadFile(filepath.Join(dirPath, name)); err == nil {
 			parts = append(parts, string(data))
 		}
 	}
-
-	// server-generated visual/structured artifacts
-	for _, name := range []string{"keyframes.json", "summary.json", "annotations.json"} {
+	for _, name := range serverDiscussionFiles {
 		if data, err := os.ReadFile(filepath.Join(dirPath, name)); err == nil {
 			parts = append(parts, string(data))
 		}
 	}
+	return contentHash(parts...)
+}
 
+// discussionCoreHash computes a hash from only the core discussion files
+// (metadata.json, summary.md, transcript.vtt). This matches the hash that
+// older CLI versions stored, enabling migration without spurious re-processing.
+func discussionCoreHash(dirPath string) string {
+	var parts []string
+	for _, name := range coreDiscussionFiles {
+		if data, err := os.ReadFile(filepath.Join(dirPath, name)); err == nil {
+			parts = append(parts, string(data))
+		}
+	}
 	return contentHash(parts...)
 }
 
@@ -239,9 +258,9 @@ func categorizeAnnotations(af *discussion.AnnotationsFile) (decisions, learnings
 // structured data (summary.json), skipping the LLM entirely.
 // Pure data transformation — no network calls.
 //
-// Reads flat top-level fields and calls .Text() on rich structs. Rejects
-// unexpected schema versions to avoid silent misparse. Key context is derived
-// from TechnicalContext.Notes + Constraints + NonGoals + high-importance chapters.
+// Works with both v1 and v2 server summary formats. The top-level fact categories
+// (decisions, learnings, etc.) are identical in both versions. Chapters are only
+// present in v2 and contribute to Key Context when available.
 func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 	summary, err := discussion.LoadSummary(d.SummaryJSONDir)
 	if err != nil {
@@ -250,9 +269,8 @@ func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 	if summary == nil {
 		return "", fmt.Errorf("summary.json not found")
 	}
-	if summary.SchemaVersion != 2 {
-		slog.Warn("unexpected schema version, falling back to LLM", "version", summary.SchemaVersion)
-		return "", fmt.Errorf("unsupported schema version: %d", summary.SchemaVersion)
+	if !summary.HasCategorizedFacts() {
+		return "", fmt.Errorf("summary.json has no categorized facts")
 	}
 
 	var sb strings.Builder
@@ -293,7 +311,7 @@ func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 		}
 	}
 
-	// key context from TechnicalContext, Constraints, NonGoals, high-importance chapters
+	// key context from TechnicalContext, Constraints, NonGoals, and (v2 only) high-importance chapters
 	var keyContext []string
 	keyContext = append(keyContext, summary.TechnicalContext.Technologies...)
 	keyContext = append(keyContext, summary.TechnicalContext.Architecture...)
@@ -301,9 +319,11 @@ func extractFactsFromSummaryJSON(d discussionInput) (string, error) {
 	keyContext = append(keyContext, summary.TechnicalContext.Notes...)
 	keyContext = append(keyContext, summary.Constraints...)
 	keyContext = append(keyContext, summary.NonGoals...)
-	for _, ch := range summary.Chapters {
-		if ch.Importance > highImportanceThreshold && ch.Summary != "" {
-			keyContext = append(keyContext, ch.Summary)
+	if summary.SchemaVersion >= 2 {
+		for _, ch := range summary.Chapters {
+			if ch.Importance > highImportanceThreshold && ch.Summary != "" {
+				keyContext = append(keyContext, ch.Summary)
+			}
 		}
 	}
 	if len(keyContext) > 0 {
