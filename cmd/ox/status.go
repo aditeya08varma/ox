@@ -1673,7 +1673,7 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 		creds, credErr := gitserver.LoadCredentialsForEndpoint(endpointSlug)
 		if credErr == nil && creds != nil && creds.Token != "" && !creds.IsExpired() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			liveness := gitserver.ValidatePATLiveness(ctx, creds.ServerURL, creds.Token)
+			liveness := gitserver.ValidatePATLiveness(ctx, creds)
 			cancel()
 			if !liveness.Skipped {
 				output.Auth.GitPATValid = &liveness.Valid
@@ -1875,7 +1875,7 @@ func renderAuthStatus(authFile string) string {
 				b.WriteString(statusErrorStyle.Render("✗ expired"))
 			} else {
 				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-				liveness := gitserver.ValidatePATLiveness(ctx, creds.ServerURL, creds.Token)
+				liveness := gitserver.ValidatePATLiveness(ctx, creds)
 				cancel()
 				switch {
 				case liveness.Valid:
