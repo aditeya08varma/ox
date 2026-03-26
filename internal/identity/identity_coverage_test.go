@@ -1185,6 +1185,242 @@ func TestParseGCloudProperties(t *testing.T) {
 	})
 }
 
+// --- Resolve (top-level wrapper) ---
+// Prevents Resolve() from diverging from ResolveWithConfig(nil)
+
+func TestResolve(t *testing.T) {
+	result, err := Resolve()
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.NotNil(t, result.Primary)
+}
+
+// --- ResolveWithConfig primary-only mode ---
+// Prevents skipping provider collection when primary-only is requested
+
+func TestResolveWithConfig_PrimaryOnly(t *testing.T) {
+	result, err := ResolveWithConfig(&Config{Collection: "primary-only"})
+	assert.NoError(t, err)
+	assert.NotNil(t, result)
+	assert.NotNil(t, result.Primary)
+}
+
+// --- readAWSCredentials (file-based) ---
+// Prevents credential file parsing failures when profile selection or INI format varies
+
+func TestReadAWSCredentials(t *testing.T) {
+	t.Run("reads default profile", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		t.Setenv("AWS_ACCESS_KEY_ID", "")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+		t.Setenv("AWS_PROFILE", "")
+
+		awsDir := filepath.Join(dir, ".aws")
+		require.NoError(t, os.MkdirAll(awsDir, 0o755))
+
+		content := `[default]
+aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+`
+		require.NoError(t, os.WriteFile(filepath.Join(awsDir, "credentials"), []byte(content), 0o644))
+
+		ak, sk := readAWSCredentials()
+		assert.Equal(t, "AKIAIOSFODNN7EXAMPLE", ak)
+		assert.Equal(t, "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY", sk)
+	})
+
+	t.Run("reads named profile from AWS_PROFILE", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		t.Setenv("AWS_ACCESS_KEY_ID", "")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+		t.Setenv("AWS_PROFILE", "staging")
+
+		awsDir := filepath.Join(dir, ".aws")
+		require.NoError(t, os.MkdirAll(awsDir, 0o755))
+
+		content := `[default]
+aws_access_key_id = AKIADEFAULT
+aws_secret_access_key = default_secret
+
+[staging]
+aws_access_key_id = AKIASTAGING
+aws_secret_access_key = staging_secret
+`
+		require.NoError(t, os.WriteFile(filepath.Join(awsDir, "credentials"), []byte(content), 0o644))
+
+		ak, sk := readAWSCredentials()
+		assert.Equal(t, "AKIASTAGING", ak)
+		assert.Equal(t, "staging_secret", sk)
+	})
+
+	t.Run("returns empty when profile not found", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("HOME", dir)
+		t.Setenv("AWS_ACCESS_KEY_ID", "")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+		t.Setenv("AWS_PROFILE", "nonexistent")
+
+		awsDir := filepath.Join(dir, ".aws")
+		require.NoError(t, os.MkdirAll(awsDir, 0o755))
+
+		content := `[default]
+aws_access_key_id = AKIADEFAULT
+aws_secret_access_key = default_secret
+`
+		require.NoError(t, os.WriteFile(filepath.Join(awsDir, "credentials"), []byte(content), 0o644))
+
+		ak, sk := readAWSCredentials()
+		assert.Empty(t, ak)
+		assert.Empty(t, sk)
+	})
+
+	t.Run("returns empty when file missing", func(t *testing.T) {
+		t.Setenv("HOME", t.TempDir())
+		t.Setenv("AWS_ACCESS_KEY_ID", "")
+		t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+
+		ak, sk := readAWSCredentials()
+		assert.Empty(t, ak)
+		assert.Empty(t, sk)
+	})
+}
+
+// --- getAWSIdentity ---
+// Prevents panics or wrong identity format when STS call fails (common case)
+
+func TestGetAWSIdentity_FallbackOnSTSFailure(t *testing.T) {
+	// STS call will fail (no real signing), should return partial identity from access key
+	t.Setenv("AWS_ACCESS_KEY_ID", "AKIAIOSFODNN7EXAMPLE")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY")
+
+	identity, err := getAWSIdentity()
+	require.NoError(t, err)
+	assert.Equal(t, "aws", identity.Source)
+	assert.False(t, identity.Verified) // fallback is unverified
+	assert.Contains(t, identity.UserID, "aws:AKIAIOSFODNN")
+}
+
+func TestGetAWSIdentity_NoCredentials(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	t.Setenv("HOME", t.TempDir())
+
+	_, err := getAWSIdentity()
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no AWS credentials")
+}
+
+// --- getGitHubIdentity / getGitLabIdentity / getBitbucketIdentity / getAzureDevOpsIdentity ---
+// Prevents silent nil returns when tokens are missing (should return error)
+
+func TestProviderIdentity_NoTokenErrors(t *testing.T) {
+	t.Run("github returns error without token", func(t *testing.T) {
+		t.Setenv("GITHUB_TOKEN", "")
+		t.Setenv("GH_TOKEN", "")
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("PATH", "") // prevent gh CLI subprocess
+
+		_, err := getGitHubIdentity()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no GitHub token")
+	})
+
+	t.Run("gitlab returns error without token", func(t *testing.T) {
+		t.Setenv("GITLAB_TOKEN", "")
+		t.Setenv("GITLAB_PRIVATE_TOKEN", "")
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+		_, err := getGitLabIdentity()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no GitLab token")
+	})
+
+	t.Run("bitbucket returns error without token", func(t *testing.T) {
+		t.Setenv("BITBUCKET_TOKEN", "")
+		t.Setenv("BITBUCKET_ACCESS_TOKEN", "")
+
+		_, err := getBitbucketIdentity()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no Bitbucket token")
+	})
+
+	t.Run("azure devops returns error without token", func(t *testing.T) {
+		t.Setenv("AZURE_DEVOPS_EXT_PAT", "")
+		t.Setenv("SYSTEM_ACCESSTOKEN", "")
+		t.Setenv("HOME", t.TempDir())
+
+		_, err := getAzureDevOpsIdentity()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no Azure DevOps token")
+	})
+
+	t.Run("gitea returns error without token", func(t *testing.T) {
+		t.Setenv("GITEA_TOKEN", "")
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+		_, err := getGiteaIdentity("https://gitea.example.com")
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "no Gitea token")
+	})
+}
+
+// --- normalizeGiteaURL edge case ---
+// Prevents panic or wrong comparison when URL is malformed (no scheme)
+
+func TestNormalizeGiteaURL_MalformedFallback(t *testing.T) {
+	t.Parallel()
+
+	// exercise the fallback path in normalizeGiteaURL when url.Parse fails
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"bare host with trailing slash (no scheme, host empty)", "gitea.local/", ""}, // url.Parse succeeds but Host=""
+		{"bare host no scheme", "gitea.local", ""},                                    // same: Host="" when no scheme
+		{"invalid scheme triggers trimTrailingSlash fallback", "://gitea.local/", "://gitea.local"}, // url.Parse fails, fallback trims slash
+		{"invalid scheme no trailing slash", "://gitea.local", "://gitea.local"},                     // url.Parse fails, fallback returns as-is
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeGiteaURL(tt.url)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// --- readApplicationDefaultCredentials edge case ---
+// Prevents crash on malformed JSON in ADC file
+
+func TestReadApplicationDefaultCredentials_InvalidJSON(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+
+	adcDir := filepath.Join(dir, "gcloud")
+	require.NoError(t, os.MkdirAll(adcDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(adcDir, "application_default_credentials.json"), []byte("{bad json"), 0o644))
+
+	assert.Nil(t, readApplicationDefaultCredentials())
+}
+
+// --- readAzureCliConfig edge case ---
+// Prevents crash on invalid YAML in azure config
+
+func TestReadAzureCliConfig_InvalidYAML(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+
+	azureDir := filepath.Join(dir, ".azure")
+	require.NoError(t, os.MkdirAll(azureDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(azureDir, "config"), []byte("{{{{"), 0o644))
+
+	assert.Empty(t, readAzureCliConfig())
+}
+
 // --- person_info edge cases not in existing tests ---
 
 func TestFormatNameAsDisplay_Unicode(t *testing.T) {

@@ -1,6 +1,9 @@
 package agentinstance
 
 import (
+	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -469,5 +472,487 @@ func TestParseAgentID(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// newTestStore creates a Store in a temp dir for testing.
+func newTestStore(t *testing.T) *Store {
+	t.Helper()
+	tmpDir := t.TempDir()
+	store, err := NewStoreForUser(tmpDir, "testuser")
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() {
+		// remove lock files that may block TempDir cleanup
+		os.Remove(store.instancesPath + ".lock")
+	})
+	return store
+}
+
+// activeInstance returns a valid non-expired Instance with the given AgentID.
+func activeInstance(agentID string) *Instance {
+	return &Instance{
+		AgentID:         agentID,
+		ServerSessionID: "oxsid_" + agentID,
+		CreatedAt:       time.Now(),
+		ExpiresAt:       time.Now().Add(24 * time.Hour),
+	}
+}
+
+func TestNewStore(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewStore(tmpDir)
+	if err != nil {
+		t.Fatalf("NewStore() error: %v", err)
+	}
+	if store.userSlug != "anonymous" {
+		t.Errorf("NewStore should default userSlug to 'anonymous', got %q", store.userSlug)
+	}
+}
+
+func TestAddValidation(t *testing.T) {
+	store := newTestStore(t)
+
+	tests := []struct {
+		name string
+		inst *Instance
+	}{
+		{"nil instance", nil},
+		{"empty agent_id", &Instance{ServerSessionID: "oxsid_x"}},
+		{"empty server_session_id", &Instance{AgentID: "OxTest"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := store.Add(tt.inst); err == nil {
+				t.Error("expected validation error")
+			}
+		})
+	}
+}
+
+func TestUpdateValidation(t *testing.T) {
+	store := newTestStore(t)
+
+	tests := []struct {
+		name string
+		inst *Instance
+	}{
+		{"nil instance", nil},
+		{"empty agent_id", &Instance{AgentID: ""}},
+		{"not found", &Instance{AgentID: "OxGone", ServerSessionID: "oxsid_x", ExpiresAt: time.Now().Add(time.Hour)}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := store.Update(tt.inst); err == nil {
+				t.Error("expected error")
+			}
+		})
+	}
+}
+
+func TestIncrementPrimeCallCountValidation(t *testing.T) {
+	store := newTestStore(t)
+
+	tests := []struct {
+		name    string
+		agentID string
+		wantErr string
+	}{
+		{"empty agent_id", "", "cannot be empty"},
+		{"not found", "OxGone", "not found"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := store.IncrementPrimeCallCount(tt.agentID)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if tt.name == "not found" && !errors.Is(err, ErrInstanceNotFound) {
+				t.Errorf("expected ErrInstanceNotFound, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestGetEmptyAgentID(t *testing.T) {
+	store := newTestStore(t)
+	_, err := store.Get("")
+	if err == nil {
+		t.Error("expected error for empty agent_id")
+	}
+}
+
+func TestIsProcessAlive(t *testing.T) {
+	tests := []struct {
+		name  string
+		pid   int
+		alive bool
+	}{
+		{"zero pid", 0, false},
+		{"negative pid", -1, false},
+		// current process is alive; use its PID
+		{"current process", os.Getpid(), true},
+		// PID that almost certainly doesn't exist
+		{"dead process", 2147483647, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inst := &Instance{ParentPID: tt.pid}
+			if got := inst.IsProcessAlive(); got != tt.alive {
+				t.Errorf("IsProcessAlive() = %v, want %v (pid=%d)", got, tt.alive, tt.pid)
+			}
+		})
+	}
+}
+
+func TestReadMalformedJSONL(t *testing.T) {
+	store := newTestStore(t)
+
+	// write a valid instance, then garbage, then another valid instance
+	valid1 := activeInstance("OxGod1")
+	valid2 := activeInstance("OxGod2")
+
+	if err := store.Add(valid1); err != nil {
+		t.Fatalf("add valid1: %v", err)
+	}
+
+	// append garbage line directly to the JSONL file
+	f, err := os.OpenFile(store.instancesPath, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatalf("open for append: %v", err)
+	}
+	fmt.Fprintln(f, "this is not valid json {{{")
+	f.Close()
+
+	if err := store.Add(valid2); err != nil {
+		t.Fatalf("add valid2: %v", err)
+	}
+
+	// both valid instances should be readable; malformed line silently skipped
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 2 {
+		t.Errorf("expected 2 instances (skipping malformed), got %d", len(list))
+	}
+}
+
+func TestLastWriteWinsDeduplication(t *testing.T) {
+	store := newTestStore(t)
+
+	// append same AgentID twice with different models
+	inst1 := activeInstance("OxDup1")
+	inst1.Model = "first-model"
+	if err := store.Add(inst1); err != nil {
+		t.Fatalf("add first: %v", err)
+	}
+
+	inst2 := activeInstance("OxDup1")
+	inst2.Model = "second-model"
+	if err := store.Add(inst2); err != nil {
+		t.Fatalf("add second: %v", err)
+	}
+
+	got, err := store.Get("OxDup1")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	if got.Model != "second-model" {
+		t.Errorf("expected last-write-wins model 'second-model', got %q", got.Model)
+	}
+
+	// List should deduplicate
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 {
+		t.Errorf("expected 1 deduplicated instance, got %d", len(list))
+	}
+}
+
+func TestPruneHardCap(t *testing.T) {
+	store := newTestStore(t)
+
+	// add maxActive+5 instances to exceed the hard cap
+	overCount := maxActive + 5
+	for i := 0; i < overCount; i++ {
+		id := fmt.Sprintf("Ox%04d", i)
+		inst := &Instance{
+			AgentID:         id,
+			ServerSessionID: "oxsid_" + id,
+			CreatedAt:       time.Now().Add(time.Duration(i) * time.Millisecond),
+			ExpiresAt:       time.Now().Add(24 * time.Hour),
+		}
+		if err := store.Add(inst); err != nil {
+			t.Fatalf("add %s: %v", id, err)
+		}
+	}
+
+	pruned, err := store.Prune()
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if pruned != 5 {
+		t.Errorf("expected 5 evicted, got %d", pruned)
+	}
+
+	// should have exactly maxActive remaining
+	remaining := store.Count()
+	if remaining != maxActive {
+		t.Errorf("expected %d remaining, got %d", maxActive, remaining)
+	}
+
+	// oldest instances (lowest IDs) should have been evicted
+	_, err = store.Get("Ox0000")
+	if err == nil {
+		t.Error("oldest instance Ox0000 should have been evicted")
+	}
+	// newest should survive
+	newestID := fmt.Sprintf("Ox%04d", overCount-1)
+	_, err = store.Get(newestID)
+	if err != nil {
+		t.Errorf("newest instance %s should survive: %v", newestID, err)
+	}
+}
+
+func TestPruneNoExpired(t *testing.T) {
+	store := newTestStore(t)
+
+	inst := activeInstance("OxOnly")
+	if err := store.Add(inst); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	pruned, err := store.Prune()
+	if err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if pruned != 0 {
+		t.Errorf("expected 0 pruned when nothing expired, got %d", pruned)
+	}
+}
+
+func TestListFiltersExpired(t *testing.T) {
+	store := newTestStore(t)
+
+	expired := &Instance{
+		AgentID:         "OxDead",
+		ServerSessionID: "oxsid_dead",
+		CreatedAt:       time.Now().Add(-48 * time.Hour),
+		ExpiresAt:       time.Now().Add(-1 * time.Hour),
+	}
+	active := activeInstance("OxLive")
+
+	if err := store.Add(expired); err != nil {
+		t.Fatalf("add expired: %v", err)
+	}
+	if err := store.Add(active); err != nil {
+		t.Fatalf("add active: %v", err)
+	}
+
+	list, err := store.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(list) != 1 {
+		t.Errorf("expected 1 active instance, got %d", len(list))
+	}
+	if list[0].AgentID != "OxLive" {
+		t.Errorf("expected OxLive, got %q", list[0].AgentID)
+	}
+
+	// background compaction may fire; wait for it
+	time.Sleep(200 * time.Millisecond)
+}
+
+func TestShouldCompact(t *testing.T) {
+	store := newTestStore(t)
+
+	tests := []struct {
+		name         string
+		totalCount   int
+		expiredCount int
+		want         bool
+	}{
+		{"no expired", 10, 0, false},
+		{"high expired ratio", 10, 6, true},               // 60% > compactionExpiredRatio (50%)
+		{"entry count exceeds threshold", 501, 1, true},    // > compactionCountThreshold
+		{"low expired ratio, low count", 10, 1, false},     // 10% < pruned ratio threshold
+		{"at pruned ratio boundary", 100, 11, true},        // 11% > compactionPrunedRatio (10%)
+		{"just below pruned ratio", 100, 10, false},        // 10% == threshold, not >
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := store.shouldCompact(tt.totalCount, tt.expiredCount)
+			if got != tt.want {
+				t.Errorf("shouldCompact(%d, %d) = %v, want %v", tt.totalCount, tt.expiredCount, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestShouldCompactFileSize(t *testing.T) {
+	store := newTestStore(t)
+
+	// write enough data to exceed compactionSizeThreshold (200KB)
+	for i := 0; i < 1500; i++ {
+		inst := &Instance{
+			AgentID:         fmt.Sprintf("Ox%04d", i),
+			ServerSessionID: fmt.Sprintf("oxsid_%04d", i),
+			CreatedAt:       time.Now(),
+			ExpiresAt:       time.Now().Add(24 * time.Hour),
+			AgentType:       "claude-code",
+			Model:           "claude-opus-4-5-20250120",
+		}
+		if err := store.Add(inst); err != nil {
+			t.Fatalf("add %d: %v", i, err)
+		}
+	}
+
+	info, err := os.Stat(store.instancesPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Size() <= compactionSizeThreshold {
+		t.Skip("file not large enough to test size-based compaction")
+	}
+
+	// at least 1 expired needed for shouldCompact to return true
+	got := store.shouldCompact(1500, 1)
+	if !got {
+		t.Error("shouldCompact should trigger based on file size exceeding threshold")
+	}
+}
+
+func TestCountReturnsZeroOnEmptyStore(t *testing.T) {
+	store := newTestStore(t)
+	if got := store.Count(); got != 0 {
+		t.Errorf("Count() = %d on empty store, want 0", got)
+	}
+}
+
+func TestReadInstancesFromNonExistentFile(t *testing.T) {
+	store := newTestStore(t)
+	// remove the directory so the file cannot exist
+	os.RemoveAll(filepath.Dir(store.instancesPath))
+
+	instances, total, expired, err := store.readInstances()
+	if err != nil {
+		t.Fatalf("readInstances should handle missing file: %v", err)
+	}
+	if len(instances) != 0 || total != 0 || expired != 0 {
+		t.Errorf("expected empty results, got %d instances, %d total, %d expired", len(instances), total, expired)
+	}
+}
+
+func TestUpdatePreservesOtherInstances(t *testing.T) {
+	store := newTestStore(t)
+
+	a := activeInstance("OxAaa1")
+	a.Model = "model-a"
+	b := activeInstance("OxBbb1")
+	b.Model = "model-b"
+
+	if err := store.Add(a); err != nil {
+		t.Fatalf("add a: %v", err)
+	}
+	if err := store.Add(b); err != nil {
+		t.Fatalf("add b: %v", err)
+	}
+
+	// update only b
+	b.Model = "model-b-v2"
+	if err := store.Update(b); err != nil {
+		t.Fatalf("update b: %v", err)
+	}
+
+	// a should be untouched
+	gotA, err := store.Get("OxAaa1")
+	if err != nil {
+		t.Fatalf("get a: %v", err)
+	}
+	if gotA.Model != "model-a" {
+		t.Errorf("instance a model changed to %q, expected 'model-a'", gotA.Model)
+	}
+
+	gotB, err := store.Get("OxBbb1")
+	if err != nil {
+		t.Fatalf("get b: %v", err)
+	}
+	if gotB.Model != "model-b-v2" {
+		t.Errorf("instance b model = %q, want 'model-b-v2'", gotB.Model)
+	}
+}
+
+func TestJSONRoundTrip(t *testing.T) {
+	// verify all Instance fields survive JSON serialization
+	inst := &Instance{
+		AgentID:         "OxRt01",
+		ServerSessionID: "oxsid_roundtrip",
+		CreatedAt:       time.Now().Truncate(time.Millisecond),
+		ExpiresAt:       time.Now().Add(24 * time.Hour).Truncate(time.Millisecond),
+		AgentType:       "claude-code",
+		AgentVer:        "1.0.42",
+		Model:           "claude-opus-4-5",
+		ParentPID:       12345,
+		ParentAgentID:   "OxPrnt",
+		PrimeCallCount:  3,
+	}
+
+	data, err := json.Marshal(inst)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var got Instance
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if got.AgentID != inst.AgentID {
+		t.Errorf("AgentID: got %q, want %q", got.AgentID, inst.AgentID)
+	}
+	if got.ServerSessionID != inst.ServerSessionID {
+		t.Errorf("ServerSessionID: got %q, want %q", got.ServerSessionID, inst.ServerSessionID)
+	}
+	if got.AgentVer != inst.AgentVer {
+		t.Errorf("AgentVer: got %q, want %q", got.AgentVer, inst.AgentVer)
+	}
+	if got.ParentPID != inst.ParentPID {
+		t.Errorf("ParentPID: got %d, want %d", got.ParentPID, inst.ParentPID)
+	}
+	if got.ParentAgentID != inst.ParentAgentID {
+		t.Errorf("ParentAgentID: got %q, want %q", got.ParentAgentID, inst.ParentAgentID)
+	}
+	if got.PrimeCallCount != inst.PrimeCallCount {
+		t.Errorf("PrimeCallCount: got %d, want %d", got.PrimeCallCount, inst.PrimeCallCount)
+	}
+
+	// verify "oxsid" JSON tag
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
+	if _, ok := raw["oxsid"]; !ok {
+		t.Error("ServerSessionID should serialize as 'oxsid' in JSON")
+	}
+}
+
+func TestPruneEmptyStore(t *testing.T) {
+	store := newTestStore(t)
+	pruned, err := store.Prune()
+	if err != nil {
+		t.Fatalf("prune empty store: %v", err)
+	}
+	if pruned != 0 {
+		t.Errorf("expected 0 pruned on empty store, got %d", pruned)
 	}
 }
