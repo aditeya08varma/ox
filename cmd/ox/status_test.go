@@ -413,3 +413,360 @@ func TestStatusJSONOutput_RoundTrip(t *testing.T) {
 	assert.Equal(t, output.Version.UpdateAvailable, decoded.Version.UpdateAvailable)
 	assert.Equal(t, output.Version.Latest, decoded.Version.Latest)
 }
+
+func TestInferSemantic(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		label string
+		value string
+		want  string
+	}{
+		// success indicators
+		{"logged in", "Auth", "Logged in", "success"},
+		{"yes value", "Enabled", "Yes", "success"},
+		{"initialized", "Project", "Initialized", "success"},
+		{"enabled", "Feature", "Enabled", "success"},
+		{"true value", "Flag", "True", "success"},
+		{"case insensitive success", "Auth", "LOGGED IN", "success"},
+
+		// error indicators
+		{"not logged in", "Auth", "Not logged in", "error"},
+		{"no value", "Enabled", "No", "error"},
+		{"not initialized", "Project", "Not initialized", "error"},
+		{"none value", "Items", "None", "error"},
+		{"disabled", "Feature", "Disabled", "error"},
+		{"false value", "Flag", "False", "error"},
+
+		// highlight (user identity)
+		{"user label", "User", "Person A", "highlight"},
+		{"email label", "Email", "person@example.com", "highlight"},
+		{"user label case insensitive", "user", "someone", "highlight"},
+
+		// muted (technical details)
+		{"path label", "Config Path", "/some/path", "muted"},
+		{"directory label", "Directory", "/tmp", "muted"},
+		{"file label", "Auth File", "auth.json", "muted"},
+		{"id label", "Team ID", "abc-123", "muted"},
+		{"expires label", "Expires", "2026-01-01", "muted"},
+
+		// default (nothing matched)
+		{"generic value", "Status", "running", "default"},
+		{"generic label and value", "Count", "42", "default"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := inferSemantic(tt.label, tt.value)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFormatValue_PrefixesBySemanticType(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		semantic   string
+		wantPrefix string
+	}{
+		{"success", "✓ "},
+		{"error", "✗ "},
+		{"warning", "⚠ "},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.semantic, func(t *testing.T) {
+			t.Parallel()
+			got := formatValue("test", tt.semantic)
+			assert.Contains(t, got, tt.wantPrefix+"test")
+		})
+	}
+}
+
+func TestFormatValue_ContainsOriginalValue(t *testing.T) {
+	t.Parallel()
+
+	semantics := []string{"success", "error", "warning", "highlight", "muted", "default", "unknown"}
+	for _, sem := range semantics {
+		t.Run(sem, func(t *testing.T) {
+			t.Parallel()
+			got := formatValue("myvalue", sem)
+			assert.Contains(t, got, "myvalue")
+		})
+	}
+}
+
+func TestRenderVisibility(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		visibility string
+		wantText   string
+	}{
+		{"public", "public", "public"},
+		{"private", "private", "private"},
+		{"Public uppercase", "Public", "Public"},
+		{"unknown falls through", "internal", "internal"},
+		{"empty string", "", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := renderVisibility(tt.visibility)
+			assert.Contains(t, got, tt.wantText)
+		})
+	}
+}
+
+func TestRenderVisibilityWithAccess(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		visibility  string
+		accessLevel string
+		wantParts   []string
+	}{
+		{
+			"viewer shows read-only",
+			"private", "viewer",
+			[]string{"private", "read-only"},
+		},
+		{
+			"member shows checkmark",
+			"private", "member",
+			[]string{"private", "✓ member"},
+		},
+		{
+			"owner shows checkmark",
+			"public", "owner",
+			[]string{"public", "✓ owner"},
+		},
+		{
+			"empty access level no suffix",
+			"private", "",
+			[]string{"private"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := renderVisibilityWithAccess(tt.visibility, tt.accessLevel)
+			for _, part := range tt.wantParts {
+				assert.Contains(t, got, part)
+			}
+		})
+	}
+
+	// viewer should NOT contain the checkmark
+	t.Run("viewer excludes checkmark", func(t *testing.T) {
+		t.Parallel()
+		got := renderVisibilityWithAccess("private", "viewer")
+		assert.NotContains(t, got, "✓")
+	})
+}
+
+func TestRenderTable(t *testing.T) {
+	t.Parallel()
+
+	t.Run("contains header and underline", func(t *testing.T) {
+		t.Parallel()
+		got := renderTable("Auth", [][]string{{"Status", "Logged in"}})
+		assert.Contains(t, got, "Auth")
+		assert.Contains(t, got, "────")
+	})
+
+	t.Run("contains row values", func(t *testing.T) {
+		t.Parallel()
+		got := renderTable("Config", [][]string{
+			{"Path", "/tmp/config"},
+			{"File", "auth.json"},
+		})
+		assert.Contains(t, got, "/tmp/config")
+		assert.Contains(t, got, "auth.json")
+	})
+
+	t.Run("explicit semantic overrides auto-detect", func(t *testing.T) {
+		t.Parallel()
+		// "Yes" would auto-detect as success, but explicit "warning" overrides
+		got := renderTable("Test", [][]string{{"Status", "Yes", "warning"}})
+		assert.Contains(t, got, "⚠")
+		assert.Contains(t, got, "Yes")
+	})
+
+	t.Run("auto-detects semantic from value", func(t *testing.T) {
+		t.Parallel()
+		got := renderTable("Test", [][]string{{"Status", "Not logged in"}})
+		assert.Contains(t, got, "✗")
+	})
+}
+
+func TestFormatGitRepoStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name         string
+		status       gitRepoStatus
+		wantText     string
+		wantSemantic string
+	}{
+		{
+			"not found",
+			gitRepoStatus{Exists: false},
+			"not found", "error",
+		},
+		{
+			"error present",
+			gitRepoStatus{Exists: true, Error: "not a git repo"},
+			"not a git repo", "error",
+		},
+		{
+			"synced no last sync",
+			gitRepoStatus{Exists: true, UncommittedCount: 0},
+			"synced", "success",
+		},
+		{
+			"synced with last sync time",
+			gitRepoStatus{
+				Exists:           true,
+				UncommittedCount: 0,
+				HasLastSync:      true,
+				LastSync:         time.Now().Add(-30 * time.Second),
+			},
+			"synced (just now)", "success",
+		},
+		{
+			"uncommitted changes",
+			gitRepoStatus{Exists: true, UncommittedCount: 3},
+			"3 uncommitted", "warning",
+		},
+		{
+			"single uncommitted",
+			gitRepoStatus{Exists: true, UncommittedCount: 1},
+			"1 uncommitted", "warning",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			text, semantic := formatGitRepoStatus(tt.status)
+			assert.Contains(t, text, tt.wantText)
+			assert.Equal(t, tt.wantSemantic, semantic)
+		})
+	}
+}
+
+func TestFormatTimeAgo(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	tests := []struct {
+		name string
+		t    time.Time
+		want string
+	}{
+		{"just now", now.Add(-5 * time.Second), "just now"},
+		{"1 minute ago", now.Add(-1 * time.Minute), "1 minute ago"},
+		{"multiple minutes", now.Add(-15 * time.Minute), "15 minutes ago"},
+		{"1 hour ago", now.Add(-1 * time.Hour), "1 hour ago"},
+		{"multiple hours", now.Add(-5 * time.Hour), "5 hours ago"},
+		{"1 day ago", now.Add(-25 * time.Hour), "1 day ago"},
+		{"multiple days", now.Add(-72 * time.Hour), "3 days ago"},
+		{"1 week ago", now.Add(-8 * 24 * time.Hour), "1 week ago"},
+		{"multiple weeks", now.Add(-21 * 24 * time.Hour), "3 weeks ago"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatTimeAgo(tt.t)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFormatEndpointDisplay(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"empty returns default", "", "(default)"},
+		{"strips https", "https://sageox.ai", "sageox.ai"},
+		{"strips http", "http://sageox.ai", "sageox.ai"},
+		{"preserves bare host", "sageox.ai", "sageox.ai"},
+		{"strips https with subdomain", "https://api.test.sageox.ai", "api.test.sageox.ai"},
+		{"preserves path after strip", "https://sageox.ai/v1", "sageox.ai/v1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatEndpointDisplay(tt.url)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestExtractGitHost(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		url  string
+		want string
+	}{
+		{"empty", "", ""},
+		{"https url", "https://git.example.com/user/repo.git", "git.example.com"},
+		{"http url", "http://git.example.com/user/repo.git", "git.example.com"},
+		{"ssh url", "git@git.example.com:user/repo.git", "git.example.com"},
+		{"https with credentials", "https://oauth2:token@git.example.com/user/repo.git", "git.example.com"},
+		{"bare host", "git.example.com/user/repo.git", "git.example.com"},
+		{"host only no path", "git.example.com", "git.example.com"},
+		{"https host no path", "https://git.example.com", "git.example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := extractGitHost(tt.url)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestFormatDurationShort(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		duration time.Duration
+		want     string
+	}{
+		{"milliseconds", 500 * time.Millisecond, "500ms"},
+		{"sub-millisecond", 100 * time.Microsecond, "0ms"},
+		{"one second", 1 * time.Second, "1.0s"},
+		{"seconds", 45500 * time.Millisecond, "45.5s"},
+		{"one minute", 60 * time.Second, "1.0m"},
+		{"minutes", 150 * time.Second, "2.5m"},
+		{"one hour", 60 * time.Minute, "1.0h"},
+		{"hours", 90 * time.Minute, "1.5h"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := formatDurationShort(tt.duration)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

@@ -269,7 +269,7 @@ func TestCalculateThanksColumnsWidth(t *testing.T) {
 
 // --- endOfDay ---
 
-func TestEndOfDay(t *testing.T) {
+func TestEndOfDay_Coverage(t *testing.T) {
 	tests := []struct {
 		name string
 		t    time.Time
@@ -307,7 +307,7 @@ func TestEndOfDay(t *testing.T) {
 
 // --- endOfMonth ---
 
-func TestEndOfMonth(t *testing.T) {
+func TestEndOfMonth_Coverage(t *testing.T) {
 	tests := []struct {
 		name string
 		t    time.Time
