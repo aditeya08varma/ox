@@ -23,12 +23,16 @@ type StatusJSON struct {
 	Version string `json:"version"`
 	Uptime  string `json:"uptime"`
 
+	// backward-compatible top-level aliases (deprecated; use project.ledger)
+	LedgerPath string     `json:"ledger_path,omitempty"`
+	LastSync   *time.Time `json:"last_sync,omitempty"`
+
 	Sync statusSyncJSON `json:"sync"`
 
-	Project       statusProjectGroupJSON    `json:"project"`
-	OtherTeams    []statusTeamContextJSON   `json:"other_teams,omitempty"`
-	Issues        []statusIssueJSON         `json:"issues,omitempty"`
-	AutoExitIn    string                    `json:"auto_exit_in,omitempty"`
+	Project    statusProjectGroupJSON  `json:"project"`
+	OtherTeams []statusTeamContextJSON `json:"other_teams,omitempty"`
+	Issues     []statusIssueJSON       `json:"issues,omitempty"`
+	AutoExitIn string                  `json:"auto_exit_in,omitempty"`
 }
 
 type statusSyncJSON struct {
@@ -127,6 +131,15 @@ func BuildStatusJSON(status *StatusData, cliVersion string) *StatusJSON {
 			ws.LastSync = &l.LastSync
 		}
 		out.Project.Ledger = ws
+		out.LedgerPath = ws.Path
+		out.LastSync = ws.LastSync
+	} else if status.LedgerPath != "" {
+		// fallback for CLI/daemon version skew
+		out.LedgerPath = status.LedgerPath
+		if !status.LastSync.IsZero() {
+			t := status.LastSync
+			out.LastSync = &t
+		}
 	}
 
 	for _, tc := range teamContexts {
@@ -217,7 +230,7 @@ func gcStatusString(ws WorkspaceSyncStatus) string {
 	if remaining <= 0 {
 		return "due"
 	}
-	return "in " + formatRelativeTime(remaining)
+	return "in " + formatDurationCompact(remaining)
 }
 
 func buildCodeIndexJSON(cs *CodeDBStats) *statusCodeIndexJSON {
