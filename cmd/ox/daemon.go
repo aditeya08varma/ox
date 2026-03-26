@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -160,9 +162,16 @@ var daemonStatusCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			fmt.Printf(`{"running": true, "pid": %d, "ledger_path": %q, "last_sync": %q}`,
-				status.Pid, status.LedgerPath, status.LastSync.Format(time.RFC3339))
-			fmt.Println()
+			cliVer := version.Version
+			jsonStatus := daemon.BuildStatusJSON(status, cliVer)
+			var buf bytes.Buffer
+			enc := json.NewEncoder(&buf)
+			enc.SetEscapeHTML(false)
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(jsonStatus); err != nil {
+				return fmt.Errorf("failed to marshal status: %w", err)
+			}
+			fmt.Print(buf.String())
 			return nil
 		}
 
