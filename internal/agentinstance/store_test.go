@@ -484,8 +484,9 @@ func newTestStore(t *testing.T) *Store {
 		t.Fatalf("failed to create store: %v", err)
 	}
 	t.Cleanup(func() {
-		// remove lock files that may block TempDir cleanup
-		os.Remove(store.instancesPath + ".lock")
+		// remove lock/tmp files that background Prune() goroutines may create,
+		// which would otherwise race with t.TempDir() cleanup
+		os.RemoveAll(filepath.Dir(store.instancesPath))
 	})
 	return store
 }
