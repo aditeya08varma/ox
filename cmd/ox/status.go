@@ -23,103 +23,24 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/tui"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
 
-// statusJSONOutput is the JSON output structure for ox status --json
-type statusJSONOutput struct {
-	Auth         *statusAuthJSON         `json:"auth"`
-	Config       *statusConfigJSON       `json:"config"`
-	Project      *statusProjectJSON      `json:"project"`
-	Ledger       *statusLedgerJSON       `json:"ledger"`
-	TeamContexts []statusTeamContextJSON `json:"team_contexts,omitempty"`
-	AICoworkers  []statusAICoworkerJSON  `json:"ai_coworkers,omitempty"`
-	Daemon       *statusDaemonJSON       `json:"daemon,omitempty"`
-	Version      *statusVersionJSON      `json:"version,omitempty"`
-}
-
-type statusAICoworkerJSON struct {
-	AgentID       string `json:"agent_id"`
-	ContextTokens int64  `json:"context_tokens"`
-	CommandCount  int    `json:"command_count"`
-	Status        string `json:"status"`
-	Age           string `json:"age"`
-}
-
-type statusVersionJSON struct {
-	Current         string `json:"current"`
-	Latest          string `json:"latest,omitempty"`
-	UpdateAvailable bool   `json:"update_available"`
-}
-
-type statusAuthJSON struct {
-	Authenticated bool       `json:"authenticated"`
-	Endpoint      string     `json:"endpoint"`
-	User          string     `json:"user,omitempty"`
-	Email         string     `json:"email,omitempty"`
-	ExpiresAt     *time.Time `json:"expires_at,omitempty"`
-	GitPATValid   *bool      `json:"git_pat_valid,omitempty"`
-	GitPATReason  string     `json:"git_pat_reason,omitempty"`
-	Error         string     `json:"error,omitempty"`
-}
-
-type statusConfigJSON struct {
-	UserConfigDir  string `json:"user_config_dir"`
-	AuthFile       string `json:"auth_file"`
-	AuthFileExists bool   `json:"auth_file_exists"`
-}
-
-type statusProjectJSON struct {
-	Initialized bool                 `json:"initialized"`
-	Directory   string               `json:"directory"`
-	ConfigPath  string               `json:"config_path,omitempty"`
-	CodeIndex   *statusCodeIndexJSON `json:"code_index,omitempty"`
-}
-
-type statusCodeIndexJSON struct {
-	Indexed     bool       `json:"indexed"`
-	LastIndexed *time.Time `json:"last_indexed,omitempty"`
-	IndexingNow bool       `json:"indexing_now"`
-	Commits     int        `json:"commits,omitempty"`
-	Blobs       int        `json:"blobs,omitempty"`
-	Symbols     int        `json:"symbols,omitempty"`
-	Error       string     `json:"error,omitempty"`
-}
-
-type statusLedgerJSON struct {
-	Configured  bool   `json:"configured"`
-	Path        string `json:"path,omitempty"`
-	Exists      bool   `json:"exists"`
-	Branch      string `json:"branch,omitempty"`
-	Status      string `json:"status,omitempty"`
-	Error       string `json:"error,omitempty"`
-	Visibility  string `json:"visibility,omitempty"`
-	AccessLevel string `json:"access_level,omitempty"`
-}
-
-type statusTeamContextJSON struct {
-	TeamID   string     `json:"team_id"`
-	TeamName string     `json:"team_name,omitempty"`
-	Path     string     `json:"path"`
-	Exists   bool       `json:"exists"`
-	Branch   string     `json:"branch,omitempty"`
-	Status   string     `json:"status,omitempty"`
-	Error    string     `json:"error,omitempty"`
-	LastSync *time.Time `json:"last_sync,omitempty"`
-	Stale    bool       `json:"stale,omitempty"`
-}
-
-type statusDaemonJSON struct {
-	Running       bool   `json:"running"`
-	Pid           int    `json:"pid,omitempty"`
-	UptimeSeconds int64  `json:"uptime_seconds,omitempty"`
-	TotalSyncs    int    `json:"total_syncs,omitempty"`
-	SyncsLastHour int    `json:"syncs_last_hour,omitempty"`
-	LastError     string `json:"last_error,omitempty"`
-}
+// type aliases for status JSON types (defined in internal/status)
+type statusJSONOutput = status.JSONOutput
+type statusAICoworkerJSON = status.AICoworkerJSON
+type statusVersionJSON = status.VersionJSON
+type statusAuthJSON = status.AuthJSON
+type statusConfigJSON = status.ConfigJSON
+type statusProjectJSON = status.ProjectJSON
+type statusCodeIndexJSON = status.CodeIndexJSON
+type statusLedgerJSON = status.LedgerJSON
+type statusTeamContextJSON = status.TeamContextJSON
+type statusDaemonJSON = status.DaemonJSON
 
 var statusJSONFlag bool
 
@@ -169,42 +90,6 @@ var (
 	statusPrivateStyle = lipgloss.NewStyle().
 				Foreground(cli.ColorPrivate)
 )
-
-// inferSemantic auto-detects value semantic type from context
-func inferSemantic(label, value string) string {
-	valueLower := strings.ToLower(value)
-	labelLower := strings.ToLower(label)
-
-	// success indicators
-	if valueLower == "logged in" || valueLower == "yes" ||
-		valueLower == "initialized" || valueLower == "enabled" ||
-		valueLower == "true" {
-		return "success"
-	}
-
-	// error/negative indicators
-	if valueLower == "not logged in" || valueLower == "no" ||
-		valueLower == "not initialized" || valueLower == "none" ||
-		valueLower == "disabled" || valueLower == "false" {
-		return "error"
-	}
-
-	// highlight important user identity data in gold
-	if labelLower == "user" || labelLower == "email" {
-		return "highlight"
-	}
-
-	// muted for technical details (IDs, paths, directories)
-	if strings.Contains(labelLower, "id") ||
-		strings.Contains(labelLower, "path") ||
-		strings.Contains(labelLower, "directory") ||
-		strings.Contains(labelLower, "file") ||
-		strings.Contains(labelLower, "expires") {
-		return "muted"
-	}
-
-	return "default"
-}
 
 // formatValue applies semantic styling to a value
 func formatValue(value string, semantic string) string {
@@ -270,7 +155,7 @@ func renderTable(header string, rows [][]string) string {
 		if len(row) > 2 {
 			semantic = row[2]
 		} else {
-			semantic = inferSemantic(label, value)
+			semantic = status.InferSemantic(label, value)
 		}
 
 		b.WriteString(statusLabelStyle.Render(label))
@@ -281,18 +166,8 @@ func renderTable(header string, rows [][]string) string {
 	return b.String()
 }
 
-// gitRepoStatus holds information about a git repository's status
-type gitRepoStatus struct {
-	Path             string
-	Exists           bool
-	Branch           string
-	UncommittedCount int
-	IsSynced         bool
-	HasLastSync      bool
-	LastSync         time.Time
-	BehindCount      int
-	Error            string
-}
+// type alias for git repo status (defined in internal/status)
+type gitRepoStatus = status.GitRepoStatus
 
 // getGitRepoStatus checks the status of a git repository at the given path.
 // Returns status info including branch, uncommitted changes, and sync state.
@@ -347,83 +222,6 @@ func getGitRepoStatus(repoPath string, lastSync time.Time, hasLastSync bool) git
 	return status
 }
 
-// formatGitRepoStatus formats the git repo status for display
-func formatGitRepoStatus(status gitRepoStatus) (string, string) {
-	if !status.Exists {
-		return "not found", "error"
-	}
-
-	if status.Error != "" {
-		return status.Error, "error"
-	}
-
-	var parts []string
-
-	if status.UncommittedCount > 0 {
-		parts = append(parts, fmt.Sprintf("%d uncommitted", status.UncommittedCount))
-	} else {
-		parts = append(parts, "synced")
-	}
-
-	result := strings.Join(parts, ", ")
-
-	if status.HasLastSync {
-		result += fmt.Sprintf(" (%s)", formatTimeAgo(status.LastSync))
-	}
-
-	if status.UncommittedCount > 0 {
-		return result, "warning"
-	}
-	return result, "success"
-}
-
-// formatTimeAgo formats a time as a human-readable relative time
-func formatTimeAgo(t time.Time) string {
-	now := time.Now()
-	diff := now.Sub(t)
-
-	switch {
-	case diff < time.Minute:
-		return "just now"
-	case diff < time.Hour:
-		mins := int(diff.Minutes())
-		if mins == 1 {
-			return "1 minute ago"
-		}
-		return fmt.Sprintf("%d minutes ago", mins)
-	case diff < 24*time.Hour:
-		hours := int(diff.Hours())
-		if hours == 1 {
-			return "1 hour ago"
-		}
-		return fmt.Sprintf("%d hours ago", hours)
-	case diff < 7*24*time.Hour:
-		days := int(diff.Hours() / 24)
-		if days == 1 {
-			return "1 day ago"
-		}
-		return fmt.Sprintf("%d days ago", days)
-	default:
-		weeks := int(diff.Hours() / 24 / 7)
-		if weeks == 1 {
-			return "1 week ago"
-		}
-		return fmt.Sprintf("%d weeks ago", weeks)
-	}
-}
-
-// formatEndpointDisplay returns a shorter display name for an endpoint URL.
-// e.g., "https://api.test.sageox.ai" -> "api.test.sageox.ai"
-func formatEndpointDisplay(endpointURL string) string {
-	if endpointURL == "" {
-		return "(default)"
-	}
-	// strip protocol prefix for cleaner display
-	endpointURL = strings.TrimPrefix(endpointURL, "https://")
-	endpointURL = strings.TrimPrefix(endpointURL, "http://")
-	return endpointURL
-}
-
 // getGitRemoteURL returns the origin remote URL for a git repo.
 // Returns empty string on error or if remote doesn't exist.
 func getGitRemoteURL(repoPath string) string {
@@ -436,43 +234,6 @@ func getGitRemoteURL(repoPath string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(output))
-}
-
-// extractGitHost extracts the hostname from a git clone URL.
-// Handles both HTTPS (https://git.example.com/...) and SSH (git@git.example.com:...) URLs.
-// Returns empty string if parsing fails.
-func extractGitHost(cloneURL string) string {
-	if cloneURL == "" {
-		return ""
-	}
-
-	// handle SSH URLs (git@host:path)
-	if strings.Contains(cloneURL, "@") && !strings.Contains(cloneURL, "://") {
-		// git@git.example.com:user/repo.git -> git.example.com
-		parts := strings.SplitN(cloneURL, "@", 2)
-		if len(parts) == 2 {
-			hostPart := strings.SplitN(parts[1], ":", 2)
-			if len(hostPart) >= 1 {
-				return hostPart[0]
-			}
-		}
-		return ""
-	}
-
-	// handle HTTPS URLs
-	cloneURL = strings.TrimPrefix(cloneURL, "https://")
-	cloneURL = strings.TrimPrefix(cloneURL, "http://")
-
-	// remove credentials if present (oauth2:token@host)
-	if idx := strings.Index(cloneURL, "@"); idx != -1 {
-		cloneURL = cloneURL[idx+1:]
-	}
-
-	// extract host (before first /)
-	if idx := strings.Index(cloneURL, "/"); idx != -1 {
-		return cloneURL[:idx]
-	}
-	return cloneURL
 }
 
 // getLedgerRemoteURL fetches the ledger git URL from the cloud API.
@@ -668,7 +429,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			ledgerLastSync = daemonSync
 			ledgerHasSync = true
 		}
-		status := getGitRepoStatus(localCfg.Ledger.Path, ledgerLastSync, ledgerHasSync)
+		repoStatus := getGitRepoStatus(localCfg.Ledger.Path, ledgerLastSync, ledgerHasSync)
 
 		repoID := ""
 		if projectCfg != nil {
@@ -706,7 +467,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 
 		// check if ledger doesn't exist locally and user doesn't have access (ErrLedgerNotFound)
-		ledgerNotAccessible := !status.Exists && errors.Is(ledgerStatusErr, api.ErrLedgerNotFound)
+		ledgerNotAccessible := !repoStatus.Exists && errors.Is(ledgerStatusErr, api.ErrLedgerNotFound)
 
 		// status line (indented)
 		if ledgerNotAccessible {
@@ -722,7 +483,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			}
 			b.WriteString("\n")
 		} else {
-			statusText, semantic := formatGitRepoStatus(status)
+			statusText, semantic := status.FormatGitRepoStatus(repoStatus)
 			if accessLevel == "viewer" {
 				statusText += " (read-only)"
 			}
@@ -731,7 +492,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			b.WriteString("\n")
 
 			// hint for missing repo
-			if !status.Exists {
+			if !repoStatus.Exists {
 				b.WriteString(statusLabelStyle.Render(""))
 				b.WriteString(statusMutedStyle.Render("Run 'ox doctor --fix' to restore"))
 				b.WriteString("\n")
@@ -932,12 +693,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 					tcHasSync = true
 				}
 			}
-			status := getGitRepoStatus(expectedPath, tcLastSync, tcHasSync)
-			if status.Error != "" {
+			repoStatus := getGitRepoStatus(expectedPath, tcLastSync, tcHasSync)
+			if repoStatus.Error != "" {
 				b.WriteString(statusLabelStyle.Render("  Status"))
-				b.WriteString(formatValue(status.Error, "error"))
+				b.WriteString(formatValue(repoStatus.Error, "error"))
 			} else {
-				statusText, semantic := formatGitRepoStatus(status)
+				statusText, semantic := status.FormatGitRepoStatus(repoStatus)
 				b.WriteString(statusLabelStyle.Render("  Status"))
 				b.WriteString(formatValue(statusText, semantic))
 			}
@@ -947,7 +708,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			syncState := daemon.LoadSyncState(expectedPath)
 			if syncState.IsStale(daemon.DefaultStalenessThreshold) && !syncState.LastSync.IsZero() {
 				b.WriteString(statusLabelStyle.Render(""))
-				b.WriteString(statusWarningStyle.Render(fmt.Sprintf("⚠ stale (last sync %s)", formatTimeAgo(syncState.LastSync))))
+				b.WriteString(statusWarningStyle.Render(fmt.Sprintf("⚠ stale (last sync %s)", status.FormatTimeAgo(syncState.LastSync))))
 				b.WriteString("\n")
 			}
 		} else {
@@ -997,13 +758,13 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 
 		gitDir := filepath.Join(expectedPath, ".git")
 		if _, err := os.Stat(gitDir); err == nil {
-			status := getGitRepoStatus(expectedPath, time.Time{}, false)
-			if status.Error != "" {
+			repoStatus := getGitRepoStatus(expectedPath, time.Time{}, false)
+			if repoStatus.Error != "" {
 				b.WriteString(statusLabelStyle.Render("  Status"))
-				b.WriteString(formatValue(status.Error, "error"))
-			} else if status.UncommittedCount > 0 {
+				b.WriteString(formatValue(repoStatus.Error, "error"))
+			} else if repoStatus.UncommittedCount > 0 {
 				b.WriteString(statusLabelStyle.Render("  Status"))
-				b.WriteString(formatValue(fmt.Sprintf("%d uncommitted", status.UncommittedCount), "warning"))
+				b.WriteString(formatValue(fmt.Sprintf("%d uncommitted", repoStatus.UncommittedCount), "warning"))
 			} else {
 				b.WriteString(statusLabelStyle.Render("  Status"))
 				b.WriteString(formatValue("synced", "success"))
@@ -1014,7 +775,7 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			syncState := daemon.LoadSyncState(expectedPath)
 			if syncState.IsStale(daemon.DefaultStalenessThreshold) && !syncState.LastSync.IsZero() {
 				b.WriteString(statusLabelStyle.Render(""))
-				b.WriteString(statusWarningStyle.Render(fmt.Sprintf("⚠ stale (last sync %s)", formatTimeAgo(syncState.LastSync))))
+				b.WriteString(statusWarningStyle.Render(fmt.Sprintf("⚠ stale (last sync %s)", status.FormatTimeAgo(syncState.LastSync))))
 				b.WriteString("\n")
 			}
 		} else {
@@ -1117,7 +878,7 @@ func daemonHasConfiguredRepos(status *daemon.StatusData) bool {
 }
 
 // renderDaemonSyncSection renders daemon sync statistics
-func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.SyncEvent, localCfg *config.LocalConfig, noProject bool, projectInitialized bool) string {
+func renderDaemonSyncSection(ds *daemon.StatusData, syncHistory []daemon.SyncEvent, localCfg *config.LocalConfig, noProject bool, projectInitialized bool) string {
 	var b strings.Builder
 
 	b.WriteString("\n")
@@ -1135,7 +896,7 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	}
 
 	// handle nil status (daemon not connected)
-	if status == nil {
+	if ds == nil {
 		b.WriteString(statusLabelStyle.Render("Status"))
 		if daemon.IsStarting() {
 			b.WriteString(statusMutedStyle.Render("◐ starting — process is running but not yet accepting connections"))
@@ -1151,7 +912,7 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 			hasAny := false
 			if localCfg.Ledger != nil && localCfg.Ledger.HasLastSync() {
 				b.WriteString(statusLabelStyle.Render("  Last ledger sync"))
-				b.WriteString(statusMutedStyle.Render(formatTimeAgo(localCfg.Ledger.LastSync)))
+				b.WriteString(statusMutedStyle.Render(status.FormatTimeAgo(localCfg.Ledger.LastSync)))
 				b.WriteString("\n")
 				hasAny = true
 			}
@@ -1162,7 +923,7 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 						name = tc.TeamID
 					}
 					b.WriteString(statusLabelStyle.Render(fmt.Sprintf("  Last %s sync", name)))
-					b.WriteString(statusMutedStyle.Render(formatTimeAgo(tc.LastSync)))
+					b.WriteString(statusMutedStyle.Render(status.FormatTimeAgo(tc.LastSync)))
 					b.WriteString("\n")
 					hasAny = true
 				}
@@ -1178,24 +939,24 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	}
 
 	// check for bootstrap vs warning condition
-	hasConfiguredRepos := daemonHasConfiguredRepos(status)
-	bootstrapping := isDaemonBootstrapping(status)
-	isNotSyncing := status.Running &&
-		status.Uptime > daemonSyncWarningThreshold &&
-		status.TotalSyncs == 0 &&
+	hasConfiguredRepos := daemonHasConfiguredRepos(ds)
+	bootstrapping := isDaemonBootstrapping(ds)
+	isNotSyncing := ds.Running &&
+		ds.Uptime > daemonSyncWarningThreshold &&
+		ds.TotalSyncs == 0 &&
 		hasConfiguredRepos &&
 		!bootstrapping // don't warn during bootstrap
 
 	// daemon status
-	if status.Running {
+	if ds.Running {
 		b.WriteString(statusLabelStyle.Render("Status"))
-		uptime := formatDurationShort(status.Uptime)
+		uptime := status.FormatDurationShort(ds.Uptime)
 		if bootstrapping {
-			b.WriteString(statusMutedStyle.Render(fmt.Sprintf("⟳ running %s — initial sync in progress (pid %d)", uptime, status.Pid)))
+			b.WriteString(statusMutedStyle.Render(fmt.Sprintf("⟳ running %s — initial sync in progress (pid %d)", uptime, ds.Pid)))
 		} else if isNotSyncing {
-			b.WriteString(formatValue(fmt.Sprintf("running %s, not syncing (pid %d)", uptime, status.Pid), "warning"))
+			b.WriteString(formatValue(fmt.Sprintf("running %s, not syncing (pid %d)", uptime, ds.Pid), "warning"))
 		} else {
-			b.WriteString(formatValue(fmt.Sprintf("running %s (pid %d)", uptime, status.Pid), "success"))
+			b.WriteString(formatValue(fmt.Sprintf("running %s (pid %d)", uptime, ds.Pid), "success"))
 		}
 		b.WriteString("\n")
 	} else {
@@ -1212,23 +973,23 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	// sync stats - show warning indicator when zero syncs but repos are configured
 	b.WriteString(statusLabelStyle.Render("Total syncs"))
 	if bootstrapping {
-		b.WriteString(statusMutedStyle.Render(fmt.Sprintf("%d (initial sync pending)", status.TotalSyncs)))
+		b.WriteString(statusMutedStyle.Render(fmt.Sprintf("%d (initial sync pending)", ds.TotalSyncs)))
 	} else if isNotSyncing {
-		b.WriteString(statusWarningStyle.Render(fmt.Sprintf("%d ", status.TotalSyncs)))
+		b.WriteString(statusWarningStyle.Render(fmt.Sprintf("%d ", ds.TotalSyncs)))
 		b.WriteString(formatValue("expected syncs with configured repos", "warning"))
 	} else {
-		b.WriteString(statusValueStyle.Render(fmt.Sprintf("%d", status.TotalSyncs)))
+		b.WriteString(statusValueStyle.Render(fmt.Sprintf("%d", ds.TotalSyncs)))
 		lastSyncStr := ""
-		if !status.LastSync.IsZero() {
-			lastSyncStr = fmt.Sprintf("; last @ %s", status.LastSync.Format("2006-01-02 15:04:05"))
+		if !ds.LastSync.IsZero() {
+			lastSyncStr = fmt.Sprintf("; last @ %s", ds.LastSync.Format("2006-01-02 15:04:05"))
 		}
-		b.WriteString(statusMutedStyle.Render(fmt.Sprintf(" (%d last hour%s)", status.SyncsLastHour, lastSyncStr)))
+		b.WriteString(statusMutedStyle.Render(fmt.Sprintf(" (%d last hour%s)", ds.SyncsLastHour, lastSyncStr)))
 	}
 	b.WriteString("\n")
 
-	if status.AvgSyncTime > 0 {
+	if ds.AvgSyncTime > 0 {
 		b.WriteString(statusLabelStyle.Render("Avg sync time"))
-		b.WriteString(statusMutedStyle.Render(formatDurationShort(status.AvgSyncTime)))
+		b.WriteString(statusMutedStyle.Render(status.FormatDurationShort(ds.AvgSyncTime)))
 		b.WriteString("\n")
 	}
 
@@ -1248,25 +1009,25 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	}
 
 	// error info
-	if status.LastError != "" {
+	if ds.LastError != "" {
 		b.WriteString(statusLabelStyle.Render("Last error"))
-		b.WriteString(formatValue(status.LastError, "error"))
+		b.WriteString(formatValue(ds.LastError, "error"))
 		b.WriteString("\n")
 	}
 
 	// show workspaces being synced (new unified view)
 	// count total workspaces across all types
 	totalWorkspaces := 0
-	for _, wsList := range status.Workspaces {
+	for _, wsList := range ds.Workspaces {
 		totalWorkspaces += len(wsList)
 	}
 
 	if totalWorkspaces > 0 {
 		// extract common git host from any workspace for the header
 		syncHost := ""
-		for _, wsList := range status.Workspaces {
+		for _, wsList := range ds.Workspaces {
 			for _, ws := range wsList {
-				if h := extractGitHost(ws.CloneURL); h != "" {
+				if h := status.ExtractGitHost(ws.CloneURL); h != "" {
 					syncHost = h
 					break
 				}
@@ -1286,7 +1047,7 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 		// display in consistent order: ledger first, then team-contexts
 		// compute label width: longest label + 2 (indent) + 2 (padding), min 20
 		syncLabelWidth := 20
-		for _, wsList := range status.Workspaces {
+		for _, wsList := range ds.Workspaces {
 			for _, ws := range wsList {
 				name := ws.Type
 				if ws.TeamName != "" {
@@ -1303,7 +1064,7 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 
 		wsOrder := []string{"ledger", "team-context"}
 		for _, wsType := range wsOrder {
-			workspaces, ok := status.Workspaces[wsType]
+			workspaces, ok := ds.Workspaces[wsType]
 			if !ok || len(workspaces) == 0 {
 				continue
 			}
@@ -1324,7 +1085,7 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 				}
 				// condensed: sync time on same line as label
 				if !ws.LastSync.IsZero() {
-					b.WriteString(statusMutedStyle.Render(formatTimeAgo(ws.LastSync)))
+					b.WriteString(statusMutedStyle.Render(status.FormatTimeAgo(ws.LastSync)))
 				} else if !ws.Exists && ws.CloneURL != "" {
 					b.WriteString(statusMutedStyle.Render(ws.CloneURL))
 				}
@@ -1340,17 +1101,17 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 	} else {
 		// fall back to legacy display if Workspaces not populated
 		// ledger path
-		if status.LedgerPath != "" {
+		if ds.LedgerPath != "" {
 			b.WriteString("\n")
 			b.WriteString(statusLabelStyle.Render("Ledger path"))
-			b.WriteString(statusMutedStyle.Render(status.LedgerPath))
+			b.WriteString(statusMutedStyle.Render(ds.LedgerPath))
 			b.WriteString("\n")
 		}
 
 		// team contexts from daemon
-		if len(status.TeamContexts) > 0 {
+		if len(ds.TeamContexts) > 0 {
 			b.WriteString("\n")
-			for _, tc := range status.TeamContexts {
+			for _, tc := range ds.TeamContexts {
 				label := tc.TeamName
 				if label == "" {
 					label = tc.TeamID
@@ -1362,7 +1123,7 @@ func renderDaemonSyncSection(status *daemon.StatusData, syncHistory []daemon.Syn
 				// sync status with git host
 				if !tc.LastSync.IsZero() {
 					b.WriteString(statusLabelStyle.Render("  Last sync"))
-					b.WriteString(statusMutedStyle.Render(formatTimeAgo(tc.LastSync)))
+					b.WriteString(statusMutedStyle.Render(status.FormatTimeAgo(tc.LastSync)))
 					b.WriteString("\n")
 				}
 				if tc.LastErr != "" {
@@ -1411,36 +1172,6 @@ func renderAICoworkersSection(client *daemon.Client) string {
 	b.WriteString("\n")
 
 	return b.String()
-}
-
-// estimateTokens estimates token count from byte count (~4 bytes per token for English/code)
-func estimateTokens(bytes int64) int {
-	return int(bytes / 4)
-}
-
-// formatTokenCount formats a token count in human-readable form (e.g., "3.1K", "1.2M")
-func formatTokenCount(tokens int) string {
-	if tokens < 1000 {
-		return fmt.Sprintf("%d", tokens)
-	}
-	if tokens < 1_000_000 {
-		return fmt.Sprintf("%.1fK", float64(tokens)/1000)
-	}
-	return fmt.Sprintf("%.1fM", float64(tokens)/1_000_000)
-}
-
-// formatDurationShort formats a duration in a short human-readable form
-func formatDurationShort(d time.Duration) string {
-	if d < time.Second {
-		return fmt.Sprintf("%dms", d.Milliseconds())
-	}
-	if d < time.Minute {
-		return fmt.Sprintf("%.1fs", d.Seconds())
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%.1fm", d.Minutes())
-	}
-	return fmt.Sprintf("%.1fh", d.Hours())
 }
 
 var statusCmd = &cobra.Command{
@@ -1799,7 +1530,7 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 						ContextTokens: inst.CumulativeContextTokens,
 						CommandCount:  inst.CommandCount,
 						Status:        inst.Status,
-						Age:           formatTimeAgo(inst.LastHeartbeat),
+						Age:           status.FormatTimeAgo(inst.LastHeartbeat),
 					})
 				}
 			}
@@ -1952,7 +1683,7 @@ func renderProjectStatus(cwd, gitRoot string, initialized bool, codeStats *daemo
 		default:
 			b.WriteString(statusMutedStyle.Render("└── "))
 			if !codeStats.LastIndexed.IsZero() {
-				b.WriteString(statusSuccessStyle.Render(formatTimeAgo(codeStats.LastIndexed)))
+				b.WriteString(statusSuccessStyle.Render(status.FormatTimeAgo(codeStats.LastIndexed)))
 			} else {
 				b.WriteString(statusSuccessStyle.Render("✓"))
 			}
