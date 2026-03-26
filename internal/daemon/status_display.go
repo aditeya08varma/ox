@@ -96,7 +96,7 @@ func BuildStatusJSON(status *StatusData, cliVersion string) *StatusJSON {
 	}
 
 	out := &StatusJSON{
-		Running: true,
+		Running: status.Running,
 		Health:  healthStr,
 		Pid:     status.Pid,
 		Version: semverOnly(status.Version),
