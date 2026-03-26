@@ -12,6 +12,253 @@ import (
 	"github.com/sageox/ox/internal/tui"
 )
 
+// --- JSON output types (mirror the human-readable status) ---
+
+// StatusJSON is the top-level JSON output for `ox daemon status --json`.
+// It mirrors the information shown in the human-readable output.
+type StatusJSON struct {
+	Running bool   `json:"running"`
+	Health  string `json:"health"`
+	Pid     int    `json:"pid"`
+	Version string `json:"version"`
+	Uptime  string `json:"uptime"`
+
+	// backward-compatible top-level aliases (deprecated; use project.ledger)
+	LedgerPath string     `json:"ledger_path,omitempty"`
+	LastSync   *time.Time `json:"last_sync,omitempty"`
+
+	Sync statusSyncJSON `json:"sync"`
+
+	Project    statusProjectGroupJSON  `json:"project"`
+	OtherTeams []statusTeamContextJSON `json:"other_teams,omitempty"`
+	Issues     []statusIssueJSON       `json:"issues,omitempty"`
+	AutoExitIn string                  `json:"auto_exit_in,omitempty"`
+}
+
+type statusSyncJSON struct {
+	Repos      int    `json:"repos"`
+	Interval   string `json:"interval"`
+	TotalSyncs int    `json:"total_syncs"`
+	AvgTime    string `json:"avg_time,omitempty"`
+	Errors     int    `json:"errors"`
+	LastError  string `json:"last_error,omitempty"`
+}
+
+type statusProjectGroupJSON struct {
+	Ledger      *statusWorkspaceJSON  `json:"ledger,omitempty"`
+	TeamContext *statusTeamContextJSON `json:"team_context,omitempty"`
+	CodeIndex   *statusCodeIndexJSON  `json:"code_index,omitempty"`
+}
+
+type statusWorkspaceJSON struct {
+	Status   string     `json:"status"`
+	Path     string     `json:"path"`
+	LastSync *time.Time `json:"last_sync,omitempty"`
+}
+
+type statusTeamContextJSON struct {
+	TeamID   string     `json:"team_id"`
+	TeamName string     `json:"team_name"`
+	Status   string     `json:"status"`
+	Path     string     `json:"path"`
+	LastSync *time.Time `json:"last_sync,omitempty"`
+	GCStatus string     `json:"gc_status,omitempty"`
+}
+
+type statusCodeIndexJSON struct {
+	Status      string     `json:"status"`
+	LastIndexed *time.Time `json:"last_indexed,omitempty"`
+	Commits     int        `json:"commits,omitempty"`
+	Blobs       int        `json:"blobs,omitempty"`
+	PRs         int        `json:"prs,omitempty"`
+	Issues      int        `json:"issues,omitempty"`
+	Error       string     `json:"error,omitempty"`
+}
+
+type statusIssueJSON struct {
+	Type     string `json:"type"`
+	Severity string `json:"severity"`
+	Summary  string `json:"summary"`
+	Repo     string `json:"repo,omitempty"`
+}
+
+// BuildStatusJSON constructs the curated JSON output that mirrors the human-readable status.
+func BuildStatusJSON(status *StatusData, cliVersion string) *StatusJSON {
+	health := determineHealth(status)
+	var healthStr string
+	switch health {
+	case HealthHealthy:
+		healthStr = "healthy"
+	case HealthWarning:
+		healthStr = "warning"
+	case HealthCritical:
+		healthStr = "critical"
+	}
+
+	out := &StatusJSON{
+		Running: status.Running,
+		Health:  healthStr,
+		Pid:     status.Pid,
+		Version: semverOnly(status.Version),
+		Uptime:  formatDurationCompact(status.Uptime),
+	}
+
+	// sync summary
+	out.Sync = statusSyncJSON{
+		Repos:      countWorkspaces(status),
+		TotalSyncs: status.TotalSyncs,
+		Errors:     status.RecentErrorCount,
+		LastError:  status.LastError,
+	}
+	if status.SyncIntervalRead > 0 {
+		out.Sync.Interval = formatDurationCompact(status.SyncIntervalRead)
+	}
+	if status.AvgSyncTime > 0 {
+		out.Sync.AvgTime = formatDurationCompact(status.AvgSyncTime)
+	}
+
+	// project group
+	ledgers := status.Workspaces["ledger"]
+	teamContexts := status.Workspaces["team-context"]
+
+	if len(ledgers) > 0 {
+		l := ledgers[0]
+		ws := &statusWorkspaceJSON{
+			Status: wsStatusString(l),
+			Path:   l.Path,
+		}
+		if !l.LastSync.IsZero() {
+			ws.LastSync = &l.LastSync
+		}
+		out.Project.Ledger = ws
+		out.LedgerPath = ws.Path
+		out.LastSync = ws.LastSync
+	} else if status.LedgerPath != "" {
+		// fallback for CLI/daemon version skew
+		out.LedgerPath = status.LedgerPath
+		if !status.LastSync.IsZero() {
+			t := status.LastSync
+			out.LastSync = &t
+		}
+	}
+
+	for _, tc := range teamContexts {
+		if status.ProjectTeamID != "" && tc.TeamID == status.ProjectTeamID {
+			out.Project.TeamContext = buildTeamContextJSON(tc)
+			break
+		}
+	}
+
+	if status.CodeDB != nil {
+		out.Project.CodeIndex = buildCodeIndexJSON(status.CodeDB)
+	}
+
+	// other teams
+	for _, tc := range teamContexts {
+		if status.ProjectTeamID != "" && tc.TeamID == status.ProjectTeamID {
+			continue
+		}
+		out.OtherTeams = append(out.OtherTeams, *buildTeamContextJSON(tc))
+	}
+
+	// issues
+	for _, issue := range status.Issues {
+		out.Issues = append(out.Issues, statusIssueJSON{
+			Type:     issue.Type,
+			Severity: issue.Severity,
+			Summary:  issue.Summary,
+			Repo:     issue.Repo,
+		})
+	}
+
+	// auto-exit
+	if status.InactivityTimeout > 0 {
+		remaining := status.InactivityTimeout - status.TimeSinceActivity
+		if remaining < 0 {
+			remaining = 0
+		}
+		out.AutoExitIn = formatDurationCompact(remaining)
+	}
+
+	return out
+}
+
+func wsStatusString(ws WorkspaceSyncStatus) string {
+	switch {
+	case !ws.Exists:
+		return "not_cloned"
+	case ws.LastErr != "":
+		return "error"
+	case ws.Syncing:
+		return "syncing"
+	case ws.LastSync.IsZero():
+		return "not_synced"
+	default:
+		return "ok"
+	}
+}
+
+func buildTeamContextJSON(tc WorkspaceSyncStatus) *statusTeamContextJSON {
+	name := tc.TeamName
+	if name == "" {
+		name = tc.TeamID
+	}
+	out := &statusTeamContextJSON{
+		TeamID:   tc.TeamID,
+		TeamName: name,
+		Status:   wsStatusString(tc),
+		Path:     tc.Path,
+		GCStatus: gcStatusString(tc),
+	}
+	if !tc.LastSync.IsZero() {
+		out.LastSync = &tc.LastSync
+	}
+	return out
+}
+
+func gcStatusString(ws WorkspaceSyncStatus) string {
+	if ws.LastGCTime.IsZero() {
+		return "due"
+	}
+	intervalDays := ws.GCIntervalDays
+	if intervalDays <= 0 {
+		intervalDays = 7
+	}
+	age := time.Since(ws.LastGCTime)
+	interval := time.Duration(intervalDays) * 24 * time.Hour
+	remaining := interval - age
+	if remaining <= 0 {
+		return "due"
+	}
+	return "in " + formatDurationCompact(remaining)
+}
+
+func buildCodeIndexJSON(cs *CodeDBStats) *statusCodeIndexJSON {
+	out := &statusCodeIndexJSON{}
+	switch {
+	case cs.IndexingNow:
+		out.Status = "indexing"
+	case !cs.IndexExists:
+		out.Status = "pending"
+	case cs.LastError != "" && cs.Commits == 0:
+		out.Status = "pending"
+	case cs.LastError != "":
+		out.Status = "error"
+		out.Error = cs.LastError
+	case !cs.LastIndexed.IsZero():
+		out.Status = "ok"
+		t := cs.LastIndexed
+		out.LastIndexed = &t
+		out.Commits = cs.Commits
+		out.Blobs = cs.Blobs
+		out.PRs = cs.PRs
+		out.Issues = cs.Issues
+	default:
+		out.Status = "ready"
+	}
+	return out
+}
+
 var (
 	// semantic colors for status
 	colorHealthy  = lipgloss.Color("2") // green
