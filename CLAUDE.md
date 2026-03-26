@@ -485,6 +485,8 @@ RIGHT: Update tests to use CreateInitializedProject(t) helper
 
 **No test theater.** Each test must answer: "What real-world failure does this prevent?" Tests that pass when the feature is broken are worse than no tests.
 
+**Coverage target: 85%+ for internal packages.** New code should ship with tests. PRs that reduce coverage below 85% need justification. Check with `go test ./internal/... -coverprofile=coverage.out && go tool cover -func=coverage.out | grep total`.
+
 ### Bug Fix Regression Tests
 
 Every bug fix MUST include a regression test unless existing tests already cover the failure mode.
