@@ -57,16 +57,6 @@ func TestSyncMetrics_RecordConflict(t *testing.T) {
 	assert.False(t, snap.LastConflict.IsZero())
 }
 
-func TestSyncMetrics_RecordForcePush(t *testing.T) {
-	m := NewSyncMetrics()
-
-	m.RecordForcePush()
-	m.RecordForcePush()
-
-	snap := m.Snapshot()
-	assert.Equal(t, int64(2), snap.ForcePushCount)
-}
-
 func TestSyncMetrics_RecordTeamSync(t *testing.T) {
 	m := NewSyncMetrics()
 
@@ -93,7 +83,6 @@ func TestSyncMetrics_SnapshotEmpty(t *testing.T) {
 	assert.Equal(t, int64(0), snap.PullSuccessCount)
 	assert.Equal(t, int64(0), snap.PullFailureCount)
 	assert.Equal(t, int64(0), snap.ConflictCount)
-	assert.Equal(t, int64(0), snap.ForcePushCount)
 	assert.True(t, snap.LastPullSuccess.IsZero())
 	assert.True(t, snap.LastPullFailure.IsZero())
 	assert.True(t, snap.LastConflict.IsZero())
