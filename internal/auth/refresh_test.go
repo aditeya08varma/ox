@@ -758,3 +758,51 @@ func TestEnsureValidTokenForEndpoint_ExpiredToken(t *testing.T) {
 	assert.Equal(t, "refreshed-refresh", token.RefreshToken)
 	assert.Equal(t, expired.UserInfo.UserID, token.UserInfo.UserID)
 }
+
+func TestRefreshToken_JWTExchangeRefreshTokenFallback(t *testing.T) {
+	t.Parallel()
+
+	// Regression test: when OAuth2 token refresh returns no refresh_token,
+	// but JWT exchange does, the stored token should use the JWT exchange one.
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case TokenEndpoint:
+			// OAuth2 refresh returns NO refresh_token
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": "refreshed-opaque",
+				"token_type":   "Bearer",
+				"expires_in":   3600,
+				// no refresh_token
+			})
+		case "/api/v1/cli/auth/token":
+			// JWT exchange DOES return a refresh_token
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "refreshed-jwt",
+				"refresh_token": "jwt-refresh-from-exchange",
+				"token_type":    "Bearer",
+				"expires_in":    900,
+			})
+		default:
+			t.Errorf("unexpected endpoint: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer mockServer.Close()
+
+	client := NewAuthClientWithDir(t.TempDir()).WithEndpoint(mockServer.URL)
+
+	// create expired token with empty refresh token (simulates the bug scenario)
+	expiredToken := createTestToken(-1 * time.Hour)
+	expiredToken.RefreshToken = ""
+	expiredToken.SessionToken = "session-token-for-refresh"
+	require.NoError(t, client.SaveToken(expiredToken))
+
+	token, err := client.EnsureValidToken(300)
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, "refreshed-jwt", token.AccessToken)
+	assert.Equal(t, "jwt-refresh-from-exchange", token.RefreshToken,
+		"refresh_token should fall back to JWT exchange response when OAuth2 response doesn't provide one")
+}
