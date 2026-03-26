@@ -845,6 +845,312 @@ func TestEndpointSlug(t *testing.T) {
 	})
 }
 
+func TestWhisperDBDir(t *testing.T) {
+	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE")
+	defer restoreEnv(saved)
+	clearXDGEnv()
+
+	tests := []struct {
+		name        string
+		repoID      string
+		endpointURL string
+		wantEmpty   bool
+		wantSuffix  string
+	}{
+		{
+			name:        "valid inputs",
+			repoID:      "repo123",
+			endpointURL: "https://sageox.ai",
+			wantSuffix:  filepath.Join(".sageox", "cache", "whisper"),
+		},
+		{
+			name:        "empty repoID returns empty",
+			repoID:      "",
+			endpointURL: "https://sageox.ai",
+			wantEmpty:   true,
+		},
+		{
+			name:        "empty endpoint returns empty",
+			repoID:      "repo123",
+			endpointURL: "",
+			wantEmpty:   true,
+		},
+		{
+			name:        "both empty returns empty",
+			repoID:      "",
+			endpointURL: "",
+			wantEmpty:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := WhisperDBDir(tt.repoID, tt.endpointURL)
+			if tt.wantEmpty {
+				if dir != "" {
+					t.Errorf("WhisperDBDir(%q, %q) = %q, want empty", tt.repoID, tt.endpointURL, dir)
+				}
+				return
+			}
+			if !strings.Contains(dir, tt.wantSuffix) {
+				t.Errorf("WhisperDBDir(%q, %q) = %q, want to contain %q", tt.repoID, tt.endpointURL, dir, tt.wantSuffix)
+			}
+		})
+	}
+}
+
+func TestTeamWhisperDBDir(t *testing.T) {
+	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE")
+	defer restoreEnv(saved)
+	clearXDGEnv()
+
+	tests := []struct {
+		name        string
+		teamID      string
+		endpointURL string
+		wantEmpty   bool
+		wantSuffix  string
+	}{
+		{
+			name:        "valid inputs",
+			teamID:      "team456",
+			endpointURL: "https://sageox.ai",
+			wantSuffix:  filepath.Join("team456", ".sageox", "cache", "whisper"),
+		},
+		{
+			name:        "empty teamID returns empty",
+			teamID:      "",
+			endpointURL: "https://sageox.ai",
+			wantEmpty:   true,
+		},
+		{
+			name:        "empty endpoint returns empty",
+			teamID:      "team456",
+			endpointURL: "",
+			wantEmpty:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := TeamWhisperDBDir(tt.teamID, tt.endpointURL)
+			if tt.wantEmpty {
+				if dir != "" {
+					t.Errorf("TeamWhisperDBDir(%q, %q) = %q, want empty", tt.teamID, tt.endpointURL, dir)
+				}
+				return
+			}
+			if !strings.Contains(dir, tt.wantSuffix) {
+				t.Errorf("TeamWhisperDBDir(%q, %q) = %q, want to contain %q", tt.teamID, tt.endpointURL, dir, tt.wantSuffix)
+			}
+		})
+	}
+}
+
+func TestLedgerSessionCacheBase(t *testing.T) {
+	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE")
+	defer restoreEnv(saved)
+	clearXDGEnv()
+
+	tests := []struct {
+		name        string
+		repoID      string
+		endpointURL string
+		wantEmpty   bool
+		wantSuffix  string
+	}{
+		{
+			name:        "valid inputs",
+			repoID:      "repo123",
+			endpointURL: "https://sageox.ai",
+			wantSuffix:  filepath.Join(".sageox", "cache"),
+		},
+		{
+			name:        "empty repoID returns empty",
+			repoID:      "",
+			endpointURL: "https://sageox.ai",
+			wantEmpty:   true,
+		},
+		{
+			name:        "empty endpoint returns empty",
+			repoID:      "repo123",
+			endpointURL: "",
+			wantEmpty:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := LedgerSessionCacheBase(tt.repoID, tt.endpointURL)
+			if tt.wantEmpty {
+				if dir != "" {
+					t.Errorf("LedgerSessionCacheBase(%q, %q) = %q, want empty", tt.repoID, tt.endpointURL, dir)
+				}
+				return
+			}
+			if !strings.HasSuffix(dir, tt.wantSuffix) {
+				t.Errorf("LedgerSessionCacheBase(%q, %q) = %q, want suffix %q", tt.repoID, tt.endpointURL, dir, tt.wantSuffix)
+			}
+			// must be under the ledger data dir
+			ledgerDir := LedgersDataDir(tt.repoID, tt.endpointURL)
+			if !strings.HasPrefix(dir, ledgerDir) {
+				t.Errorf("LedgerSessionCacheBase result %q not under LedgersDataDir %q", dir, ledgerDir)
+			}
+		})
+	}
+}
+
+func TestCodeDBDataDir(t *testing.T) {
+	dir := CodeDBDataDir("/home/user/project")
+	want := filepath.Join("/home/user/project", ".sageox", "cache", "codedb")
+	if dir != want {
+		t.Errorf("CodeDBDataDir() = %q, want %q", dir, want)
+	}
+}
+
+func TestConfigFiles(t *testing.T) {
+	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE")
+	defer restoreEnv(saved)
+	clearXDGEnv()
+
+	tests := []struct {
+		name     string
+		fn       func() string
+		wantFile string
+	}{
+		{"GitCredentialsFile", GitCredentialsFile, "git-credentials.json"},
+		{"VerificationCacheFile", VerificationCacheFile, "verification-cache.json"},
+		{"MachineIDFile", MachineIDFile, "machine-id"},
+		{"UserConfigFile", UserConfigFile, "config.yaml"},
+		{"AuthFile", AuthFile, "auth.json"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := tt.fn()
+			if !strings.HasSuffix(path, tt.wantFile) {
+				t.Errorf("%s() = %q, want suffix %q", tt.name, path, tt.wantFile)
+			}
+			// all config files must live under ConfigDir
+			if !strings.HasPrefix(path, ConfigDir()) {
+				t.Errorf("%s() = %q, want prefix %q", tt.name, path, ConfigDir())
+			}
+		})
+	}
+}
+
+func TestDaemonCacheDir(t *testing.T) {
+	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE")
+	defer restoreEnv(saved)
+	clearXDGEnv()
+
+	dir := DaemonCacheDir()
+	cacheDir := CacheDir()
+	if dir != cacheDir {
+		t.Errorf("DaemonCacheDir() = %q, want %q (same as CacheDir)", dir, cacheDir)
+	}
+}
+
+func TestHeartbeatCacheDir(t *testing.T) {
+	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE")
+	defer restoreEnv(saved)
+	clearXDGEnv()
+
+	t.Run("valid endpoint", func(t *testing.T) {
+		dir := HeartbeatCacheDir("https://sageox.ai")
+		if !strings.HasSuffix(dir, filepath.Join("sageox.ai", "heartbeats")) {
+			t.Errorf("HeartbeatCacheDir() = %q, want suffix sageox.ai/heartbeats", dir)
+		}
+		if !strings.HasPrefix(dir, CacheDir()) {
+			t.Errorf("HeartbeatCacheDir() = %q, want prefix %q", dir, CacheDir())
+		}
+	})
+
+	t.Run("normalizes api prefix", func(t *testing.T) {
+		dir := HeartbeatCacheDir("https://api.sageox.ai")
+		if !strings.Contains(dir, filepath.Join("sageox.ai", "heartbeats")) {
+			t.Errorf("HeartbeatCacheDir(api.sageox.ai) = %q, want to contain sageox.ai/heartbeats", dir)
+		}
+	})
+
+	t.Run("empty endpoint panics", func(t *testing.T) {
+		defer func() {
+			if r := recover(); r == nil {
+				t.Error("HeartbeatCacheDir('') should panic when endpoint is empty")
+			}
+		}()
+		HeartbeatCacheDir("")
+	})
+}
+
+func TestTempDir_UsernameFallbacks(t *testing.T) {
+	t.Run("uses USER env var", func(t *testing.T) {
+		t.Setenv("USER", "testperson")
+		t.Setenv("USERNAME", "")
+		dir := TempDir()
+		if !strings.Contains(dir, "testperson") {
+			t.Errorf("TempDir() = %q, want to contain 'testperson'", dir)
+		}
+	})
+
+	t.Run("falls back to USERNAME when USER is empty", func(t *testing.T) {
+		t.Setenv("USER", "")
+		t.Setenv("USERNAME", "winuser")
+		dir := TempDir()
+		if !strings.Contains(dir, "winuser") {
+			t.Errorf("TempDir() = %q, want to contain 'winuser'", dir)
+		}
+	})
+
+	t.Run("falls back to sageox when both empty", func(t *testing.T) {
+		t.Setenv("USER", "")
+		t.Setenv("USERNAME", "")
+		dir := TempDir()
+		// the path should contain "sageox" as the username fallback
+		// path is /tmp/sageox/sageox — the first sageox is the username, second is the app dir
+		parts := strings.Split(dir, string(filepath.Separator))
+		// find the username part (after /tmp/ or base temp dir)
+		found := false
+		for i, p := range parts {
+			if p == "sageox" && i > 0 && i < len(parts)-1 {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("TempDir() = %q, want 'sageox' as fallback username in path", dir)
+		}
+	})
+}
+
+func TestXDGStateHome(t *testing.T) {
+	saved := saveEnv("OX_XDG_ENABLE", "OX_XDG_DISABLE", "XDG_STATE_HOME")
+	defer restoreEnv(saved)
+
+	t.Run("respects XDG_STATE_HOME", func(t *testing.T) {
+		clearXDGEnv()
+		os.Setenv("XDG_STATE_HOME", "/custom/state")
+		// xdgStateHome is not exported, but we can test it indirectly via StateDir
+		// when OX_XDG_DISABLE is NOT set (XDG mode), StateDir uses xdgRuntimeDir
+		// so we need legacy mode where StateDir uses SageoxDir()/state
+		// Actually xdgStateHome is used nowhere in production currently...
+		// Let's test it directly since we're in the same package
+		result := xdgStateHome()
+		if result != "/custom/state" {
+			t.Errorf("xdgStateHome() = %q, want /custom/state", result)
+		}
+	})
+
+	t.Run("defaults to ~/.local/state", func(t *testing.T) {
+		clearXDGEnv()
+		os.Unsetenv("XDG_STATE_HOME")
+		result := xdgStateHome()
+		if !strings.HasSuffix(result, filepath.Join(".local", "state")) {
+			t.Errorf("xdgStateHome() = %q, want suffix .local/state", result)
+		}
+	})
+}
+
 // TestAlternateSessionCacheDirsCoverAllLocations verifies that the union of
 // SessionCacheDir + AlternateSessionCacheDirs always covers all known cache
 // locations regardless of XDG_CACHE_HOME setting.

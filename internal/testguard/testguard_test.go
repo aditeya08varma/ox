@@ -8,83 +8,149 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-func TestMinimalEnv_InjectsNoDaemon(t *testing.T) {
+// --- MinimalEnv ---
+
+func TestMinimalEnv_AlwaysInjectsSentinels(t *testing.T) {
 	env := MinimalEnv(nil)
 
-	found := false
-	for _, kv := range env {
+	envMap := envToMap(env)
+	assert.Equal(t, "1", envMap["OX_NO_DAEMON"], "must inject OX_NO_DAEMON=1")
+	assert.Equal(t, "1", envMap["DO_NOT_TRACK"], "must inject DO_NOT_TRACK=1")
+}
+
+func TestMinimalEnv_InheritsAllowlistedVars(t *testing.T) {
+	// set a known allowlisted var and confirm it's inherited
+	t.Setenv("GOPATH", "/tmp/testgopath")
+	t.Setenv("HOME", "/tmp/testhome")
+
+	env := MinimalEnv(nil)
+	envMap := envToMap(env)
+
+	assert.Equal(t, "/tmp/testgopath", envMap["GOPATH"])
+	assert.Equal(t, "/tmp/testhome", envMap["HOME"])
+}
+
+func TestMinimalEnv_BlocksNonAllowlistedVars(t *testing.T) {
+	blockedVars := []string{
+		"SAGEOX_ENDPOINT",
+		"AWS_SECRET_ACCESS_KEY",
+		"ANTHROPIC_API_KEY",
+		"DATABASE_URL",
+		"RANDOM_VAR_12345",
+	}
+	for _, key := range blockedVars {
+		t.Setenv(key, "some-value")
+	}
+
+	env := MinimalEnv(nil)
+	envMap := envToMap(env)
+
+	for _, key := range blockedVars {
+		_, present := envMap[key]
+		assert.False(t, present, "MinimalEnv must block non-allowlisted var %s", key)
+	}
+}
+
+func TestMinimalEnv_TestVarsAppendedAfterBase(t *testing.T) {
+	// test vars should appear after base env, so they can override
+	// (e.g., a test providing its own PATH)
+	overrides := []string{
+		"SAGEOX_ENDPOINT=http://localhost:9999",
+		"CUSTOM_FLAG=yes",
+	}
+
+	env := MinimalEnv(overrides)
+
+	// find positions: OX_NO_DAEMON should come before test vars
+	noDaemonIdx := -1
+	endpointIdx := -1
+	for i, kv := range env {
 		if kv == "OX_NO_DAEMON=1" {
-			found = true
-			break
+			noDaemonIdx = i
+		}
+		if strings.HasPrefix(kv, "SAGEOX_ENDPOINT=") {
+			endpointIdx = i
 		}
 	}
-	assert.True(t, found, "MinimalEnv should always inject OX_NO_DAEMON=1")
+	require.NotEqual(t, -1, noDaemonIdx, "OX_NO_DAEMON must be present")
+	require.NotEqual(t, -1, endpointIdx, "test override must be present")
+	assert.Less(t, noDaemonIdx, endpointIdx,
+		"sentinel vars should appear before test overrides so overrides win")
 }
 
-func TestMinimalEnv_InjectsDoNotTrack(t *testing.T) {
-	env := MinimalEnv(nil)
-
-	found := false
-	for _, kv := range env {
-		if kv == "DO_NOT_TRACK=1" {
-			found = true
-			break
-		}
-	}
-	assert.True(t, found, "MinimalEnv should always inject DO_NOT_TRACK=1")
-}
-
-func TestMinimalEnv_ExcludesSageoxEndpoint(t *testing.T) {
-	// even if SAGEOX_ENDPOINT is in the real env, MinimalEnv should NOT inherit it
-	t.Setenv("SAGEOX_ENDPOINT", "https://sageox.ai")
+func TestMinimalEnv_SkipsEmptyAllowlistedVars(t *testing.T) {
+	// unset an allowlisted var; it should not appear as "KEY="
+	t.Setenv("LC_ALL", "")
 
 	env := MinimalEnv(nil)
-
 	for _, kv := range env {
 		parts := strings.SplitN(kv, "=", 2)
-		assert.NotEqual(t, "SAGEOX_ENDPOINT", parts[0],
-			"MinimalEnv should not inherit SAGEOX_ENDPOINT from real environment")
-	}
-}
-
-func TestMinimalEnv_AllowsTestOverrides(t *testing.T) {
-	env := MinimalEnv([]string{
-		"SAGEOX_ENDPOINT=http://localhost:12345",
-		"OX_XDG_ENABLE=1",
-	})
-
-	found := false
-	for _, kv := range env {
-		if kv == "SAGEOX_ENDPOINT=http://localhost:12345" {
-			found = true
+		if parts[0] == "LC_ALL" {
+			t.Fatal("MinimalEnv should skip allowlisted vars with empty values")
 		}
 	}
-	assert.True(t, found, "test overrides should be included")
 }
 
-func TestValidateEnv_AllowsTestInfra(t *testing.T) {
-	// test.sageox.ai should be allowed (it's test infrastructure)
-	validateEnv(t, []string{
-		"SAGEOX_ENDPOINT=https://test.sageox.ai",
-	})
-	// if we get here without Fatalf, the test passes
-}
+// --- validateEnv ---
 
-func TestValidateEnv_RejectsProductionHost(t *testing.T) {
-	// production sageox.ai (without test. prefix) should be detected
-	env := []string{
-		"SAGEOX_ENDPOINT=https://sageox.ai",
+func TestValidateEnv_SafeValues(t *testing.T) {
+	// these should all pass without fataling
+	tests := []struct {
+		name string
+		env  []string
+	}{
+		{
+			name: "localhost is always safe",
+			env:  []string{"ENDPOINT=http://localhost:8080"},
+		},
+		{
+			name: "test.sageox.ai is exempted",
+			env:  []string{"SAGEOX_ENDPOINT=https://test.sageox.ai"},
+		},
+		{
+			name: "case insensitive test prefix",
+			env:  []string{"ENDPOINT=https://TEST.SAGEOX.AI"},
+		},
+		{
+			name: "malformed entry without equals is skipped",
+			env:  []string{"MALFORMED_NO_EQUALS"},
+		},
+		{
+			name: "empty value is safe",
+			env:  []string{"SAGEOX_ENDPOINT="},
+		},
+		{
+			name: "no sageox at all",
+			env:  []string{"FOO=bar", "DB=postgres://localhost/test"},
+		},
+		{
+			name: "localhost exempts even if sageox.ai substring present",
+			env:  []string{"REDIRECT=http://localhost:3000?next=sageox.ai"},
+		},
 	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// if validateEnv fatals here, the test fails — which is correct
+			validateEnv(t, tt.env)
+		})
+	}
+}
+
+// containsProductionHost mirrors validateEnv's detection logic to test
+// the rejection cases. We can't call validateEnv with a fake *testing.T
+// because it takes a concrete *testing.T and calls Fatalf (which does
+// runtime.Goexit). Instead we verify the detection logic directly.
+func containsProductionHost(env []string) bool {
 	for _, kv := range env {
 		parts := strings.SplitN(kv, "=", 2)
 		if len(parts) != 2 {
 			continue
 		}
-		val := parts[1]
-		lower := strings.ToLower(val)
+		lower := strings.ToLower(parts[1])
 		for _, pattern := range productionHostPatterns {
 			if !strings.Contains(lower, pattern) {
 				continue
@@ -97,47 +163,260 @@ func TestValidateEnv_RejectsProductionHost(t *testing.T) {
 				}
 			}
 			if !exempted {
-				return // test passes: production URL detected and not exempted
+				return true
 			}
 		}
 	}
-	t.Error("should have detected production hostname in env value")
+	return false
 }
 
-func TestSafeMockServer_PassesCleanResponses(t *testing.T) {
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"url": "https://localhost:1/repo.git"}`))
-	})
+func TestValidateEnv_RejectsProductionHosts(t *testing.T) {
+	tests := []struct {
+		name string
+		env  []string
+	}{
+		{
+			name: "bare sageox.ai",
+			env:  []string{"SAGEOX_ENDPOINT=https://sageox.ai"},
+		},
+		{
+			name: "api.sageox.ai",
+			env:  []string{"SAGEOX_ENDPOINT=https://api.sageox.ai"},
+		},
+		{
+			name: "www.sageox.ai",
+			env:  []string{"URL=https://www.sageox.ai/path"},
+		},
+		{
+			name: "uppercase SAGEOX.AI",
+			env:  []string{"ENDPOINT=https://SAGEOX.AI/api"},
+		},
+		{
+			name: "production host in path segment",
+			env:  []string{"WEBHOOK=https://hooks.example.com/sageox.ai/callback"},
+		},
+		{
+			name: "multiple vars one bad",
+			env:  []string{"GOOD=http://localhost:1234", "BAD=https://sageox.ai"},
+		},
+	}
 
-	server := SafeMockServer(t, handler)
-	defer server.Close()
-
-	resp, err := http.Get(server.URL + "/test")
-	assert.NoError(t, err)
-	assert.Equal(t, 200, resp.StatusCode)
-	resp.Body.Close()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.True(t, containsProductionHost(tt.env),
+				"expected production host detection for env: %v", tt.env)
+		})
+	}
 }
 
-func TestResponseValidator_DetectsProductionURL(t *testing.T) {
+// --- responseValidator (mock server body scanning) ---
+
+func TestResponseValidator(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantError  bool
+		wantSubstr string // substring expected in error message
+	}{
+		{
+			name:      "clean localhost response",
+			body:      `{"clone_url": "http://localhost:4567/repo.git"}`,
+			wantError: false,
+		},
+		{
+			name:      "no URLs at all",
+			body:      `{"status": "ok", "count": 42}`,
+			wantError: false,
+		},
+		{
+			name:       "bare sageox.ai in response body",
+			body:       `{"url": "https://sageox.ai/repo"}`,
+			wantError:  true,
+			wantSubstr: "sageox.ai",
+		},
+		{
+			name:       "test.sageox.ai is ALSO rejected in mock responses",
+			body:       `{"url": "https://test.sageox.ai/repo.git"}`,
+			wantError:  true,
+			wantSubstr: "sageox.ai",
+		},
+		{
+			name:       "case insensitive body scanning",
+			body:       `{"url": "https://SAGEOX.AI/api"}`,
+			wantError:  true,
+			wantSubstr: "sageox.ai",
+		},
+		{
+			name:      "empty body",
+			body:      "",
+			wantError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Write([]byte(tt.body))
+			})
+
+			ct := &captureT{}
+			wrapped := &responseValidator{t: ct, handler: handler}
+			server := httptest.NewServer(wrapped)
+			defer server.Close()
+
+			resp, err := http.Get(server.URL + "/test")
+			require.NoError(t, err)
+			resp.Body.Close()
+
+			if tt.wantError {
+				assert.True(t, ct.errored, "expected error for body: %s", tt.body)
+				assert.Contains(t, ct.msg, tt.wantSubstr)
+			} else {
+				assert.False(t, ct.errored, "unexpected error for body: %s", tt.body)
+			}
+		})
+	}
+}
+
+func TestResponseValidator_IncludesMethodAndPath(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"url": "https://git.test.sageox.ai/repo.git"}`))
+		w.Write([]byte(`{"git": "https://sageox.ai/repo.git"}`))
 	})
 
-	// use httptest directly to avoid SafeMockServer's cleanup interfering
-	fakeT := &captureT{}
-	wrapped := &responseValidator{t: fakeT, handler: handler}
+	ct := &captureT{}
+	wrapped := &responseValidator{t: ct, handler: handler}
 	server := httptest.NewServer(wrapped)
 	defer server.Close()
 
-	resp, err := http.Get(server.URL + "/test")
-	assert.NoError(t, err)
+	resp, err := http.Get(server.URL + "/api/v1/repos")
+	require.NoError(t, err)
 	resp.Body.Close()
 
-	assert.True(t, fakeT.errored, "should have reported error for production URL in response")
-	assert.Contains(t, fakeT.msg, "sageox.ai")
+	require.True(t, ct.errored)
+	assert.Contains(t, ct.msg, "GET")
+	assert.Contains(t, ct.msg, "/api/v1/repos")
 }
 
-// captureT captures Errorf calls without stopping execution
+func TestResponseValidator_PassesThroughResponseToClient(t *testing.T) {
+	// verify the tee doesn't swallow the response body
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		w.Write([]byte(`{"id": 1, "status": "created"}`))
+	})
+
+	server := SafeMockServer(t, handler)
+
+	resp, err := http.Get(server.URL + "/create")
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+
+	buf := make([]byte, 1024)
+	n, _ := resp.Body.Read(buf)
+	assert.Contains(t, string(buf[:n]), `"status": "created"`)
+}
+
+// --- truncate ---
+
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		max    int
+		expect string
+	}{
+		{
+			name:   "shorter than max",
+			input:  "hello",
+			max:    10,
+			expect: "hello",
+		},
+		{
+			name:   "exactly max",
+			input:  "hello",
+			max:    5,
+			expect: "hello",
+		},
+		{
+			name:   "longer than max",
+			input:  "hello world",
+			max:    5,
+			expect: "hello...",
+		},
+		{
+			name:   "zero max",
+			input:  "any",
+			max:    0,
+			expect: "...",
+		},
+		{
+			name:   "empty string",
+			input:  "",
+			max:    5,
+			expect: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expect, truncate(tt.input, tt.max))
+		})
+	}
+}
+
+// --- SafeMockServer lifecycle ---
+
+func TestSafeMockServer_CleanupClosesServer(t *testing.T) {
+	var serverURL string
+
+	// run in a sub-test so cleanup fires when sub-test ends
+	t.Run("inner", func(t *testing.T) {
+		handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Write([]byte("ok"))
+		})
+		server := SafeMockServer(t, handler)
+		serverURL = server.URL
+	})
+
+	// after sub-test cleanup, server should be closed
+	_, err := http.Get(serverURL + "/probe")
+	assert.Error(t, err, "server should be closed after test cleanup")
+}
+
+// --- OxCmdContext env isolation ---
+
+func TestOxCmdContext_SetsWorkingDir(t *testing.T) {
+	dir := t.TempDir()
+	cmd := OxCmd(t, "/bin/echo", dir, []string{}, "hello")
+	assert.Equal(t, dir, cmd.Dir)
+}
+
+func TestOxCmdContext_EnvIsolation(t *testing.T) {
+	// set vars that should NOT leak into the command
+	t.Setenv("ANTHROPIC_API_KEY", "sk-secret")
+	t.Setenv("SAGEOX_ENDPOINT", "http://localhost:9999")
+
+	cmd := OxCmd(t, "/bin/echo", t.TempDir(), []string{
+		"SAGEOX_ENDPOINT=http://localhost:9999",
+	}, "test")
+
+	envMap := envToMap(cmd.Env)
+
+	// should have our sentinel
+	assert.Equal(t, "1", envMap["OX_NO_DAEMON"])
+
+	// should NOT have leaked secret
+	_, hasSecret := envMap["ANTHROPIC_API_KEY"]
+	assert.False(t, hasSecret, "secrets must not leak into subprocess env")
+
+	// should have explicitly passed test var
+	assert.Equal(t, "http://localhost:9999", envMap["SAGEOX_ENDPOINT"])
+}
+
+// --- helpers ---
+
+// captureT captures Errorf calls without stopping execution.
 type captureT struct {
 	testing.T
 	errored bool
@@ -150,3 +429,16 @@ func (c *captureT) Errorf(format string, args ...any) {
 }
 
 func (c *captureT) Helper() {}
+
+// envToMap converts a []string{"K=V"} slice to map[string]string.
+// If a key appears multiple times, last value wins (matching real env behavior).
+func envToMap(env []string) map[string]string {
+	m := make(map[string]string, len(env))
+	for _, kv := range env {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) == 2 {
+			m[parts[0]] = parts[1]
+		}
+	}
+	return m
+}

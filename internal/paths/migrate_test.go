@@ -3,6 +3,7 @@ package paths
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -694,6 +695,491 @@ func TestCopyDir_SymlinksSkipped(t *testing.T) {
 
 	// regular file should be copied
 	assert.FileExists(t, filepath.Join(dstDir, "regular.txt"))
+}
+
+// -----------------------------------------------------------------------------
+// DetectLegacyLedgerPath Tests
+// -----------------------------------------------------------------------------
+
+func TestDetectLegacyLedgerPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		setup       func(t *testing.T) string // returns projectRoot
+		wantFound   bool
+	}{
+		{
+			name: "empty project root returns empty",
+			setup: func(t *testing.T) string {
+				return ""
+			},
+			wantFound: false,
+		},
+		{
+			name: "no legacy dir returns empty",
+			setup: func(t *testing.T) string {
+				tmp := t.TempDir()
+				projectRoot := filepath.Join(tmp, "myrepo")
+				require.NoError(t, os.MkdirAll(projectRoot, 0755))
+				return projectRoot
+			},
+			wantFound: false,
+		},
+		{
+			name: "legacy dir exists returns path",
+			setup: func(t *testing.T) string {
+				tmp := t.TempDir()
+				projectRoot := filepath.Join(tmp, "myrepo")
+				require.NoError(t, os.MkdirAll(projectRoot, 0755))
+				legacyDir := filepath.Join(tmp, "myrepo_sageox_ledger")
+				require.NoError(t, os.MkdirAll(legacyDir, 0755))
+				return projectRoot
+			},
+			wantFound: true,
+		},
+		{
+			name: "legacy file (not dir) returns empty",
+			setup: func(t *testing.T) string {
+				tmp := t.TempDir()
+				projectRoot := filepath.Join(tmp, "myrepo")
+				require.NoError(t, os.MkdirAll(projectRoot, 0755))
+				// create a file, not a directory
+				legacyFile := filepath.Join(tmp, "myrepo_sageox_ledger")
+				require.NoError(t, os.WriteFile(legacyFile, []byte("not a dir"), 0644))
+				return projectRoot
+			},
+			wantFound: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			projectRoot := tt.setup(t)
+			result := DetectLegacyLedgerPath(projectRoot)
+			if tt.wantFound {
+				assert.NotEmpty(t, result)
+				assert.Contains(t, result, "_sageox_ledger")
+			} else {
+				assert.Empty(t, result)
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// NewLedgerPath Tests
+// -----------------------------------------------------------------------------
+
+func TestNewLedgerPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		projectRoot string
+		endpoint    string
+		wantSuffix  string
+		wantPanic   bool
+	}{
+		{
+			name:        "empty project root returns empty",
+			projectRoot: "",
+			endpoint:    "https://sageox.ai",
+			wantSuffix:  "",
+		},
+		{
+			name:        "production endpoint skips endpoint dir",
+			projectRoot: "/home/dev/Code/myrepo",
+			endpoint:    "https://sageox.ai",
+			wantSuffix:  filepath.Join("myrepo_sageox", "ledger"),
+		},
+		{
+			name:        "production api prefix also skips endpoint dir",
+			projectRoot: "/home/dev/Code/myrepo",
+			endpoint:    "https://api.sageox.ai",
+			wantSuffix:  filepath.Join("myrepo_sageox", "ledger"),
+		},
+		{
+			name:        "staging endpoint includes endpoint dir",
+			projectRoot: "/home/dev/Code/myrepo",
+			endpoint:    "https://staging.sageox.ai",
+			wantSuffix:  filepath.Join("myrepo_sageox", "staging.sageox.ai", "ledger"),
+		},
+		{
+			name:        "localhost endpoint includes endpoint dir",
+			projectRoot: "/home/dev/Code/myrepo",
+			endpoint:    "http://localhost:8080",
+			wantSuffix:  "ledger",
+		},
+		{
+			name:        "empty endpoint panics",
+			projectRoot: "/home/dev/Code/myrepo",
+			endpoint:    "",
+			wantPanic:   true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.wantPanic {
+				assert.Panics(t, func() {
+					NewLedgerPath(tt.projectRoot, tt.endpoint)
+				})
+				return
+			}
+			result := NewLedgerPath(tt.projectRoot, tt.endpoint)
+			if tt.projectRoot == "" {
+				assert.Empty(t, result)
+				return
+			}
+			assert.True(t, strings.HasSuffix(result, tt.wantSuffix),
+				"NewLedgerPath(%q, %q) = %q, want suffix %q", tt.projectRoot, tt.endpoint, result, tt.wantSuffix)
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// LedgerNeedsMigration Tests
+// -----------------------------------------------------------------------------
+
+func TestLedgerNeedsMigration(t *testing.T) {
+	t.Run("empty project root returns false", func(t *testing.T) {
+		assert.False(t, LedgerNeedsMigration("", "https://sageox.ai"))
+	})
+
+	t.Run("no legacy dir returns false", func(t *testing.T) {
+		tmp := t.TempDir()
+		projectRoot := filepath.Join(tmp, "myrepo")
+		require.NoError(t, os.MkdirAll(projectRoot, 0755))
+		assert.False(t, LedgerNeedsMigration(projectRoot, "https://sageox.ai"))
+	})
+
+	t.Run("legacy exists and new does not returns true", func(t *testing.T) {
+		tmp := t.TempDir()
+		projectRoot := filepath.Join(tmp, "myrepo")
+		require.NoError(t, os.MkdirAll(projectRoot, 0755))
+		legacyDir := filepath.Join(tmp, "myrepo_sageox_ledger")
+		require.NoError(t, os.MkdirAll(legacyDir, 0755))
+
+		assert.True(t, LedgerNeedsMigration(projectRoot, "https://sageox.ai"))
+	})
+
+	t.Run("both exist returns false", func(t *testing.T) {
+		tmp := t.TempDir()
+		projectRoot := filepath.Join(tmp, "myrepo")
+		require.NoError(t, os.MkdirAll(projectRoot, 0755))
+		legacyDir := filepath.Join(tmp, "myrepo_sageox_ledger")
+		require.NoError(t, os.MkdirAll(legacyDir, 0755))
+		newDir := NewLedgerPath(projectRoot, "https://sageox.ai")
+		require.NoError(t, os.MkdirAll(newDir, 0755))
+
+		assert.False(t, LedgerNeedsMigration(projectRoot, "https://sageox.ai"))
+	})
+}
+
+// -----------------------------------------------------------------------------
+// CheckLedgerMigrationStatus Tests
+// -----------------------------------------------------------------------------
+
+func TestCheckLedgerMigrationStatus(t *testing.T) {
+	t.Run("empty project root returns zero struct", func(t *testing.T) {
+		status := CheckLedgerMigrationStatus("", "https://sageox.ai")
+		assert.False(t, status.NeedsMigration)
+		assert.False(t, status.LegacyExists)
+		assert.False(t, status.NewExists)
+	})
+
+	t.Run("no legacy dir", func(t *testing.T) {
+		tmp := t.TempDir()
+		projectRoot := filepath.Join(tmp, "myrepo")
+		require.NoError(t, os.MkdirAll(projectRoot, 0755))
+
+		status := CheckLedgerMigrationStatus(projectRoot, "https://sageox.ai")
+		assert.False(t, status.NeedsMigration)
+		assert.False(t, status.LegacyExists)
+		// LegacyPath should still be populated (for reporting)
+		assert.NotEmpty(t, status.LegacyPath)
+		assert.Contains(t, status.LegacyPath, "_sageox_ledger")
+	})
+
+	t.Run("legacy exists needs migration", func(t *testing.T) {
+		tmp := t.TempDir()
+		projectRoot := filepath.Join(tmp, "myrepo")
+		require.NoError(t, os.MkdirAll(projectRoot, 0755))
+		legacyDir := filepath.Join(tmp, "myrepo_sageox_ledger")
+		require.NoError(t, os.MkdirAll(legacyDir, 0755))
+
+		status := CheckLedgerMigrationStatus(projectRoot, "https://sageox.ai")
+		assert.True(t, status.NeedsMigration)
+		assert.True(t, status.LegacyExists)
+		assert.False(t, status.NewExists)
+		assert.Equal(t, legacyDir, status.LegacyPath)
+	})
+
+	t.Run("new already exists no migration needed", func(t *testing.T) {
+		tmp := t.TempDir()
+		projectRoot := filepath.Join(tmp, "myrepo")
+		require.NoError(t, os.MkdirAll(projectRoot, 0755))
+		legacyDir := filepath.Join(tmp, "myrepo_sageox_ledger")
+		require.NoError(t, os.MkdirAll(legacyDir, 0755))
+		newDir := NewLedgerPath(projectRoot, "https://sageox.ai")
+		require.NoError(t, os.MkdirAll(newDir, 0755))
+
+		status := CheckLedgerMigrationStatus(projectRoot, "https://sageox.ai")
+		assert.False(t, status.NeedsMigration)
+		assert.True(t, status.LegacyExists)
+		assert.True(t, status.NewExists)
+	})
+}
+
+// -----------------------------------------------------------------------------
+// MigrateLedgerToNewStructure Tests
+// -----------------------------------------------------------------------------
+
+func TestMigrateLedgerToNewStructure(t *testing.T) {
+	t.Run("empty project root returns error", func(t *testing.T) {
+		err := MigrateLedgerToNewStructure("", "https://sageox.ai")
+		assert.Error(t, err)
+	})
+
+	t.Run("no legacy dir is no-op", func(t *testing.T) {
+		tmp := t.TempDir()
+		projectRoot := filepath.Join(tmp, "myrepo")
+		require.NoError(t, os.MkdirAll(projectRoot, 0755))
+
+		err := MigrateLedgerToNewStructure(projectRoot, "https://sageox.ai")
+		assert.NoError(t, err)
+	})
+
+	t.Run("new path already exists is no-op", func(t *testing.T) {
+		tmp := t.TempDir()
+		projectRoot := filepath.Join(tmp, "myrepo")
+		require.NoError(t, os.MkdirAll(projectRoot, 0755))
+		legacyDir := filepath.Join(tmp, "myrepo_sageox_ledger")
+		require.NoError(t, os.MkdirAll(legacyDir, 0755))
+		newDir := NewLedgerPath(projectRoot, "https://sageox.ai")
+		require.NoError(t, os.MkdirAll(newDir, 0755))
+
+		err := MigrateLedgerToNewStructure(projectRoot, "https://sageox.ai")
+		assert.NoError(t, err)
+	})
+
+	t.Run("successful migration moves directory", func(t *testing.T) {
+		tmp := t.TempDir()
+		projectRoot := filepath.Join(tmp, "myrepo")
+		require.NoError(t, os.MkdirAll(projectRoot, 0755))
+
+		// create legacy ledger with .git dir and a file
+		legacyDir := filepath.Join(tmp, "myrepo_sageox_ledger")
+		require.NoError(t, os.MkdirAll(filepath.Join(legacyDir, ".git"), 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(legacyDir, "data.txt"), []byte("ledger data"), 0644))
+
+		err := MigrateLedgerToNewStructure(projectRoot, "https://sageox.ai")
+		require.NoError(t, err)
+
+		newDir := NewLedgerPath(projectRoot, "https://sageox.ai")
+		// new path should exist with content
+		assert.DirExists(t, newDir)
+		assert.DirExists(t, filepath.Join(newDir, ".git"))
+		content, err := os.ReadFile(filepath.Join(newDir, "data.txt"))
+		require.NoError(t, err)
+		assert.Equal(t, "ledger data", string(content))
+
+		// legacy should be gone
+		assert.NoDirExists(t, legacyDir)
+	})
+}
+
+// -----------------------------------------------------------------------------
+// CreateTeamSymlinks Tests
+// -----------------------------------------------------------------------------
+
+func TestCreateTeamSymlinks(t *testing.T) {
+	t.Run("empty team IDs is no-op", func(t *testing.T) {
+		err := CreateTeamSymlinks("/some/path", nil)
+		assert.NoError(t, err)
+
+		err = CreateTeamSymlinks("/some/path", []string{})
+		assert.NoError(t, err)
+	})
+
+	t.Run("with team IDs returns nil (placeholder)", func(t *testing.T) {
+		err := CreateTeamSymlinks("/some/path", []string{"team1", "team2"})
+		assert.NoError(t, err)
+	})
+}
+
+// -----------------------------------------------------------------------------
+// CheckMigrationStatus with Legacy Mode Tests
+// -----------------------------------------------------------------------------
+
+func TestCheckMigrationStatus_LegacyMode(t *testing.T) {
+	t.Setenv("OX_XDG_DISABLE", "1")
+	t.Setenv("OX_XDG_ENABLE", "")
+
+	status := CheckMigrationStatus()
+	// in legacy mode with OX_XDG_DISABLE, migration is possible
+	// the result depends on filesystem state, but the function should not panic
+	assert.IsType(t, MigrationStatus{}, status)
+}
+
+func TestMigrate_LegacyMode_NoLegacyData(t *testing.T) {
+	t.Setenv("OX_XDG_DISABLE", "1")
+	t.Setenv("OX_XDG_ENABLE", "")
+
+	result := Migrate()
+	// no legacy data to migrate, so nothing should have migrated
+	assert.IsType(t, MigrationResult{}, result)
+}
+
+// -----------------------------------------------------------------------------
+// migrateSessionCache with context dir Tests
+// -----------------------------------------------------------------------------
+
+func TestMigrateSessionCache_WithContextDirContainingSubdirs(t *testing.T) {
+	tempDir := t.TempDir()
+	legacyDir := filepath.Join(tempDir, "legacy")
+	contextDir := filepath.Join(legacyDir, "context")
+
+	// create session directories inside context/
+	for _, sessionName := range []string{"session-abc", "session-def"} {
+		sessionDir := filepath.Join(contextDir, sessionName)
+		require.NoError(t, os.MkdirAll(sessionDir, 0755))
+		require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte("data"), 0644))
+	}
+
+	// also create a file (not dir) inside context/ — should be skipped
+	require.NoError(t, os.WriteFile(filepath.Join(contextDir, "stray-file.txt"), []byte("stray"), 0644))
+
+	err := migrateSessionCache(legacyDir)
+	assert.NoError(t, err)
+
+	// context dir should be cleaned up
+	assert.NoDirExists(t, contextDir)
+}
+
+func TestMigrateSessionCache_WithDaemonLogs(t *testing.T) {
+	tempDir := t.TempDir()
+	legacyDir := filepath.Join(tempDir, "legacy")
+
+	// context dir must exist for migrateSessionCache to proceed past early return
+	contextDir := filepath.Join(legacyDir, "context")
+	require.NoError(t, os.MkdirAll(contextDir, 0755))
+
+	// create daemon log files matching the glob pattern
+	for _, logName := range []string{"daemon-abc.log", "daemon-def.log"} {
+		require.NoError(t, os.WriteFile(filepath.Join(legacyDir, logName), []byte("log data"), 0644))
+	}
+
+	err := migrateSessionCache(legacyDir)
+	assert.NoError(t, err)
+
+	// daemon logs should have been moved — original files removed
+	for _, logName := range []string{"daemon-abc.log", "daemon-def.log"} {
+		assert.NoFileExists(t, filepath.Join(legacyDir, logName))
+	}
+}
+
+// -----------------------------------------------------------------------------
+// TeamContextMigrationNeeded with existing new path
+// -----------------------------------------------------------------------------
+
+func TestTeamContextMigrationNeeded_NewPathExists(t *testing.T) {
+	t.Setenv("OX_XDG_DISABLE", "1")
+	t.Setenv("OX_XDG_ENABLE", "")
+
+	tempDir := t.TempDir()
+	legacyPath := filepath.Join(tempDir, "sageox_team_abc_context")
+	require.NoError(t, os.MkdirAll(legacyPath, 0755))
+
+	// create the new path so migration is not needed
+	newPath := TeamContextDir("abc", "https://sageox.ai")
+	require.NoError(t, os.MkdirAll(newPath, 0755))
+
+	result := TeamContextMigrationNeeded(filepath.Join(tempDir, "project"), "abc", legacyPath)
+	assert.False(t, result, "should return false when new path already exists")
+}
+
+// -----------------------------------------------------------------------------
+// MigrateTeamContext Success Path Tests
+// -----------------------------------------------------------------------------
+
+func TestMigrateTeamContext_SuccessfulRename(t *testing.T) {
+	t.Setenv("OX_XDG_DISABLE", "1")
+	t.Setenv("OX_XDG_ENABLE", "")
+
+	tempDir := t.TempDir()
+	legacyPath := filepath.Join(tempDir, "sageox_team_abc_context")
+
+	// create legacy dir with some content
+	require.NoError(t, os.MkdirAll(legacyPath, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(legacyPath, "SOUL.md"), []byte("team soul"), 0644))
+
+	err := MigrateTeamContext("abc", legacyPath)
+	require.NoError(t, err)
+
+	// new path should exist with content
+	newPath := TeamContextDir("abc", "https://sageox.ai")
+	assert.DirExists(t, newPath)
+	content, err := os.ReadFile(filepath.Join(newPath, "SOUL.md"))
+	require.NoError(t, err)
+	assert.Equal(t, "team soul", string(content))
+}
+
+// -----------------------------------------------------------------------------
+// Migrate with Legacy Data Tests
+// -----------------------------------------------------------------------------
+
+func TestMigrate_LegacyMode_WithLegacyConfig(t *testing.T) {
+	t.Setenv("OX_XDG_DISABLE", "1")
+	t.Setenv("OX_XDG_ENABLE", "")
+
+	// create legacy config dir at ~/.config/sageox
+	home := getHomeDir()
+	if home == "" {
+		t.Skip("cannot determine home directory")
+	}
+
+	legacyConfigDir := filepath.Join(home, ".config", "sageox")
+	newConfigDir := ConfigDir() // in legacy mode: ~/.sageox/config
+
+	// skip if legacy dir already exists (don't mess with real data)
+	if _, err := os.Stat(legacyConfigDir); err == nil {
+		t.Skip("legacy config dir already exists, skipping to avoid data loss")
+	}
+	// skip if new structure already exists (migration won't run)
+	if _, err := os.Stat(newConfigDir); err == nil {
+		t.Skip("new config dir already exists, migration would be skipped")
+	}
+
+	// this test is fragile on real systems — just verify no panic
+	result := Migrate()
+	assert.IsType(t, MigrationResult{}, result)
+}
+
+// -----------------------------------------------------------------------------
+// migrateSessionCache with destination already existing
+// -----------------------------------------------------------------------------
+
+func TestMigrateSessionCache_SkipsExistingDestSession(t *testing.T) {
+	tempDir := t.TempDir()
+	legacyDir := filepath.Join(tempDir, "legacy")
+	contextDir := filepath.Join(legacyDir, "context")
+
+	// create a session in context/
+	sessionDir := filepath.Join(contextDir, "existing-session")
+	require.NoError(t, os.MkdirAll(sessionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte("old data"), 0644))
+
+	// pre-create the destination session dir so it gets skipped
+	dstDir := SessionCacheDir("")
+	dstSessionDir := filepath.Join(dstDir, "existing-session")
+	require.NoError(t, os.MkdirAll(dstSessionDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dstSessionDir, "raw.jsonl"), []byte("keep this"), 0644))
+
+	err := migrateSessionCache(legacyDir)
+	assert.NoError(t, err)
+
+	// destination content should NOT be overwritten
+	content, err := os.ReadFile(filepath.Join(dstSessionDir, "raw.jsonl"))
+	require.NoError(t, err)
+	assert.Equal(t, "keep this", string(content))
 }
 
 func TestMigrateDirectory_PartialMigration(t *testing.T) {

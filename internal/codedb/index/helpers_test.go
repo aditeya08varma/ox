@@ -1,0 +1,257 @@
+package index
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func TestTimeToUnix(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    time.Time
+		wantNil  bool
+		wantUnix int64
+	}{
+		{"zero time returns nil", time.Time{}, true, 0},
+		{"epoch returns 0", time.Unix(0, 0), false, 0},
+		{"specific time", time.Date(2025, 1, 15, 12, 0, 0, 0, time.UTC), false, 1736942400},
+		{"negative unix time", time.Date(1969, 1, 1, 0, 0, 0, 0, time.UTC), false, -31536000},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := timeToUnix(tt.input)
+			if tt.wantNil {
+				if got != nil {
+					t.Errorf("expected nil, got %d", *got)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatal("expected non-nil")
+			}
+			if *got != tt.wantUnix {
+				t.Errorf("timeToUnix = %d, want %d", *got, tt.wantUnix)
+			}
+		})
+	}
+}
+
+func TestTimeToUnixPtr(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil pointer returns nil", func(t *testing.T) {
+		got := timeToUnixPtr(nil)
+		if got != nil {
+			t.Errorf("expected nil, got %d", *got)
+		}
+	})
+
+	t.Run("zero time pointer returns nil", func(t *testing.T) {
+		zero := time.Time{}
+		got := timeToUnixPtr(&zero)
+		if got != nil {
+			t.Errorf("expected nil for zero time, got %d", *got)
+		}
+	})
+
+	t.Run("valid time pointer", func(t *testing.T) {
+		ts := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
+		got := timeToUnixPtr(&ts)
+		if got == nil {
+			t.Fatal("expected non-nil")
+		}
+		if *got != ts.Unix() {
+			t.Errorf("got %d, want %d", *got, ts.Unix())
+		}
+	})
+}
+
+func TestDirtyIndexPath_Structure(t *testing.T) {
+	t.Parallel()
+
+	codedbDir := "/data/codedb"
+	worktreePath := "/home/user/project"
+
+	p := DirtyIndexPath(codedbDir, worktreePath)
+
+	// should be under codedbDir/bleve/dirty/
+	dir := filepath.Dir(p)
+	expectedDir := filepath.Join(codedbDir, "bleve", "dirty")
+	if dir != expectedDir {
+		t.Errorf("directory = %q, want %q", dir, expectedDir)
+	}
+
+	// hash should be SHA256 of worktree path, first 8 bytes hex-encoded
+	h := sha256.Sum256([]byte(worktreePath))
+	expectedName := hex.EncodeToString(h[:8])
+	gotName := filepath.Base(p)
+	if gotName != expectedName {
+		t.Errorf("filename = %q, want %q", gotName, expectedName)
+	}
+}
+
+func TestDirtyIndexPath_DifferentInputs(t *testing.T) {
+	t.Parallel()
+
+	// same codedb dir, different worktrees should produce different paths
+	p1 := DirtyIndexPath("/data", "/project-a")
+	p2 := DirtyIndexPath("/data", "/project-b")
+	if p1 == p2 {
+		t.Error("different worktrees should produce different paths")
+	}
+
+	// different codedb dirs, same worktree should produce different paths
+	p3 := DirtyIndexPath("/data1", "/project")
+	p4 := DirtyIndexPath("/data2", "/project")
+	if p3 == p4 {
+		t.Error("different codedb dirs should produce different parent paths")
+	}
+}
+
+func TestFileUnchanged(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	testFile := filepath.Join(tmp, "test.json")
+	if err := os.WriteFile(testFile, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	info, err := os.Stat(testFile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	mtime := info.ModTime().UTC().UnixNano()
+
+	tests := []struct {
+		name        string
+		path        string
+		knownMtimes map[string]int64
+		want        bool
+	}{
+		{
+			"matching mtime returns true",
+			testFile,
+			map[string]int64{testFile: mtime},
+			true,
+		},
+		{
+			"different mtime returns false",
+			testFile,
+			map[string]int64{testFile: mtime - 1000},
+			false,
+		},
+		{
+			"missing from known returns false",
+			testFile,
+			map[string]int64{},
+			false,
+		},
+		{
+			"nonexistent file returns false",
+			filepath.Join(tmp, "no-such-file.json"),
+			map[string]int64{filepath.Join(tmp, "no-such-file.json"): 12345},
+			false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := fileUnchanged(tt.path, tt.knownMtimes)
+			if got != tt.want {
+				t.Errorf("fileUnchanged = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveGitDir_InvalidGitFile(t *testing.T) {
+	t.Parallel()
+
+	// .git is a file but doesn't contain "gitdir: ..." prefix
+	tmp := t.TempDir()
+	dotGit := filepath.Join(tmp, ".git")
+	if err := os.WriteFile(dotGit, []byte("not a gitdir reference"), 0o644); err != nil {
+		t.Fatalf("write .git: %v", err)
+	}
+
+	path, isWorktree := resolveGitDir(tmp)
+	if isWorktree {
+		t.Error("should not detect as worktree with invalid .git file content")
+	}
+	if path != tmp {
+		t.Errorf("path = %q, want %q", path, tmp)
+	}
+}
+
+func TestResolveGitDir_GitFilePointsToMissing(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	dotGit := filepath.Join(tmp, ".git")
+	// valid gitdir prefix but points to nonexistent path
+	if err := os.WriteFile(dotGit, []byte("gitdir: /nonexistent/path/.git/worktrees/wt"), 0o644); err != nil {
+		t.Fatalf("write .git: %v", err)
+	}
+
+	path, isWorktree := resolveGitDir(tmp)
+	// should gracefully fall back since commondir file doesn't exist
+	if isWorktree {
+		t.Error("should not detect as worktree when commondir is missing")
+	}
+	if path != tmp {
+		t.Errorf("path = %q, want %q", path, tmp)
+	}
+}
+
+func TestDefaultSkipDirs(t *testing.T) {
+	t.Parallel()
+
+	expected := []string{".git", "node_modules", ".sageox", "vendor"}
+	for _, dir := range expected {
+		if !defaultSkipDirs[dir] {
+			t.Errorf("expected %q in defaultSkipDirs", dir)
+		}
+	}
+
+	// should not skip regular directories
+	notSkipped := []string{"src", "internal", "cmd", "pkg", "lib"}
+	for _, dir := range notSkipped {
+		if defaultSkipDirs[dir] {
+			t.Errorf("%q should not be in defaultSkipDirs", dir)
+		}
+	}
+}
+
+func TestDefaultBranchFallbacks(t *testing.T) {
+	t.Parallel()
+
+	if len(defaultBranchFallbacks) == 0 {
+		t.Fatal("defaultBranchFallbacks should not be empty")
+	}
+
+	// should include common default branch refs
+	expected := map[string]bool{
+		"refs/heads/main":           false,
+		"refs/heads/master":         false,
+		"refs/remotes/origin/main":  false,
+		"refs/remotes/origin/master": false,
+	}
+
+	for _, fb := range defaultBranchFallbacks {
+		expected[fb] = true
+	}
+
+	for name, found := range expected {
+		if !found {
+			t.Errorf("expected %q in defaultBranchFallbacks", name)
+		}
+	}
+}
