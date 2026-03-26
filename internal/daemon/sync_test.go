@@ -259,7 +259,7 @@ func TestSyncScheduler_SyncWithProgress_PropagatesPullError(t *testing.T) {
 
 	err := scheduler.SyncWithProgress(nil)
 	assert.Error(t, err, "SyncWithProgress must propagate git pull failures")
-	// could be "pull failed" or "diverged" depending on detectForcePush
+	// could be "pull failed" or "diverged" depending on detectDivergedBranches
 	assert.Contains(t, err.Error(), "ledger")
 }
 
@@ -520,6 +520,8 @@ func TestSyncScheduler_PullTeamContext_FetchHeadDeduplication(t *testing.T) {
 func TestSyncScheduler_PullTeamContext_NotGitRepo(t *testing.T) {
 	// create temp directory that is NOT a git repo
 	tmpDir := t.TempDir()
+	tcPath := filepath.Join(tmpDir, "team-ctx")
+	require.NoError(t, os.MkdirAll(tcPath, 0755))
 
 	cfg := DefaultConfig()
 	cfg.TeamContextSyncInterval = 10 * time.Minute
@@ -527,9 +529,11 @@ func TestSyncScheduler_PullTeamContext_NotGitRepo(t *testing.T) {
 
 	scheduler := NewSyncScheduler(cfg, logger)
 
-	// pull should fail since it's not a git repo
-	err := scheduler.pullTeamContext(context.Background(), tmpDir)
-	assert.Error(t, err)
+	// pull should handle gracefully: detect invalid repo, move aside for re-clone
+	err := scheduler.pullTeamContext(context.Background(), tcPath)
+	assert.NoError(t, err)
+	// original path should be gone (moved to .bak)
+	assert.NoDirExists(t, tcPath)
 }
 
 func TestSyncScheduler_TeamContextIntegration(t *testing.T) {
