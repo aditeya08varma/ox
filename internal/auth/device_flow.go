@@ -203,8 +203,8 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 				accessToken = token.AccessToken
 			}
 
-			// if device flow didn't return a refresh token, use the one from JWT exchange
-			if refreshToken == "" && jwtToken.RefreshToken != "" {
+			// if device flow omitted refresh_token, use JWT exchange refresh_token when available
+			if token.RefreshToken == "" && jwtToken != nil && jwtToken.RefreshToken != "" {
 				refreshToken = jwtToken.RefreshToken
 			}
 
@@ -552,8 +552,8 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 				accessToken = token.AccessToken
 			}
 
-			// if device flow didn't return a refresh token, use the one from JWT exchange
-			if refreshToken == "" && jwtToken.RefreshToken != "" {
+			// if device flow omitted refresh_token, use JWT exchange refresh_token when available
+			if token.RefreshToken == "" && jwtToken != nil && jwtToken.RefreshToken != "" {
 				refreshToken = jwtToken.RefreshToken
 			}
 

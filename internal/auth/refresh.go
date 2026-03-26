@@ -303,8 +303,8 @@ func refreshTokenForEndpoint(token *StoredToken, ep string) (*StoredToken, error
 		}
 	}
 
-	// fallback: capture refresh_token from JWT exchange if OAuth2 response didn't provide one
-	if refreshToken == "" && jwtToken != nil && jwtToken.RefreshToken != "" {
+	// fallback: if OAuth2 response omitted refresh_token, prefer JWT exchange refresh_token when present
+	if responseData.RefreshToken == "" && jwtToken != nil && jwtToken.RefreshToken != "" {
 		refreshToken = jwtToken.RefreshToken
 	}
 
@@ -529,8 +529,8 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 		}
 	}
 
-	// fallback: capture refresh_token from JWT exchange if OAuth2 response didn't provide one
-	if refreshTokenStr == "" && jwtToken != nil && jwtToken.RefreshToken != "" {
+	// fallback: if OAuth2 response omitted refresh_token, prefer JWT exchange refresh_token when present
+	if responseData.RefreshToken == "" && jwtToken != nil && jwtToken.RefreshToken != "" {
 		refreshTokenStr = jwtToken.RefreshToken
 	}
 
