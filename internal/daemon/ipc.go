@@ -1659,6 +1659,9 @@ func (c *Client) CodeIndex(payload CodeIndexPayload, onProgress ProgressCallback
 
 	// idle timeout — reset on each progress message
 	idleTimeout := 60 * time.Second
+	if c.timeout > 0 && c.timeout < idleTimeout {
+		idleTimeout = c.timeout
+	}
 	conn.SetDeadline(time.Now().Add(idleTimeout))
 
 	payloadData, _ := json.Marshal(payload)

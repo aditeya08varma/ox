@@ -852,6 +852,101 @@ func TestServerClient_SyncWithProgress_LegacyFallback(t *testing.T) {
 	cancel()
 }
 
+// TestSyncWithProgress_IdleTimeoutExtendsOnProgress verifies that the idle
+// timeout resets on each progress message. A short idle timeout (500ms) would
+// expire if not reset, but progress messages every 300ms keep it alive.
+func TestSyncWithProgress_IdleTimeoutExtendsOnProgress(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "ox-ipc-idle-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	server := NewServer(logger)
+
+	server.SetHandlers(
+		func() error { return nil },
+		func() {},
+		func() *StatusData { return &StatusData{Running: true} },
+	)
+
+	// handler emits 4 progress messages with 300ms gaps = 1.2s total,
+	// which exceeds the 500ms idle timeout — only works if the deadline resets.
+	server.SetSyncHandler(func(progress *ProgressWriter) error {
+		stages := []string{"stage1", "stage2", "stage3", "stage4"}
+		for _, s := range stages {
+			time.Sleep(300 * time.Millisecond)
+			if progress != nil {
+				_ = progress.WriteStage(s, "working...")
+			}
+		}
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	client := &Client{
+		socketPath: SocketPath(),
+		timeout:    500 * time.Millisecond, // short idle timeout
+	}
+
+	var progressUpdates []string
+	err = client.SyncWithProgress(func(stage string, percent *int, message string) {
+		progressUpdates = append(progressUpdates, stage)
+	})
+
+	require.NoError(t, err, "should succeed — progress resets the idle timeout")
+	assert.Equal(t, []string{"stage1", "stage2", "stage3", "stage4"}, progressUpdates)
+
+	cancel()
+}
+
+// TestSyncWithProgress_IdleTimeoutExpiresWithoutProgress verifies that the
+// connection times out when no progress is received within the idle period.
+func TestSyncWithProgress_IdleTimeoutExpiresWithoutProgress(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("/tmp", "ox-ipc-idle-")
+	require.NoError(t, err)
+	t.Cleanup(func() { os.RemoveAll(tmpDir) })
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_RUNTIME_DIR", tmpDir)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	server := NewServer(logger)
+
+	server.SetHandlers(
+		func() error { return nil },
+		func() {},
+		func() *StatusData { return &StatusData{Running: true} },
+	)
+
+	// handler stalls for 2s without sending any progress — should trigger timeout
+	server.SetSyncHandler(func(progress *ProgressWriter) error {
+		time.Sleep(2 * time.Second)
+		return nil
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go server.Start(ctx)
+	time.Sleep(100 * time.Millisecond)
+
+	client := &Client{
+		socketPath: SocketPath(),
+		timeout:    500 * time.Millisecond, // short idle timeout
+	}
+
+	err = client.SyncWithProgress(nil)
+	assert.Error(t, err, "should timeout — no progress to reset deadline")
+
+	cancel()
+}
+
 func TestServer_SetTeamSyncHandler(t *testing.T) {
 	s := NewServer(nil)
 

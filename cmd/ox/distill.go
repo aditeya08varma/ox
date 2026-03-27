@@ -342,7 +342,7 @@ Memory files are organized by temporal layers:
 func init() {
 	distillCmd.Flags().StringVar(&distillLayer, "layer", "", "distill only a specific layer (daily, weekly, monthly)")
 	distillCmd.Flags().BoolVar(&distillDryRun, "dry-run", false, "show what would be distilled without invoking the AI coworker")
-	distillCmd.Flags().BoolVar(&distillSync, "sync", false, "sync team context, code index, and ledger before distilling")
+	distillCmd.Flags().BoolVar(&distillSync, "sync", false, "sync ledger, team context, and code index before distilling")
 
 	rootCmd.AddCommand(distillCmd)
 }
@@ -417,23 +417,33 @@ func logPrompt(cmd *cobra.Command, label, prompt string) {
 	fmt.Fprintf(cmd.ErrOrStderr(), "--- prompt (%s) ---\n%s--- end prompt ---\n", label, prompt)
 }
 
-// syncBeforeDistill ensures the daemon is running, then syncs all workspaces
-// (ledger + team contexts) and triggers a code index update. Each step shows
-// progress via a spinner. Returns an error if any critical step fails.
+// syncBeforeDistill ensures the daemon is running, then syncs the ledger,
+// team contexts, and code index. Each step shows progress via a spinner.
+// Returns an error if any critical sync step fails.
 func syncBeforeDistill() error {
 	// ensure daemon is running
 	if err := daemon.EnsureDaemon(); err != nil {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	// sync ledger and team contexts
-	if err := cli.WithSpinnerNoResult("Syncing ledger and team contexts...", func() error {
-		client := daemon.NewClientWithTimeout(60 * time.Second)
+	// sync ledger
+	if err := cli.WithSpinnerNoResult("Syncing ledger...", func() error {
+		client := daemon.NewClient()
 		return client.SyncWithProgress(func(stage string, percent *int, message string) {
 			// progress handled by spinner
 		})
 	}); err != nil {
-		return fmt.Errorf("sync failed: %w", err)
+		return fmt.Errorf("ledger sync failed: %w", err)
+	}
+
+	// sync team contexts
+	if err := cli.WithSpinnerNoResult("Syncing team contexts...", func() error {
+		client := daemon.NewClient()
+		return client.TeamSyncWithProgress(func(stage string, percent *int, message string) {
+			// progress handled by spinner
+		})
+	}); err != nil {
+		return fmt.Errorf("team context sync failed: %w", err)
 	}
 
 	// update code index
