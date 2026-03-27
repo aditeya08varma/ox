@@ -47,6 +47,11 @@ var daemonStartCmd = &cobra.Command{
 			return nil
 		}
 
+		// kill any stale daemon for this workspace before starting a new one
+		if err := daemon.KillStaleDaemonForCurrentWorkspace(); err != nil {
+			return fmt.Errorf("failed to stop stale daemon: %w", err)
+		}
+
 		// resolve ledger path (only if it's actually a git repo)
 		ledgerPath, err := ledger.DefaultPath()
 		if err != nil {

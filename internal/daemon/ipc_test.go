@@ -991,9 +991,12 @@ func TestServerClient_TeamSyncWithProgress_Integration(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	go server.Start(ctx)
+	serverDone := make(chan struct{})
+	go func() {
+		server.Start(ctx)
+		close(serverDone)
+	}()
 	time.Sleep(100 * time.Millisecond)
 
 	client := &Client{
@@ -1018,6 +1021,7 @@ func TestServerClient_TeamSyncWithProgress_Integration(t *testing.T) {
 	assert.Equal(t, "complete", progressUpdates[5])
 
 	cancel()
+	<-serverDone // wait for server to fully shut down and clean up socket
 }
 
 // TestServer_GracefulShutdown_WaitsForInflightConnections tests that the server
@@ -1152,9 +1156,12 @@ func TestServerClient_TeamSyncWithProgress_NoHandler(t *testing.T) {
 	// deliberately not setting team sync handler
 
 	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
-	go server.Start(ctx)
+	serverDone := make(chan struct{})
+	go func() {
+		server.Start(ctx)
+		close(serverDone)
+	}()
 	time.Sleep(100 * time.Millisecond)
 
 	client := &Client{
@@ -1167,6 +1174,7 @@ func TestServerClient_TeamSyncWithProgress_NoHandler(t *testing.T) {
 	assert.Contains(t, err.Error(), "team sync handler not set")
 
 	cancel()
+	<-serverDone // wait for server to fully shut down and clean up socket
 }
 
 // --- Regression tests: IPC status must remain responsive during long-running operations ---

@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/sageox/ox/internal/repotools"
 )
 
 // TryConnectOrDirect attempts to connect to the daemon.
@@ -139,6 +141,27 @@ func ensureDaemonInternal() error {
 		return nil // already running on new (repo-based) socket
 	}
 
+	// A daemon may be alive but not yet listening on its socket (startup/throttle).
+	// Wait for it rather than killing it.
+	if IsStarting() {
+		for i := 0; i < 20; i++ {
+			time.Sleep(100 * time.Millisecond)
+			if IsRunning() {
+				return nil
+			}
+			if !IsStarting() {
+				break
+			}
+		}
+	}
+
+	// Kill any stale daemon for this workspace before starting a new one.
+	// Since IsRunning() returned false and IsStarting() is also false, the old
+	// daemon is unresponsive. IPC stop will likely fail; SIGTERM is the fallback.
+	if err := killStaleDaemon(CurrentWorkspaceID()); err != nil {
+		return fmt.Errorf("failed to stop stale daemon: %w", err)
+	}
+
 	// migration: stop old path-based daemon if one exists on a legacy socket
 	stopLegacyDaemon()
 
@@ -163,7 +186,7 @@ func ensureDaemonInternal() error {
 	// start daemon process
 	// NOTE: No setsid/detach — Claude manages the daemon process lifecycle.
 	// The daemon relies on inactivity timeout to self-exit when claude dies.
-	cmd := exec.Command(exe, "daemon", "start", "--foreground")
+	cmd := exec.Command(exe, buildDaemonArgs(resolveRepoName())...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
@@ -184,6 +207,110 @@ func ensureDaemonInternal() error {
 	}
 
 	return fmt.Errorf("daemon started but not responding")
+}
+
+// killStaleDaemon kills any existing daemon for the given workspace before starting a new one.
+// Escalation: IPC stop (graceful) → SIGTERM (forceful) → error.
+// Returns nil if the stale daemon was successfully stopped or none existed.
+// Returns an error if the stale daemon could not be stopped (caller should not start a new one).
+func killStaleDaemon(workspaceID string) error {
+	reg, err := LoadRegistry()
+	if err != nil {
+		slog.Debug("failed to load registry for stale daemon check", "error", err)
+		return nil
+	}
+
+	info := reg.FindByWorkspaceID(workspaceID)
+	if info == nil {
+		return nil // no existing entry
+	}
+
+	// check if process is alive (signal 0)
+	if err := signalProcess(info.PID, 0); err != nil {
+		// process is dead — clean up stale registry entry and files
+		slog.Debug("stale daemon entry (process dead), cleaning up", "workspace_id", workspaceID, "pid", info.PID)
+		_ = reg.Unregister(workspaceID)
+		_ = os.Remove(PidPathForWorkspace(workspaceID))
+		_ = os.Remove(info.SocketPath)
+		return nil
+	}
+
+	// process is alive — try graceful IPC stop first (2s timeout for busy daemons)
+	client := &Client{socketPath: info.SocketPath, timeout: 2 * time.Second}
+	if err := client.Ping(); err == nil {
+		slog.Info("stopping existing daemon via IPC", "workspace_id", workspaceID, "pid", info.PID)
+		if err := client.Stop(); err != nil {
+			slog.Warn("IPC stop failed, falling back to SIGTERM", "workspace_id", workspaceID, "pid", info.PID, "error", err)
+		}
+		if waitForProcessExit(info.PID, 5*time.Second) {
+			_ = reg.Unregister(workspaceID)
+			_ = os.Remove(PidPathForWorkspace(workspaceID))
+			_ = os.Remove(info.SocketPath)
+			return nil
+		}
+		slog.Warn("daemon did not exit after IPC stop, escalating to SIGTERM", "workspace_id", workspaceID, "pid", info.PID)
+	}
+
+	// IPC unreachable or stop didn't work — verify this is actually an ox daemon
+	// before sending SIGTERM (guards against PID reuse by an unrelated process)
+	if !isOxDaemonProcess(info.PID) {
+		slog.Info("PID is not an ox daemon, cleaning up stale entry", "workspace_id", workspaceID, "pid", info.PID)
+		_ = reg.Unregister(workspaceID)
+		_ = os.Remove(PidPathForWorkspace(workspaceID))
+		_ = os.Remove(info.SocketPath)
+		return nil
+	}
+
+	slog.Info("sending SIGTERM to stale daemon", "workspace_id", workspaceID, "pid", info.PID)
+	if err := signalProcess(info.PID, sigTERM); err != nil {
+		slog.Warn("failed to SIGTERM stale daemon", "workspace_id", workspaceID, "pid", info.PID, "error", err)
+	}
+
+	if waitForProcessExit(info.PID, 2*time.Second) {
+		_ = reg.Unregister(workspaceID)
+		_ = os.Remove(PidPathForWorkspace(workspaceID))
+		_ = os.Remove(info.SocketPath)
+		return nil
+	}
+	return fmt.Errorf("stale daemon %d did not exit after SIGTERM", info.PID)
+}
+
+// waitForProcessExit polls signal 0 until the process exits or timeout is reached.
+// Returns true if the process exited, false if it's still alive at timeout.
+func waitForProcessExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := signalProcess(pid, 0); err != nil {
+			return true // process exited
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return false
+}
+
+// KillStaleDaemonForCurrentWorkspace is the public entry point for pre-start kill.
+// Called by `ox daemon start` CLI command.
+func KillStaleDaemonForCurrentWorkspace() error {
+	return killStaleDaemon(CurrentWorkspaceID())
+}
+
+// buildDaemonArgs constructs command-line arguments for starting a daemon subprocess.
+// Includes --repo flag for ps identification when repoName is non-empty.
+func buildDaemonArgs(repoName string) []string {
+	args := []string{"daemon", "start", "--foreground"}
+	if repoName != "" {
+		args = append(args, "--repo="+repoName)
+	}
+	return args
+}
+
+// resolveRepoName returns the human-readable repo name (e.g., "owner/repo") for the CWD.
+func resolveRepoName() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return repotools.GetRepoName(cwd)
 }
 
 // stopLegacyDaemon stops a daemon running under the old path-based workspace ID.

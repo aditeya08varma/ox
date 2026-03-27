@@ -67,6 +67,12 @@ type Config struct {
 	// Zero disables nudging (used when murmuring config is "manual").
 	MurmurNudgeInterval time.Duration
 
+	// SocketCheckInterval is how often the daemon checks the registry to see if
+	// its PID is still registered. If a different PID is registered, the daemon
+	// assumes it has been superseded and exits gracefully.
+	// Zero disables the check.
+	SocketCheckInterval time.Duration
+
 	// AutoStart starts daemon on first ox command if true.
 	AutoStart bool
 
@@ -89,6 +95,7 @@ func DefaultConfig() *Config {
 		GitHubSyncInterval:      15 * time.Minute, // sync PRs/issues every 15 minutes
 		MurmurNudgeInterval:     15 * time.Minute, // nudge agents to self-report every 15 minutes
 		InactivityTimeout:       1 * time.Hour,    // exit after 1 hour of inactivity
+		SocketCheckInterval:     30 * time.Second, // detect socket takeover by new daemon
 		AutoStart:               true,
 		LedgerPath:              "", // resolved at runtime
 		ProjectRoot:             "", // resolved at runtime

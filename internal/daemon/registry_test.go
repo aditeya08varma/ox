@@ -175,6 +175,35 @@ func TestRegistry_Register_WithRepoID(t *testing.T) {
 	assert.Equal(t, "repo_test", stored.RepoID)
 }
 
+func TestRegistry_FindByWorkspaceID(t *testing.T) {
+	reg := &Registry{Daemons: map[string]DaemonInfo{
+		"aaaa1111": {WorkspaceID: "aaaa1111", PID: 100},
+		"bbbb2222": {WorkspaceID: "bbbb2222", PID: 200},
+	}}
+
+	t.Run("found", func(t *testing.T) {
+		info := reg.FindByWorkspaceID("aaaa1111")
+		require.NotNil(t, info)
+		assert.Equal(t, 100, info.PID)
+	})
+
+	t.Run("not_found", func(t *testing.T) {
+		info := reg.FindByWorkspaceID("cccc3333")
+		assert.Nil(t, info)
+	})
+
+	t.Run("empty_id", func(t *testing.T) {
+		info := reg.FindByWorkspaceID("")
+		assert.Nil(t, info)
+	})
+}
+
+func TestRegistry_FindByWorkspaceID_EmptyRegistry(t *testing.T) {
+	reg := &Registry{Daemons: make(map[string]DaemonInfo)}
+	info := reg.FindByWorkspaceID("aaaa1111")
+	assert.Nil(t, info)
+}
+
 func TestDaemonInfo_RepoID_OmittedWhenEmpty(t *testing.T) {
 	// when RepoID is empty, it should be omitted from JSON (if tagged with omitempty)
 	// or present as empty string. Either is acceptable for backwards compat.

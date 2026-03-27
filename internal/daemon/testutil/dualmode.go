@@ -119,6 +119,7 @@ func StartTestDaemon(t *testing.T, tmpDir string) (cleanup func()) {
 	cfg.ProjectRoot = tmpDir
 	cfg.SyncIntervalRead = 1 * time.Hour // don't auto-sync during tests
 	cfg.InactivityTimeout = 0            // disable inactivity timeout for tests
+	cfg.SocketCheckInterval = 0          // disable socket self-check for tests
 
 	// create ledger directory
 	if err := os.MkdirAll(cfg.LedgerPath, 0755); err != nil {
@@ -196,6 +197,7 @@ func TestDaemonConfig(tmpDir string) *daemon.Config {
 	cfg.ProjectRoot = tmpDir
 	cfg.SyncIntervalRead = 1 * time.Hour
 	cfg.InactivityTimeout = 0
+	cfg.SocketCheckInterval = 0
 	return cfg
 }
 
