@@ -706,6 +706,156 @@ func TestCommitAndPushGitHubData_WithData(t *testing.T) {
 	}
 }
 
+func TestSyncPRs_RebuildStateFromDisk_SkipsCommentFetch(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// simulate daemon having already synced PR files to disk
+	for _, pr := range []*PRFile{
+		{Number: 10, Title: "PR 10", State: "open", Author: "alice", CreatedAt: now, UpdatedAt: now},
+		{Number: 11, Title: "PR 11", State: "merged", Author: "bob", CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeCommit: "abc",
+			Commits: []PRCommit{{SHA: "c1", Author: "bob", Date: now, Msg: "commit"}}},
+	} {
+		if err := WriteGitHubPR(ledgerPath, pr); err != nil {
+			t.Fatalf("write PR %d: %v", pr.Number, err)
+		}
+	}
+
+	// NO sync state file — simulates cache loss / first CLI run after daemon sync
+
+	// fetcher returns the same PRs (incremental sync finds them)
+	// track whether comment fetching is called
+	commentCalls := 0
+	fetcher := &countingFetcher{
+		inner: &mockFetcher{
+			prs: []FetchedPR{
+				{Number: 10, Title: "PR 10", State: "open", Author: "alice", CreatedAt: now, UpdatedAt: now},
+				{Number: 11, Title: "PR 11", State: "closed", Author: "bob", CreatedAt: now, UpdatedAt: now, MergedAt: &now, MergeSHA: "abc"},
+			},
+			comments: map[int][]FetchedComment{},
+		},
+		onCommentCall: func() { commentCalls++ },
+	}
+
+	result, err := SyncPRs(context.Background(), fetcher, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("SyncPRs: %v", err)
+	}
+
+	// both PRs should be treated as "known" (rebuilt from disk) — no comment fetches
+	if commentCalls > 0 {
+		t.Errorf("expected 0 comment API calls (state rebuilt from disk), got %d", commentCalls)
+	}
+	if result.PRCreated != 0 {
+		t.Errorf("expected 0 created (all known from disk), got %d", result.PRCreated)
+	}
+	if result.PRTotal != 2 {
+		t.Errorf("expected 2 total, got %d", result.PRTotal)
+	}
+
+	// verify the persisted sync state was rebuilt correctly
+	state, err := ReadGitHubTypeSyncState(ledgerPath, "pr")
+	if err != nil {
+		t.Fatalf("ReadGitHubTypeSyncState: %v", err)
+	}
+	if len(state.KnownStates) != 2 {
+		t.Errorf("expected 2 known states, got %d", len(state.KnownStates))
+	}
+	if state.KnownStates[10] != "open" {
+		t.Errorf("expected PR 10 state 'open', got %q", state.KnownStates[10])
+	}
+	if state.KnownStates[11] != "merged" {
+		t.Errorf("expected PR 11 state 'merged', got %q", state.KnownStates[11])
+	}
+	if state.LastSyncAt.IsZero() {
+		t.Error("expected non-zero LastSyncAt after rebuild")
+	}
+}
+
+func TestSyncIssues_RebuildStateFromDisk_SkipsCommentFetch(t *testing.T) {
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// simulate daemon having already synced issue files to disk
+	if err := WriteGitHubIssue(ledgerPath, &IssueFile{
+		Number: 20, Title: "Issue 20", State: "open", Author: "alice", CreatedAt: now, UpdatedAt: now,
+	}); err != nil {
+		t.Fatalf("write issue: %v", err)
+	}
+
+	// NO sync state file
+
+	commentCalls := 0
+	fetcher := &countingFetcher{
+		inner: &mockFetcher{
+			issues: []FetchedIssue{
+				{Number: 20, Title: "Issue 20", State: "open", Author: "alice", CreatedAt: now, UpdatedAt: now},
+			},
+			comments: map[int][]FetchedComment{},
+		},
+		onCommentCall: func() { commentCalls++ },
+	}
+
+	result, err := SyncIssues(context.Background(), fetcher, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("SyncIssues: %v", err)
+	}
+
+	if commentCalls > 0 {
+		t.Errorf("expected 0 comment API calls (state rebuilt from disk), got %d", commentCalls)
+	}
+	if result.IssueCreated != 0 {
+		t.Errorf("expected 0 created (known from disk), got %d", result.IssueCreated)
+	}
+
+	// verify the persisted sync state was rebuilt correctly
+	state, err := ReadGitHubTypeSyncState(ledgerPath, "issue")
+	if err != nil {
+		t.Fatalf("ReadGitHubTypeSyncState: %v", err)
+	}
+	if len(state.KnownStates) != 1 {
+		t.Errorf("expected 1 known state, got %d", len(state.KnownStates))
+	}
+	if state.KnownStates[20] != "open" {
+		t.Errorf("expected issue 20 state 'open', got %q", state.KnownStates[20])
+	}
+	if state.LastSyncAt.IsZero() {
+		t.Error("expected non-zero LastSyncAt after rebuild")
+	}
+}
+
+// countingFetcher wraps a GitHubFetcher to count comment API calls.
+type countingFetcher struct {
+	inner         GitHubFetcher
+	onCommentCall func()
+}
+
+func (f *countingFetcher) ListPullRequests(ctx context.Context, owner, repo string, opts ListPRsOptions) ([]FetchedPR, *FetchRateLimit, error) {
+	return f.inner.ListPullRequests(ctx, owner, repo, opts)
+}
+func (f *countingFetcher) ListIssues(ctx context.Context, owner, repo string, opts ListIssuesOptions) ([]FetchedIssue, *FetchRateLimit, error) {
+	return f.inner.ListIssues(ctx, owner, repo, opts)
+}
+func (f *countingFetcher) ListPRComments(ctx context.Context, owner, repo string, number int) ([]FetchedComment, error) {
+	if f.onCommentCall != nil {
+		f.onCommentCall()
+	}
+	return f.inner.ListPRComments(ctx, owner, repo, number)
+}
+func (f *countingFetcher) ListIssueComments(ctx context.Context, owner, repo string, number int) ([]FetchedComment, error) {
+	if f.onCommentCall != nil {
+		f.onCommentCall()
+	}
+	return f.inner.ListIssueComments(ctx, owner, repo, number)
+}
+func (f *countingFetcher) ListPRCommits(ctx context.Context, owner, repo string, number int) ([]FetchedPRCommit, error) {
+	return f.inner.ListPRCommits(ctx, owner, repo, number)
+}
+
 // initGitRepo creates a minimal git repo for testing.
 func initGitRepo(t *testing.T, dir string) {
 	t.Helper()

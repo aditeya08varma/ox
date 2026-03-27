@@ -104,6 +104,20 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 		return nil, fmt.Errorf("read pr sync state: %w", err)
 	}
 
+	// rebuild KnownStates from disk when sync state is cold (first run,
+	// cache lost, daemon reclone). Without this, every PR is treated as
+	// "unknown" and triggers per-PR API calls for comments and commits —
+	// ~3 requests × N PRs — which hangs for minutes on large repos.
+	if len(state.KnownStates) == 0 {
+		rebuilt, rebuildErr := rebuildSyncStateFromDisk(ledgerPath, "pr", logger)
+		if rebuildErr != nil {
+			logger.Warn("rebuild pr sync state from disk failed", "error", rebuildErr)
+		} else if len(rebuilt.KnownStates) > 0 {
+			state = rebuilt
+			logger.Info("rebuilt pr sync state from disk", "known", len(state.KnownStates))
+		}
+	}
+
 	since := time.Now().AddDate(0, 0, -maxDays)
 	if !state.LastSyncAt.IsZero() && state.LastSyncAt.After(since) {
 		since = state.LastSyncAt
@@ -210,6 +224,17 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 	state, err := ReadGitHubTypeSyncState(ledgerPath, "issue")
 	if err != nil {
 		return nil, fmt.Errorf("read issue sync state: %w", err)
+	}
+
+	// rebuild KnownStates from disk when sync state is cold
+	if len(state.KnownStates) == 0 {
+		rebuilt, rebuildErr := rebuildSyncStateFromDisk(ledgerPath, "issue", logger)
+		if rebuildErr != nil {
+			logger.Warn("rebuild issue sync state from disk failed", "error", rebuildErr)
+		} else if len(rebuilt.KnownStates) > 0 {
+			state = rebuilt
+			logger.Info("rebuilt issue sync state from disk", "known", len(state.KnownStates))
+		}
 	}
 
 	since := time.Now().AddDate(0, 0, -maxDays)
