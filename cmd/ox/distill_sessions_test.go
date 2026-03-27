@@ -487,9 +487,10 @@ func TestReadPendingSessionFacts(t *testing.T) {
 		}
 	})
 
-	t.Run("filters by since", func(t *testing.T) {
+	t.Run("filters by file mtime not directory date", func(t *testing.T) {
 		tcPath := t.TempDir()
 
+		// create two files: one old (backdate mtime), one new (current mtime)
 		for _, item := range []struct {
 			date, name string
 		}{
@@ -497,21 +498,56 @@ func TestReadPendingSessionFacts(t *testing.T) {
 			{"2026-03-11", "2026-03-11T09-00-alice-OxABCD.jsonl"},
 		} {
 			dir := filepath.Join(tcPath, "memory", ".session-facts", item.date)
-			os.MkdirAll(dir, 0o755)
-			os.WriteFile(filepath.Join(dir, item.name), []byte(`{"_meta":{"schema_version":"2","source_type":"session","recorded_at":"`+item.date+`T00:00:00Z"}}
-{"headline":"fact","source_type":"session"}`), 0o644)
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, item.name), []byte(`{"_meta":{"schema_version":"2","source_type":"session","recorded_at":"`+item.date+`T00:00:00Z"}}
+{"headline":"fact","source_type":"session"}`), 0o644); err != nil {
+				t.Fatal(err)
+			}
 		}
 
-		since, _ := time.Parse("2006-01-02", "2026-03-10")
+		// backdate the old file's mtime to before since
+		oldFile := filepath.Join(tcPath, "memory", ".session-facts", "2026-03-09", "2026-03-09T14-23-ryan-Ox7f3a.jsonl")
+		oldTime := time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC)
+		os.Chtimes(oldFile, oldTime, oldTime)
+
+		// since = 1 second ago — new file (current mtime) is after since, old file is before
+		since := time.Now().Add(-time.Second)
 		result, err := readPendingSessionFacts(tcPath, since)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(result) != 1 {
-			t.Errorf("got %d date groups, want 1 (only 2026-03-11)", len(result))
+			t.Errorf("got %d date groups, want 1 (only fresh file)", len(result))
 		}
 		if _, ok := result["2026-03-11"]; !ok {
-			t.Error("expected 2026-03-11 in results")
+			t.Error("expected 2026-03-11 in results (fresh mtime)")
+		}
+	})
+
+	t.Run("late-arriving session included despite old date", func(t *testing.T) {
+		tcPath := t.TempDir()
+
+		// simulate a March 10 session extracted today (fresh mtime)
+		dir := filepath.Join(tcPath, "memory", ".session-facts", "2026-03-10")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "2026-03-10T14-23-ryan-Ox7f3a.jsonl"),
+			[]byte(`{"_meta":{"schema_version":"2","source_type":"session","recorded_at":"2026-03-10T00:00:00Z"}}
+{"headline":"late fact","source_type":"session"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		// since = March 25 — file mtime is now (fresh), so it should be included
+		since, _ := time.Parse("2006-01-02", "2026-03-25")
+		result, err := readPendingSessionFacts(tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(result["2026-03-10"]) != 1 {
+			t.Errorf("late-arriving session should be included, got %d entries", len(result["2026-03-10"]))
 		}
 	})
 
@@ -541,7 +577,7 @@ func TestReadPendingSessionFacts(t *testing.T) {
 		}
 	})
 
-	t.Run("since boundary — date equal to since is included", func(t *testing.T) {
+	t.Run("zero since — all files included", func(t *testing.T) {
 		tcPath := t.TempDir()
 		dir := filepath.Join(tcPath, "memory", ".session-facts", "2026-03-10")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -552,13 +588,12 @@ func TestReadPendingSessionFacts(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		since, _ := time.Parse("2006-01-02", "2026-03-10")
-		result, err := readPendingSessionFacts(tcPath, since)
+		result, err := readPendingSessionFacts(tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(result["2026-03-10"]) != 1 {
-			t.Errorf("date equal to since should be included, got %d entries", len(result["2026-03-10"]))
+			t.Errorf("zero since should include all, got %d entries", len(result["2026-03-10"]))
 		}
 	})
 

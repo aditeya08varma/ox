@@ -13,7 +13,6 @@ import (
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/facts"
-	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/spf13/cobra"
 )
@@ -47,14 +46,19 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 		state.ProcessedSessions = make(map[string]string)
 	}
 
-	// resolve ledger path
-	ledgerPath, err := ledger.DefaultPath()
+	// resolve ledger path via project context (respects endpoint + repo ID)
+	projCtx, err := config.LoadProjectContext(projectRoot)
 	if err != nil {
-		slog.Debug("cannot resolve ledger path for session fact extraction", "error", err)
+		slog.Debug("cannot load project context for session fact extraction", "error", err)
 		return nil
 	}
-	if !ledger.Exists(ledgerPath) {
-		slog.Debug("no ledger available for session fact extraction, skipping")
+	ledgerPath := projCtx.DefaultLedgerPath()
+	if ledgerPath == "" {
+		slog.Debug("no ledger path configured, skipping session fact extraction")
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(ledgerPath, "sessions")); err != nil {
+		slog.Debug("no sessions directory in ledger, skipping", "path", ledgerPath)
 		return nil
 	}
 
@@ -79,8 +83,20 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 		extractedFacts := sessionSummaryToFacts(s)
 		if len(extractedFacts) == 0 {
 			slog.Debug("no facts extracted from session", "session", s.DirName)
-			// still mark as processed to avoid re-scanning
-			state.ProcessedSessions[s.DirName] = s.Hash
+			// write empty marker so scanPendingSessions skips this session
+			markerFile := filepath.Join("memory", ".session-facts", s.Date, s.DirName+".jsonl")
+			markerHeader := facts.FileHeader{
+				Meta: facts.FileMeta{
+					SchemaVersion: facts.SchemaVersion,
+					SourceType:    facts.SourceSession,
+					RecordedAt:    s.Date + "T00:00:00Z",
+				},
+			}
+			if err := facts.WriteFacts(filepath.Join(tc.Path, markerFile), markerHeader, nil); err != nil {
+				slog.Warn("failed to write empty session fact marker", "session", s.DirName, "error", err)
+			} else {
+				state.ProcessedSessions[s.DirName] = s.Hash
+			}
 			continue
 		}
 
@@ -102,6 +118,10 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 
 		if err := commitMemoryFile(tc.Path, factFile, fmt.Sprintf("memory: extract facts from session %s", s.DirName)); err != nil {
 			slog.Warn("failed to commit session facts", "session", s.DirName, "error", err)
+			if removeErr := os.Remove(fullPath); removeErr != nil && !os.IsNotExist(removeErr) {
+				slog.Warn("failed to clean up uncommitted session facts", "session", s.DirName, "error", removeErr)
+			}
+			continue
 		}
 
 		state.ProcessedSessions[s.DirName] = s.Hash
@@ -322,7 +342,10 @@ func sessionSummaryToFacts(input sessionInput) []facts.Fact {
 }
 
 // readPendingSessionFacts reads fact files from memory/.session-facts/<date>/
-// that were created since the given timestamp, grouped by date.
+// that were written since the given timestamp, grouped by session date.
+// Uses file mtime (not directory date) for the since filter so that
+// late-arriving sessions (e.g., March 10 session synced on March 27)
+// are included even when since is past the session date.
 // Returns a map of YYYY-MM-DD → []discussionFactEntry for seamless merge
 // with discussion and github facts in distillDaily.
 func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discussionFactEntry, error) {
@@ -343,13 +366,7 @@ func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discu
 		}
 
 		date := dateDir.Name()
-		factDate, err := time.Parse("2006-01-02", date)
-		if err != nil {
-			continue
-		}
-
-		// filter by since
-		if !since.IsZero() && factDate.Before(since.Truncate(24*time.Hour)) {
+		if _, err := time.Parse("2006-01-02", date); err != nil {
 			continue
 		}
 
@@ -363,6 +380,15 @@ func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discu
 		for _, f := range files {
 			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
 				continue
+			}
+
+			// filter by file mtime — includes late-arriving sessions
+			// whose session date is older than since
+			if !since.IsZero() {
+				info, err := f.Info()
+				if err == nil && info.ModTime().Before(since) {
+					continue
+				}
 			}
 
 			data, err := os.ReadFile(filepath.Join(datePath, f.Name()))
