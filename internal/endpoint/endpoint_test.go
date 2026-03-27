@@ -76,14 +76,14 @@ func TestNormalizeEndpoint(t *testing.T) {
 		{"www full URL", "https://www.sageox.ai", "https://sageox.ai"},
 		{"www with path", "https://www.sageox.ai/v1", "https://sageox.ai/v1"},
 		{"www staging", "https://www.test.sageox.ai", "https://test.sageox.ai"},
-		{"www bare host", "www.sageox.ai", "sageox.ai"},
+		{"www bare host", "www.sageox.ai", "https://sageox.ai"},
 		{"www enterprise", "https://www.sageox.walmart.com", "https://sageox.walmart.com"},
 
 		// api. stripping
 		{"api full URL", "https://api.sageox.ai", "https://sageox.ai"},
 		{"api with path", "https://api.sageox.ai/v1/repos", "https://sageox.ai/v1/repos"},
 		{"api staging", "https://api.test.sageox.ai", "https://test.sageox.ai"},
-		{"api bare host", "api.sageox.ai", "sageox.ai"},
+		{"api bare host", "api.sageox.ai", "https://sageox.ai"},
 
 		// app. stripping
 		{"app full URL", "https://app.sageox.ai", "https://sageox.ai"},
@@ -104,8 +104,8 @@ func TestNormalizeEndpoint(t *testing.T) {
 		{"www trailing slash", "https://www.sageox.ai/", "https://sageox.ai"},
 
 		// bare host with port
-		{"bare host with port", "www.sageox.ai:443", "sageox.ai:443"},
-		{"api bare with port", "api.sageox.ai:443", "sageox.ai:443"},
+		{"bare host with port", "www.sageox.ai:443", "https://sageox.ai:443"},
+		{"api bare with port", "api.sageox.ai:443", "https://sageox.ai:443"},
 
 		// edge cases
 		{"empty", "", ""},
@@ -118,10 +118,13 @@ func TestNormalizeEndpoint(t *testing.T) {
 		{"prefix only api.", "api.", ""},
 
 		// git. bare host
-		{"git bare host", "git.sageox.ai", "sageox.ai"},
+		{"git bare host", "git.sageox.ai", "https://sageox.ai"},
 
 		// URL with prefix + port
 		{"api full URL with port and path", "https://api.sageox.ai:443/v1", "https://sageox.ai:443/v1"},
+
+		// bare host no prefix (the --endpoint flag bug)
+		{"bare host no prefix", "test.sageox.ai", "https://test.sageox.ai"},
 
 		// mixed case
 		{"mixed case prefix", "https://API.SageOx.AI", "https://SageOx.AI"},

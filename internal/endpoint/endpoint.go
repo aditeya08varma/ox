@@ -184,7 +184,8 @@ func extractHost(endpoint string) string {
 //	https://api.sageox.ai/v1  → https://sageox.ai/v1
 //	https://app.sageox.ai     → https://sageox.ai
 //	https://git.test.sageox.ai → https://test.sageox.ai
-//	www.test.sageox.ai        → test.sageox.ai
+//	www.test.sageox.ai        → https://test.sageox.ai
+//	test.sageox.ai            → https://test.sageox.ai
 //	http://localhost:8080      → http://localhost:8080  (no prefix to strip)
 func NormalizeEndpoint(ep string) string {
 	if ep == "" {
@@ -211,7 +212,7 @@ func NormalizeEndpoint(ep string) string {
 		return ep
 	}
 
-	// bare host or host:port — strip prefix from the host portion
+	// bare host or host:port — strip prefix, then add https:// scheme
 	host := ep
 	port := ""
 	if idx := strings.LastIndex(host, ":"); idx != -1 {
@@ -230,10 +231,13 @@ func NormalizeEndpoint(ep string) string {
 	}
 
 	normalized := stripSubdomainPrefix(host)
-	if port != "" {
-		return normalized + ":" + port
+	if normalized == "" {
+		return ""
 	}
-	return normalized
+	if port != "" {
+		return "https://" + normalized + ":" + port
+	}
+	return "https://" + normalized
 }
 
 // stripSubdomainPrefix removes a single common subdomain prefix from a hostname.

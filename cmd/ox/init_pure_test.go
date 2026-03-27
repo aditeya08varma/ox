@@ -86,17 +86,17 @@ func TestGenerateSageoxLinksSection(t *testing.T) {
 		},
 		{
 			name: "repo id only",
-			cfg:  &config.ProjectConfig{RepoID: "repo_abc123"},
+			cfg:  &config.ProjectConfig{RepoID: "repo_abc123", Endpoint: "https://sageox.ai"},
 			want: "## SageOx Links\n\n- **Repository Dashboard:** https://sageox.ai/repo/repo_abc123\n",
 		},
 		{
 			name: "team id only",
-			cfg:  &config.ProjectConfig{TeamID: "team_xyz789"},
+			cfg:  &config.ProjectConfig{TeamID: "team_xyz789", Endpoint: "https://sageox.ai"},
 			want: "## SageOx Links\n\n- **Team Dashboard:** https://sageox.ai/team/team_xyz789\n",
 		},
 		{
 			name: "both ids",
-			cfg:  &config.ProjectConfig{RepoID: "repo_abc123", TeamID: "team_xyz789"},
+			cfg:  &config.ProjectConfig{RepoID: "repo_abc123", TeamID: "team_xyz789", Endpoint: "https://sageox.ai"},
 			want: "## SageOx Links\n\n- **Repository Dashboard:** https://sageox.ai/repo/repo_abc123\n- **Team Dashboard:** https://sageox.ai/team/team_xyz789\n",
 		},
 	}
