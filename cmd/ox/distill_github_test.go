@@ -216,14 +216,15 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 	assert.Contains(t, backend.promptReceived, "Add rate limiting")
 
 	// Verify fact file was written with UUID7 filename
-	today := time.Now().UTC().Format("2006-01-02")
+	// Use the same timestamp as the inserted data to avoid UTC midnight boundary flakes
+	expectedDay := time.Unix(ts, 0).UTC().Format("2006-01-02")
 	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
 	entries, err := os.ReadDir(factsDir)
 	require.NoError(t, err)
 
 	var found bool
 	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), today) && strings.HasSuffix(e.Name(), ".jsonl") {
+		if strings.HasPrefix(e.Name(), expectedDay) && strings.HasSuffix(e.Name(), ".jsonl") {
 			content, err := os.ReadFile(filepath.Join(factsDir, e.Name()))
 			require.NoError(t, err)
 			contentStr := string(content)
@@ -233,11 +234,11 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 			assert.Contains(t, contentStr, `"schema_version":"2"`)
 			assert.Contains(t, contentStr, `"source_type":"github"`)
 			// UUID7 filename should be longer than just "YYYY-MM-DD.jsonl"
-			assert.Greater(t, len(e.Name()), len(today+".jsonl"))
+			assert.Greater(t, len(e.Name()), len(expectedDay+".jsonl"))
 			found = true
 		}
 	}
-	assert.True(t, found, "expected UUID7 fact file for %s", today)
+	assert.True(t, found, "expected UUID7 fact file for %s", expectedDay)
 
 	// Verify state was updated
 	assert.NotEmpty(t, state.LastGitHubFacts)
@@ -429,11 +430,15 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	// UUID7 filenames prevent overwrite — both runs produce separate files
 	assert.Greater(t, len(entries2), firstRunCount, "intra-day re-run should add files, not overwrite")
 
-	// Verify all files are for today and have UUID7 suffix
-	today := time.Now().UTC().Format("2006-01-02")
+	// Verify all files are for valid days and have UUID7 suffix.
+	// The first run inserts data 1 hour ago (may be previous UTC day near midnight),
+	// the second run inserts data at now — both are valid dates.
+	firstRunDay := time.Unix(ts, 0).UTC().Format("2006-01-02")
+	secondRunDay := time.Now().UTC().Format("2006-01-02")
 	for _, e := range entries2 {
-		assert.True(t, strings.HasPrefix(e.Name(), today), "file %s should be for today", e.Name())
-		assert.Greater(t, len(e.Name()), len(today+".jsonl"), "file %s should have UUID7 suffix", e.Name())
+		validDay := strings.HasPrefix(e.Name(), firstRunDay) || strings.HasPrefix(e.Name(), secondRunDay)
+		assert.True(t, validDay, "file %s should be for %s or %s", e.Name(), firstRunDay, secondRunDay)
+		assert.Greater(t, len(e.Name()), len("2006-01-02.jsonl"), "file %s should have UUID7 suffix", e.Name())
 	}
 }
 
