@@ -203,6 +203,11 @@ func Login(ctx context.Context, deviceCode *DeviceCodeResponse, statusCallback f
 				accessToken = token.AccessToken
 			}
 
+			// if device flow omitted refresh_token, use JWT exchange refresh_token when available
+			if token.RefreshToken == "" && jwtToken != nil && jwtToken.RefreshToken != "" {
+				refreshToken = jwtToken.RefreshToken
+			}
+
 			// fetch user info using JWT
 			userInfo, err := fetchUserInfo(client, apiURL, accessToken)
 			if err != nil {
@@ -306,9 +311,10 @@ func pollToken(client *http.Client, endpoint, deviceCode string) (*TokenResponse
 
 // JWTExchangeResponse represents the response from JWT exchange endpoint
 type JWTExchangeResponse struct {
-	AccessToken string `json:"access_token"`
-	TokenType   string `json:"token_type"`
-	ExpiresIn   int    `json:"expires_in"`
+	AccessToken  string `json:"access_token"`
+	RefreshToken string `json:"refresh_token"`
+	TokenType    string `json:"token_type"`
+	ExpiresIn    int    `json:"expires_in"`
 }
 
 // exchangeForJWT exchanges an opaque session token for a JWT
@@ -544,6 +550,11 @@ func (c *AuthClient) Login(ctx context.Context, deviceCode *DeviceCodeResponse, 
 				slog.Warn("JWT exchange returned empty access_token, falling back to opaque token",
 					"endpoint", apiURL+"/api/v1/cli/auth/token")
 				accessToken = token.AccessToken
+			}
+
+			// if device flow omitted refresh_token, use JWT exchange refresh_token when available
+			if token.RefreshToken == "" && jwtToken != nil && jwtToken.RefreshToken != "" {
+				refreshToken = jwtToken.RefreshToken
 			}
 
 			// fetch user info using JWT

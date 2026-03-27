@@ -690,3 +690,149 @@ func TestExchangeForJWT_ResponseFormats(t *testing.T) {
 		})
 	}
 }
+
+func TestExchangeForJWT_RefreshTokenField(t *testing.T) {
+	t.Parallel()
+
+	// verify JWTExchangeResponse captures refresh_token from server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"access_token":  "jwt-token",
+			"refresh_token": "jwt-refresh-token",
+			"token_type":    "Bearer",
+			"expires_in":    900,
+		})
+	}))
+	defer server.Close()
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := exchangeForJWT(client, server.URL, "opaque-token")
+	require.NoError(t, err)
+	assert.Equal(t, "jwt-token", resp.AccessToken)
+	assert.Equal(t, "jwt-refresh-token", resp.RefreshToken)
+}
+
+func TestLogin_JWTExchangeRefreshTokenFallback(t *testing.T) {
+	t.Parallel()
+
+	// Regression test: when device flow returns no refresh_token,
+	// but JWT exchange does, the stored token should use the JWT exchange one.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case DeviceTokenEndpoint:
+			// device flow returns NO refresh_token
+			json.NewEncoder(w).Encode(TokenResponse{
+				AccessToken: "opaque-token",
+				TokenType:   "Bearer",
+				ExpiresIn:   3600,
+				// RefreshToken intentionally empty
+			})
+		case "/api/v1/cli/auth/token":
+			// JWT exchange DOES return a refresh_token
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "jwt-access",
+				"refresh_token": "jwt-refresh-from-exchange",
+				"token_type":    "Bearer",
+				"expires_in":    900,
+			})
+		case UserInfoEndpoint:
+			json.NewEncoder(w).Encode(UserInfo{
+				UserID: "user-123",
+				Email:  "test@example.com",
+				Name:   "Test User",
+			})
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAuthClientWithDir(t.TempDir()).WithEndpoint(server.URL)
+
+	deviceCode := &DeviceCodeResponse{
+		DeviceCode:      "test-device-code",
+		UserCode:        "ABCD-1234",
+		VerificationURI: "https://example.com/verify",
+		ExpiresIn:       300,
+		Interval:        1,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	err := client.Login(ctx, deviceCode, nil)
+	require.NoError(t, err)
+
+	// verify the stored token picked up refresh_token from JWT exchange
+	token, err := client.GetToken()
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, "jwt-access", token.AccessToken)
+	assert.Equal(t, "jwt-refresh-from-exchange", token.RefreshToken,
+		"refresh_token should fall back to JWT exchange response when device flow doesn't provide one")
+}
+
+func TestLogin_JWTExchangeRefreshTokenFallback_WithSessionToken(t *testing.T) {
+	t.Parallel()
+
+	// Edge case: device flow returns session_token (no refresh_token),
+	// JWT exchange returns refresh_token — JWT refresh_token should be preferred.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch r.URL.Path {
+		case DeviceTokenEndpoint:
+			// device flow returns session_token but NO refresh_token
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "opaque-token",
+				"session_token": "device-session-token",
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+			})
+		case "/api/v1/cli/auth/token":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "jwt-access",
+				"refresh_token": "jwt-refresh-from-exchange",
+				"token_type":    "Bearer",
+				"expires_in":    900,
+			})
+		case UserInfoEndpoint:
+			json.NewEncoder(w).Encode(UserInfo{
+				UserID: "user-123",
+				Email:  "test@example.com",
+				Name:   "Test User",
+			})
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewAuthClientWithDir(t.TempDir()).WithEndpoint(server.URL)
+
+	deviceCode := &DeviceCodeResponse{
+		DeviceCode:      "test-device-code",
+		UserCode:        "ABCD-1234",
+		VerificationURI: "https://example.com/verify",
+		ExpiresIn:       300,
+		Interval:        1,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	err := client.Login(ctx, deviceCode, nil)
+	require.NoError(t, err)
+
+	token, err := client.GetToken()
+	require.NoError(t, err)
+	require.NotNil(t, token)
+	assert.Equal(t, "jwt-access", token.AccessToken)
+	assert.Equal(t, "jwt-refresh-from-exchange", token.RefreshToken,
+		"JWT exchange refresh_token should be preferred over session_token fallback")
+}

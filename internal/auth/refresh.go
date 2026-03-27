@@ -303,6 +303,11 @@ func refreshTokenForEndpoint(token *StoredToken, ep string) (*StoredToken, error
 		}
 	}
 
+	// fallback: if OAuth2 response omitted refresh_token, prefer JWT exchange refresh_token when present
+	if responseData.RefreshToken == "" && jwtToken != nil && jwtToken.RefreshToken != "" {
+		refreshToken = jwtToken.RefreshToken
+	}
+
 	// calculate expiry time
 	expiresAt := time.Now().UTC().Add(time.Duration(expiresIn) * time.Second)
 
@@ -522,6 +527,11 @@ func (c *AuthClient) refreshToken(token *StoredToken) (*StoredToken, error) {
 		if jwtToken.ExpiresIn > 0 {
 			expiresIn = jwtToken.ExpiresIn
 		}
+	}
+
+	// fallback: if OAuth2 response omitted refresh_token, prefer JWT exchange refresh_token when present
+	if responseData.RefreshToken == "" && jwtToken != nil && jwtToken.RefreshToken != "" {
+		refreshTokenStr = jwtToken.RefreshToken
 	}
 
 	// calculate expiry time
