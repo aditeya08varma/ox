@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -27,6 +28,7 @@ func TestUploadSessionFiles_Basic(t *testing.T) {
 	summaryOID := ComputeOID(summaryContent)
 
 	// mock LFS batch server that accepts all uploads and verifies
+	var mu sync.Mutex
 	uploaded := make(map[string]bool)
 	verified := make(map[string]bool)
 	var serverURL string
@@ -65,7 +67,9 @@ func TestUploadSessionFiles_Basic(t *testing.T) {
 		// handle upload PUT requests
 		if r.Method == "PUT" {
 			oid := filepath.Base(r.URL.Path)
+			mu.Lock()
 			uploaded[oid] = true
+			mu.Unlock()
 			w.WriteHeader(200)
 			return
 		}
@@ -77,7 +81,9 @@ func TestUploadSessionFiles_Basic(t *testing.T) {
 				Size int64  `json:"size"`
 			}
 			json.NewDecoder(r.Body).Decode(&body)
+			mu.Lock()
 			verified[body.OID] = true
+			mu.Unlock()
 			w.WriteHeader(200)
 			return
 		}
@@ -119,18 +125,25 @@ func TestUploadSessionFiles_Basic(t *testing.T) {
 	}
 
 	// verify blobs were uploaded
-	if !uploaded[rawOID] {
+	mu.Lock()
+	uploadedRaw := uploaded[rawOID]
+	uploadedSummary := uploaded[summaryOID]
+	verifiedRaw := verified[rawOID]
+	verifiedSummary := verified[summaryOID]
+	mu.Unlock()
+
+	if !uploadedRaw {
 		t.Error("raw.jsonl blob was not uploaded")
 	}
-	if !uploaded[summaryOID] {
+	if !uploadedSummary {
 		t.Error("summary.md blob was not uploaded")
 	}
 
 	// verify blobs were verified via the LFS verify action
-	if !verified[rawOID] {
+	if !verifiedRaw {
 		t.Error("raw.jsonl blob was not verified after upload")
 	}
-	if !verified[summaryOID] {
+	if !verifiedSummary {
 		t.Error("summary.md blob was not verified after upload")
 	}
 }
