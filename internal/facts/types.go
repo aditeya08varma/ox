@@ -30,6 +30,7 @@ const (
 	SourceGitHub      = "github"
 	SourceDiscussion  = "discussion"
 	SourceObservation = "observation"
+	SourceSession     = "session"
 )
 
 // Category constants.
