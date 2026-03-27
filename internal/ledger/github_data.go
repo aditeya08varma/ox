@@ -3,6 +3,7 @@ package ledger
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -289,6 +290,54 @@ func ListGitHubDataFiles(ledgerPath string, dataType string) ([]string, error) {
 	}
 
 	return paths, nil
+}
+
+// rebuildSyncStateFromDisk reconstructs a GitHubTypeSyncState from existing
+// JSON files in the ledger. This handles the cold-start case where the cache
+// file is missing (first run, daemon reclone, cache cleared) but the data
+// files already exist on disk from a prior sync.
+func rebuildSyncStateFromDisk(ledgerPath, dataType string, logger *slog.Logger) (*GitHubTypeSyncState, error) {
+	files, err := ListGitHubDataFiles(ledgerPath, dataType)
+	if err != nil {
+		return nil, fmt.Errorf("list %s files: %w", dataType, err)
+	}
+	if len(files) == 0 {
+		return &GitHubTypeSyncState{KnownStates: make(map[int]string)}, nil
+	}
+
+	state := &GitHubTypeSyncState{
+		KnownStates: make(map[int]string, len(files)),
+	}
+	var latestUpdate time.Time
+
+	for _, path := range files {
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			logger.Debug("rebuild sync state: skip unreadable file", "path", path, "error", readErr)
+			continue
+		}
+
+		// lightweight parse — only extract the fields we need
+		var stub struct {
+			Number    int       `json:"number"`
+			State     string    `json:"state"`
+			UpdatedAt time.Time `json:"updated_at"`
+		}
+		if jsonErr := json.Unmarshal(data, &stub); jsonErr != nil {
+			logger.Debug("rebuild sync state: skip unparseable file", "path", path, "error", jsonErr)
+			continue
+		}
+
+		state.KnownStates[stub.Number] = stub.State
+		if stub.UpdatedAt.After(latestUpdate) {
+			latestUpdate = stub.UpdatedAt
+		}
+	}
+
+	state.Count = len(state.KnownStates)
+	state.LastSyncAt = latestUpdate
+
+	return state, nil
 }
 
 // ComputeGitHubDataPaths returns sparse checkout patterns for the last N days
