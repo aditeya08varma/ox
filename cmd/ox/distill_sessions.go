@@ -1,0 +1,412 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/facts"
+	"github.com/sageox/ox/pkg/sessionsummary"
+	"github.com/spf13/cobra"
+)
+
+// sessionNameRe parses session directory names.
+// Format: YYYY-MM-DDTHH-MM-<username>-<sessionID>
+// Captures: date (group 1), username (group 2).
+var sessionNameRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})T\d{2}-\d{2}-(.+)-\w+$`)
+
+// minSessionQuality is the minimum quality score for a session to be included
+// in fact extraction. Sessions scoring below this are considered too low-signal.
+// A zero score means the LLM didn't provide one (backward compat) — include those.
+const minSessionQuality = 0.2
+
+// sessionInput holds parsed data for a single session directory.
+type sessionInput struct {
+	DirName string                            // e.g., "2026-01-06T14-32-ryan-Ox7f3a"
+	Date    string                            // "2026-01-06" (extracted from dir name)
+	Who     string                            // username extracted from dir name
+	Hash    string                            // content hash from scan, avoids re-reading summary.json
+	Summary *sessionsummary.SummarizeResponse // parsed summary.json
+}
+
+// extractSessionFacts scans the ledger for sessions with summary.json,
+// transforms structured session data into facts, and writes JSONL files
+// to memory/.session-facts/<date>/ in the team context.
+//
+// No LLM calls — pure data transformation from structured summary.json.
+func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *distillStateV2, projectRoot string) error {
+	if state.ProcessedSessions == nil {
+		state.ProcessedSessions = make(map[string]string)
+	}
+
+	// resolve ledger path via project context (respects endpoint + repo ID)
+	projCtx, err := config.LoadProjectContext(projectRoot)
+	if err != nil {
+		slog.Debug("cannot load project context for session fact extraction", "error", err)
+		return nil
+	}
+	ledgerPath := projCtx.DefaultLedgerPath()
+	if ledgerPath == "" {
+		slog.Debug("no ledger path configured, skipping session fact extraction")
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(ledgerPath, "sessions")); err != nil {
+		slog.Debug("no sessions directory in ledger, skipping", "path", ledgerPath)
+		return nil
+	}
+
+	pending, err := scanPendingSessions(ledgerPath, tc.Path, state.ProcessedSessions)
+	if err != nil {
+		return fmt.Errorf("scan sessions: %w", err)
+	}
+
+	if len(pending) == 0 {
+		return nil
+	}
+
+	if distillDryRun {
+		fmt.Fprintf(cmd.OutOrStdout(), "Pending sessions: %d\n", len(pending))
+		for _, s := range pending {
+			fmt.Fprintf(cmd.OutOrStdout(), "  - %s: %s\n", s.DirName, s.Summary.Title)
+		}
+		return nil
+	}
+
+	for _, s := range pending {
+		extractedFacts := sessionSummaryToFacts(s)
+		if len(extractedFacts) == 0 {
+			slog.Debug("no facts extracted from session", "session", s.DirName)
+			// write empty marker so scanPendingSessions skips this session
+			markerFile := filepath.Join("memory", ".session-facts", s.Date, s.DirName+".jsonl")
+			markerHeader := facts.FileHeader{
+				Meta: facts.FileMeta{
+					SchemaVersion: facts.SchemaVersion,
+					SourceType:    facts.SourceSession,
+					RecordedAt:    s.Date + "T00:00:00Z",
+				},
+			}
+			if err := facts.WriteFacts(filepath.Join(tc.Path, markerFile), markerHeader, nil); err != nil {
+				slog.Warn("failed to write empty session fact marker", "session", s.DirName, "error", err)
+			} else {
+				state.ProcessedSessions[s.DirName] = s.Hash
+			}
+			continue
+		}
+
+		header := facts.FileHeader{
+			Meta: facts.FileMeta{
+				SchemaVersion: facts.SchemaVersion,
+				SourceType:    facts.SourceSession,
+				RecordedAt:    s.Date + "T00:00:00Z",
+			},
+		}
+
+		factFile := filepath.Join("memory", ".session-facts", s.Date, s.DirName+".jsonl")
+		fullPath := filepath.Join(tc.Path, factFile)
+
+		if err := facts.WriteFacts(fullPath, header, extractedFacts); err != nil {
+			slog.Warn("failed to write session facts", "session", s.DirName, "error", err)
+			continue
+		}
+
+		if err := commitMemoryFile(tc.Path, factFile, fmt.Sprintf("memory: extract facts from session %s", s.DirName)); err != nil {
+			slog.Warn("failed to commit session facts", "session", s.DirName, "error", err)
+			if removeErr := os.Remove(fullPath); removeErr != nil && !os.IsNotExist(removeErr) {
+				slog.Warn("failed to clean up uncommitted session facts", "session", s.DirName, "error", removeErr)
+			}
+			continue
+		}
+
+		state.ProcessedSessions[s.DirName] = s.Hash
+
+		fmt.Fprintf(cmd.OutOrStdout(), "Extracted %d facts from session: %s\n", len(extractedFacts), s.Summary.Title)
+	}
+
+	return nil
+}
+
+// scanPendingSessions reads the sessions/ directory in the ledger and returns
+// sessions not yet tracked in state.ProcessedSessions that have a summary.json.
+func scanPendingSessions(ledgerPath, tcPath string, processed map[string]string) ([]sessionInput, error) {
+	sessionsDir := filepath.Join(ledgerPath, "sessions")
+	entries, err := os.ReadDir(sessionsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read sessions dir: %w", err)
+	}
+
+	var pending []sessionInput
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		dirName := entry.Name()
+
+		// parse date and username from session name
+		date, who := parseSessionName(dirName)
+		if date == "" {
+			slog.Debug("skip session dir with unparseable name", "dir", dirName)
+			continue
+		}
+
+		// check if summary.json exists
+		summaryPath := filepath.Join(sessionsDir, dirName, "summary.json")
+		summaryData, err := os.ReadFile(summaryPath)
+		if err != nil {
+			continue // no summary.json, skip
+		}
+
+		// compute content hash for change detection
+		currentHash := contentHash(string(summaryData))
+
+		// check if fact file already exists in team context
+		factFilePath := filepath.Join(tcPath, "memory", ".session-facts", date, dirName+".jsonl")
+		factFileExists := fileExists(factFilePath)
+
+		// skip if already processed with same hash and fact file exists
+		if prevHash, ok := processed[dirName]; ok && prevHash == currentHash && factFileExists {
+			continue
+		}
+
+		// skip if fact file already exists (covers fresh clone / deleted state)
+		if _, ok := processed[dirName]; !ok && factFileExists {
+			continue
+		}
+
+		// parse summary.json
+		var summary sessionsummary.SummarizeResponse
+		if err := json.Unmarshal(summaryData, &summary); err != nil {
+			slog.Debug("malformed summary.json, skipping", "session", dirName, "error", err)
+			continue
+		}
+
+		// quality gate: skip low-quality sessions
+		if summary.QualityScore > 0 && summary.QualityScore < minSessionQuality {
+			slog.Debug("skip low-quality session", "session", dirName, "score", summary.QualityScore)
+			continue
+		}
+
+		pending = append(pending, sessionInput{
+			DirName: dirName,
+			Date:    date,
+			Who:     who,
+			Hash:    currentHash,
+			Summary: &summary,
+		})
+	}
+
+	// sort by date (oldest first)
+	sort.Slice(pending, func(i, j int) bool {
+		return pending[i].DirName < pending[j].DirName
+	})
+
+	return pending, nil
+}
+
+// parseSessionName extracts the date and username from a session directory name.
+// Format: YYYY-MM-DDTHH-MM-<username>-<sessionID>
+// Returns empty strings if the name doesn't match the expected format.
+func parseSessionName(name string) (date, who string) {
+	m := sessionNameRe.FindStringSubmatch(name)
+	if m == nil {
+		return "", ""
+	}
+	return m[1], m[2]
+}
+
+// sessionContentHash computes a content hash of a session's summary.json.
+func sessionContentHash(ledgerPath, dirName string) string {
+	data, err := os.ReadFile(filepath.Join(ledgerPath, "sessions", dirName, "summary.json"))
+	if err != nil {
+		slog.Debug("failed to hash session summary", "session", dirName, "error", err)
+		return ""
+	}
+	return contentHash(string(data))
+}
+
+// sessionSummaryToFacts transforms a session summary into uniform facts.
+// Pure data transformation — no LLM calls.
+func sessionSummaryToFacts(input sessionInput) []facts.Fact {
+	var result []facts.Fact
+	s := input.Summary
+	ts := input.Date + "T00:00:00Z"
+	ref := "sessions/" + input.DirName
+
+	// session context fact (title + summary)
+	if s.Title != "" && s.Summary != "" {
+		summary := s.Summary
+		if len(s.KeyActions) > 0 {
+			summary += " Key actions: " + strings.Join(s.KeyActions, "; ")
+		}
+		result = append(result, facts.Fact{
+			Headline:   s.Title,
+			Summary:    summary,
+			SourceType: facts.SourceSession,
+			SourceRef:  ref,
+			Timestamp:  ts,
+			Category:   facts.CategoryContext,
+			Who:        input.Who,
+		})
+	}
+
+	if s.AgentSummary != nil {
+		// decisions
+		for _, d := range s.AgentSummary.Decisions {
+			who := d.Owner
+			if who == "" {
+				who = input.Who
+			}
+			result = append(result, facts.Fact{
+				Headline:   d.What,
+				Rationale:  d.Why,
+				SourceType: facts.SourceSession,
+				SourceRef:  ref,
+				Timestamp:  ts,
+				Category:   facts.CategoryDecision,
+				Who:        who,
+			})
+		}
+
+		// action items
+		for _, a := range s.AgentSummary.ActionItems {
+			who := a.Assignee
+			if who == "" {
+				who = input.Who
+			}
+			var summary string
+			if a.Priority != "" {
+				summary = fmt.Sprintf("Priority: %s", a.Priority)
+			}
+			result = append(result, facts.Fact{
+				Headline:   a.Task,
+				Summary:    summary,
+				SourceType: facts.SourceSession,
+				SourceRef:  ref,
+				Timestamp:  ts,
+				Category:   facts.CategoryActionItem,
+				Who:        who,
+			})
+		}
+
+		// open questions
+		for _, q := range s.AgentSummary.OpenQuestions {
+			result = append(result, facts.Fact{
+				Headline:   q.Question,
+				Summary:    q.Context,
+				SourceType: facts.SourceSession,
+				SourceRef:  ref,
+				Timestamp:  ts,
+				Category:   facts.CategoryOpenQuestion,
+				Who:        input.Who,
+			})
+		}
+	}
+
+	// aha moments — skip "question" type (overlaps with OpenQuestions)
+	for _, aha := range s.AhaMoments {
+		switch aha.Type {
+		case "insight", "breakthrough", "synthesis":
+			result = append(result, facts.Fact{
+				Headline:   aha.Highlight,
+				Summary:    aha.Why,
+				SourceType: facts.SourceSession,
+				SourceRef:  ref,
+				Timestamp:  ts,
+				Category:   facts.CategoryLearning,
+				Who:        input.Who,
+			})
+		case "decision":
+			result = append(result, facts.Fact{
+				Headline:   aha.Highlight,
+				Summary:    aha.Why,
+				SourceType: facts.SourceSession,
+				SourceRef:  ref,
+				Timestamp:  ts,
+				Category:   facts.CategoryDecision,
+				Who:        input.Who,
+			})
+		}
+	}
+
+	return result
+}
+
+// readPendingSessionFacts reads fact files from memory/.session-facts/<date>/
+// that were written since the given timestamp, grouped by session date.
+// Uses file mtime (not directory date) for the since filter so that
+// late-arriving sessions (e.g., March 10 session synced on March 27)
+// are included even when since is past the session date.
+// Returns a map of YYYY-MM-DD → []discussionFactEntry for seamless merge
+// with discussion and github facts in distillDaily.
+func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discussionFactEntry, error) {
+	sessionFactsDir := filepath.Join(tcPath, "memory", ".session-facts")
+	dateDirs, err := os.ReadDir(sessionFactsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read session-facts dir: %w", err)
+	}
+
+	result := make(map[string][]discussionFactEntry)
+
+	for _, dateDir := range dateDirs {
+		if !dateDir.IsDir() {
+			continue
+		}
+
+		date := dateDir.Name()
+		if _, err := time.Parse("2006-01-02", date); err != nil {
+			continue
+		}
+
+		// read all .jsonl files in this date directory
+		datePath := filepath.Join(sessionFactsDir, date)
+		files, err := os.ReadDir(datePath)
+		if err != nil {
+			continue
+		}
+
+		for _, f := range files {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+				continue
+			}
+
+			// filter by file mtime — includes late-arriving sessions
+			// whose session date is older than since
+			if !since.IsZero() {
+				info, err := f.Info()
+				if err == nil && info.ModTime().Before(since) {
+					continue
+				}
+			}
+
+			data, err := os.ReadFile(filepath.Join(datePath, f.Name()))
+			if err != nil {
+				continue
+			}
+			content := strings.TrimSpace(string(data))
+			if content == "" {
+				continue
+			}
+
+			result[date] = append(result[date], discussionFactEntry{
+				Content: content,
+				RelPath: filepath.Join("memory", ".session-facts", date, f.Name()),
+				Date:    date,
+			})
+		}
+	}
+
+	return result, nil
+}

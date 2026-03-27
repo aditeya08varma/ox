@@ -361,6 +361,10 @@ type distillStateV2 struct {
 	ProcessedDiscussions map[string]string `json:"processed_discussions,omitempty"`
 	// LastGitHubFacts is the RFC3339 timestamp of the last successful GitHub fact extraction.
 	LastGitHubFacts string `json:"last_github_facts,omitempty"`
+	// ProcessedSessions tracks which session dirs have been processed.
+	// Key: directory name, Value: content hash of summary.json at time of processing.
+	// Map-based (not timestamp cursor) because sessions arrive out of order via daemon sync.
+	ProcessedSessions map[string]string `json:"processed_sessions,omitempty"`
 	// v1 compat fields (read for migration, not written)
 	LastDistilled    string `json:"last_distilled,omitempty"`
 	ObservationCount int    `json:"observation_count,omitempty"`
@@ -492,6 +496,17 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		} else if !distillDryRun {
 			if err := saveDistillStateV2(projectRoot, state); err != nil {
 				slog.Warn("failed to save distill state after github extraction", "error", err)
+			}
+		}
+	}
+
+	// extract facts from session summaries before daily distill
+	if plan.Daily {
+		if err := extractSessionFacts(cmd, tc, state, projectRoot); err != nil {
+			slog.Warn("session fact extraction failed", "error", err)
+		} else if !distillDryRun {
+			if err := saveDistillStateV2(projectRoot, state); err != nil {
+				slog.Warn("failed to save distill state after session extraction", "error", err)
 			}
 		}
 	}
@@ -753,6 +768,18 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 	}
 	for day, facts := range ghFactsByDay {
 		factsByDay[day] = append(factsByDay[day], facts...)
+	}
+
+	// read session facts grouped by date
+	sessionFactsByDay, err := readPendingSessionFacts(tc.Path, since)
+	if err != nil {
+		slog.Warn("failed to read session facts", "error", err)
+	}
+	if factsByDay == nil {
+		factsByDay = make(map[string][]discussionFactEntry)
+	}
+	for day, sessionFacts := range sessionFactsByDay {
+		factsByDay[day] = append(factsByDay[day], sessionFacts...)
 	}
 
 	if len(observations) == 0 && len(factsByDay) == 0 {
