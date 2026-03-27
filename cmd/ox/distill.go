@@ -438,7 +438,7 @@ func syncBeforeDistill() error {
 
 	// update code index
 	if err := cli.WithSpinnerNoResult("Updating code index...", func() error {
-		client := daemon.NewClientWithTimeout(5 * time.Minute)
+		client := daemon.NewClient()
 		_, err := client.CodeIndex(daemon.CodeIndexPayload{}, func(stage string, percent *int, message string) {
 			// progress handled by spinner
 		})
