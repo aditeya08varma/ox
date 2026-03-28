@@ -1411,7 +1411,8 @@ func (c *Client) RequestSync() error {
 
 // SyncWithProgress requests the daemon to perform a sync with progress updates.
 // The onProgress callback is called for each progress update (may be nil).
-// Uses a 30s timeout since syncs can take time.
+// Uses an idle timeout: the deadline resets on each progress message, so the
+// connection stays alive as long as the daemon is making progress.
 func (c *Client) SyncWithProgress(onProgress ProgressCallback) error {
 	conn, err := c.Connect()
 	if err != nil {
@@ -1419,12 +1420,12 @@ func (c *Client) SyncWithProgress(onProgress ProgressCallback) error {
 	}
 	defer conn.Close()
 
-	// use configured timeout, with minimum floor for sync operations
-	syncTimeout := 30 * time.Second
-	if c.timeout > 0 && c.timeout < syncTimeout {
-		syncTimeout = c.timeout
+	// idle timeout — reset on each progress message
+	idleTimeout := 30 * time.Second
+	if c.timeout > 0 && c.timeout < idleTimeout {
+		idleTimeout = c.timeout
 	}
-	conn.SetDeadline(time.Now().Add(syncTimeout))
+	conn.SetDeadline(time.Now().Add(idleTimeout))
 
 	msg := Message{
 		Type:        MsgTypeSync,
@@ -1453,6 +1454,7 @@ func (c *Client) SyncWithProgress(onProgress ProgressCallback) error {
 
 		// check for progress update
 		if resp.Progress != nil {
+			conn.SetDeadline(time.Now().Add(idleTimeout))
 			if onProgress != nil {
 				onProgress(resp.Progress.Stage, resp.Progress.Percent, resp.Progress.Message)
 			}
@@ -1469,7 +1471,8 @@ func (c *Client) SyncWithProgress(onProgress ProgressCallback) error {
 
 // TeamSyncWithProgress requests the daemon to sync all team contexts with progress updates.
 // The onProgress callback is called for each progress update (may be nil).
-// Uses a 60s timeout since syncing multiple teams can take time.
+// Uses an idle timeout: the deadline resets on each progress message, so the
+// connection stays alive as long as the daemon is making progress.
 func (c *Client) TeamSyncWithProgress(onProgress ProgressCallback) error {
 	conn, err := c.Connect()
 	if err != nil {
@@ -1477,12 +1480,12 @@ func (c *Client) TeamSyncWithProgress(onProgress ProgressCallback) error {
 	}
 	defer conn.Close()
 
-	// use configured timeout, with minimum floor for team sync operations
-	teamSyncTimeout := 60 * time.Second
-	if c.timeout > 0 && c.timeout < teamSyncTimeout {
-		teamSyncTimeout = c.timeout
+	// idle timeout — reset on each progress message
+	idleTimeout := 60 * time.Second
+	if c.timeout > 0 && c.timeout < idleTimeout {
+		idleTimeout = c.timeout
 	}
-	conn.SetDeadline(time.Now().Add(teamSyncTimeout))
+	conn.SetDeadline(time.Now().Add(idleTimeout))
 
 	msg := Message{
 		Type:        MsgTypeTeamSync,
@@ -1511,6 +1514,7 @@ func (c *Client) TeamSyncWithProgress(onProgress ProgressCallback) error {
 
 		// check for progress update
 		if resp.Progress != nil {
+			conn.SetDeadline(time.Now().Add(idleTimeout))
 			if onProgress != nil {
 				onProgress(resp.Progress.Stage, resp.Progress.Percent, resp.Progress.Message)
 			}
@@ -1643,7 +1647,9 @@ func (c *Client) MarkErrorsViewed(ids []string) error {
 }
 
 // CodeIndex requests the daemon to index code with progress updates.
-// Uses a long timeout (5 minutes) since indexing can take time for large repos.
+// Uses an idle timeout: the deadline resets on each progress message, so the
+// connection stays alive as long as the daemon is making progress. Indexing
+// large repos can take many minutes but emits frequent progress updates.
 func (c *Client) CodeIndex(payload CodeIndexPayload, onProgress ProgressCallback) (*CodeIndexResult, error) {
 	conn, err := c.Connect()
 	if err != nil {
@@ -1651,9 +1657,12 @@ func (c *Client) CodeIndex(payload CodeIndexPayload, onProgress ProgressCallback
 	}
 	defer conn.Close()
 
-	// indexing can take minutes for large repos
-	indexTimeout := 5 * time.Minute
-	conn.SetDeadline(time.Now().Add(indexTimeout))
+	// idle timeout — reset on each progress message
+	idleTimeout := 60 * time.Second
+	if c.timeout > 0 && c.timeout < idleTimeout {
+		idleTimeout = c.timeout
+	}
+	conn.SetDeadline(time.Now().Add(idleTimeout))
 
 	payloadData, _ := json.Marshal(payload)
 	msg := Message{
@@ -1681,6 +1690,7 @@ func (c *Client) CodeIndex(payload CodeIndexPayload, onProgress ProgressCallback
 		}
 
 		if resp.Progress != nil {
+			conn.SetDeadline(time.Now().Add(idleTimeout))
 			if onProgress != nil {
 				onProgress(resp.Progress.Stage, resp.Progress.Percent, resp.Progress.Message)
 			}

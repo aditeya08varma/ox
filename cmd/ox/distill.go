@@ -16,7 +16,9 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/agentcli"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/facts"
 	"github.com/spf13/cobra"
@@ -318,6 +320,7 @@ func readWeeklyFilesForMonth(weeklyDir string, year, month int) ([]string, []str
 var (
 	distillLayer  string
 	distillDryRun bool
+	distillSync   bool
 )
 
 var distillCmd = &cobra.Command{
@@ -339,6 +342,7 @@ Memory files are organized by temporal layers:
 func init() {
 	distillCmd.Flags().StringVar(&distillLayer, "layer", "", "distill only a specific layer (daily, weekly, monthly)")
 	distillCmd.Flags().BoolVar(&distillDryRun, "dry-run", false, "show what would be distilled without invoking the AI coworker")
+	distillCmd.Flags().BoolVar(&distillSync, "sync", false, "sync ledger, team context, and code index before distilling")
 
 	rootCmd.AddCommand(distillCmd)
 }
@@ -413,6 +417,50 @@ func logPrompt(cmd *cobra.Command, label, prompt string) {
 	fmt.Fprintf(cmd.ErrOrStderr(), "--- prompt (%s) ---\n%s--- end prompt ---\n", label, prompt)
 }
 
+// syncBeforeDistill ensures the daemon is running, then syncs the ledger,
+// team contexts, and code index. Each step shows progress via a spinner.
+// Returns an error if any critical sync step fails.
+func syncBeforeDistill() error {
+	// ensure daemon is running
+	if err := daemon.EnsureDaemon(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
+	}
+
+	// sync ledger
+	if err := cli.WithSpinnerNoResult("Syncing ledger...", func() error {
+		client := daemon.NewClientWithTimeout(30 * time.Second)
+		return client.SyncWithProgress(func(stage string, percent *int, message string) {
+			// progress handled by spinner
+		})
+	}); err != nil {
+		return fmt.Errorf("ledger sync failed: %w", err)
+	}
+
+	// sync team contexts
+	if err := cli.WithSpinnerNoResult("Syncing team contexts...", func() error {
+		client := daemon.NewClientWithTimeout(60 * time.Second)
+		return client.TeamSyncWithProgress(func(stage string, percent *int, message string) {
+			// progress handled by spinner
+		})
+	}); err != nil {
+		return fmt.Errorf("team context sync failed: %w", err)
+	}
+
+	// update code index
+	if err := cli.WithSpinnerNoResult("Updating code index...", func() error {
+		client := daemon.NewClientWithTimeout(60 * time.Second)
+		_, err := client.CodeIndex(daemon.CodeIndexPayload{}, func(stage string, percent *int, message string) {
+			// progress handled by spinner
+		})
+		return err
+	}); err != nil {
+		// code index failure is non-fatal — distill can proceed without it
+		slog.Warn("code index update failed", "error", err)
+	}
+
+	return nil
+}
+
 func runDistill(cmd *cobra.Command, _ []string) error {
 	ctx := cmd.Context()
 	if ctx == nil {
@@ -427,6 +475,13 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	tc := config.FindRepoTeamContext(projectRoot)
 	if tc == nil {
 		return fmt.Errorf("no team context configured — run 'ox init' first")
+	}
+
+	// sync before distilling if requested
+	if distillSync {
+		if err := syncBeforeDistill(); err != nil {
+			return err
+		}
 	}
 
 	// push team context commits to remote when we're done — even if the
