@@ -466,8 +466,7 @@ func containsImpl(s, substr string) bool {
 
 // TestPushWithRetry_CredentialNoiseWithDivergence is a regression test for the
 // bug fixed in a18cd6c: push output containing both "non-fast-forward" and
-// macOS Keychain "failed to store: -25300" must take the rebase path, not the
-// LFS force-push path.
+// macOS Keychain "failed to store: -25300" must take the rebase path.
 func TestPushWithRetry_CredentialNoiseWithDivergence(t *testing.T) {
 	repo, bare := initBareRemoteRepo(t)
 
@@ -483,16 +482,44 @@ func TestPushWithRetry_CredentialNoiseWithDivergence(t *testing.T) {
 	addCommit(t, repo, "local.txt", "from-first", "first commit")
 
 	// push should hit non-fast-forward, rebase, and succeed.
-	// AllowForceOnLFS is true to verify that the LFS force-push path is NOT
-	// taken when the real issue is non-fast-forward (even with credential noise).
 	err := PushWithRetry(context.Background(), repo, PushOpts{
-		MaxRetries:      3,
-		OpTimeout:       10 * time.Second,
-		AllowForceOnLFS: true,
+		MaxRetries: 3,
+		OpTimeout:  10 * time.Second,
 	})
-	assert.NoError(t, err, "should succeed via rebase, not LFS force-push")
+	assert.NoError(t, err, "should succeed via rebase")
 
 	// verify both files present (rebase succeeded, not force-push)
 	assert.FileExists(t, filepath.Join(repo, "remote.txt"))
 	assert.FileExists(t, filepath.Join(repo, "local.txt"))
+}
+
+// TestPushWithRetry_LFSErrorRetriesWithoutForcePush is a regression test ensuring
+// that LFS push errors are retried normally and never trigger force push.
+// Previously, AllowForceOnLFS would attempt --force-with-lease on LFS errors;
+// that path was removed because our remotes reject force pushes server-side.
+func TestPushWithRetry_LFSErrorRetriesWithoutForcePush(t *testing.T) {
+	repo := t.TempDir()
+	run(t, "", "git", "init", "--quiet", repo)
+	run(t, repo, "git", "config", "user.email", "test@test.local")
+	run(t, repo, "git", "config", "user.name", "Test")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x"), 0644))
+	run(t, repo, "git", "add", "f.txt")
+	run(t, repo, "git", "commit", "-m", "init", "--no-verify", "--quiet")
+
+	// point remote at a nonexistent path so push always fails
+	run(t, repo, "git", "remote", "add", "origin", "/nonexistent/bare/repo.git")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	err := PushWithRetry(ctx, repo, PushOpts{
+		MaxRetries: 2,
+		OpTimeout:  3 * time.Second,
+		RepairLFS:  true, // would have been paired with AllowForceOnLFS before
+	})
+
+	// should fail after retries, not with a force-push error
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "2 attempts", "should exhaust retries normally")
+	assert.NotContains(t, err.Error(), "force push", "must never attempt force push")
 }
