@@ -318,9 +318,10 @@ func readWeeklyFilesForMonth(weeklyDir string, year, month int) ([]string, []str
 }
 
 var (
-	distillLayer  string
-	distillDryRun bool
-	distillSync   bool
+	distillLayer   string
+	distillDryRun  bool
+	distillSync    bool
+	distillVerbose bool
 )
 
 var distillCmd = &cobra.Command{
@@ -343,6 +344,7 @@ func init() {
 	distillCmd.Flags().StringVar(&distillLayer, "layer", "", "distill only a specific layer (daily, weekly, monthly)")
 	distillCmd.Flags().BoolVar(&distillDryRun, "dry-run", false, "show what would be distilled without invoking the AI coworker")
 	distillCmd.Flags().BoolVar(&distillSync, "sync", false, "sync ledger, team context, and code index before distilling")
+	distillCmd.Flags().BoolVar(&distillVerbose, "verbose", false, "log full prompts to stderr")
 
 	rootCmd.AddCommand(distillCmd)
 }
@@ -410,8 +412,7 @@ func (s *distillStateV2) lastMonthlyTime() time.Time {
 
 // logPrompt logs the full prompt to stderr when --verbose is set.
 func logPrompt(cmd *cobra.Command, label, prompt string) {
-	verbose, _ := cmd.Flags().GetBool("verbose")
-	if !verbose {
+	if !distillVerbose {
 		return
 	}
 	fmt.Fprintf(cmd.ErrOrStderr(), "--- prompt (%s) ---\n%s--- end prompt ---\n", label, prompt)
@@ -520,8 +521,21 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		slog.Warn("failed to seed MEMORY.md", "error", err)
 	}
 
-	// load team distillation guidelines (DISTILL.md) — optional
-	guidelines := loadDistillGuidelines(tc.Path)
+	// migrate old DISTILL.md to memory/guidance/ if needed
+	if migrated, err := migrateDistillGuidelines(tc.Path); err != nil {
+		slog.Warn("failed to migrate DISTILL.md", "error", err)
+	} else if migrated {
+		slog.Info("migrated DISTILL.md to memory/guidance/")
+	}
+
+	// seed default guidance files if they don't exist
+	if err := seedGuidanceFiles(tc.Path); err != nil {
+		slog.Warn("failed to seed guidance files", "error", err)
+	}
+
+	// load guidance once — snapshot at run start, not re-read per stage
+	extractGuidelines := loadGuidance(tc.Path, "EXTRACT.md")
+	distillGuidelines := loadGuidance(tc.Path, "DISTILL.md")
 
 	now := time.Now().UTC()
 
@@ -535,7 +549,7 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 
 	// extract facts from unprocessed discussions before daily distill
 	if plan.Daily {
-		if err := extractDiscussionFacts(ctx, cmd, backend, tc, state, guidelines); err != nil {
+		if err := extractDiscussionFacts(ctx, cmd, backend, tc, state, extractGuidelines); err != nil {
 			slog.Warn("discussion fact extraction failed", "error", err)
 		} else if !distillDryRun {
 			if err := saveDistillStateV2(projectRoot, state); err != nil {
@@ -546,7 +560,7 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 
 	// extract facts from GitHub activity before daily distill
 	if plan.Daily {
-		if err := extractGitHubFacts(ctx, cmd, backend, tc, state, projectRoot); err != nil {
+		if err := extractGitHubFacts(ctx, cmd, backend, tc, state, projectRoot, extractGuidelines); err != nil {
 			slog.Warn("github fact extraction failed", "error", err)
 		} else if !distillDryRun {
 			if err := saveDistillStateV2(projectRoot, state); err != nil {
@@ -567,19 +581,19 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	}
 
 	if plan.Daily {
-		if err := distillDaily(ctx, cmd, backend, tc, state, projectRoot, now, guidelines); err != nil {
+		if err := distillDaily(ctx, cmd, backend, tc, state, projectRoot, now, distillGuidelines); err != nil {
 			return fmt.Errorf("daily distill: %w", err)
 		}
 	}
 
 	for _, week := range plan.Weeks {
-		if err := distillWeekly(ctx, cmd, backend, tc, state, week, guidelines); err != nil {
+		if err := distillWeekly(ctx, cmd, backend, tc, state, week, distillGuidelines); err != nil {
 			return fmt.Errorf("weekly distill (%d-W%02d): %w", week.Year, week.Week, err)
 		}
 	}
 
 	for _, month := range plan.Months {
-		if err := distillMonthly(ctx, cmd, backend, tc, state, month, guidelines); err != nil {
+		if err := distillMonthly(ctx, cmd, backend, tc, state, month, distillGuidelines); err != nil {
 			return fmt.Errorf("monthly distill (%s): %w", month, err)
 		}
 	}

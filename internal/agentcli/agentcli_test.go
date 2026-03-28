@@ -247,3 +247,56 @@ func TestClaudeRunRequiresCLI(t *testing.T) {
 		t.Error("expected error when claude CLI not in PATH")
 	}
 }
+
+func TestWriteGuidelines(t *testing.T) {
+	t.Run("empty guidelines is no-op", func(t *testing.T) {
+		var sb strings.Builder
+		WriteGuidelines(&sb, "", "distill-daily")
+		if sb.Len() != 0 {
+			t.Errorf("expected empty output, got %q", sb.String())
+		}
+	})
+
+	t.Run("with stage", func(t *testing.T) {
+		var sb strings.Builder
+		WriteGuidelines(&sb, "focus on security", "extract-discussions")
+		out := sb.String()
+		if !strings.Contains(out, "<team-guidelines>") {
+			t.Error("should contain opening tag")
+		}
+		if !strings.Contains(out, "Current pipeline stage: extract-discussions") {
+			t.Error("should contain stage identifier")
+		}
+		if !strings.Contains(out, "focus on security") {
+			t.Error("should contain guidelines content")
+		}
+		if !strings.Contains(out, "You MAY use the Read tool") {
+			t.Error("should contain Read tool permission")
+		}
+		if !strings.Contains(out, "</team-guidelines>") {
+			t.Error("should contain closing tag")
+		}
+	})
+
+	t.Run("empty stage omits stage line", func(t *testing.T) {
+		var sb strings.Builder
+		WriteGuidelines(&sb, "some guidance", "")
+		out := sb.String()
+		if strings.Contains(out, "Current pipeline stage") {
+			t.Error("should not contain stage line when stage is empty")
+		}
+		if !strings.Contains(out, "some guidance") {
+			t.Error("should still contain guidelines content")
+		}
+	})
+
+	t.Run("adds trailing newline if missing", func(t *testing.T) {
+		var sb strings.Builder
+		WriteGuidelines(&sb, "no trailing newline", "test")
+		out := sb.String()
+		// guidelines content should end with \n before the Read tool line
+		if !strings.Contains(out, "no trailing newline\n") {
+			t.Error("should add trailing newline to guidelines content")
+		}
+	})
+}

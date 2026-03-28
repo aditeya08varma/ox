@@ -10,8 +10,10 @@ const systemPrompt = `<system>
 You are an expert summarizer and distiller of information.
 
 This is a pure text-in/text-out task. All the input you need is provided below.
-Do NOT read files, check the filesystem, or use any tools. Do NOT consider any
-prior context or existing files — work ONLY from the input provided in this prompt.
+Do NOT read files, check the filesystem, or use any tools — EXCEPT when
+explicitly permitted (e.g., reading team guidance or fact files listed below).
+Do NOT consider any prior context or existing files beyond what is provided or
+permitted in this prompt.
 
 Your sole output is the summary or extraction described in the <task> section.
 
@@ -28,18 +30,24 @@ Rules:
 
 `
 
-// writeGuidelines wraps team distillation guidelines in a <team-guidelines> tag.
-// Guidelines come from DISTILL.md in the team context — they let teams
-// customize what gets emphasized, omitted, or structured differently.
-func writeGuidelines(sb *strings.Builder, guidelines string) {
+// WriteGuidelines wraps team guidelines in a <team-guidelines> tag and tells
+// the LLM which pipeline stage it's in. The stage identifier lets the guidelines
+// reference optional per-stage override files via progressive disclosure
+// (e.g., "if extracting discussions, read EXTRACT-discussions.md").
+// The LLM MAY use the Read tool to access files in memory/guidance/.
+func WriteGuidelines(sb *strings.Builder, guidelines, stage string) {
 	if guidelines == "" {
 		return
 	}
 	sb.WriteString("<team-guidelines>\n")
+	if stage != "" {
+		fmt.Fprintf(sb, "Current pipeline stage: %s\n\n", stage)
+	}
 	sb.WriteString(guidelines)
 	if !strings.HasSuffix(guidelines, "\n") {
 		sb.WriteByte('\n')
 	}
+	sb.WriteString("\nYou MAY use the Read tool to access any file referenced above in memory/guidance/.\n")
 	sb.WriteString("</team-guidelines>\n\n")
 }
 
@@ -51,7 +59,7 @@ func DailyPrompt(observations []string, date, guidelines string, factPaths ...st
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
-	writeGuidelines(&sb, guidelines)
+	WriteGuidelines(&sb, guidelines, "distill-daily")
 
 	sb.WriteString("<task>\n")
 	sb.WriteString("Distill these team observations into a daily memory summary.\n")
@@ -90,7 +98,7 @@ func DiscussionFactsPrompt(title, summary, transcript, guidelines, annotations s
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
-	writeGuidelines(&sb, guidelines)
+	WriteGuidelines(&sb, guidelines, "extract-discussions")
 
 	sb.WriteString("<task>\n")
 	sb.WriteString("Extract structured facts from this team discussion as JSONL.\n")
@@ -138,7 +146,7 @@ func WeeklyPrompt(dailySummaries []string, weekID, guidelines string) string {
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
-	writeGuidelines(&sb, guidelines)
+	WriteGuidelines(&sb, guidelines, "distill-weekly")
 
 	sb.WriteString("<task>\n")
 	sb.WriteString("Synthesize these daily summaries into a weekly memory.\n")
@@ -158,7 +166,7 @@ func MonthlyPrompt(weeklySummaries []string, month, guidelines string) string {
 	var sb strings.Builder
 
 	sb.WriteString(systemPrompt)
-	writeGuidelines(&sb, guidelines)
+	WriteGuidelines(&sb, guidelines, "distill-monthly")
 
 	sb.WriteString("<task>\n")
 	sb.WriteString("Synthesize these weekly summaries into a monthly memory.\n")

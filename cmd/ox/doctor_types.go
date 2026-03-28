@@ -165,6 +165,9 @@ const (
 	CheckSlugCredentialIntegrity = "credential-integrity"
 	CheckSlugGitPATLiveness      = "git-pat-liveness"
 
+	// Distillation checks
+	CheckSlugGuidanceFiles = "guidance-files"
+
 	// Code Search checks
 	CheckSlugCodeIndex = "code-index"
 )

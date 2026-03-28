@@ -94,7 +94,7 @@ If you are uncertain whether something is meaningful, include it with a note in 
 
 // extractGitHubFacts queries CodeDB for GitHub activity, partitions by day,
 // calls the LLM extractor per day, and writes facts to memory/.github-facts/{date}-{uuid7}.jsonl.
-func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, projectRoot string) error {
+func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, projectRoot, guidelines string) error {
 	// resolve CodeDB
 	dataDir := resolveCodeDBDir(projectRoot)
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
@@ -163,7 +163,7 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 		}
 
 		interval := "1 day"
-		prompt := buildGitHubExtractorPrompt(string(data), interval)
+		prompt := buildGitHubExtractorPrompt(string(data), interval, guidelines)
 		logPrompt(cmd, "github-facts:"+day, prompt)
 
 		fmt.Fprintf(cmd.OutOrStdout(), "Extracting facts from %d PRs, %d issues, %d commits for %s...\n",
@@ -275,10 +275,12 @@ func inferGitHubFactsHighWater(tcPath string) time.Time {
 }
 
 // buildGitHubExtractorPrompt constructs the full prompt for the GitHub fact extractor.
-func buildGitHubExtractorPrompt(clustersJSON, interval string) string {
+func buildGitHubExtractorPrompt(clustersJSON, interval, guidelines string) string {
 	var sb strings.Builder
 	sb.WriteString(githubExtractorSystemPrompt)
-	sb.WriteString("\n\n---\n\n")
+	sb.WriteString("\n\n")
+	agentcli.WriteGuidelines(&sb, guidelines, "extract-github")
+	sb.WriteString("---\n\n")
 	fmt.Fprintf(&sb, "Here is a batch of GitHub event clusters from the last %s. ", interval)
 	sb.WriteString("Each cluster contains pre-assembled related objects with their full comment histories.\n\n")
 	sb.WriteString("Analyze each cluster and extract raw facts for any meaningful events. Remember:\n")
