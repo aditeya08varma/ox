@@ -3,6 +3,7 @@
 package gitutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -33,6 +34,39 @@ func HasLockFiles(gitDir string) []string {
 		}
 	}
 	return found
+}
+
+// StaleLockAge is how old a git lock file must be before we consider it abandoned.
+// Git operations normally hold locks for milliseconds to a few seconds, but a slow
+// git pull --rebase on a large repo over a poor network can hold index.lock for
+// several minutes. 5 minutes is conservative enough to cover legitimate operations
+// while still recovering from crashed processes.
+const StaleLockAge = 5 * time.Minute
+
+// RemoveStaleLockFiles removes git lock files older than StaleLockAge.
+// Safe to call at daemon startup or before pull operations — only removes
+// files that no running git process could still be holding.
+// Returns the names of files removed and any removal errors encountered.
+func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
+	for _, lock := range knownLockFiles {
+		path := filepath.Join(gitDir, lock)
+		info, err := os.Stat(path)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				errs = append(errs, fmt.Errorf("stat %s: %w", lock, err))
+			}
+			continue
+		}
+		if time.Since(info.ModTime()) < StaleLockAge {
+			continue // recent enough to be from an active process
+		}
+		if err := os.Remove(path); err != nil {
+			errs = append(errs, fmt.Errorf("remove %s: %w", lock, err))
+		} else {
+			removed = append(removed, lock)
+		}
+	}
+	return removed, errs
 }
 
 // IsRebaseInProgress checks whether the repo is stuck in a broken rebase state.

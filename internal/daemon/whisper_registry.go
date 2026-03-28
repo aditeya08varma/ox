@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 	"time"
 
@@ -112,6 +113,85 @@ func (r *WhisperRegistry) GetWhispers(agentID string, attention whisperstore.Att
 		all = []whisperstore.WhisperEntry{}
 	}
 	return all, nil
+}
+
+// GetAllWhispers queries ALL stores and merges all whispers without advancing cursors.
+// Used for inspection — shows pending and already-delivered whispers.
+func (r *WhisperRegistry) GetAllWhispers(agentID string) ([]whisperstore.WhisperEntry, error) {
+	entries, _, err := r.GetWhispersPage(agentID, time.Time{}, 0)
+	return entries, err
+}
+
+// GetWhispersPage returns a paginated view of all whispers across all stores.
+// before: if non-zero, only entries with created_at strictly before this time.
+// limit: max entries to return; 0 uses the store's default (50).
+// Merges results from ledger and all team stores, sorts by created_at DESC, and truncates.
+// Returns (entries, hasMore, error).
+func (r *WhisperRegistry) GetWhispersPage(agentID string, before time.Time, limit int) ([]whisperstore.WhisperEntry, bool, error) {
+	const defaultLimit = 50
+	const maxLimit = 200
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+
+	var all []whisperstore.WhisperEntry
+
+	if r.ledgerStore != nil {
+		// fetch limit+1 per store so we can detect hasMore after merge
+		entries, _, err := r.ledgerStore.GetWhispersPage(agentID, before, limit+1)
+		if err != nil {
+			r.logger.Warn("ledger whisper history query failed", "err", err)
+		} else {
+			all = append(all, entries...)
+		}
+	}
+
+	r.mu.RLock()
+	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
+	for k, v := range r.teamStores {
+		stores[k] = v
+	}
+	r.mu.RUnlock()
+
+	for teamID, store := range stores {
+		entries, _, err := store.GetWhispersPage(agentID, before, limit+1)
+		if err != nil {
+			r.logger.Warn("team whisper history query failed", "team_id", teamID, "err", err)
+			continue
+		}
+		all = append(all, entries...)
+	}
+
+	// sort merged results by created_at DESC
+	slices.SortFunc(all, func(a, b whisperstore.WhisperEntry) int {
+		if a.CreatedAt.After(b.CreatedAt) {
+			return -1
+		}
+		if b.CreatedAt.After(a.CreatedAt) {
+			return 1
+		}
+		return 0
+	})
+
+	hasMore := len(all) > limit
+	if hasMore {
+		all = all[:limit]
+	}
+	if all == nil {
+		all = []whisperstore.WhisperEntry{}
+	}
+	return all, hasMore, nil
+}
+
+// GetCursor returns the agent's cursor from the ledger store (earliest cursor wins for display).
+func (r *WhisperRegistry) GetCursor(agentID string) (time.Time, error) {
+	if r.ledgerStore == nil {
+		return time.Time{}, nil
+	}
+	return r.ledgerStore.GetCursor(agentID)
 }
 
 // IsRelayed checks if a murmur has been relayed in the appropriate store.

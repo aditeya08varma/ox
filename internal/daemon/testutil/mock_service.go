@@ -3,6 +3,7 @@ package testutil
 import (
 	"encoding/json"
 	"os"
+	"time"
 
 	"github.com/sageox/ox/internal/daemon"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
@@ -121,6 +122,10 @@ func (m *MockService) Whispers(agentID string, attention whisperstore.Attention,
 		return m.WhispersFunc(agentID, attention, topics)
 	}
 	return nil, nil
+}
+
+func (m *MockService) WhisperHistory(agentID string, before time.Time, limit int) (*daemon.WhisperHistoryResponse, error) {
+	return &daemon.WhisperHistoryResponse{Entries: []whisperstore.WhisperEntry{}}, nil
 }
 
 func (m *MockService) CodeStatus() *daemon.CodeDBStats {

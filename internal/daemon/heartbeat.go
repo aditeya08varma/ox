@@ -153,6 +153,10 @@ type HeartbeatHandler struct {
 	agentType     map[string]string // agent_id → agent type
 	agentPID      map[string]int    // agent_id → parent process ID
 
+	// per-agent whisper delivery tracking
+	whisperMu       sync.RWMutex
+	agentLastWhisper map[string]time.Time // agent_id → last whisper delivery time
+
 	// credentials (updated from heartbeats) - protected by credMu
 	credMu          sync.RWMutex
 	credentials     *HeartbeatCreds
@@ -201,6 +205,7 @@ func NewHeartbeatHandler(logger *slog.Logger) *HeartbeatHandler {
 		agentParentID:      make(map[string]string),
 		agentType:          make(map[string]string),
 		agentPID:           make(map[string]int),
+		agentLastWhisper:   make(map[string]time.Time),
 	}
 }
 
@@ -596,6 +601,24 @@ func (h *HeartbeatHandler) GetAgentPID(agentID string) int {
 	return h.agentPID[agentID]
 }
 
+// RecordWhisperDelivery records that whispers were delivered to the agent right now.
+func (h *HeartbeatHandler) RecordWhisperDelivery(agentID string) {
+	if agentID == "" {
+		return
+	}
+	h.whisperMu.Lock()
+	defer h.whisperMu.Unlock()
+	h.agentLastWhisper[agentID] = time.Now()
+}
+
+// GetAgentLastWhisper returns when whispers were last delivered to the agent.
+// Returns zero time if no whispers have been delivered.
+func (h *HeartbeatHandler) GetAgentLastWhisper(agentID string) time.Time {
+	h.whisperMu.RLock()
+	defer h.whisperMu.RUnlock()
+	return h.agentLastWhisper[agentID]
+}
+
 // CleanupStaleAgents removes entries from all agent-keyed maps for agents
 // not in the active set. Call periodically (e.g., after liveness checks) to
 // prevent unbounded growth of context and metadata maps.
@@ -631,6 +654,14 @@ func (h *HeartbeatHandler) CleanupStaleAgents(activeIDs []string) {
 		}
 	}
 	h.metaMu.Unlock()
+
+	h.whisperMu.Lock()
+	for id := range h.agentLastWhisper {
+		if _, ok := active[id]; !ok {
+			delete(h.agentLastWhisper, id)
+		}
+	}
+	h.whisperMu.Unlock()
 }
 
 // ActivitySummary returns a summary of all activity for status display.

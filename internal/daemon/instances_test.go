@@ -167,7 +167,7 @@ func TestInstanceStore_GetActive(t *testing.T) {
 	// stale instance (old heartbeat)
 	store.Register(&Instance{
 		ID:            "stale-1",
-		LastHeartbeat: now.Add(-10 * time.Minute), // beyond StaleThreshold (5m)
+		LastHeartbeat: now.Add(-20 * time.Minute), // beyond StaleThreshold (15m)
 	})
 
 	active := store.GetActive()
@@ -214,7 +214,7 @@ func TestInstanceStore_ActiveCount(t *testing.T) {
 
 	now := time.Now()
 	store.Register(&Instance{ID: "active", LastHeartbeat: now})
-	store.Register(&Instance{ID: "stale", LastHeartbeat: now.Add(-10 * time.Minute)})
+	store.Register(&Instance{ID: "stale", LastHeartbeat: now.Add(-20 * time.Minute)})
 
 	assert.Equal(t, 2, store.Count(), "Count includes all instances")
 	assert.Equal(t, 1, store.ActiveCount(), "ActiveCount excludes stale")
@@ -292,12 +292,12 @@ func TestInstance_ComputeStatus(t *testing.T) {
 		expected string
 	}{
 		{"fresh heartbeat is active", 0, StatusActive},
-		{"10s ago is active", 10 * time.Second, StatusActive},
-		{"29s ago is active", 29 * time.Second, StatusActive},
-		{"31s ago is idle", 31 * time.Second, StatusIdle},
-		{"2m ago is idle", 2 * time.Minute, StatusIdle},
-		{"4m59s ago is idle", 4*time.Minute + 59*time.Second, StatusIdle},
-		{"5m ago is stale", 5 * time.Minute, StatusStale},
+		{"1m ago is active", 1 * time.Minute, StatusActive},
+		{"4m59s ago is active", 4*time.Minute + 59*time.Second, StatusActive},
+		{"5m ago is idle", 5 * time.Minute, StatusIdle},
+		{"10m ago is idle", 10 * time.Minute, StatusIdle},
+		{"14m59s ago is idle", 14*time.Minute + 59*time.Second, StatusIdle},
+		{"15m ago is stale", 15 * time.Minute, StatusStale},
 		{"1h ago is stale", 1 * time.Hour, StatusStale},
 	}
 

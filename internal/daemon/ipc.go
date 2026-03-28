@@ -48,6 +48,7 @@ const (
 	MsgTypeCodeIndex       = "code_index"       // index local code with progress
 	MsgTypeCodeStatus      = "code_status"      // get code index status/stats
 	MsgTypeWhispers        = "whispers"         // query whisper entries for an agent
+	MsgTypeWhisperHistory  = "whisper_history"  // query all whispers (pending + delivered) without advancing cursor
 	MsgTypeSessionFinalize = "session_finalize" // one-way, trigger async session upload+finalization
 	MsgTypeMurmur          = "murmur"           // one-way, write+commit a murmur file in ledger/team context
 )
@@ -148,6 +149,33 @@ type StatusData struct {
 
 	// connected clones/worktrees that have sent heartbeats
 	Callers []CallerInfo `json:"callers,omitempty"`
+}
+
+// BootstrapGracePeriod is the window after daemon start during which zero syncs
+// is not considered a problem — the daemon is still performing its first pull.
+const BootstrapGracePeriod = 3 * time.Minute
+
+// HasConfiguredRepos reports whether the daemon has repos it should be syncing.
+func (s *StatusData) HasConfiguredRepos() bool {
+	if s == nil {
+		return false
+	}
+	for _, workspaces := range s.Workspaces {
+		if len(workspaces) > 0 {
+			return true
+		}
+	}
+	return s.LedgerPath != "" || len(s.TeamContexts) > 0
+}
+
+// IsBootstrapping reports true when the daemon just started and hasn't completed
+// its first sync yet. Callers use this to soften warnings during the grace period.
+// Only true when repos are configured — a daemon with nothing to sync is never bootstrapping.
+func (s *StatusData) IsBootstrapping() bool {
+	if s == nil || !s.Running {
+		return false
+	}
+	return s.TotalSyncs == 0 && s.Uptime < BootstrapGracePeriod && s.HasConfiguredRepos()
 }
 
 // ExtendedStatus provides additional status info for diagnostics.
@@ -357,6 +385,10 @@ type InstanceInfo struct {
 	// ParentPID is the parent process ID of the agent.
 	// Enables instant liveness detection without heartbeat timeout.
 	ParentPID int `json:"parent_pid,omitempty"`
+
+	// LastWhisper is when whispers were last delivered to this agent.
+	// Zero if no whispers have been delivered in the current daemon session.
+	LastWhisper time.Time `json:"last_whisper,omitempty"`
 }
 
 // InstancesResponse is the response for the instances IPC message.
@@ -374,6 +406,22 @@ type WhispersPayload struct {
 // WhispersResponse is the response for whisper queries.
 type WhispersResponse struct {
 	Entries []whisperstore.WhisperEntry `json:"entries"`
+}
+
+// WhisperHistoryPayload is the payload for whisper history queries.
+type WhisperHistoryPayload struct {
+	AgentID string    `json:"agent_id"`        // empty = all agents
+	Before  time.Time `json:"before,omitempty"` // cursor: only return entries older than this
+	Limit   int       `json:"limit,omitempty"`  // max entries per page; 0 = default (50), max 200
+}
+
+// WhisperHistoryResponse returns a page of whispers with delivery status.
+type WhisperHistoryResponse struct {
+	Entries    []whisperstore.WhisperEntry `json:"entries"`
+	Cursor     time.Time                   `json:"cursor"`              // agent's delivery cursor (entries at/before this are "delivered")
+	HasCursor  bool                        `json:"has_cursor"`           // false if agent has never received whispers
+	HasMore    bool                        `json:"has_more,omitempty"`   // true if more entries exist beyond this page
+	NextCursor time.Time                   `json:"next_cursor,omitempty"` // pass as Before in next request to get the next page
 }
 
 // DoctorResponse is the response for the doctor IPC message.
@@ -505,6 +553,7 @@ type DaemonService interface {
 	Sessions() []AgentSession // deprecated: use Instances
 	Instances() []InstanceInfo
 	Whispers(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
+	WhisperHistory(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)
 	CodeStatus() *CodeDBStats
 
 	// mutation operations
@@ -552,6 +601,7 @@ type CallbackService struct {
 	onCodeIndex        func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
 	onCodeStatus       func() *CodeDBStats
 	onWhispers         func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
+	onWhisperHistory   func(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)
 }
 
 func (c *CallbackService) Sync() error {
@@ -642,6 +692,16 @@ func (c *CallbackService) Whispers(agentID string, attention whisperstore.Attent
 		return fn(agentID, attention, topics)
 	}
 	return nil, nil
+}
+
+func (c *CallbackService) WhisperHistory(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error) {
+	c.mu.Lock()
+	fn := c.onWhisperHistory
+	c.mu.Unlock()
+	if fn != nil {
+		return fn(agentID, before, limit)
+	}
+	return &WhisperHistoryResponse{Entries: []whisperstore.WhisperEntry{}}, nil
 }
 
 func (c *CallbackService) CodeStatus() *CodeDBStats {
@@ -833,6 +893,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeCodeIndex, handleCodeIndex)
 	router.Register(MsgTypeCodeStatus, handleCodeStatus)
 	router.Register(MsgTypeWhispers, handleWhispers)
+	router.Register(MsgTypeWhisperHistory, handleWhisperHistory)
 	router.Register(MsgTypeMurmur, handleMurmur)
 
 	return router
@@ -1001,6 +1062,14 @@ func (s *Server) SetWhispersHandler(cb func(agentID string, attention whispersto
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	svc.onWhispers = cb
+}
+
+// SetWhisperHistoryHandler sets the handler for whisper history (inspection) queries.
+func (s *Server) SetWhisperHistoryHandler(cb func(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error)) {
+	svc := s.mustCallbackService("SetWhisperHistoryHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onWhisperHistory = cb
 }
 
 // mustCallbackService returns the mutable callback adapter.
@@ -1172,6 +1241,26 @@ func NewClientWithTimeout(timeout time.Duration) *Client {
 	}
 }
 
+// NewClientForCurrentRepo creates an IPC client that uses the registry to find
+// the daemon for the current repo, even if its workspace ID differs from what
+// the current binary computes (e.g., after a workspace ID format change).
+// Use this in status/stop/restart commands where you need to reach the daemon
+// for the project in the current directory regardless of workspace ID drift.
+func NewClientForCurrentRepo() *Client {
+	return &Client{
+		socketPath: resolveSocketPath(),
+		timeout:    50 * time.Millisecond,
+	}
+}
+
+// NewClientForCurrentRepoWithTimeout is like NewClientForCurrentRepo but with a custom timeout.
+func NewClientForCurrentRepoWithTimeout(timeout time.Duration) *Client {
+	return &Client{
+		socketPath: resolveSocketPath(),
+		timeout:    timeout,
+	}
+}
+
 // NewClientWithSocket creates an IPC client for a specific socket path.
 // Used when connecting to daemons for other workspaces.
 func NewClientWithSocket(socketPath string) *Client {
@@ -1288,10 +1377,14 @@ func (c *Client) Ping() error {
 // Uses a 100ms timeout - plenty for localhost IPC. If you need custom
 // timeouts, use NewClientWithTimeout(t).Ping() directly.
 func IsHealthy() error {
-	client := NewClientWithTimeout(100 * time.Millisecond)
+	client := NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 	if err := client.Ping(); err != nil {
 		// distinguish "no socket" from "socket exists but unresponsive"
-		if _, statErr := os.Stat(SocketPath()); os.IsNotExist(statErr) {
+		socketPath := client.socketPath
+		if socketPath == "" {
+			socketPath = SocketPath()
+		}
+		if _, statErr := os.Stat(socketPath); os.IsNotExist(statErr) {
 			return errors.New("daemon not running")
 		}
 		return fmt.Errorf("daemon not responsive: %w", err)
@@ -1425,6 +1518,29 @@ func (c *Client) Whispers(agentID string, attention string, topics []string) (*W
 	var result WhispersResponse
 	if err := json.Unmarshal(resp.Data, &result); err != nil {
 		return nil, fmt.Errorf("unmarshal whispers: %w", err)
+	}
+	return &result, nil
+}
+
+// WhisperHistory queries a page of whispers for an agent without advancing the cursor.
+// Used for inspection — shows what has been or will be whispered to an agent.
+// Pass before=zero and limit=0 to get the first page (most recent 50 entries).
+// Use resp.NextCursor as before in subsequent calls when resp.HasMore is true.
+func (c *Client) WhisperHistory(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error) {
+	payload, _ := json.Marshal(WhisperHistoryPayload{AgentID: agentID, Before: before, Limit: limit})
+	resp, err := c.sendMessage(Message{
+		Type:    MsgTypeWhisperHistory,
+		Payload: payload,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+	var result WhisperHistoryResponse
+	if err := json.Unmarshal(resp.Data, &result); err != nil {
+		return nil, fmt.Errorf("unmarshal whisper history: %w", err)
 	}
 	return &result, nil
 }

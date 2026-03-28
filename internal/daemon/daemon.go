@@ -422,8 +422,17 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 
 		elapsed := now.Sub(last)
 
-		// skip stale instances (no heartbeat in >5min) — they're dead sessions
-		if elapsed > StaleThreshold {
+		// Instant liveness check: if we know the PID, trust it over heartbeat timing.
+		// A living process is always shown (no stale cutoff). A dead PID is always exited.
+		agentPID := d.heartbeat.GetAgentPID(agentID)
+		pidAlive := false
+		if agentPID > 0 {
+			proc, procErr := os.FindProcess(agentPID)
+			pidAlive = procErr == nil && proc.Signal(syscall.Signal(0)) == nil
+		}
+
+		// skip stale instances with no known-live PID — likely ended session
+		if elapsed > StaleThreshold && !pidAlive {
 			continue
 		}
 
@@ -431,14 +440,12 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 		if elapsed > IdleThreshold {
 			status = StatusIdle
 		}
-
-		// instant liveness check: if PID is known and process is dead, mark as exited
-		agentPID := d.heartbeat.GetAgentPID(agentID)
-		if agentPID > 0 {
-			proc, procErr := os.FindProcess(agentPID)
-			if procErr != nil || proc.Signal(syscall.Signal(0)) != nil {
-				status = StatusExited
-			}
+		// Only mark exited if PID is dead AND the heartbeat is stale.
+		// Hook heartbeats set ParentPID to the short-lived shell subprocess PID, which
+		// dies immediately after the hook. A fresh heartbeat means the agent is still
+		// active even if the most-recently-recorded PID is gone.
+		if agentPID > 0 && !pidAlive && elapsed > IdleThreshold {
+			status = StatusExited
 		}
 
 		ctxStats := d.heartbeat.GetAgentContextStats(agentID)
@@ -453,6 +460,7 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 			ParentAgentID:           d.heartbeat.GetAgentParentID(agentID),
 			AgentType:               d.heartbeat.GetAgentType(agentID),
 			ParentPID:               d.heartbeat.GetAgentPID(agentID),
+			LastWhisper:             d.heartbeat.GetAgentLastWhisper(agentID),
 		})
 	}
 
@@ -585,33 +593,137 @@ func superseded() bool {
 	return info.PID != os.Getpid()
 }
 
-// IsRunning checks if a daemon is currently running and responsive.
-// Uses socket-based ping detection. Claude manages the daemon process lifecycle,
-// so flock-based locking is no longer needed.
-func IsRunning() bool {
-	client := NewClientWithTimeout(500 * time.Millisecond)
-	return client.Ping() == nil
+// DaemonState describes the lifecycle state of the daemon process.
+type DaemonState int
+
+const (
+	// DaemonStateStopped: no PID file, dead process, or unreadable PID.
+	DaemonStateStopped DaemonState = iota
+	// DaemonStateStarting: process is alive but IPC not yet ready.
+	// Normal during throttled restarts (up to 2 min) or fast initial startup.
+	DaemonStateStarting
+	// DaemonStateStuck: process alive, IPC unreachable, past the startup window.
+	// PID file is older than startupStuckThreshold — the process likely hung in init.
+	DaemonStateStuck
+	// DaemonStateRunning: IPC socket is up and responding to pings.
+	DaemonStateRunning
+)
+
+// startupStuckThreshold is how long a process can be alive without IPC before
+// it's considered stuck rather than starting. Must exceed the maximum restart
+// throttle delay (2 min) plus a generous startup window.
+const startupStuckThreshold = 3 * time.Minute
+
+// resolveSocketPath returns the socket path for the current repo's running daemon.
+// Tries the current workspace socket first; falls back to a registry lookup by
+// repo_id to handle workspace ID drift between binary versions (e.g., when the
+// workspace ID computation changes but an older daemon is still running).
+func resolveSocketPath() string {
+	sock := SocketPath()
+	if _, err := os.Stat(sock); err == nil {
+		return sock // fast path: current workspace socket exists
+	}
+
+	// Socket missing for current workspace ID — check registry for a daemon
+	// registered under the same repo_id with a different workspace ID.
+	cwd, err := os.Getwd()
+	if err != nil {
+		return sock
+	}
+	repoID := config.GetRepoID(cwd)
+	if info := FindDaemonForRepo(repoID); info != nil {
+		if _, err := os.Stat(info.SocketPath); err == nil {
+			slog.Debug("resolved daemon via registry fallback",
+				"computed_workspace", CurrentWorkspaceID(),
+				"registry_workspace", info.WorkspaceID,
+				"repo_id", repoID)
+			return info.SocketPath
+		}
+	}
+	return sock
 }
 
-// IsStarting checks if a daemon process exists (PID file with live process)
-// but is not yet responding to IPC. This happens during startup throttling
-// or initial setup before the IPC socket is ready.
-func IsStarting() bool {
+// pidForSocket looks up the PID registered for a given socket path in the daemon registry.
+// Returns 0 if the socket path is not found in the registry.
+func pidForSocket(socketPath string) int {
+	reg, err := LoadRegistry()
+	if err != nil {
+		return 0
+	}
+	for _, info := range reg.Daemons {
+		if info.SocketPath == socketPath {
+			return info.PID
+		}
+	}
+	return 0
+}
+
+// GetState returns the current lifecycle state of the daemon.
+// This is the canonical way to check daemon status — prefer it over
+// the boolean helpers IsRunning/IsStarting, which are thin wrappers.
+func GetState() DaemonState {
+	// IPC ping is the authoritative check for a fully-running daemon.
+	// Uses resolveSocketPath to handle workspace ID drift across binary versions.
+	socketPath := resolveSocketPath()
+	client := &Client{socketPath: socketPath, timeout: 2 * time.Second}
+	if client.Ping() == nil {
+		return DaemonStateRunning
+	}
+
+	// Ping failed. If the socket file exists AND the owning process is still alive,
+	// the daemon is running but temporarily unable to respond (busy with GC, large sync).
+	// Don't classify as stuck based on a timeout alone.
+	// Cross-check with the registry: a stale socket from an ungraceful exit is NOT running.
+	if _, err := os.Stat(socketPath); err == nil {
+		if pid := pidForSocket(socketPath); pid > 0 {
+			if proc, pErr := os.FindProcess(pid); pErr == nil {
+				if proc.Signal(syscall.Signal(0)) == nil {
+					return DaemonStateRunning
+				}
+				// Registry positively identified a dead owner — safe to remove stale socket.
+				_ = os.Remove(socketPath)
+			}
+		}
+		// pid == 0 means registry entry missing or unreadable — don't remove the socket
+		// since we can't confirm the owner is gone; treat as unknown state.
+	}
+
+	// No socket — check whether a process is alive via PID file.
 	data, err := os.ReadFile(PidPath())
 	if err != nil {
-		return false
+		return DaemonStateStopped
 	}
 	var pid int
 	if _, err := fmt.Sscanf(string(data), "%d", &pid); err != nil {
-		return false
+		return DaemonStateStopped
 	}
-	// check if process is alive (signal 0 = no signal, just check existence)
 	proc, err := os.FindProcess(pid)
 	if err != nil {
-		return false
+		return DaemonStateStopped
 	}
-	// on Unix, FindProcess always succeeds; use Signal(0) to check liveness
-	return proc.Signal(syscall.Signal(0)) == nil
+	if proc.Signal(syscall.Signal(0)) != nil {
+		return DaemonStateStopped // process is dead
+	}
+
+	// Process is alive but no socket yet (still initializing).
+	// Use PID file mtime to distinguish legitimate startup from stuck.
+	if info, err := os.Stat(PidPath()); err == nil {
+		if time.Since(info.ModTime()) > startupStuckThreshold {
+			return DaemonStateStuck
+		}
+	}
+	return DaemonStateStarting
+}
+
+// IsRunning checks if the daemon is fully running and responsive to IPC.
+func IsRunning() bool { return GetState() == DaemonStateRunning }
+
+// IsStarting checks if a daemon process exists but is not yet responding to IPC.
+// Returns true for both Starting and Stuck states — callers that need to distinguish
+// them should call GetState() directly.
+func IsStarting() bool {
+	s := GetState()
+	return s == DaemonStateStarting || s == DaemonStateStuck
 }
 
 // initComponents creates and wires all daemon subsystems. Returns setup duration.
@@ -622,6 +734,14 @@ func (d *Daemon) initComponents() time.Duration {
 	var projectEndpoint string
 	if projectCfg, err := config.LoadProjectConfig(d.config.ProjectRoot); err == nil && projectCfg != nil {
 		projectEndpoint = projectCfg.GetEndpoint()
+	}
+
+	// clean up stale git lock files left by crashed processes before starting sync
+	if d.config.LedgerPath != "" {
+		gitDir := filepath.Join(d.config.LedgerPath, ".git")
+		if removed, _ := gitutil.RemoveStaleLockFiles(gitDir); len(removed) > 0 {
+			d.logger.Info("removed stale git lock files at startup", "path", d.config.LedgerPath, "locks", removed)
+		}
 	}
 
 	// telemetry + friction collectors
@@ -972,7 +1092,36 @@ func (s *daemonServiceImpl) Whispers(agentID string, attention whisperstore.Atte
 	if s.d.whisperRegistry == nil {
 		return nil, nil
 	}
-	return s.d.whisperRegistry.GetWhispers(agentID, attention, topics)
+	entries, err := s.d.whisperRegistry.GetWhispers(agentID, attention, topics)
+	if err == nil && len(entries) > 0 && agentID != "" && s.d.heartbeat != nil {
+		s.d.heartbeat.RecordWhisperDelivery(agentID)
+	}
+	return entries, err
+}
+
+func (s *daemonServiceImpl) WhisperHistory(agentID string, before time.Time, limit int) (*WhisperHistoryResponse, error) {
+	if s.d.whisperRegistry == nil {
+		return &WhisperHistoryResponse{Entries: []whisperstore.WhisperEntry{}}, nil
+	}
+	entries, hasMore, err := s.d.whisperRegistry.GetWhispersPage(agentID, before, limit)
+	if err != nil {
+		return nil, err
+	}
+	cursor, err := s.d.whisperRegistry.GetCursor(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("get cursor: %w", err)
+	}
+	resp := &WhisperHistoryResponse{
+		Entries:   entries,
+		Cursor:    cursor,
+		HasCursor: !cursor.IsZero(),
+		HasMore:   hasMore,
+	}
+	if hasMore && len(entries) > 0 {
+		// oldest entry in this page is the cursor for the next page
+		resp.NextCursor = entries[len(entries)-1].CreatedAt
+	}
+	return resp, nil
 }
 
 func (s *daemonServiceImpl) CodeStatus() *CodeDBStats {
