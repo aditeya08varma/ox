@@ -164,7 +164,8 @@ type Daemon struct {
 	// state
 	mu               sync.Mutex
 	running          bool
-	restartRequested bool      // set when version mismatch triggers restart
+	restartRequested bool // set when version mismatch triggers restart
+	wasSuperseded    bool // set when exiting because another daemon took over
 	startTime        time.Time // daemon start time for uptime tracking
 	lastActivity     time.Time // tracks last activity for inactivity timeout
 
@@ -307,6 +308,16 @@ func (d *Daemon) Start() error {
 		d.logger.Info("inactivity timeout enabled", "timeout", d.config.InactivityTimeout, "check_interval", checkInterval)
 	}
 
+	// socket self-check ticker: detect when another daemon has taken over our socket
+	var socketCheckTicker *time.Ticker
+	var socketCheckChan <-chan time.Time
+	if d.config.SocketCheckInterval > 0 {
+		socketCheckTicker = time.NewTicker(d.config.SocketCheckInterval)
+		socketCheckChan = socketCheckTicker.C
+		defer socketCheckTicker.Stop()
+		d.logger.Info("socket self-check enabled", "interval", d.config.SocketCheckInterval)
+	}
+
 	for {
 		select {
 		case sig := <-sigChan:
@@ -315,6 +326,12 @@ func (d *Daemon) Start() error {
 		case <-d.ctx.Done():
 			d.logger.Info("context canceled")
 			return d.shutdown()
+		case <-socketCheckChan:
+			if superseded() {
+				d.logger.Info("registry PID changed, shutting down (superseded by new daemon)")
+				d.wasSuperseded = true
+				return d.shutdown()
+			}
 		case <-inactivityChan:
 			// check if ledger path still exists (handles directory renames/moves)
 			if d.config.LedgerPath != "" {
@@ -537,14 +554,33 @@ func (d *Daemon) writePidFile() error {
 }
 
 // cleanup removes PID and socket files.
+// When the daemon was superseded by a new instance, skip removing the socket
+// and registry entry — those now belong to the replacement daemon.
 func (d *Daemon) cleanup() {
-	// unregister from daemon registry
-	if err := UnregisterDaemon(); err != nil {
-		d.logger.Warn("failed to unregister daemon", "error", err)
+	if !d.wasSuperseded {
+		if err := UnregisterDaemon(); err != nil {
+			d.logger.Warn("failed to unregister daemon", "error", err)
+		}
+		os.Remove(SocketPath())
+		os.Remove(PidPath())
 	}
+}
 
-	os.Remove(PidPath())
-	os.Remove(SocketPath())
+// superseded returns true if another daemon has taken over this workspace.
+// Checks the registry to see if a different PID is now registered for our workspace ID.
+// This handles the case where a new daemon replaces the socket file (same path, different process).
+func superseded() bool {
+	reg, err := LoadRegistry()
+	if err != nil {
+		return false // can't tell, assume not superseded
+	}
+	info := reg.FindByWorkspaceID(CurrentWorkspaceID())
+	if info == nil {
+		// Entry missing — could be a race in registry writes or a cleared file.
+		// Only evict when the registry positively names a different PID.
+		return false
+	}
+	return info.PID != os.Getpid()
 }
 
 // IsRunning checks if a daemon is currently running and responsive.

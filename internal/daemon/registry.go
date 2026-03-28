@@ -201,6 +201,22 @@ func FindDaemonForRepo(repoID string) *DaemonInfo {
 	return reg.FindByRepoID(repoID)
 }
 
+// FindByWorkspaceID returns the daemon entry for the given workspace ID,
+// or nil if no match is found. Empty workspaceID always returns nil.
+func (r *Registry) FindByWorkspaceID(workspaceID string) *DaemonInfo {
+	if workspaceID == "" {
+		return nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if info, ok := r.Daemons[workspaceID]; ok {
+		return &info
+	}
+	return nil
+}
+
 // FindByRepoID returns the first daemon entry matching the given repo_id,
 // or nil if no match is found. Empty repoID always returns nil.
 func (r *Registry) FindByRepoID(repoID string) *DaemonInfo {

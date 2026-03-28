@@ -136,6 +136,10 @@ func TestDefaultConfig_NewFields(t *testing.T) {
 	t.Run("team context sync interval is set", func(t *testing.T) {
 		assert.Equal(t, 15*time.Second, cfg.TeamContextSyncInterval)
 	})
+
+	t.Run("socket check interval is set", func(t *testing.T) {
+		assert.Equal(t, 30*time.Second, cfg.SocketCheckInterval)
+	})
 }
 
 // TestDaemon_Stop_SetsRunningFalseBeforeCancel verifies that Stop() sets
