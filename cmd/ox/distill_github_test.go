@@ -48,7 +48,7 @@ func TestBuildGitHubExtractorPrompt(t *testing.T) {
 	t.Parallel()
 
 	clustersJSON := `[{"type":"pull_request","number":42}]`
-	prompt := buildGitHubExtractorPrompt(clustersJSON, "7 days")
+	prompt := buildGitHubExtractorPrompt(clustersJSON, "7 days", "")
 
 	// System prompt present
 	assert.Contains(t, prompt, "You are a signal extractor for an alignment feed system")
@@ -71,8 +71,22 @@ func TestBuildGitHubExtractorPrompt(t *testing.T) {
 func TestBuildGitHubExtractorPrompt_ContainsBatchTags(t *testing.T) {
 	t.Parallel()
 
-	prompt := buildGitHubExtractorPrompt("[]", "24 hours")
+	prompt := buildGitHubExtractorPrompt("[]", "24 hours", "")
 	assert.Contains(t, prompt, "<batch>\n[]\n</batch>")
+}
+
+func TestBuildGitHubExtractorPrompt_WithGuidelines(t *testing.T) {
+	t.Parallel()
+
+	prompt := buildGitHubExtractorPrompt("[]", "1 day", "Focus on security-related changes.")
+
+	// Guidelines should be injected
+	assert.Contains(t, prompt, "<team-guidelines>")
+	assert.Contains(t, prompt, "Focus on security-related changes.")
+	assert.Contains(t, prompt, "</team-guidelines>")
+
+	// System prompt still present
+	assert.Contains(t, prompt, "You are a signal extractor for an alignment feed system")
 }
 
 func TestGitHubFactsSince_Default(t *testing.T) {
@@ -203,11 +217,10 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
-	cmd.Flags().Bool("verbose", false, "")
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot)
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
 	require.NoError(t, err)
 
 	// Verify prompt was sent to backend
@@ -261,7 +274,6 @@ func TestExtractGitHubFacts_DryRun(t *testing.T) {
 	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
-	cmd.Flags().Bool("verbose", false, "")
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
@@ -269,7 +281,7 @@ func TestExtractGitHubFacts_DryRun(t *testing.T) {
 	distillDryRun = true
 	defer func() { distillDryRun = oldDryRun }()
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot)
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
 	require.NoError(t, err)
 
 	// Backend should NOT have been called
@@ -292,11 +304,10 @@ func TestExtractGitHubFacts_EmptySkip(t *testing.T) {
 	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
-	cmd.Flags().Bool("verbose", false, "")
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot)
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
 	require.NoError(t, err)
 
 	// Backend should NOT have been called (no activity)
@@ -338,11 +349,10 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
-	cmd.Flags().Bool("verbose", false, "")
 	cmd.SetOut(&bytes.Buffer{})
 
 	// First run: processes PRs #1-3
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot)
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
 	require.NoError(t, err)
 	assert.NotEmpty(t, state.LastGitHubFacts)
 	assert.Contains(t, backend.promptReceived, "<batch>")
@@ -370,7 +380,7 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 	backend.output = `{"headline":"second run","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`
 	cmd.SetOut(&bytes.Buffer{})
 
-	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot)
+	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
 	require.NoError(t, err)
 
 	// The second run should have processed PR #4 (high-water mark works)
@@ -400,11 +410,10 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	state := &distillStateV2{}
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
-	cmd.Flags().Bool("verbose", false, "")
 	cmd.SetOut(&bytes.Buffer{})
 
 	// First run
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot)
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
 	require.NoError(t, err)
 
 	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
@@ -422,7 +431,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 
 	// Second run same day
-	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot)
+	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
 	require.NoError(t, err)
 
 	entries2, err := os.ReadDir(factsDir)
@@ -470,10 +479,9 @@ func TestExtractGitHubFacts_MultiDayCatchup(t *testing.T) {
 	state.LastGitHubFacts = time.Now().UTC().AddDate(0, 0, -4).Format(time.RFC3339)
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
-	cmd.Flags().Bool("verbose", false, "")
 	cmd.SetOut(&bytes.Buffer{})
 
-	err := extractGitHubFacts(context.Background(), cmd, tracker, tc, state, projectRoot)
+	err := extractGitHubFacts(context.Background(), cmd, tracker, tc, state, projectRoot, "")
 	require.NoError(t, err)
 
 	// Verify fact files were created for each day

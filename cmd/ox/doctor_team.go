@@ -27,11 +27,17 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 	localCfg, err := config.LoadLocalConfig(gitRoot)
 	if err != nil || len(localCfg.TeamContexts) == 0 {
 		// no team contexts configured, check for legacy directories
+		var checks []checkResult
 		legacyCheck := checkLegacyTeamContexts(gitRoot)
 		if legacyCheck.warning || !legacyCheck.passed {
-			return []checkResult{legacyCheck}
+			checks = append(checks, legacyCheck)
 		}
-		return nil
+		// guidance check uses FindRepoTeamContext (daemon-discovered)
+		guidanceCheck := checkGuidanceFiles(opts.shouldFix(CheckSlugGuidanceFiles))
+		if guidanceCheck.warning || !guidanceCheck.passed {
+			checks = append(checks, guidanceCheck)
+		}
+		return checks
 	}
 
 	var checks []checkResult
@@ -58,6 +64,12 @@ func checkTeamContextHealth(opts doctorOptions) []checkResult {
 	orphanCheck := checkOrphanedTeamDirs(opts)
 	if orphanCheck.warning || !orphanCheck.passed {
 		checks = append(checks, orphanCheck)
+	}
+
+	// check for distill guidance files
+	guidanceCheck := checkGuidanceFiles(opts.shouldFix(CheckSlugGuidanceFiles))
+	if guidanceCheck.warning || !guidanceCheck.passed {
+		checks = append(checks, guidanceCheck)
 	}
 
 	return checks

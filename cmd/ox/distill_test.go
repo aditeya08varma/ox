@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestDetermineLayers(t *testing.T) {
@@ -113,7 +115,7 @@ func TestEnsureMemoryDirs(t *testing.T) {
 		t.Fatalf("ensureMemoryDirs: %v", err)
 	}
 
-	for _, sub := range []string{"memory/daily", "memory/weekly", "memory/monthly"} {
+	for _, sub := range []string{"memory/daily", "memory/weekly", "memory/monthly", "memory/guidance"} {
 		path := filepath.Join(tmp, sub)
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			t.Errorf("expected directory %s to exist", sub)
@@ -333,24 +335,179 @@ func TestDistillStateV2LastTimes(t *testing.T) {
 	})
 }
 
-func TestLoadDistillGuidelines(t *testing.T) {
+func TestLoadGuidance(t *testing.T) {
 	tmp := t.TempDir()
-
-	// no file — returns empty
-	got := loadDistillGuidelines(tmp)
-	if got != "" {
-		t.Errorf("expected empty string for missing DISTILL.md, got %q", got)
-	}
-
-	// with file — returns content
-	content := "Always track security decisions.\nIgnore dependency bumps."
-	if err := os.WriteFile(filepath.Join(tmp, "DISTILL.md"), []byte(content), 0o644); err != nil {
+	guidanceDir := filepath.Join(tmp, "memory", "guidance")
+	if err := os.MkdirAll(guidanceDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	got = loadDistillGuidelines(tmp)
-	if got != content {
-		t.Errorf("expected %q, got %q", content, got)
+
+	t.Run("missing file returns empty", func(t *testing.T) {
+		got := loadGuidance(tmp, "EXTRACT.md")
+		if got != "" {
+			t.Errorf("expected empty string, got %q", got)
+		}
+	})
+
+	t.Run("reads EXTRACT.md", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filepath.Join(guidanceDir, "EXTRACT.md"), []byte("extract guidance"), 0o644))
+		got := loadGuidance(tmp, "EXTRACT.md")
+		if got != "extract guidance" {
+			t.Errorf("expected 'extract guidance', got %q", got)
+		}
+	})
+
+	t.Run("reads DISTILL.md", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filepath.Join(guidanceDir, "DISTILL.md"), []byte("distill guidance"), 0o644))
+		got := loadGuidance(tmp, "DISTILL.md")
+		if got != "distill guidance" {
+			t.Errorf("expected 'distill guidance', got %q", got)
+		}
+	})
+
+	t.Run("trims whitespace", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(filepath.Join(guidanceDir, "EXTRACT.md"), []byte("  padded  \n"), 0o644))
+		got := loadGuidance(tmp, "EXTRACT.md")
+		if got != "padded" {
+			t.Errorf("expected 'padded', got %q", got)
+		}
+	})
+}
+
+func TestSeedGuidanceFiles(t *testing.T) {
+	tmp := t.TempDir()
+	initGitRepo(t, tmp)
+
+	if err := seedGuidanceFiles(tmp); err != nil {
+		t.Fatalf("seedGuidanceFiles: %v", err)
 	}
+
+	guidanceDir := filepath.Join(tmp, "memory", "guidance")
+
+	// EXTRACT.md should exist
+	data, err := os.ReadFile(filepath.Join(guidanceDir, "EXTRACT.md"))
+	if err != nil {
+		t.Fatalf("EXTRACT.md not created: %v", err)
+	}
+	if !strings.Contains(string(data), "Extraction Guidance") {
+		t.Error("EXTRACT.md should contain default content")
+	}
+
+	// DISTILL.md should exist
+	data, err = os.ReadFile(filepath.Join(guidanceDir, "DISTILL.md"))
+	if err != nil {
+		t.Fatalf("DISTILL.md not created: %v", err)
+	}
+	if !strings.Contains(string(data), "Distillation Guidance") {
+		t.Error("DISTILL.md should contain default content")
+	}
+
+	// second call should not overwrite
+	require.NoError(t, os.WriteFile(filepath.Join(guidanceDir, "EXTRACT.md"), []byte("custom"), 0o644))
+	if err := seedGuidanceFiles(tmp); err != nil {
+		t.Fatalf("seedGuidanceFiles (second call): %v", err)
+	}
+	data, _ = os.ReadFile(filepath.Join(guidanceDir, "EXTRACT.md"))
+	if string(data) != "custom" {
+		t.Error("seedGuidanceFiles should not overwrite existing files")
+	}
+}
+
+func TestMigrateDistillGuidelines(t *testing.T) {
+	t.Run("migrates old file", func(t *testing.T) {
+		tmp := t.TempDir()
+		initGitRepo(t, tmp)
+
+		oldContent := "# Custom Guidelines\nTrack security."
+		require.NoError(t, os.WriteFile(filepath.Join(tmp, "DISTILL.md"), []byte(oldContent), 0o644))
+
+		// commit the old file so git tracks it (mirrors real-world state)
+		if err := commitMemoryFile(tmp, "DISTILL.md", "seed DISTILL.md"); err != nil {
+			t.Fatalf("commit old DISTILL.md: %v", err)
+		}
+
+		migrated, err := migrateDistillGuidelines(tmp)
+		if err != nil {
+			t.Fatalf("migrateDistillGuidelines: %v", err)
+		}
+		if !migrated {
+			t.Error("expected migration to occur")
+		}
+
+		// old file should be gone
+		if _, err := os.Stat(filepath.Join(tmp, "DISTILL.md")); err == nil {
+			t.Error("old DISTILL.md should be removed")
+		}
+
+		// new file should exist with same content
+		data, err := os.ReadFile(filepath.Join(tmp, "memory", "guidance", "DISTILL.md"))
+		if err != nil {
+			t.Fatalf("new DISTILL.md not found: %v", err)
+		}
+		if string(data) != oldContent {
+			t.Errorf("expected %q, got %q", oldContent, string(data))
+		}
+	})
+
+	t.Run("skips if old file missing", func(t *testing.T) {
+		tmp := t.TempDir()
+		migrated, err := migrateDistillGuidelines(tmp)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if migrated {
+			t.Error("should not migrate when no old file")
+		}
+	})
+
+	t.Run("skips if new file exists", func(t *testing.T) {
+		tmp := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(tmp, "DISTILL.md"), []byte("old"), 0o644))
+		guidanceDir := filepath.Join(tmp, "memory", "guidance")
+		require.NoError(t, os.MkdirAll(guidanceDir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(guidanceDir, "DISTILL.md"), []byte("new"), 0o644))
+
+		migrated, err := migrateDistillGuidelines(tmp)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if migrated {
+			t.Error("should not migrate when new file already exists")
+		}
+
+		// new file should still have original content
+		data, _ := os.ReadFile(filepath.Join(guidanceDir, "DISTILL.md"))
+		if string(data) != "new" {
+			t.Error("new file should not be overwritten")
+		}
+	})
+
+	t.Run("migrates untracked file via fallback", func(t *testing.T) {
+		tmp := t.TempDir()
+		initGitRepo(t, tmp)
+
+		// write DISTILL.md but do NOT commit it — it's untracked, so git mv will fail
+		oldContent := "untracked custom guidelines"
+		require.NoError(t, os.WriteFile(filepath.Join(tmp, "DISTILL.md"), []byte(oldContent), 0o644))
+
+		migrated, err := migrateDistillGuidelines(tmp)
+		require.NoError(t, err)
+		if !migrated {
+			t.Error("expected migration to occur for untracked file")
+		}
+
+		// old file should be gone
+		if _, err := os.Stat(filepath.Join(tmp, "DISTILL.md")); err == nil {
+			t.Error("old DISTILL.md should be removed")
+		}
+
+		// new file should exist with same content
+		data, err := os.ReadFile(filepath.Join(tmp, "memory", "guidance", "DISTILL.md"))
+		require.NoError(t, err)
+		if string(data) != oldContent {
+			t.Errorf("expected %q, got %q", oldContent, string(data))
+		}
+	})
 }
 
 func TestContentHash(t *testing.T) {
