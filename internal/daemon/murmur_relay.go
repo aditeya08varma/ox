@@ -2,7 +2,9 @@ package daemon
 
 import (
 	"log/slog"
+	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/ledger"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -13,20 +15,30 @@ import (
 type MurmurRelay struct {
 	registry      *WhisperRegistry
 	localAgentIDs map[string]bool // agent IDs on this machine (skip self-authored murmurs)
+	nudgeTracker  *MurmurNudgeTracker
+	projectRoot   string // re-checked on every relay to pick up config changes
+	lastRelayAt   time.Time
 	logger        *slog.Logger
 }
 
 // NewMurmurRelay creates a relay that scans murmur files and converts them
 // to whisper entries in the registry.
-func NewMurmurRelay(registry *WhisperRegistry, logger *slog.Logger) *MurmurRelay {
+func NewMurmurRelay(registry *WhisperRegistry, projectRoot string, logger *slog.Logger) *MurmurRelay {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &MurmurRelay{
 		registry:      registry,
 		localAgentIDs: make(map[string]bool),
+		projectRoot:   projectRoot,
 		logger:        logger,
 	}
+}
+
+// SetNudgeTracker sets the nudge tracker so the relay can record when
+// agents publish murmurs, suppressing future nudges.
+func (r *MurmurRelay) SetNudgeTracker(tracker *MurmurNudgeTracker) {
+	r.nudgeTracker = tracker
 }
 
 // SetLocalAgentIDs sets the agent IDs running on this machine.
@@ -44,7 +56,23 @@ func (r *MurmurRelay) SetLocalAgentIDs(ids []string) {
 // scope must be "ledger" or "team".
 // Returns the number of murmurs successfully relayed.
 func (r *MurmurRelay) RelayFromPath(baseDir, scope string) int {
-	murmurs, err := ledger.ReadMurmursInWindow(baseDir, ledger.DefaultMurmurWindowHours)
+	if !config.MurmuringEnabled(r.projectRoot) {
+		return 0
+	}
+
+	// incremental scan: only look back to lastRelayAt instead of the full 12h window
+	windowHours := ledger.DefaultMurmurWindowHours
+	if !r.lastRelayAt.IsZero() {
+		hoursSince := int(time.Since(r.lastRelayAt).Hours()) + 1 // +1 to cover partial hours
+		if hoursSince < 1 {
+			hoursSince = 1
+		}
+		if hoursSince < windowHours {
+			windowHours = hoursSince
+		}
+	}
+
+	murmurs, err := ledger.ReadMurmursInWindow(baseDir, windowHours)
 	if err != nil {
 		r.logger.Warn("failed to read murmurs", "dir", baseDir, "scope", scope, "err", err)
 		return 0
@@ -91,8 +119,16 @@ func (r *MurmurRelay) RelayFromPath(baseDir, scope string) int {
 			r.logger.Warn("failed to mark murmur relayed", "murmur_id", m.ID, "err", err)
 		}
 
+		// record murmur for nudge suppression
+		if r.nudgeTracker != nil && m.AgentID != "" {
+			r.nudgeTracker.RecordMurmur(m.AgentID)
+		}
+
 		relayed++
 	}
+
+	// update scan cursor even if 0 murmurs found — the window was clean
+	r.lastRelayAt = time.Now()
 
 	if relayed > 0 {
 		r.logger.Debug("murmurs relayed", "scope", scope, "count", relayed, "dir", baseDir)

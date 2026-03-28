@@ -60,6 +60,23 @@ conventions and knowledge that apply to ALL repos your team owns.`,
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
 	},
 	{
+		Key:         "murmuring",
+		Description: "Auto work-in-progress signals",
+		LongDescription: `Controls work-in-progress signals to teammates.
+
+Murmurs are short coordination signals that let teammates know what
+AI coworkers are working on before PRs or commits appear. Signals
+propagate via the ledger and are delivered as whispers to active
+coworkers.
+
+  manual - Murmurs via 'ox murmur' only (default)
+  auto   - Daemon also nudges agents to murmur periodically (~15 min)`,
+		Category:    "Collaboration",
+		ValidValues: []string{"manual", "auto"},
+		Default:     "manual",
+		Levels:      []ConfigLevel{ConfigLevelRepo},
+	},
+	{
 		Key:         "telemetry",
 		Description: "Anonymous usage telemetry",
 		LongDescription: `Controls anonymous usage statistics collection.
@@ -214,6 +231,11 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 		}
 		if teamCfg != nil && teamCfg.SessionRecording != "" {
 			cv.TeamVal = config.NormalizeSessionRecording(teamCfg.SessionRecording)
+		}
+
+	case "murmuring":
+		if repoCfg != nil && repoCfg.Murmuring != "" {
+			cv.RepoVal = repoCfg.Murmuring
 		}
 
 	case "telemetry":
@@ -392,6 +414,9 @@ func setRepoConfig(key, value, projectRoot string) error {
 	switch key {
 	case "session_recording":
 		cfg.SessionRecording = value
+
+	case "murmuring":
+		cfg.Murmuring = value
 
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)

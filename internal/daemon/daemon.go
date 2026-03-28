@@ -158,7 +158,8 @@ type Daemon struct {
 	issues          *IssueTracker
 	codedb          *CodeDBManager
 	agentWorker     *agentwork.Manager
-	whisperRegistry *WhisperRegistry
+	whisperRegistry    *WhisperRegistry
+	murmurNudgeTracker *MurmurNudgeTracker
 
 	// state
 	mu               sync.Mutex
@@ -697,10 +698,13 @@ func (d *Daemon) initComponents() time.Duration {
 	d.scheduler.SetIssueTracker(d.issues)
 	if d.whisperRegistry != nil {
 		d.scheduler.SetWhisperRegistry(d.whisperRegistry)
-		if config.FeatureMurmurEnabled() {
-			murmurRelay := NewMurmurRelay(d.whisperRegistry, d.logger)
-			d.scheduler.SetMurmurRelay(murmurRelay)
-		}
+		// always wire relay + nudge tracker; they re-check MurmuringEnabled()
+		// on every tick so config changes take effect without daemon restart
+		murmurRelay := NewMurmurRelay(d.whisperRegistry, d.config.ProjectRoot, d.logger)
+		d.murmurNudgeTracker = NewMurmurNudgeTracker()
+		murmurRelay.SetNudgeTracker(d.murmurNudgeTracker)
+		d.heartbeat.SetAgentHeartbeatCallback(d.murmurNudgeTracker.RecordHeartbeat)
+		d.scheduler.SetMurmurRelay(murmurRelay)
 	}
 	if d.codedb != nil {
 		d.scheduler.SetCodeDBManager(d.codedb)
@@ -745,6 +749,9 @@ func (d *Daemon) startWorkers() {
 	if d.whisperRegistry != nil {
 		ws := NewWhisperScheduler(d.whisperRegistry, d.logger)
 		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
+		if d.murmurNudgeTracker != nil && d.config.MurmurNudgeInterval > 0 {
+			ws.RegisterSource(NewMurmurNudgeSource(d.murmurNudgeTracker, d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot))
+		}
 		ws.Start(d.ctx, &d.wg)
 		ws.RunPrune(d.ctx, &d.wg, 1*time.Hour)
 	}
