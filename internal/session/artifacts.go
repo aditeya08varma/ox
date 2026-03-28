@@ -11,15 +11,7 @@ import (
 type ArtifactPaths struct {
 	SummaryMD   string // summary.md — structured markdown summary
 	SummaryJSON string // summary.json — machine-readable summary
-	HTML        string // session.html — interactive HTML viewer
 	SessionMD   string // session.md — full session transcript in markdown
-}
-
-// HTMLGenerator abstracts HTML generation to avoid import cycles
-// (internal/session cannot import internal/session/html).
-type HTMLGenerator interface {
-	GenerateToFile(stored *StoredSession, outputPath string) error
-	GenerateToFileWithSummary(stored *StoredSession, summary *SummarizeResponse, outputPath string) error
 }
 
 // WriteSessionArtifacts generates the standard set of session artifacts from
@@ -27,9 +19,14 @@ type HTMLGenerator interface {
 // anti-entropy finalization call this to ensure identical output.
 //
 // The summaryResp may come from LocalSummary (stats-only) or LLM (rich).
-// Either way, the same 4 files are produced.
-func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp *SummarizeResponse, htmlGen HTMLGenerator) (*ArtifactPaths, error) {
+// Either way, the same 3 files are produced.
+func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp *SummarizeResponse) (*ArtifactPaths, error) {
 	paths := &ArtifactPaths{}
+
+	// --- enrich summary.json with computed fields (files_changed, chapters) ---
+	if summaryResp != nil && stored != nil {
+		EnrichSummary(stored, summaryResp)
+	}
 
 	// --- summary.json ---
 	if summaryResp != nil {
@@ -66,22 +63,6 @@ func WriteSessionArtifacts(sessionDir string, stored *StoredSession, summaryResp
 		}
 		paths.SummaryMD = summaryMDPath
 	}
-
-	// --- session.html ---
-	if htmlGen == nil {
-		return nil, fmt.Errorf("generate session.html: html generator is nil")
-	}
-	htmlPath := filepath.Join(sessionDir, "session.html")
-	if summaryResp != nil {
-		if err := htmlGen.GenerateToFileWithSummary(stored, summaryResp, htmlPath); err != nil {
-			return nil, fmt.Errorf("generate session.html: %w", err)
-		}
-	} else {
-		if err := htmlGen.GenerateToFile(stored, htmlPath); err != nil {
-			return nil, fmt.Errorf("generate session.html: %w", err)
-		}
-	}
-	paths.HTML = htmlPath
 
 	// --- session.md ---
 	sessionMDPath := filepath.Join(sessionDir, "session.md")

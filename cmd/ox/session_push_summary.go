@@ -156,9 +156,19 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
-	// copy file to <session-dir>/summary.json
+	// preserve computed fields (files_changed, chapters) from existing summary.json
+	// that was enriched by WriteSessionArtifacts during session stop. The LLM-generated
+	// summary doesn't include these fields, and raw.jsonl may be an LFS stub by now,
+	// so we must carry them forward rather than re-computing.
 	summaryDst := filepath.Join(sessionDir, "summary.json")
-	if err := os.WriteFile(summaryDst, data, 0644); err != nil {
+	preserveComputedFields(summaryDst, &summaryParsed)
+
+	// write merged summary to ledger
+	mergedData, mergeErr := json.MarshalIndent(summaryParsed, "", "  ")
+	if mergeErr != nil {
+		mergedData = data // fall back to original LLM summary
+	}
+	if err := os.WriteFile(summaryDst, mergedData, 0644); err != nil {
 		return &pushSummaryOutput{
 			Success: false,
 			Type:    "push_summary",
@@ -182,9 +192,6 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 
 	// extract session name from session dir path for commit message
 	sessionName := filepath.Base(sessionDir)
-
-	// regenerate local cache HTML with rich summary regardless of disposition
-	regenerateLocalCacheHTML(sessionName, data)
 
 	// if below upload threshold, keep locally but don't push
 	if disposition == session.QualityLocalOnly {
@@ -230,6 +237,7 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	if output, err := commitCmd.CombinedOutput(); err != nil {
 		outStr := string(output)
 		if strings.Contains(outStr, "nothing to commit") {
+			clearNeedsSummaryMarkerForSession(sessionName)
 			return &pushSummaryOutput{
 				Success:      true,
 				Type:         "push_summary",
@@ -285,8 +293,10 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 	}
 }
 
-// clearNeedsSummaryMarkerForSession attempts to find and clear the .needs-summary marker
-// for a session by scanning known cache locations. Best-effort, failures are logged.
+// clearNeedsSummaryMarkerForSession clears the .needs-summary marker and prunes
+// the session cache directory. The cache was intentionally kept alive after upload
+// so that push-summary could read raw.jsonl (the ledger copy becomes an LFS stub).
+// Now that push-summary is done, the cache can be safely removed.
 func clearNeedsSummaryMarkerForSession(sessionName string) {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -303,57 +313,35 @@ func clearNeedsSummaryMarkerForSession(sessionName string) {
 	if err := session.ClearNeedsSummaryMarker(cacheSessionDir); err != nil {
 		slog.Debug("clear needs-summary marker", "error", err, "session", sessionName)
 	}
+
+	// prune cache now that push-summary is complete
+	if cacheSessionDir != "" && cacheSessionDir != "." {
+		if err := os.RemoveAll(cacheSessionDir); err != nil {
+			slog.Debug("prune session cache after push-summary", "dir", cacheSessionDir, "error", err)
+		}
+	}
 }
 
-// regenerateLocalCacheHTML regenerates the session HTML in the local cache
-// using the rich summary (with aha moments, SageOx insights, etc.).
-// It writes summary.json to the cache dir so generateHTML() can read it,
-// then regenerates the HTML with the full rich template.
-// Best-effort: failures are logged but don't affect push-summary success.
-func regenerateLocalCacheHTML(sessionName string, summaryData []byte) {
-	gitRoot := findGitRoot()
-	if gitRoot == "" {
-		return
-	}
-
-	repoID := getRepoIDOrDefault(gitRoot)
-	contextPath := session.GetContextPath(repoID)
-	if contextPath == "" {
-		return
-	}
-
-	cacheSessionDir := filepath.Join(contextPath, "sessions", sessionName)
-
-	// find raw.jsonl in cache dir
-	rawPath := filepath.Join(cacheSessionDir, ledgerFileRaw)
-	if _, err := os.Stat(rawPath); err != nil {
-		slog.Debug("no raw.jsonl in cache for HTML regen", "path", rawPath)
-		return
-	}
-
-	// write summary.json to cache dir so generateHTML() can read it
-	cacheSummaryPath := filepath.Join(cacheSessionDir, "summary.json")
-	if err := os.WriteFile(cacheSummaryPath, summaryData, 0644); err != nil {
-		slog.Debug("write summary.json to cache for HTML regen", "error", err)
-		return
-	}
-
-	// read stored session
-	stored, err := session.ReadSessionFromPath(rawPath)
+// preserveComputedFields reads the existing summary.json and carries forward
+// files_changed and chapters into the new summary if the new summary lacks them.
+// These fields were computed by WriteSessionArtifacts during session stop (when
+// raw.jsonl was still in cache). By push-summary time, raw.jsonl may be an LFS
+// stub, so re-computing is not reliable.
+func preserveComputedFields(summaryPath string, newSummary *session.SummarizeResponse) {
+	existingData, err := os.ReadFile(summaryPath)
 	if err != nil {
-		slog.Debug("read session for HTML regen", "error", err)
 		return
 	}
-
-	// regenerate HTML using generateHTML() which reads summary.json from
-	// the same directory and populates aha moments, SageOx insights, etc.
-	htmlPath := filepath.Join(filepath.Dir(rawPath), ledgerFileHTML)
-	if err := generateHTML(stored, htmlPath); err != nil {
-		slog.Debug("regenerate HTML with rich summary", "error", err)
+	var existing session.SummarizeResponse
+	if json.Unmarshal(existingData, &existing) != nil {
 		return
 	}
-
-	slog.Info("regenerated local cache HTML with rich summary", "path", htmlPath)
+	if len(newSummary.FilesChanged) == 0 && len(existing.FilesChanged) > 0 {
+		newSummary.FilesChanged = existing.FilesChanged
+	}
+	if len(newSummary.Chapters) == 0 && len(existing.Chapters) > 0 {
+		newSummary.Chapters = existing.Chapters
+	}
 }
 
 // findGitRootFrom walks up from a directory to find the .git root.
