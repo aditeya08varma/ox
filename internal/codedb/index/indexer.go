@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 
 	"github.com/sageox/ox/internal/codedb/comments"
 	"github.com/sageox/ox/internal/codedb/language"
+	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/codedb/symbols"
 )
@@ -204,13 +206,13 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	if err != nil {
 		return fmt.Errorf("derive repo name from URL: %w", err)
 	}
-	repoID, err := upsertRepo(s, repoName, repoPath)
+	repoID, err := upsertRepo(ctx, s, repoName, repoPath)
 	if err != nil {
 		return fmt.Errorf("upsert repo record: %w", err)
 	}
 
 	// 3. Load known commits
-	knownCommits, err := loadKnownCommits(s, repoID)
+	knownCommits, err := loadKnownCommits(ctx, s, repoID)
 	if err != nil {
 		return fmt.Errorf("load known commits: %w", err)
 	}
@@ -254,7 +256,7 @@ func IndexRepo(ctx context.Context, s *store.Store, url string, opts IndexOption
 	defer func() { st.tx.Rollback() }()
 
 	// 6. Check if default branch tip has changed
-	existingRefs, err := loadExistingRefs(s, repoID)
+	existingRefs, err := loadExistingRefs(ctx, s, repoID)
 	if err != nil {
 		return fmt.Errorf("load existing refs: %w", err)
 	}
@@ -315,13 +317,13 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 
 	// 2. Upsert repo record — use the local path as both name and path
 	repoName := filepath.Base(localPath)
-	repoID, err := upsertRepo(s, repoName, localPath)
+	repoID, err := upsertRepo(ctx, s, repoName, localPath)
 	if err != nil {
 		return fmt.Errorf("upsert repo record: %w", err)
 	}
 
 	// 3. Load known commits
-	knownCommits, err := loadKnownCommits(s, repoID)
+	knownCommits, err := loadKnownCommits(ctx, s, repoID)
 	if err != nil {
 		return fmt.Errorf("load known commits: %w", err)
 	}
@@ -370,7 +372,7 @@ func IndexLocalRepo(ctx context.Context, s *store.Store, localPath string, opts 
 	defer func() { st.tx.Rollback() }()
 
 	// 6. Check if default branch tip has changed
-	existingRefs, err := loadExistingRefs(s, repoID)
+	existingRefs, err := loadExistingRefs(ctx, s, repoID)
 	if err != nil {
 		return fmt.Errorf("load existing refs: %w", err)
 	}
@@ -584,17 +586,12 @@ func gitStatusDirtyFiles(ctx context.Context, repoPath string) ([]string, error)
 }
 
 // upsertRepo inserts or updates a repo record and returns its ID.
-func upsertRepo(s *store.Store, name, path string) (int64, error) {
-	_, err := s.Exec(
-		`INSERT INTO repos (name, path) VALUES (?, ?)
-		 ON CONFLICT(name) DO UPDATE SET path = excluded.path`,
-		name, path,
-	)
-	if err != nil {
+func upsertRepo(ctx context.Context, s *store.Store, name, path string) (int64, error) {
+	q := s.Queries()
+	if err := q.UpsertRepo(ctx, codedbsqlc.UpsertRepoParams{Name: name, Path: path}); err != nil {
 		return 0, fmt.Errorf("upsert repo: %w", err)
 	}
-	var id int64
-	err = s.QueryRow("SELECT id FROM repos WHERE name = ?", name).Scan(&id)
+	id, err := q.GetRepoIDByName(ctx, name)
 	if err != nil {
 		return 0, fmt.Errorf("get repo id: %w", err)
 	}
@@ -602,46 +599,27 @@ func upsertRepo(s *store.Store, name, path string) (int64, error) {
 }
 
 // loadKnownCommits returns a set of commit hashes already indexed for a repo.
-func loadKnownCommits(s *store.Store, repoID int64) (map[string]bool, error) {
-	known := make(map[string]bool)
-	rows, err := s.Query("SELECT hash FROM commits WHERE repo_id = ?", repoID)
+func loadKnownCommits(ctx context.Context, s *store.Store, repoID int64) (map[string]bool, error) {
+	hashes, err := s.Queries().ListCommitHashesByRepo(ctx, repoID)
 	if err != nil {
 		return nil, fmt.Errorf("query known commits: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var h string
-		if err := rows.Scan(&h); err != nil {
-			return nil, fmt.Errorf("scan commit hash: %w", err)
-		}
+	known := make(map[string]bool, len(hashes))
+	for _, h := range hashes {
 		known[h] = true
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate known commits: %w", err)
 	}
 	return known, nil
 }
 
 // loadExistingRefs returns a map of ref name -> tip commit hash for a repo.
-func loadExistingRefs(s *store.Store, repoID int64) (map[string]string, error) {
-	refs := make(map[string]string)
-	rows, err := s.Query(
-		`SELECT r.name, c.hash FROM refs r JOIN commits c ON r.commit_id = c.id WHERE r.repo_id = ?`,
-		repoID,
-	)
+func loadExistingRefs(ctx context.Context, s *store.Store, repoID int64) (map[string]string, error) {
+	rows, err := s.Queries().ListRefsByRepo(ctx, repoID)
 	if err != nil {
 		return nil, fmt.Errorf("load existing refs: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var name, hash string
-		if err := rows.Scan(&name, &hash); err != nil {
-			return nil, fmt.Errorf("scan ref row: %w", err)
-		}
-		refs[name] = hash
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate refs: %w", err)
+	refs := make(map[string]string, len(rows))
+	for _, row := range rows {
+		refs[row.Name] = row.Hash
 	}
 	return refs, nil
 }
@@ -847,25 +825,23 @@ func (st *indexState) processRef(ctx context.Context, ri refInfo, refIdx, totalR
 // indexCommit inserts a single commit and its diffs into the database and Bleve.
 func (st *indexState) indexCommit(ctx context.Context, cd commitData) error {
 	oidHex := cd.oid.String()
+	q := codedbsqlc.New(st.tx)
 
-	result, err := st.tx.Exec(
-		`INSERT OR IGNORE INTO commits (repo_id, hash, author, message, timestamp)
-		 VALUES (?, ?, ?, ?, ?)`,
-		st.repoID, oidHex, cd.author, cd.message, cd.timestamp,
-	)
-	if err != nil {
+	if err := q.InsertCommit(ctx, codedbsqlc.InsertCommitParams{
+		RepoID:    st.repoID,
+		Hash:      oidHex,
+		Author:    sql.NullString{String: cd.author, Valid: cd.author != ""},
+		Message:   sql.NullString{String: cd.message, Valid: cd.message != ""},
+		Timestamp: sql.NullInt64{Int64: cd.timestamp, Valid: true},
+	}); err != nil {
 		return fmt.Errorf("insert commit: %w", err)
 	}
 
 	// Use LastInsertId to skip a SELECT; each commit hash is processed once per run.
 	// Fall back to SELECT only when RowsAffected==0 (commit already existed).
-	var commitDBID int64
-	if n, _ := result.RowsAffected(); n > 0 {
-		commitDBID, _ = result.LastInsertId()
-	} else {
-		if err = st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", oidHex).Scan(&commitDBID); err != nil {
-			return fmt.Errorf("get commit id: %w", err)
-		}
+	commitDBID, err := q.GetCommitIDByHash(ctx, oidHex)
+	if err != nil {
+		return fmt.Errorf("get commit id: %w", err)
 	}
 	st.commitIDCache[oidHex] = commitDBID
 
@@ -936,18 +912,28 @@ func (st *indexState) indexCommit(ctx context.Context, cd commitData) error {
 
 // insertParentLinks records commit parent relationships.
 func (st *indexState) insertParentLinks(commitDBID int64, parentIDs []plumbing.Hash) error {
+	ctx := context.Background()
+	q := codedbsqlc.New(st.tx)
 	for _, parentOID := range parentIDs {
 		parentHex := parentOID.String()
 		// Use cache to avoid a SELECT per parent; cache is populated by indexCommit.
 		parentDBID, ok := st.commitIDCache[parentHex]
 		if !ok {
 			// Parent was indexed in a previous run — look up from DB.
-			if err := st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", parentHex).Scan(&parentDBID); err != nil {
-				continue // parent not yet in DB; skip link
+			var err error
+			parentDBID, err = q.GetCommitIDByHash(ctx, parentHex)
+			if err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					continue // parent not yet in DB; skip link
+				}
+				return fmt.Errorf("get parent commit id %s: %w", parentHex, err)
 			}
+			st.commitIDCache[parentHex] = parentDBID
 		}
-		if _, err := st.tx.Exec("INSERT OR IGNORE INTO commit_parents (commit_id, parent_id) VALUES (?, ?)",
-			commitDBID, parentDBID); err != nil {
+		if err := q.InsertCommitParent(ctx, codedbsqlc.InsertCommitParentParams{
+			CommitID: commitDBID,
+			ParentID: parentDBID,
+		}); err != nil {
 			return fmt.Errorf("insert commit parent: %w", err)
 		}
 	}
@@ -1058,30 +1044,29 @@ func (st *indexState) indexDeletionEntry(commitDBID int64, path string, oldOID p
 // oldText/newText are pre-read blob contents from ensureBlob; when non-empty they
 // avoid a second git object read inside generateDiffText.
 func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.NullInt64, newBlobDBID int64, oldOID, newOID plumbing.Hash, hasOld, hasNew bool, oldText, newText string) error {
-	var newBlobPtr interface{}
+	ctx := context.Background()
+	q := codedbsqlc.New(st.tx)
+
+	var newBlobNull sql.NullInt64
 	if hasNew {
-		newBlobPtr = newBlobDBID
+		newBlobNull = sql.NullInt64{Int64: newBlobDBID, Valid: true}
 	}
 
-	result, err := st.tx.Exec(
-		`INSERT OR IGNORE INTO diffs (commit_id, path, old_blob_id, new_blob_id)
-		 VALUES (?, ?, ?, ?)`,
-		commitDBID, path, oldBlobDBID, newBlobPtr,
-	)
-	if err != nil {
+	if err := q.InsertDiff(ctx, codedbsqlc.InsertDiffParams{
+		CommitID:  commitDBID,
+		Path:      path,
+		OldBlobID: oldBlobDBID,
+		NewBlobID: newBlobNull,
+	}); err != nil {
 		return fmt.Errorf("insert diff: %w", err)
 	}
 
-	// Use LastInsertId to skip a SELECT; each (commit_id, path) is processed once,
-	// so RowsAffected should always be 1. Fall back to SELECT on the rare conflict.
-	var diffDBID int64
-	if n, _ := result.RowsAffected(); n > 0 {
-		diffDBID, _ = result.LastInsertId()
-	} else {
-		if err = st.tx.QueryRow("SELECT id FROM diffs WHERE commit_id = ? AND path = ?",
-			commitDBID, path).Scan(&diffDBID); err != nil {
-			return nil // non-fatal: skip Bleve indexing for this diff
-		}
+	diffDBID, err := q.GetDiffIDByCommitPath(ctx, codedbsqlc.GetDiffIDByCommitPathParams{
+		CommitID: commitDBID,
+		Path:     path,
+	})
+	if err != nil {
+		return fmt.Errorf("get diff id: %w", err)
 	}
 
 	diffText := generateDiffText(st.repo, path, oldOID, newOID, hasOld, hasNew, oldText, newText)
@@ -1097,14 +1082,16 @@ func (st *indexState) insertDiff(commitDBID int64, path string, oldBlobDBID sql.
 
 // buildTipFileRevs rebuilds the file_revs table for a ref's tip commit.
 func (st *indexState) buildTipFileRevs(ri refInfo) error {
+	ctx := context.Background()
+	q := codedbsqlc.New(st.tx)
+
 	tipHex := ri.tipOID.String()
-	var tipCommitDBID int64
-	err := st.tx.QueryRow("SELECT id FROM commits WHERE hash = ?", tipHex).Scan(&tipCommitDBID)
+	tipCommitDBID, err := q.GetCommitIDByHash(ctx, tipHex)
 	if err != nil {
 		return nil // skip if tip not indexed
 	}
 
-	if _, err := st.tx.Exec("DELETE FROM file_revs WHERE commit_id = ?", tipCommitDBID); err != nil {
+	if err := q.DeleteFileRevsByCommit(ctx, tipCommitDBID); err != nil {
 		return fmt.Errorf("delete file_revs: %w", err)
 	}
 
@@ -1125,18 +1112,21 @@ func (st *indexState) buildTipFileRevs(ri refInfo) error {
 		if indexed {
 			st.newBlobs++
 		}
-		if _, err := st.tx.Exec("INSERT OR IGNORE INTO file_revs (commit_id, path, blob_id) VALUES (?, ?, ?)",
-			tipCommitDBID, path, blobDBID); err != nil {
+		if err := q.InsertFileRev(ctx, codedbsqlc.InsertFileRevParams{
+			CommitID: tipCommitDBID,
+			Path:     path,
+			BlobID:   blobDBID,
+		}); err != nil {
 			return fmt.Errorf("insert file_rev: %w", err)
 		}
 	}
 
-	// Upsert ref
-	if _, err := st.tx.Exec(
-		`INSERT INTO refs (repo_id, name, commit_id) VALUES (?, ?, ?)
-		 ON CONFLICT(repo_id, name) DO UPDATE SET commit_id = excluded.commit_id`,
-		st.repoID, ri.name, tipCommitDBID,
-	); err != nil {
+	// upsert ref
+	if err := q.UpsertRef(ctx, codedbsqlc.UpsertRefParams{
+		RepoID:   st.repoID,
+		Name:     ri.name,
+		CommitID: tipCommitDBID,
+	}); err != nil {
 		return fmt.Errorf("upsert ref: %w", err)
 	}
 
@@ -1209,8 +1199,9 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 	}
 
 	// check SQL
-	var blobDBID int64
-	err := st.tx.QueryRow("SELECT id FROM blobs WHERE content_hash = ?", contentHash).Scan(&blobDBID)
+	q := codedbsqlc.New(st.tx)
+	ctx := context.Background()
+	blobDBID, err := q.GetBlobIDByHash(ctx, contentHash)
 	if err == nil {
 		st.blobIDCache[contentHash] = blobDBID
 		return blobDBID, "", false, nil
@@ -1218,27 +1209,16 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 
 	// new blob — insert and index in Bleve
 	lang := language.Detect(path)
-	var langPtr *string
-	if lang != "" {
-		langPtr = &lang
-	}
-
-	result, err := st.tx.Exec(
-		"INSERT OR IGNORE INTO blobs (content_hash, language) VALUES (?, ?)",
-		contentHash, langPtr,
-	)
-	if err != nil {
+	if err := q.InsertBlob(ctx, codedbsqlc.InsertBlobParams{
+		ContentHash: contentHash,
+		Language:    toNullString(lang),
+	}); err != nil {
 		return 0, "", false, fmt.Errorf("insert blob: %w", err)
 	}
 
-	// Use LastInsertId to skip a SELECT when the INSERT succeeded (the common case).
-	// Fall back to SELECT only when RowsAffected==0 (concurrent duplicate; rare).
-	if n, _ := result.RowsAffected(); n > 0 {
-		blobDBID, _ = result.LastInsertId()
-	} else {
-		if err = st.tx.QueryRow("SELECT id FROM blobs WHERE content_hash = ?", contentHash).Scan(&blobDBID); err != nil {
-			return 0, "", false, fmt.Errorf("get blob id: %w", err)
-		}
+	blobDBID, err = q.GetBlobIDByHash(ctx, contentHash)
+	if err != nil {
+		return 0, "", false, fmt.Errorf("get blob id: %w", err)
 	}
 
 	st.blobIDCache[contentHash] = blobDBID
@@ -1447,20 +1427,16 @@ sendLoop:
 }
 
 // openReposFromDB queries repo paths from the store and opens them.
-func openReposFromDB(s *store.Store) ([]*git.Repository, error) {
-	repoRows, err := s.Query("SELECT path FROM repos")
+func openReposFromDB(ctx context.Context, s *store.Store) ([]*git.Repository, error) {
+	paths, err := s.Queries().ListRepoPaths(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("query repo paths: %w", err)
 	}
+	if len(paths) == 0 {
+		return nil, fmt.Errorf("no repos found in database")
+	}
 	var repos []*git.Repository
-	var pathCount int
-	for repoRows.Next() {
-		var p string
-		if err := repoRows.Scan(&p); err != nil {
-			repoRows.Close()
-			return nil, fmt.Errorf("scan repo path: %w", err)
-		}
-		pathCount++
+	for _, p := range paths {
 		r, err := plainOpenTolerant(p)
 		if err != nil {
 			slog.Debug("skipping repo that failed to open", "path", p, "err", err)
@@ -1468,15 +1444,8 @@ func openReposFromDB(s *store.Store) ([]*git.Repository, error) {
 		}
 		repos = append(repos, r)
 	}
-	repoRows.Close()
-	if err := repoRows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate repo paths: %w", err)
-	}
-	if pathCount == 0 {
-		return nil, fmt.Errorf("no repos found in database")
-	}
 	if len(repos) == 0 {
-		return nil, fmt.Errorf("could not open any of %d git repos from database", pathCount)
+		return nil, fmt.Errorf("could not open any of %d git repos from database", len(paths))
 	}
 	return repos, nil
 }
@@ -1543,7 +1512,7 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 	}
 	report(fmt.Sprintf("Found %d unparsed blobs with supported languages.", len(blobs)))
 
-	repos, err := openReposFromDB(s)
+	repos, err := openReposFromDB(ctx, s)
 	if err != nil {
 		return stats, fmt.Errorf("open repos for symbol parsing: %w", err)
 	}
@@ -1562,6 +1531,8 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 	}
 	defer tx.Rollback()
 
+	txq := codedbsqlc.New(tx)
+
 	for i, blob := range blobs {
 		if err := ctx.Err(); err != nil {
 			return stats, err
@@ -1578,7 +1549,7 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 		}
 		if len(content) == 0 {
 			// genuinely empty file — mark parsed so we don't retry
-			if _, err := tx.Exec("UPDATE blobs SET parsed = 1 WHERE id = ?", blob.id); err != nil {
+			if err := txq.MarkBlobParsed(ctx, blob.id); err != nil {
 				slog.Warn("mark empty blob parsed", "blob_id", blob.id, "err", err)
 			}
 			continue
@@ -1635,9 +1606,10 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 		// Batch update parent IDs
 		for j, sym := range syms {
 			if sym.ParentIdx >= 0 && sym.ParentIdx < len(symDBIDs) {
-				_, err := tx.Exec("UPDATE symbols SET parent_id = ? WHERE id = ?",
-					symDBIDs[sym.ParentIdx], symDBIDs[j])
-				if err != nil {
+				if err := txq.UpdateSymbolParent(ctx, codedbsqlc.UpdateSymbolParentParams{
+					ParentID: sql.NullInt64{Int64: symDBIDs[sym.ParentIdx], Valid: true},
+					ID:       symDBIDs[j],
+				}); err != nil {
 					return stats, fmt.Errorf("update symbol parent: %w", err)
 				}
 			}
@@ -1671,8 +1643,7 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 			}
 		}
 
-		_, err = tx.Exec("UPDATE blobs SET parsed = 1 WHERE id = ?", blob.id)
-		if err != nil {
+		if err := txq.MarkBlobParsed(ctx, blob.id); err != nil {
 			return stats, fmt.Errorf("mark blob parsed: %w", err)
 		}
 
@@ -1765,7 +1736,7 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 	}
 	report(fmt.Sprintf("Parsing comments from %d blobs...", len(blobs)))
 
-	repos, err := openReposFromDB(s)
+	repos, err := openReposFromDB(ctx, s)
 	if err != nil {
 		return stats, fmt.Errorf("open repos for comment parsing: %w", err)
 	}
@@ -1849,6 +1820,7 @@ sendLoop2:
 	}
 	defer tx.Rollback()
 
+	txq := codedbsqlc.New(tx)
 	commentBatch := s.CommentIndex.NewBatch()
 	commentBatchN := 0
 	const commentSQLBatchSize = 100
@@ -1866,7 +1838,7 @@ sendLoop2:
 			continue
 		}
 		if result.skip || len(result.comments) == 0 {
-			if _, err := tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", result.blobID); err != nil {
+			if err := txq.MarkBlobCommentsParsed(ctx, result.blobID); err != nil {
 				slog.Warn("mark blob comments_parsed", "blob_id", result.blobID, "err", err)
 			}
 			if !result.skip {
@@ -1932,8 +1904,7 @@ sendLoop2:
 			}
 		}
 
-		_, err = tx.Exec("UPDATE blobs SET comments_parsed = 1 WHERE id = ?", result.blobID)
-		if err != nil {
+		if err := txq.MarkBlobCommentsParsed(ctx, result.blobID); err != nil {
 			return stats, fmt.Errorf("mark blob comments_parsed: %w", err)
 		}
 

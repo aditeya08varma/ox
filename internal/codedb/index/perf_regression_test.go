@@ -77,7 +77,7 @@ func TestParentLinks_IncrementalRun(t *testing.T) {
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git subprocess needs full env for PATH/SSH
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai", a36bcc7 (fix: address lint warnings in test files)
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -119,7 +119,7 @@ func TestEnsureBlob_ContentForNewBlob(t *testing.T) {
 
 	s := openTestStore(t)
 	// upsertRepo to get a valid repoID.
-	repoID, err := upsertRepo(s, "test-repo", dir)
+	repoID, err := upsertRepo(context.Background(), s, "test-repo", dir)
 	require.NoError(t, err)
 
 	tx, err := s.BeginTx(context.Background(), nil)
@@ -162,7 +162,7 @@ func TestEnsureBlob_NoContentOnCacheHit(t *testing.T) {
 	require.NoError(t, err)
 
 	s := openTestStore(t)
-	repoID, err := upsertRepo(s, "test-repo-2", dir)
+	repoID, err := upsertRepo(context.Background(), s, "test-repo-2", dir)
 	require.NoError(t, err)
 
 	tx, err := s.BeginTx(context.Background(), nil)
@@ -331,7 +331,7 @@ func TestIndexLocalRepo_BlobDedup(t *testing.T) {
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git subprocess needs full env for PATH/SSH
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai", a36bcc7 (fix: address lint warnings in test files)
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -479,7 +479,7 @@ func TestDiffTree_InitialCommitAllFilesIndexed(t *testing.T) {
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git subprocess needs full env for PATH/SSH
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai", a36bcc7 (fix: address lint warnings in test files)
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -517,7 +517,7 @@ func TestDiffTree_ModifyAndDeleteTracked(t *testing.T) {
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git subprocess needs full env for PATH/SSH
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai", a36bcc7 (fix: address lint warnings in test files)
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
@@ -575,7 +575,7 @@ func TestDiffTree_UnchangedFilesNotDuplicated(t *testing.T) {
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), // safe: git subprocess needs full env for PATH/SSH
 			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@sageox.ai",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai", a36bcc7 (fix: address lint warnings in test files)
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@sageox.ai",
 		)
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, "git %v: %s", args, out)
