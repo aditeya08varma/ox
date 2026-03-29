@@ -64,10 +64,15 @@ func ValidatePATLiveness(ctx context.Context, creds *GitCredentials) PATLiveness
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--heads", probeURL)
 	// ensure the process is killed promptly when context expires
 	cmd.WaitDelay = 100 * time.Millisecond
-	// use GIT_ASKPASS for credentials, suppress interactive prompts
+	// use GIT_ASKPASS for credentials, suppress interactive prompts and
+	// system credential helpers (e.g. osxkeychain) so they can't override
+	// the fresh token we're testing with
 	cmd.Env = append(cmd.Environ(),
 		"GIT_ASKPASS="+askpass,
 		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_COUNT=1",
+		"GIT_CONFIG_KEY_0=credential.helper",
+		"GIT_CONFIG_VALUE_0=", // disable credential helper for this probe
 	)
 
 	output, err := cmd.CombinedOutput()
@@ -129,6 +134,44 @@ func buildProbeURL(repoURL string) (string, error) {
 	}
 	u.User = url.User("oauth2")
 	return u.String(), nil
+}
+
+// ClearCredentialHelperEntry evicts any stored credential for the given git
+// server from all configured credential helpers (osxkeychain, libsecret,
+// wincred, etc.) using `git credential reject`. This prevents stale entries
+// from a previous install from silently overriding GIT_ASKPASS in future
+// git operations.
+//
+// Failures are logged but not returned — this is best-effort cleanup.
+// serverURL should be the git server base URL (e.g. "https://git.sageox.ai").
+func ClearCredentialHelperEntry(serverURL string) {
+	u, err := url.Parse(serverURL)
+	if err != nil || u.Host == "" {
+		slog.Debug("credential helper clear: skipped", "reason", "invalid server URL", "url", serverURL)
+		return
+	}
+
+	protocol := u.Scheme
+	if protocol == "" {
+		protocol = "https"
+	}
+	host := u.Hostname()
+
+	// `git credential reject` reads protocol/host/username from stdin and
+	// instructs each configured helper to delete the matching entry.
+	input := fmt.Sprintf("protocol=%s\nhost=%s\nusername=oauth2\n\n", protocol, host)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, "git", "credential", "reject")
+	cmd.Stdin = strings.NewReader(input)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		slog.Debug("credential helper clear: git credential reject failed",
+			"host", host, "error", err, "output", strings.TrimSpace(string(out)))
+	} else {
+		slog.Debug("credential helper clear: evicted stale entry", "host", host)
+	}
 }
 
 // writeAskpassScript creates a temporary script that echoes the token.
