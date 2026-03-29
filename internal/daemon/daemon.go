@@ -161,7 +161,7 @@ type Daemon struct {
 	codedb          *CodeDBManager
 	agentWorker     *agentwork.Manager
 	whisperRegistry    *WhisperRegistry
-	murmurNudgeTracker *MurmurNudgeTracker
+	dbMaintenance      *DBMaintenanceScheduler
 
 	// state
 	mu               sync.Mutex
@@ -862,9 +862,6 @@ func (d *Daemon) initComponents() time.Duration {
 		// always wire relay + nudge tracker; they re-check MurmuringEnabled()
 		// on every tick so config changes take effect without daemon restart
 		murmurRelay := NewMurmurRelay(d.whisperRegistry, d.config.ProjectRoot, d.logger)
-		d.murmurNudgeTracker = NewMurmurNudgeTracker()
-		murmurRelay.SetNudgeTracker(d.murmurNudgeTracker)
-		d.heartbeat.SetAgentHeartbeatCallback(d.murmurNudgeTracker.RecordHeartbeat)
 		d.scheduler.SetMurmurRelay(murmurRelay)
 	}
 	if d.codedb != nil {
@@ -910,12 +907,22 @@ func (d *Daemon) startWorkers() {
 	if d.whisperRegistry != nil {
 		ws := NewWhisperScheduler(d.whisperRegistry, d.logger)
 		ws.RegisterSource(NewActivitySummarySource(d.heartbeat, d.scheduler))
-		if d.murmurNudgeTracker != nil && d.config.MurmurNudgeInterval > 0 {
-			ws.RegisterSource(NewMurmurNudgeSource(d.murmurNudgeTracker, d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot))
+		if d.config.MurmurNudgeInterval > 0 {
+			ws.RegisterSource(NewMurmurNudgeSource(d.whisperRegistry.LedgerStore(), d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot))
 		}
 		ws.Start(d.ctx, &d.wg)
-		ws.RunPrune(d.ctx, &d.wg, 1*time.Hour)
 	}
+
+	// unified DB maintenance: prune, vacuum, integrity check for all SQLite databases
+	d.dbMaintenance = NewDBMaintenanceScheduler(d.logger)
+	if d.whisperRegistry != nil {
+		d.dbMaintenance.Register(NewWhisperDBMaintainer(
+			"whisper", d.whisperRegistry, 24*time.Hour, 10*1024*1024))
+	}
+	if d.codedb != nil {
+		d.dbMaintenance.Register(NewCodeDBMaintainer("codedb", d.codedb))
+	}
+	d.dbMaintenance.Start(d.ctx, &d.wg, 1*time.Hour)
 
 	if d.config.LedgerPath != "" {
 		d.watcher = NewWatcher(d.config.LedgerPath, d.config.DebounceWindow, d.logger)
