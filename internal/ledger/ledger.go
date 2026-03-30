@@ -455,6 +455,13 @@ func ConfigureSparseCheckout(path string) error {
 	// can read murmur files after git pull
 	dirs = append(dirs, ComputeMurmurDataPaths(DefaultMurmurWindowHours)...)
 
+	// protect staged/dirty files: "sparse-checkout set" removes tracked files
+	// outside the cone from the working tree. If the CLI has staged files in a
+	// directory not in our computed set (e.g. data/linear/, data/custom/), those
+	// files would be deleted from disk before the CLI commits+pushes.
+	// Detect such directories and include them in the cone.
+	dirs = append(dirs, dirtyDirsOutsideCone(path, dirs)...)
+
 	// set directories to include (excludes everything else like assets/)
 	args := append([]string{"-C", path, "sparse-checkout", "set"}, dirs...)
 	setCmd := exec.Command("git", args...)
@@ -469,6 +476,87 @@ func ConfigureSparseCheckout(path string) error {
 	}
 
 	return nil
+}
+
+// dirtyDirsOutsideCone returns top-level directories that contain staged or
+// modified tracked files but are not already in the cone dirs list.
+// This prevents "sparse-checkout set" from deleting files the CLI has staged
+// but not yet committed+pushed.
+func dirtyDirsOutsideCone(repoPath string, coneDirs []string) []string {
+	cmd := exec.Command("git", "-C", repoPath, "status", "--porcelain", "-z")
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return nil
+	}
+	return parseDirtyDirsFromPorcelain(out, coneDirs)
+}
+
+// parseDirtyDirsFromPorcelain extracts top-level directories from NUL-delimited
+// "git status --porcelain -z" output that are not already in coneDirs.
+//
+// Porcelain -z format:
+//   - Normal entries:  "XY path\0"
+//   - Rename/copy:     "XY new_path\0orig_path\0" (orig_path is a bare token)
+func parseDirtyDirsFromPorcelain(porcelainOutput []byte, coneDirs []string) []string {
+	// normalize cone dirs by stripping trailing slashes so prefix matching
+	// works against path components (e.g. "data/github/2026/03/30/" → "data/github/2026/03/30")
+	coneSet := make(map[string]bool, len(coneDirs))
+	for _, d := range coneDirs {
+		coneSet[strings.TrimRight(d, "/")] = true
+	}
+
+	seen := make(map[string]bool)
+	var extra []string
+
+	addIfUncovered := func(filePath string) {
+		if filePath == "" {
+			return
+		}
+		// check if any path prefix is already covered by a cone entry
+		// e.g. for "data/github/2026/03/30/prs.json", check:
+		//   "data", "data/github", "data/github/2026", ... "data/github/2026/03/30"
+		for i := 0; i < len(filePath); i++ {
+			if filePath[i] == '/' {
+				if coneSet[filePath[:i]] {
+					return
+				}
+			}
+		}
+		// check the full path for root-level files or exact matches
+		if coneSet[filePath] {
+			return
+		}
+		// not covered — add the first path segment (top-level dir)
+		topDir := filePath
+		if idx := strings.IndexByte(filePath, '/'); idx > 0 {
+			topDir = filePath[:idx]
+		}
+		if !seen[topDir] {
+			seen[topDir] = true
+			extra = append(extra, topDir)
+		}
+	}
+
+	entries := strings.Split(string(porcelainOutput), "\x00")
+	expectBarePath := false
+	for _, entry := range entries {
+		if expectBarePath {
+			expectBarePath = false
+			addIfUncovered(entry)
+			continue
+		}
+		if len(entry) < 4 {
+			continue
+		}
+		statusX := entry[0]
+		filePath := entry[3:] // skip "XY " status prefix
+		addIfUncovered(filePath)
+		// rename (R) and copy (C) entries emit a second bare path
+		if statusX == 'R' || statusX == 'C' {
+			expectBarePath = true
+		}
+	}
+	return extra
 }
 
 // EnableSparseCheckout enables sparse checkout on an existing ledger.
