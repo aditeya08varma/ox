@@ -71,6 +71,9 @@ func initLangs() {
 
 // Extract parses source code in the given language and returns symbol
 // definitions and references using tree-sitter tags queries.
+// Parses the source only once: TagIncremental returns both tags and the
+// parsed tree, which is then reused for type-info extraction (signature,
+// return type, params) — avoiding a redundant second parse.
 func Extract(source, language string) ([]Symbol, []Ref) {
 	if source == "" {
 		return nil, nil
@@ -92,7 +95,13 @@ func Extract(source, language string) ([]Symbol, []Ref) {
 		return nil, nil
 	}
 
-	tags := tagger.Tag([]byte(source))
+	// Single parse: TagIncremental returns both tags and the parsed tree,
+	// so extractTypeInfoFromTree can reuse the tree instead of parsing again.
+	srcBytes := []byte(source)
+	tags, tree := tagger.TagIncremental(srcBytes, nil)
+	if tree != nil {
+		defer tree.Release()
+	}
 	if len(tags) == 0 {
 		return nil, nil
 	}
@@ -132,7 +141,7 @@ func Extract(source, language string) ([]Symbol, []Ref) {
 
 	assignParents(syms)
 	assignContainingSymbols(syms, refs, refStartBytes)
-	extractTypeInfo(le.lang, language, []byte(source), syms)
+	extractTypeInfoFromTree(le.lang, language, srcBytes, tree, syms)
 
 	return syms, refs
 }

@@ -15,18 +15,12 @@ var functionKinds = map[string]bool{
 }
 
 
-// extractTypeInfo enriches function-like symbols with signature, return type, and params.
-func extractTypeInfo(lang *gotreesitter.Language, language string, source []byte, syms []Symbol) {
-	if lang == nil || len(source) == 0 || len(syms) == 0 {
+// extractTypeInfoFromTree enriches function-like symbols with signature, return type,
+// and params using an already-parsed tree (avoids a redundant second parse).
+func extractTypeInfoFromTree(lang *gotreesitter.Language, language string, source []byte, tree *gotreesitter.Tree, syms []Symbol) {
+	if lang == nil || len(source) == 0 || len(syms) == 0 || tree == nil {
 		return
 	}
-
-	parser := gotreesitter.NewParser(lang)
-	tree, err := parser.Parse(source)
-	if err != nil {
-		return
-	}
-	defer tree.Release()
 
 	root := tree.RootNode()
 	if root == nil {
