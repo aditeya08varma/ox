@@ -1494,8 +1494,17 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 	}
 	inClause := strings.Join(placeholders, ", ")
 
+	// Only parse blobs visible at a branch tip (referenced by file_revs).
+	// Symbol queries always JOIN through file_revs, so symbols on
+	// historical-only blobs are never reachable. Skipping them avoids
+	// ~60-70% of tree-sitter parsing work on repos with long histories.
+	// Historical blobs keep parsed=0 so they'll be picked up if a future
+	// ref tip re-exposes them via buildTipFileRevs.
 	query := fmt.Sprintf(
-		"SELECT id, content_hash, language FROM blobs WHERE parsed = 0 AND language IN (%s)",
+		`SELECT DISTINCT b.id, b.content_hash, b.language
+		 FROM blobs b
+		 JOIN file_revs fr ON fr.blob_id = b.id
+		 WHERE b.parsed = 0 AND b.language IN (%s)`,
 		inClause,
 	)
 	rows, err := s.Query(query, args...)
