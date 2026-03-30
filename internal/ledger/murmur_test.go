@@ -599,10 +599,10 @@ func TestConfigureSparseCheckout_MurmurDoesNotBreakExisting(t *testing.T) {
 		t.Errorf("expected %d GitHub data paths, got %d (murmur integration may have broken GitHub paths)", DefaultGitHubDataWindowDays, githubCount)
 	}
 
-	// total should be base dirs + GitHub + murmur
-	expectedTotal := 3 + DefaultGitHubDataWindowDays + DefaultMurmurWindowHours
+	// total should be base dirs (.sageox, .sync, sessions, audit) + GitHub + murmur
+	expectedTotal := 4 + DefaultGitHubDataWindowDays + DefaultMurmurWindowHours
 	if len(lines) != expectedTotal {
-		t.Errorf("expected %d total sparse checkout entries (3 base + %d GitHub + %d murmur), got %d",
+		t.Errorf("expected %d total sparse checkout entries (4 base + %d GitHub + %d murmur), got %d",
 			expectedTotal, DefaultGitHubDataWindowDays, DefaultMurmurWindowHours, len(lines))
 	}
 }
