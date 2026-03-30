@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/sageox/ox/internal/codedb/sqlc"
@@ -233,7 +234,24 @@ func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 		return bleve.New(path, mapping)
 	}
 
-	// any other error indicates corruption; nuke and recreate
+	// Before treating as corruption, check if the bbolt file exists.
+	// If it does, the error is likely a lock-timeout (another goroutine or process
+	// has the index open with bbolt's exclusive flock). Nuking in that case destroys
+	// an index that is actively being written — the correct action is to return an
+	// error and let the caller retry later.
+	boltPath := filepath.Join(path, "store", "root.bolt")
+	_, statErr := os.Stat(boltPath)
+	if statErr == nil {
+		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", err)
+	}
+	// only nuke when the bolt file is provably absent (ENOENT) or the path structure
+	// is broken (ENOTDIR: a directory was replaced by a file). Permission and I/O
+	// errors (EPERM, EIO, etc.) are transient — nuking would cause data loss.
+	if !os.IsNotExist(statErr) && !errors.Is(statErr, syscall.ENOTDIR) {
+		return nil, fmt.Errorf("stat bleve bolt file %s: %w", boltPath, statErr)
+	}
+
+	// bolt file absent or path structure broken — nuke and recreate
 	slog.Error("bleve index corrupt, recreating", "path", path, "err", err)
 	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return nil, fmt.Errorf("remove corrupt bleve index %s: %w", path, removeErr)

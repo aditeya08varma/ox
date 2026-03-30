@@ -8,6 +8,8 @@ import (
 	"runtime"
 	"sync"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // expectedTables lists every table the schema should create.
@@ -559,5 +561,47 @@ func TestForeignKeysEnabled(t *testing.T) {
 	)
 	if err == nil {
 		t.Error("expected foreign key violation, got nil")
+	}
+}
+
+// TestOpenOrCreateBleveIndex_LockedIndexNotNuked verifies that openOrCreateBleveIndex
+// does NOT delete an existing bleve index when an open error occurs and root.bolt is present.
+// Regression test: previously, any non-ENOENT error caused os.RemoveAll, which would
+// destroy an index being actively written by another goroutine.
+//
+// bleve opens bbolt without a timeout, so true lock-timeout cannot be triggered in-process.
+// Instead the test creates a real index at indexPath (so root.bolt has valid bbolt structure),
+// then corrupts root.bolt to produce an immediate open error — the same code path that fires
+// when another goroutine holds the bbolt exclusive lock.
+func TestOpenOrCreateBleveIndex_LockedIndexNotNuked(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: Bleve + bbolt operations")
+	}
+
+	tmp := t.TempDir()
+	indexPath := filepath.Join(tmp, "test-index")
+
+	// create a real bleve index at indexPath so root.bolt exists with valid bbolt structure
+	first, err := openOrCreateBleveIndex(indexPath)
+	if err != nil {
+		t.Fatalf("create index: %v", err)
+	}
+	first.Close()
+
+	boltPath := filepath.Join(indexPath, "store", "root.bolt")
+
+	// corrupt root.bolt — causes bbolt to return an immediate error (invalid magic bytes)
+	// rather than waiting indefinitely for a lock, exercising the same "bolt exists → don't nuke"
+	// code path that fires during real lock contention
+	require.NoError(t, os.WriteFile(boltPath, []byte("corrupted"), 0600))
+
+	// openOrCreateBleveIndex must fail (corrupt bolt) but must NOT delete the index directory
+	_, openErr := openOrCreateBleveIndex(indexPath)
+	require.Error(t, openErr, "expected error opening corrupt index")
+
+	// bolt file must survive — index was not nuked
+	if _, statErr := os.Stat(boltPath); statErr != nil {
+		t.Errorf("root.bolt was deleted: openOrCreateBleveIndex nuked on open error: %v", statErr)
 	}
 }

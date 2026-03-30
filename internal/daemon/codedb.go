@@ -38,6 +38,10 @@ type CodeDBManager struct {
 	lastErr   error
 	stats     CodeDBStats // cached after each index run; read by Stats() without opening DB
 	dataDir   string      // cached data dir; resolved once on first use
+
+	// testHook is called at the start of doIndex; nil in production.
+	// Tests use it to synchronize with or measure the indexing goroutine.
+	testHook func()
 }
 
 // CodeDBStats tracks index statistics.
@@ -164,6 +168,25 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		return nil, fmt.Errorf("indexing already in progress")
 	}
 	m.indexing = true
+	m.mu.Unlock()
+
+	defer func() {
+		m.mu.Lock()
+		m.indexing = false
+		m.mu.Unlock()
+	}()
+
+	return m.doIndex(ctx, payload, pw)
+}
+
+// doIndex executes the full indexing pipeline. Callers must already own the
+// m.indexing flag (i.e. have set it to true under m.mu before calling).
+func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, pw *ProgressWriter) (*CodeIndexResult, error) {
+	if m.testHook != nil {
+		m.testHook()
+	}
+
+	m.mu.Lock()
 	projectRoot := m.projectRoot // snapshot under lock to avoid races with UpdateProjectRoot
 	m.mu.Unlock()
 
@@ -172,18 +195,9 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 	// even after the worktree directory is removed.
 	if payload.URL == "" {
 		if _, err := os.Stat(projectRoot); os.IsNotExist(err) {
-			m.mu.Lock()
-			m.indexing = false
-			m.mu.Unlock()
 			return nil, fmt.Errorf("project root no longer exists, skipping index: %s", projectRoot)
 		}
 	}
-
-	defer func() {
-		m.mu.Lock()
-		m.indexing = false
-		m.mu.Unlock()
-	}()
 
 	dataDir := m.resolveSharedDataDir()
 
@@ -370,11 +384,20 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 // re-index if needed. If no index exists yet, creates the initial index.
 // This is non-blocking and safe to call from the scheduler or daemon startup.
 func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
+	// Claim the indexing flag BEFORE launching the goroutine.
+	// Without this, rapid CheckFreshness calls (e.g. from the file-watcher path)
+	// can see m.indexing=false, all launch goroutines, and then race to call
+	// m.Index() — the losers immediately return "indexing already in progress"
+	// and call gcDirtyIndexes, which opens codedb while the winner holds bbolt's
+	// exclusive lock. That open fails with a timeout (not ENOENT), which
+	// openOrCreateBleveIndex misinterprets as corruption and wipes the bleve
+	// directory mid-index.
 	m.mu.Lock()
 	if m.indexing {
 		m.mu.Unlock()
 		return
 	}
+	m.indexing = true
 	m.mu.Unlock()
 
 	dataDir := m.resolveSharedDataDir()
@@ -394,6 +417,12 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 
 	// run background index (initial build or incremental refresh)
 	go func() {
+		defer func() {
+			m.mu.Lock()
+			m.indexing = false
+			m.mu.Unlock()
+		}()
+
 		if isInitial {
 			m.logger.Info("codedb auto-indexing repo for first time")
 		} else {
@@ -403,7 +432,9 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		// go-git to iterate git history indefinitely (observed: 21+ hours).
 		indexCtx, cancel := context.WithTimeout(ctx, maxIndexDuration)
 		defer cancel()
-		result, err := m.Index(indexCtx, CodeIndexPayload{}, nil)
+		// Call doIndex directly — we already own m.indexing, so Index() would
+		// deadlock (it also tries to claim the flag).
+		result, err := m.doIndex(indexCtx, CodeIndexPayload{}, nil)
 		if err != nil {
 			if isInitial {
 				m.logger.Warn("codedb initial index failed", "error", err)
