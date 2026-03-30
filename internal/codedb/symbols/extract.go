@@ -96,13 +96,13 @@ func Extract(source, language string) ([]Symbol, []Ref) {
 	}
 
 	// Single parse: TagIncremental returns both tags and the parsed tree,
-	// so extractTypeInfo can reuse the tree instead of parsing again.
+	// so extractTypeInfoFromTree can reuse the tree instead of parsing again.
 	srcBytes := []byte(source)
 	tags, tree := tagger.TagIncremental(srcBytes, nil)
+	if tree != nil {
+		defer tree.Release()
+	}
 	if len(tags) == 0 {
-		if tree != nil {
-			tree.Release()
-		}
 		return nil, nil
 	}
 
@@ -142,7 +142,6 @@ func Extract(source, language string) ([]Symbol, []Ref) {
 	assignParents(syms)
 	assignContainingSymbols(syms, refs, refStartBytes)
 	extractTypeInfoFromTree(le.lang, language, srcBytes, tree, syms)
-	tree.Release()
 
 	return syms, refs
 }
