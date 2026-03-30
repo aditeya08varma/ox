@@ -86,16 +86,27 @@ func TestRef_NoContainingSymbol(t *testing.T) {
 	}
 }
 
-func TestExtract_Stub_ReturnsNil(t *testing.T) {
+func TestExtract_Go_BasicFunction(t *testing.T) {
 	t.Parallel()
 
-	// stub implementation always returns nil
-	syms, refs := Extract("package main\nfunc main() {}", "go")
-	if syms != nil {
-		t.Errorf("stub Extract symbols = %v, want nil", syms)
+	syms, _ := Extract("package main\nfunc main() {}", "go")
+	if len(syms) == 0 {
+		t.Fatal("expected at least one symbol from Go source")
 	}
-	if refs != nil {
-		t.Errorf("stub Extract refs = %v, want nil", refs)
+	found := false
+	for _, s := range syms {
+		if s.Name == "main" && s.Kind == "function" {
+			found = true
+			if s.Line != 2 {
+				t.Errorf("main function Line = %d, want 2", s.Line)
+			}
+			if s.ParentIdx != -1 {
+				t.Errorf("main function ParentIdx = %d, want -1", s.ParentIdx)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("did not find main function in symbols: %v", syms)
 	}
 }
 
@@ -123,12 +134,28 @@ func TestExtract_Stub_UnknownLanguage(t *testing.T) {
 	}
 }
 
-func TestSupportedLanguages_Stub_ReturnsNil(t *testing.T) {
+func TestSupportedLanguages_ReturnsLanguages(t *testing.T) {
 	t.Parallel()
 
 	langs := SupportedLanguages()
-	if langs != nil {
-		t.Errorf("stub SupportedLanguages = %v, want nil", langs)
+	if len(langs) == 0 {
+		t.Fatal("SupportedLanguages returned empty slice")
+	}
+	expected := map[string]bool{"go": true, "python": true, "javascript": true, "typescript": true, "tsx": true, "rust": true, "c": true, "cpp": true}
+	actual := map[string]bool{}
+	for _, l := range langs {
+		if !expected[l] {
+			t.Errorf("unexpected language %q in SupportedLanguages", l)
+		}
+		actual[l] = true
+	}
+	if len(actual) != len(langs) {
+		t.Errorf("SupportedLanguages contains duplicates: %d unique vs %d total", len(actual), len(langs))
+	}
+	for want := range expected {
+		if !actual[want] {
+			t.Errorf("missing expected language %q", want)
+		}
 	}
 }
 

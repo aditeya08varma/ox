@@ -98,11 +98,7 @@ func commitCount(t *testing.T, dir string) int {
 // and doesn't rewrite the local file:// remote URL.
 func isolatePushEnv(t *testing.T, clonePath string) {
 	t.Helper()
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.Chdir(oldWd) })
-	require.NoError(t, os.Chdir(clonePath))
-
+	t.Chdir(clonePath)
 	t.Setenv("SAGEOX_ENDPOINT", "https://test-only-no-creds.invalid")
 }
 
@@ -305,6 +301,40 @@ func TestConcurrentSessionUploads_Parallel(t *testing.T) {
 	cmd := exec.Command("git", "-C", barePath, "fsck", "--no-dangling")
 	out, err := cmd.CombinedOutput()
 	assert.NoError(t, err, "git fsck should pass (no corruption): %s", string(out))
+}
+
+func TestPushLedger_EmptyGitRoot_NoPanic(t *testing.T) {
+	barePath, clonePath := createBareAndClone(t)
+
+	// capture original remote URL before pushLedger runs
+	originalRemote := strings.TrimSpace(runGit(t, clonePath, "remote", "get-url", "origin"))
+
+	// cd to a non-git dir so findGitRoot() returns ""
+	nonGitDir := t.TempDir()
+	t.Chdir(nonGitDir)
+
+	sessionName := "2026-01-01T00-00-testuser-OxEmpty"
+	writeSessionFiles(t, clonePath, sessionName)
+	runGit(t, clonePath, "add", filepath.Join(clonePath, "sessions"))
+	runGit(t, clonePath, "commit", "--no-verify", "-m", "session: "+sessionName)
+
+	// when findGitRoot() is empty, pushLedger must skip credential refresh
+	// entirely — not fall back to the Default endpoint which would corrupt
+	// the remote URL by injecting oauth2 credentials into a file:// URL
+	assert.NotPanics(t, func() {
+		_ = pushLedger(context.Background(), clonePath)
+	})
+
+	// verify remote URL was not corrupted by credential injection
+	afterRemote := strings.TrimSpace(runGit(t, clonePath, "remote", "get-url", "origin"))
+	assert.Equal(t, originalRemote, afterRemote,
+		"remote URL must not be modified when git root is empty")
+
+	// verify push still succeeded (no credential injection needed for file:// remotes)
+	verifyClone := cloneBare(t, barePath)
+	metaPath := filepath.Join(verifyClone, "sessions", sessionName, "meta.json")
+	_, err := os.Stat(metaPath)
+	assert.NoError(t, err, "session should be pushed to remote despite empty git root")
 }
 
 func TestEnsureSessionsGitignore(t *testing.T) {
