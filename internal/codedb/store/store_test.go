@@ -42,34 +42,56 @@ func TestNewBleveIndex_DataPersistsAcrossReopen(t *testing.T) {
 		t.Skip("short: Bleve index creation")
 	}
 
-	tmp := filepath.Join(t.TempDir(), "persist-test")
+	t.Run("success", func(t *testing.T) {
+		tmp := filepath.Join(t.TempDir(), "persist-test")
 
-	// Create index, write data, close cleanly.
-	idx, err := NewBleveIndex(tmp)
-	if err != nil {
-		t.Fatalf("create: %v", err)
-	}
-	for i := range 10 {
-		if err := idx.Index(fmt.Sprintf("doc-%d", i), map[string]interface{}{"body": "data"}); err != nil {
-			t.Fatalf("index doc %d: %v", i, err)
+		// Create index, write data, close cleanly.
+		idx, err := NewBleveIndex(tmp)
+		if err != nil {
+			t.Fatalf("create: %v", err)
 		}
-	}
-	idx.Close()
+		for i := range 10 {
+			if err := idx.Index(fmt.Sprintf("doc-%d", i), map[string]interface{}{"body": "data"}); err != nil {
+				t.Fatalf("index doc %d: %v", i, err)
+			}
+		}
+		idx.Close()
 
-	// Reopen and verify data persisted.
-	idx2, err := safeOpenBleve(tmp)
-	if err != nil {
-		t.Fatalf("reopen: %v", err)
-	}
-	defer idx2.Close()
+		// Reopen and verify data persisted.
+		idx2, err := safeOpenBleve(tmp)
+		if err != nil {
+			t.Fatalf("reopen: %v", err)
+		}
+		defer idx2.Close()
 
-	count, err := idx2.DocCount()
-	if err != nil {
-		t.Fatalf("doc count: %v", err)
-	}
-	if count != 10 {
-		t.Errorf("expected 10 docs after reopen, got %d", count)
-	}
+		count, err := idx2.DocCount()
+		if err != nil {
+			t.Fatalf("doc count: %v", err)
+		}
+		if count != 10 {
+			t.Errorf("expected 10 docs after reopen, got %d", count)
+		}
+	})
+
+	t.Run("invalid_path", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("permission test not reliable on Windows")
+		}
+		if os.Getuid() == 0 {
+			t.Skip("skipping permission test when running as root")
+		}
+
+		unwritable := filepath.Join(t.TempDir(), "readonly")
+		if err := os.MkdirAll(unwritable, 0o500); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		t.Cleanup(func() { os.Chmod(unwritable, 0o700) })
+
+		_, err := NewBleveIndex(filepath.Join(unwritable, "index"))
+		if err == nil {
+			t.Fatal("expected error creating Bleve index in unwritable directory, got nil")
+		}
+	})
 }
 
 func TestOpenCreatesStructure(t *testing.T) {

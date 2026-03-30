@@ -205,8 +205,10 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 	// Without this, codedb writes trigger the watcher → sync → CheckFreshness
 	// → more indexing → more writes (a feedback loop that pins CPU and causes
 	// Bleve segment file races).
-	// Second condition handles Windows where filepath.Separator is '\\'.
-	if strings.Contains(event.Name, ".sageox/cache") || strings.Contains(event.Name, ".sageox"+string(filepath.Separator)+"cache") {
+	// Match the exact directory segment to avoid false positives on paths like
+	// .sageox/cache.json or .sageox/cached/.
+	cacheSegment := ".sageox" + string(filepath.Separator) + "cache" + string(filepath.Separator)
+	if strings.Contains(event.Name, cacheSegment) || strings.HasSuffix(event.Name, ".sageox"+string(filepath.Separator)+"cache") {
 		return
 	}
 
