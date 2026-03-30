@@ -465,6 +465,15 @@ func init() {
 		},
 	})
 
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugDaemonDedup,
+		Name:        "Daemon deduplication",
+		Category:    "Daemon",
+		FixLevel:    FixLevelConfirm,
+		Description: "Detects and stops duplicate daemon processes for the same repo",
+		Run:         checkDaemonDeduplication,
+	})
+
 	// ============================================================
 	// Ledger Infrastructure checks
 	// ============================================================
