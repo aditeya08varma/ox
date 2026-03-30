@@ -229,8 +229,7 @@ func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 		return idx, nil
 	}
 	if errors.Is(err, bleve.ErrorIndexPathDoesNotExist) {
-		mapping := bleve.NewIndexMapping()
-		return bleve.New(path, mapping)
+		return NewBleveIndex(path)
 	}
 
 	// any other error indicates corruption; nuke and recreate
@@ -238,6 +237,19 @@ func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return nil, fmt.Errorf("remove corrupt bleve index %s: %w", path, removeErr)
 	}
+	return NewBleveIndex(path)
+}
+
+// NewBleveIndex creates a Bleve index with default scorch settings. Exported
+// for use by the index package (BuildDirtyIndex) to ensure consistent config.
+//
+// Note: scorch's background merger can race with the persister on large repos,
+// deleting .zap segment files between batch writes (".zap: no such file").
+// This race is triggered by external churn (file watchers, rapid re-indexing).
+// The daemon prevents it via: (1) watcher exclusion for .sageox/cache/ and
+// (2) CheckFreshness cooldown. With those guards, indexing runs without the
+// rapid start/stop cycle that provokes the merger race.
+func NewBleveIndex(path string) (bleve.Index, error) {
 	mapping := bleve.NewIndexMapping()
 	return bleve.New(path, mapping)
 }

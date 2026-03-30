@@ -78,6 +78,47 @@ func TestWatcher_HandleEvent_AllowSageox(t *testing.T) {
 	assert.Equal(t, int32(1), called.Load())
 }
 
+func TestWatcher_HandleEvent_IgnoreSageoxCache(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	w := NewWatcher("/tmp/test", 50*time.Millisecond, logger)
+
+	called := atomic.Int32{}
+	w.callback = func() { called.Add(1) }
+
+	// .sageox/cache/ writes (codedb, whisper) should be ignored to prevent
+	// the file watcher → sync → re-index feedback loop
+	cacheFiles := []string{
+		"/tmp/test/.sageox/cache/codedb/metadata.db",
+		"/tmp/test/.sageox/cache/codedb/bleve/diff/store/000000000002.zap",
+		"/tmp/test/.sageox/cache/codedb/bleve/code/store/root.bolt",
+		"/tmp/test/.sageox/cache/whisper/whisper.db",
+	}
+	for _, f := range cacheFiles {
+		w.handleEvent(fsnotify.Event{Name: f, Op: fsnotify.Write})
+		w.handleEvent(fsnotify.Event{Name: f, Op: fsnotify.Create})
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, int32(0), called.Load(), "cache file changes should not trigger sync")
+}
+
+func TestWatcher_HandleEvent_AllowSageoxNonCache(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	w := NewWatcher("/tmp/test", 50*time.Millisecond, logger)
+
+	called := atomic.Int32{}
+	w.callback = func() { called.Add(1) }
+
+	// non-cache .sageox changes should still trigger (e.g., session data)
+	w.handleEvent(fsnotify.Event{
+		Name: filepath.Join("/tmp/test", ".sageox", "config.json"),
+		Op:   fsnotify.Write,
+	})
+
+	time.Sleep(100 * time.Millisecond)
+	assert.Equal(t, int32(1), called.Load(), ".sageox non-cache changes should trigger sync")
+}
+
 func TestWatcher_HandleEvent_IgnoreChmod(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	w := NewWatcher("/tmp/test", 50*time.Millisecond, logger)
