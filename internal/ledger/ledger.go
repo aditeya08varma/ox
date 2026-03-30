@@ -440,7 +440,6 @@ func ConfigureSparseCheckout(path string) error {
 
 	// base directories always included
 	dirs := []string{
-		".sageox",
 		".sync",
 		"sessions",
 		"audit",
