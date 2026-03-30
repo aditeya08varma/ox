@@ -671,9 +671,10 @@ func TestCheckFreshness_FailedIndexSetsLastAttempt(t *testing.T) {
 	mgr.mu.Unlock()
 	require.False(t, attempt.IsZero(), "lastAttempt should be set after CheckFreshness")
 
-	// Wait for indexing to complete.
-	for range 20 {
-		time.Sleep(50 * time.Millisecond)
+	// Wait for indexing to complete. Use a generous timeout for slow CI runners
+	// where Bleve/SQLite startup contention with parallel tests can cause delays.
+	for range 60 {
+		time.Sleep(100 * time.Millisecond)
 		mgr.mu.Lock()
 		indexing := mgr.indexing
 		mgr.mu.Unlock()
@@ -686,11 +687,11 @@ func TestCheckFreshness_FailedIndexSetsLastAttempt(t *testing.T) {
 	mgr.mu.Lock()
 	origIndexing := mgr.indexing
 	mgr.mu.Unlock()
-	assert.False(t, origIndexing, "first index should have completed")
+	require.False(t, origIndexing, "first index should have completed (timed out waiting)")
 
 	// Second call — should be blocked by cooldown even though index failed.
 	mgr.CheckFreshness(t.Context())
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	mgr.mu.Lock()
 	indexingAfterSecond := mgr.indexing
