@@ -160,7 +160,7 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 		// ensure sync timestamp is set (may be zero if cloned before this fix)
 		if ws := s.workspaceRegistry.GetWorkspace(workspaceID); ws != nil && ws.ConfigLastSync.IsZero() {
 			if err := s.workspaceRegistry.UpdateConfigLastSync(workspaceID); err != nil {
-				s.logger.Warn("failed to backfill config last sync", "type", repoType, "error", err)
+				s.logger.Warn("failed to backfill config last sync", "type", repoType, "path", repoPath, "error", err)
 			}
 			s.recordSyncState(context.Background(), repoPath)
 		}
@@ -174,7 +174,7 @@ func (s *SyncScheduler) cloneInBackground(cloneURL, repoPath, repoType, workspac
 		}
 		// persist sync timestamp so status shows "synced" after clone
 		if err := s.workspaceRegistry.UpdateConfigLastSync(workspaceID); err != nil {
-			s.logger.Warn("failed to update config last sync after clone", "type", repoType, "error", err)
+			s.logger.Warn("failed to update config last sync after clone", "type", repoType, "path", repoPath, "error", err)
 		}
 		s.recordSyncState(context.Background(), repoPath)
 	}

@@ -353,9 +353,10 @@ func runDaemonForeground(ledgerPath string) error {
 	cfg.ProjectRoot = findGitRoot() // required for team context syncing
 
 	// use INFO level logging to stderr (which gets redirected to log file)
+	// include PID so multi-daemon scenarios and auto-restarts can be distinguished
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
-	}))
+	})).With("pid", os.Getpid())
 
 	d := daemon.New(cfg, logger)
 	if err := d.Start(); err != nil {
