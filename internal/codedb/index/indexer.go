@@ -436,8 +436,7 @@ func BuildDirtyIndex(ctx context.Context, localPath, dirtyPath string, opts Inde
 	tmpPath := dirtyPath + ".tmp"
 	_ = os.RemoveAll(tmpPath)
 
-	mapping := bleve.NewIndexMapping()
-	dirtyIdx, err := bleve.New(tmpPath, mapping)
+	dirtyIdx, err := store.NewBleveIndex(tmpPath)
 	if err != nil {
 		return 0, fmt.Errorf("create dirty index: %w", err)
 	}

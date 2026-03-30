@@ -32,12 +32,18 @@ type CodeDBManager struct {
 	logger      *slog.Logger
 	telemetry   *TelemetryCollector
 
-	mu        sync.Mutex
-	indexing  bool
-	lastIndex time.Time
-	lastErr   error
-	stats     CodeDBStats // cached after each index run; read by Stats() without opening DB
-	dataDir   string      // cached data dir; resolved once on first use
+	mu          sync.Mutex
+	indexing    bool
+	lastIndex   time.Time // last successful index completion
+	lastAttempt time.Time // last index attempt (success or failure) — used for cooldown
+	lastErr     error
+	stats       CodeDBStats // cached after each index run; read by Stats() without opening DB
+	dataDir     string      // cached data dir; resolved once on first use
+
+	// freshnessCooldown prevents rapid re-indexing when the file watcher or
+	// scheduler fires faster than indexing completes. Applied to lastAttempt
+	// (not lastIndex) so persistent failures don't cause infinite retry loops.
+	freshnessCooldown time.Duration
 }
 
 // CodeDBStats tracks index statistics.
@@ -90,9 +96,10 @@ type CodeIndexResult struct {
 // Falls back to the legacy per-worktree path if project config is unavailable.
 func NewCodeDBManager(projectRoot string, logger *slog.Logger, telemetry *TelemetryCollector) *CodeDBManager {
 	return &CodeDBManager{
-		projectRoot: projectRoot,
-		logger:      logger,
-		telemetry:   telemetry,
+		projectRoot:       projectRoot,
+		logger:            logger,
+		telemetry:         telemetry,
+		freshnessCooldown: 5 * time.Minute,
 	}
 }
 
@@ -122,6 +129,12 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 				}
 			}
 			m.mu.Lock()
+			// Re-check: another goroutine may have resolved while we were doing I/O.
+			if m.dataDir != "" {
+				cached := m.dataDir
+				m.mu.Unlock()
+				return cached
+			}
 			m.dataDir = dir
 			m.mu.Unlock()
 			return dir
@@ -130,6 +143,11 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 	m.logger.Debug("falling back to legacy codedb path", "reason", err)
 	dir := paths.CodeDBDataDir(projectRoot)
 	m.mu.Lock()
+	if m.dataDir != "" {
+		cached := m.dataDir
+		m.mu.Unlock()
+		return cached
+	}
 	m.dataDir = dir
 	m.mu.Unlock()
 	return dir
@@ -152,17 +170,22 @@ func (m *CodeDBManager) SetLedgerPath(path string) {
 // protection but Bleve's bolt backend only allows one writer at a time and will
 // error if two daemons index simultaneously.
 func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw *ProgressWriter) (*CodeIndexResult, error) {
-	// in-process mutex — sufficient for single-daemon-per-repo, not cross-process.
-	// see struct-level comment for the multi-daemon worktree caveat.
 	m.mu.Lock()
 	if m.indexing {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("indexing already in progress")
 	}
 	m.indexing = true
-	projectRoot := m.projectRoot // snapshot under lock to avoid races with UpdateProjectRoot
+	m.lastAttempt = time.Now()
+	projectRoot := m.projectRoot
 	m.mu.Unlock()
 
+	return m.doIndex(ctx, payload, pw, projectRoot)
+}
+
+// doIndex is the internal indexing implementation. The caller must have already
+// set m.indexing=true. doIndex resets it to false when done.
+func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, pw *ProgressWriter, projectRoot string) (*CodeIndexResult, error) {
 	defer func() {
 		m.mu.Lock()
 		m.indexing = false
@@ -353,19 +376,39 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 // CheckFreshness checks if the index needs refreshing and triggers a background
 // re-index if needed. If no index exists yet, creates the initial index.
 // This is non-blocking and safe to call from the scheduler or daemon startup.
+//
+// A cooldown (default 5 min) prevents rapid re-indexing when the file watcher
+// or scheduler fires faster than indexing completes. Without the cooldown,
+// codedb writes trigger the ledger file watcher → TriggerSync → pullChanges →
+// CheckFreshness → more indexing → more writes (a feedback loop that pins CPU).
+//
+// Setting m.indexing=true synchronously (before the goroutine) prevents the
+// TOCTOU race where multiple callers see indexing=false and all spawn goroutines.
+// The cooldown provides additional protection: even if two calls slip through
+// (e.g., one via IPC and one via scheduler), the second will be rejected by
+// Index()'s own m.indexing check.
 func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
-	m.mu.Lock()
-	if m.indexing {
-		m.mu.Unlock()
-		return
-	}
-	m.mu.Unlock()
-
 	dataDir := m.resolveSharedDataDir()
 	isInitial := false
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		isInitial = true
 	}
+
+	m.mu.Lock()
+	if m.indexing {
+		m.mu.Unlock()
+		return
+	}
+	// Cooldown: skip if we attempted indexing recently. Uses lastAttempt (not
+	// lastIndex) so persistent failures don't cause infinite retry loops. The
+	// only exception is the very first attempt (lastAttempt.IsZero()).
+	if !m.lastAttempt.IsZero() && time.Since(m.lastAttempt) < m.freshnessCooldown {
+		m.mu.Unlock()
+		return
+	}
+	m.indexing = true
+	m.lastAttempt = time.Now()
+	m.mu.Unlock()
 
 	// run background index (initial build or incremental refresh)
 	go func() {
@@ -374,7 +417,13 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 		} else {
 			m.logger.Info("codedb freshness check starting")
 		}
-		result, err := m.Index(ctx, CodeIndexPayload{}, nil)
+		// Snapshot projectRoot for the goroutine. m.indexing is already set by
+		// CheckFreshness, so we call doIndex directly (not Index, which would
+		// see indexing=true and return "already in progress").
+		m.mu.Lock()
+		projectRoot := m.projectRoot
+		m.mu.Unlock()
+		result, err := m.doIndex(ctx, CodeIndexPayload{}, nil, projectRoot)
 		if err != nil {
 			if isInitial {
 				m.logger.Warn("codedb initial index failed", "error", err)
@@ -382,13 +431,23 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 				m.logger.Debug("codedb freshness check failed", "error", err)
 			}
 		}
-		if m.telemetry != nil && result != nil {
-			m.telemetry.RecordCodeIndexComplete(result, "success")
+		// Record telemetry for both success and failure.
+		if m.telemetry != nil {
+			status := "success"
+			if err != nil {
+				status = "error"
+			}
+			if result == nil {
+				result = &CodeIndexResult{} // zero-value for failed attempts
+			}
+			m.telemetry.RecordCodeIndexComplete(result, status)
 		}
 
 		// GC stale dirty overlays for worktrees that no longer exist.
 		// Run after indexing so the new overlay (if any) is in place before we inspect.
-		m.gcDirtyIndexes(dataDir)
+		// Re-resolve dataDir so GC targets the same location doIndex wrote to,
+		// even if UpdateProjectRoot changed the path mid-flight.
+		m.gcDirtyIndexes(m.resolveSharedDataDir())
 	}()
 }
 
@@ -514,15 +573,42 @@ func queryStatsFromDB(db *codedb.DB, dataDir string) CodeDBStats {
 // UpdateProjectRoot updates the project root path used for indexing.
 // Called when a heartbeat arrives from a different workspace (e.g., Conductor
 // creates a new workspace after deleting the old one).
+//
+// When multiple workspaces exist for the same repo (e.g., Conductor worktrees),
+// the shared CodeDB directory is the same (keyed by RepoID+endpoint). In that
+// case we update projectRoot (so indexing targets the right worktree) but keep
+// the cached dataDir to avoid unnecessary re-resolution and re-indexing.
 func (m *CodeDBManager) UpdateProjectRoot(path string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if path == "" || path == m.projectRoot {
+		m.mu.Unlock()
 		return
 	}
 	old := m.projectRoot
+	cachedDir := m.dataDir
 	m.projectRoot = path
-	m.dataDir = "" // force re-resolve under the new root
+	// Clear dataDir atomically with the projectRoot update so concurrent
+	// callers of resolveSharedDataDir never see new projectRoot + stale dataDir.
+	m.dataDir = ""
+	m.mu.Unlock()
+
+	// If we had a cached data dir, check whether the new path resolves to the
+	// same shared location. For same-repo workspaces (same RepoID + endpoint)
+	// the shared CodeDB path is identical — restore the cache to avoid
+	// unnecessary re-resolution and re-indexing.
+	// This config load does file I/O, so it runs outside the lock.
+	if cachedDir != "" {
+		ctx, err := config.LoadProjectContext(path)
+		if err == nil {
+			if dir := paths.CodeDBSharedDir(ctx.RepoID(), ctx.Endpoint()); dir == cachedDir {
+				m.mu.Lock()
+				m.dataDir = cachedDir // restore — same repo, same shared dir
+				m.mu.Unlock()
+				m.logger.Debug("codedb project root updated (same shared dir)", "old", old, "new", path)
+				return
+			}
+		}
+	}
 	m.logger.Info("codedb project root updated", "old", old, "new", path)
 }
 

@@ -201,6 +201,15 @@ func (w *Watcher) handleEvent(event fsnotify.Event) {
 		return
 	}
 
+	// ignore .sageox/cache/ — local-only computed data (codedb, whisper).
+	// Without this, codedb writes trigger the watcher → sync → CheckFreshness
+	// → more indexing → more writes (a feedback loop that pins CPU and causes
+	// Bleve segment file races).
+	// Second condition handles Windows where filepath.Separator is '\\'.
+	if strings.Contains(event.Name, ".sageox/cache") || strings.Contains(event.Name, ".sageox"+string(filepath.Separator)+"cache") {
+		return
+	}
+
 	// ignore hidden files
 	base := filepath.Base(event.Name)
 	if strings.HasPrefix(base, ".") && base != ".sageox" {

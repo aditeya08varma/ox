@@ -3,6 +3,7 @@ package store
 import (
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -33,6 +34,42 @@ func openStore(t *testing.T) *Store {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+func TestNewBleveIndex_DataPersistsAcrossReopen(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: Bleve index creation")
+	}
+
+	tmp := filepath.Join(t.TempDir(), "persist-test")
+
+	// Create index, write data, close cleanly.
+	idx, err := NewBleveIndex(tmp)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	for i := range 10 {
+		if err := idx.Index(fmt.Sprintf("doc-%d", i), map[string]interface{}{"body": "data"}); err != nil {
+			t.Fatalf("index doc %d: %v", i, err)
+		}
+	}
+	idx.Close()
+
+	// Reopen and verify data persisted.
+	idx2, err := safeOpenBleve(tmp)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer idx2.Close()
+
+	count, err := idx2.DocCount()
+	if err != nil {
+		t.Fatalf("doc count: %v", err)
+	}
+	if count != 10 {
+		t.Errorf("expected 10 docs after reopen, got %d", count)
+	}
 }
 
 func TestOpenCreatesStructure(t *testing.T) {
