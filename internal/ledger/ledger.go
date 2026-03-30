@@ -430,7 +430,7 @@ func ConfigureSparseCheckout(path string) error {
 	// This function is called every ~60s by the sync scheduler to refresh
 	// the rolling murmur/github data window — "sparse-checkout set" alone
 	// is sufficient for that.
-	checkCmd := exec.Command("git", "-C", path, "config", "--get", "core.sparseCheckout")
+	checkCmd := exec.Command("git", "-C", path, "config", "--type=bool", "--get", "core.sparseCheckout")
 	if out, err := checkCmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
 		initCmd := exec.Command("git", "-C", path, "sparse-checkout", "init", "--cone")
 		if output, err := initCmd.CombinedOutput(); err != nil {
