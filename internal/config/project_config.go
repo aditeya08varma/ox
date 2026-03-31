@@ -138,6 +138,11 @@ type ProjectConfig struct {
 	// GitHubSyncIssues controls issue sync independently.
 	// Values: "enabled" (default), "disabled"
 	GitHubSyncIssues string `json:"github_sync_issues,omitempty"`
+
+	// Timezone is the project's IANA timezone for daily/weekly/monthly summary grouping.
+	// Example: "America/New_York", "Europe/London", "Asia/Tokyo"
+	// If empty, falls back to team config, then UTC.
+	Timezone string `json:"timezone,omitempty"`
 }
 
 // NeedsUpgrade returns true if the config version is older than CurrentConfigVersion

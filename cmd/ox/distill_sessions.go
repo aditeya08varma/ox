@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -29,11 +30,12 @@ const minSessionQuality = 0.2
 
 // sessionInput holds parsed data for a single session directory.
 type sessionInput struct {
-	DirName string                            // e.g., "2026-01-06T14-32-ryan-Ox7f3a"
-	Date    string                            // "2026-01-06" (extracted from dir name)
-	Who     string                            // username extracted from dir name
-	Hash    string                            // content hash from scan, avoids re-reading summary.json
-	Summary *sessionsummary.SummarizeResponse // parsed summary.json
+	DirName   string                            // e.g., "2026-01-06T14-32-ryan-Ox7f3a"
+	Date      string                            // "2026-01-06" (extracted from dir name)
+	Who       string                            // username extracted from dir name
+	Hash      string                            // content hash from scan, avoids re-reading summary.json
+	StartedAt time.Time                         // from raw.jsonl _meta.started_at; zero if unavailable
+	Summary   *sessionsummary.SummarizeResponse // parsed summary.json
 }
 
 // extractSessionFacts scans the given ledger for sessions with summary.json,
@@ -74,6 +76,13 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 	}
 
 	for _, s := range pending {
+		// Use actual UTC StartedAt when available; fall back to date-only string
+		// so parseFactDate uses the directory date as-is (no false UTC instant).
+		recordedAt := s.Date
+		if !s.StartedAt.IsZero() {
+			recordedAt = s.StartedAt.UTC().Format(time.RFC3339)
+		}
+
 		extractedFacts := sessionSummaryToFacts(s)
 		if len(extractedFacts) == 0 {
 			slog.Debug("no facts extracted from session", "session", s.DirName)
@@ -83,7 +92,7 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 				Meta: facts.FileMeta{
 					SchemaVersion: facts.SchemaVersion,
 					SourceType:    facts.SourceSession,
-					RecordedAt:    s.Date + "T00:00:00Z",
+					RecordedAt:    recordedAt,
 				},
 			}
 			if err := facts.WriteFacts(filepath.Join(tc.Path, markerFile), markerHeader, nil); err != nil {
@@ -98,7 +107,7 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 			Meta: facts.FileMeta{
 				SchemaVersion: facts.SchemaVersion,
 				SourceType:    facts.SourceSession,
-				RecordedAt:    s.Date + "T00:00:00Z",
+				RecordedAt:    recordedAt,
 			},
 		}
 
@@ -124,6 +133,37 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 	}
 
 	return nil
+}
+
+// readSessionStartedAt reads the first line of raw.jsonl in a session directory
+// and parses the _meta.started_at field as an RFC3339 timestamp.
+// Returns zero time if raw.jsonl is missing or _meta is unparseable.
+func readSessionStartedAt(sessionDir string) time.Time {
+	f, err := os.Open(filepath.Join(sessionDir, "raw.jsonl"))
+	if err != nil {
+		return time.Time{}
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	if !scanner.Scan() {
+		return time.Time{}
+	}
+
+	var meta struct {
+		Meta struct {
+			StartedAt string `json:"started_at"`
+		} `json:"_meta"`
+	}
+	if err := json.Unmarshal(scanner.Bytes(), &meta); err != nil || meta.Meta.StartedAt == "" {
+		return time.Time{}
+	}
+
+	t, err := time.Parse(time.RFC3339, meta.Meta.StartedAt)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
 }
 
 // scanPendingSessions reads the sessions/ directory in the ledger and returns
@@ -190,12 +230,20 @@ func scanPendingSessions(ledgerPath, tcPath string, processed map[string]string)
 			continue
 		}
 
+		// try to get accurate started_at from raw.jsonl _meta
+		startedAt := readSessionStartedAt(filepath.Join(sessionsDir, dirName))
+		sessionDate := date
+		if !startedAt.IsZero() {
+			sessionDate = startedAt.UTC().Format("2006-01-02")
+		}
+
 		pending = append(pending, sessionInput{
-			DirName: dirName,
-			Date:    date,
-			Who:     who,
-			Hash:    currentHash,
-			Summary: &summary,
+			DirName:   dirName,
+			Date:      sessionDate,
+			Who:       who,
+			Hash:      currentHash,
+			StartedAt: startedAt,
+			Summary:   &summary,
 		})
 	}
 
@@ -233,7 +281,10 @@ func sessionContentHash(ledgerPath, dirName string) string {
 func sessionSummaryToFacts(input sessionInput) []facts.Fact {
 	var result []facts.Fact
 	s := input.Summary
-	ts := input.Date + "T00:00:00Z"
+	ts := input.Date
+	if !input.StartedAt.IsZero() {
+		ts = input.StartedAt.UTC().Format(time.RFC3339)
+	}
 	ref := "sessions/" + input.DirName
 
 	// session context fact (title + summary)
@@ -342,7 +393,7 @@ func sessionSummaryToFacts(input sessionInput) []facts.Fact {
 // are included even when since is past the session date.
 // Returns a map of YYYY-MM-DD → []discussionFactEntry for seamless merge
 // with discussion and github facts in distillDaily.
-func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discussionFactEntry, error) {
+func readPendingSessionFacts(tcPath string, since time.Time, tz ...*time.Location) (map[string][]discussionFactEntry, error) {
 	sessionFactsDir := filepath.Join(tcPath, "memory", ".session-facts")
 	dateDirs, err := os.ReadDir(sessionFactsDir)
 	if err != nil {
@@ -394,10 +445,18 @@ func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discu
 				continue
 			}
 
-			result[date] = append(result[date], discussionFactEntry{
+			// Use parseFactDate to extract the date from content metadata,
+			// converting UTC timestamps to the team timezone for day-bucketing.
+			// Falls back to directory name if no parseable date in content.
+			factDate := parseFactDate(content, f.Name(), tz...)
+			if factDate == "" {
+				factDate = date // fallback to directory name
+			}
+
+			result[factDate] = append(result[factDate], discussionFactEntry{
 				Content: content,
 				RelPath: filepath.Join("memory", ".session-facts", date, f.Name()),
-				Date:    date,
+				Date:    factDate,
 			})
 		}
 	}

@@ -148,7 +148,12 @@ func init() {
 
 func runConfigSet(cmd *cobra.Command, args []string) error {
 	key := args[0]
-	value := strings.ToLower(args[1])
+	value := args[1]
+	// lowercase non-timezone values for consistency (e.g., "Auto" → "auto")
+	// timezone values are case-sensitive IANA names (e.g., "US/Pacific")
+	if key != "timezone" {
+		value = strings.ToLower(value)
+	}
 
 	userLevel, _ := cmd.Flags().GetBool("user")
 	repoLevel, _ := cmd.Flags().GetBool("repo")

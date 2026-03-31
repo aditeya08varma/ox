@@ -77,7 +77,7 @@ func (s *Store) BasePath() string {
 // Format: YYYY-MM-DDTHH-MM-<username>-<sessionID>
 // Example: 2026-01-06T14-32-ryan-Ox7f3a
 func GenerateSessionName(sessionID, username string) string {
-	now := time.Now()
+	now := time.Now().UTC()
 	timestamp := now.Format("2006-01-02T15-04")
 
 	// sanitize username for filesystem safety
@@ -675,7 +675,7 @@ func parseFilenameTimestamp(name string) time.Time {
 
 	// extract timestamp portion (first 16 chars: 2006-01-02T15-04)
 	timestampStr := name[:16]
-	t, err := time.ParseInLocation("2006-01-02T15-04", timestampStr, time.Local)
+	t, err := time.ParseInLocation("2006-01-02T15-04", timestampStr, time.UTC)
 	if err != nil {
 		return time.Time{}
 	}
@@ -985,7 +985,7 @@ func (s *Store) DeleteSession(sessionName string) error {
 // Prune removes sessions older than the specified duration.
 // Returns the number of sessions removed.
 func (s *Store) Prune(olderThan time.Duration) (int, error) {
-	cutoff := time.Now().Add(-olderThan)
+	cutoff := time.Now().UTC().Add(-olderThan)
 	var removed int
 
 	sessionNames, err := s.ListSessionNames()

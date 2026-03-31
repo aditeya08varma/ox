@@ -222,7 +222,7 @@ func TestCaptureSubagentSessions(t *testing.T) {
 		sessionsDir := filepath.Join(tmpDir, "sessions")
 		require.NoError(t, os.MkdirAll(sessionsDir, 0755))
 
-		baseTime := time.Now()
+		baseTime := time.Now().UTC()
 
 		// create parent session with current timestamp
 		parentSessionName := baseTime.Format("2006-01-02T15-04") + "-user-OxParent"

@@ -134,7 +134,7 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 	if customMessage != "" {
 		commitMsg = customMessage
 	} else {
-		timestamp := time.Now().Format("2006-01-02T15-04")
+		timestamp := time.Now().UTC().Format("2006-01-02T15-04")
 		if len(sessionIDs) == 1 {
 			commitMsg = fmt.Sprintf("Add session %s-%s", timestamp, sessionIDs[0])
 		} else if len(sessionIDs) > 1 {

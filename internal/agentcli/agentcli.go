@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os/exec"
 	"strings"
 	"time"
@@ -52,12 +53,38 @@ func (c *Claude) Run(ctx context.Context, prompt string) (string, error) {
 	if err != nil {
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
-			return "", fmt.Errorf("claude exited %d: %s", exitErr.ExitCode(), strings.TrimSpace(string(exitErr.Stderr)))
+			stderr := strings.TrimSpace(string(exitErr.Stderr))
+			stdout := strings.TrimSpace(string(out))
+			slog.Warn("claude process failed",
+				"exit_code", exitErr.ExitCode(),
+				"stderr", stderr,
+				"stdout_len", len(stdout),
+				"prompt_len", len(prompt),
+				"timeout", c.Timeout,
+				"workdir", c.WorkDir,
+			)
+			if stderr != "" {
+				return "", fmt.Errorf("claude exited %d: %s", exitErr.ExitCode(), stderr)
+			}
+			if stdout != "" {
+				return "", fmt.Errorf("claude exited %d (no stderr, stdout=%d bytes): %s", exitErr.ExitCode(), len(stdout), truncate(stdout, 200))
+			}
+			return "", fmt.Errorf("claude exited %d (no output, prompt was %d bytes)", exitErr.ExitCode(), len(prompt))
+		}
+		if ctx.Err() != nil {
+			return "", fmt.Errorf("claude timed out after %s (prompt was %d bytes)", c.Timeout, len(prompt))
 		}
 		return "", fmt.Errorf("claude: %w", err)
 	}
 
 	return strings.TrimSpace(string(out)), nil
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max] + "..."
 }
 
 // Detect returns the first available backend, or an error.

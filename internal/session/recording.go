@@ -382,7 +382,7 @@ func MarkExplicitStop(projectRoot, agentID string) error {
 
 	marker := explicitStopMarker + "." + agentID
 	markerPath := filepath.Join(dir, marker)
-	if err := os.WriteFile(markerPath, []byte(time.Now().Format(time.RFC3339)), 0600); err != nil {
+	if err := os.WriteFile(markerPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0600); err != nil {
 		return fmt.Errorf("write explicit stop marker: %w", err)
 	}
 	return nil

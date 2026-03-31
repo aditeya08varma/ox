@@ -173,6 +173,31 @@ Override per-invocation with --html, --text, or --json flags.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "timezone",
+		Description: "Team timezone for daily/weekly/monthly summary grouping",
+		LongDescription: `Sets the IANA timezone used for grouping sessions into daily, weekly,
+and monthly summaries.
+
+Use any valid IANA timezone name (e.g., America/New_York, Europe/London,
+Asia/Tokyo, US/Pacific, UTC).
+
+When set at the team level, all coworkers share the same day boundaries.
+Individual repos can override with a different timezone if needed.`,
+		Category:    "Display",
+		ValidValues: []string{
+			"UTC",
+			"US/Eastern", "US/Central", "US/Mountain", "US/Pacific",
+			"America/New_York", "America/Chicago", "America/Denver", "America/Los_Angeles",
+			"America/Toronto", "America/Vancouver", "America/Sao_Paulo",
+			"Europe/London", "Europe/Berlin", "Europe/Paris", "Europe/Amsterdam",
+			"Asia/Tokyo", "Asia/Shanghai", "Asia/Kolkata", "Asia/Singapore",
+			"Australia/Sydney", "Australia/Melbourne",
+			"Pacific/Auckland",
+		}, // common IANA timezones; any valid IANA name is accepted via custom validation
+		Default:     "UTC",
+		Levels:      []ConfigLevel{ConfigLevelRepo, ConfigLevelTeam},
+	},
+	{
 		Key:         "agent_worker",
 		Description: "Daemon AI coworker for background tasks",
 		LongDescription: `Selects which agent CLI the daemon uses for background tasks like
@@ -307,6 +332,14 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.UserVal = userCfg.ViewFormat
 		}
 
+	case "timezone":
+		if repoCfg != nil && repoCfg.Timezone != "" {
+			cv.RepoVal = repoCfg.Timezone
+		}
+		if teamCfg != nil && teamCfg.Timezone != "" {
+			cv.TeamVal = teamCfg.Timezone
+		}
+
 	case "agent_worker":
 		if userCfg != nil && userCfg.AgentWorker != nil {
 			agent := userCfg.AgentWorker.GetAgent()
@@ -377,8 +410,12 @@ func SetConfigValue(key, value string, level ConfigLevel, projectRoot string) er
 		return fmt.Errorf("unknown setting: %s", key)
 	}
 
-	// validate value if setting has valid values
-	if len(setting.ValidValues) > 0 {
+	// validate value — timezone uses custom IANA validation, others use ValidValues list
+	if key == "timezone" {
+		if !config.IsValidTimezone(value) {
+			return fmt.Errorf("invalid timezone %q: must be a valid IANA timezone (e.g., America/New_York, Europe/London, UTC)", value)
+		}
+	} else if len(setting.ValidValues) > 0 {
 		valid := false
 		for _, v := range setting.ValidValues {
 			if v == value {
@@ -493,6 +530,9 @@ func setRepoConfig(key, value, projectRoot string) error {
 	case "murmur_receive":
 		cfg.MurmurReceive = value
 
+	case "timezone":
+		cfg.Timezone = value
+
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
 	}
@@ -513,12 +553,18 @@ func setTeamConfig(key, value, projectRoot string) error {
 	teamPath := tc.Path
 	cfg, err := config.LoadTeamConfig(teamPath)
 	if err != nil {
+		return fmt.Errorf("failed to load team config: %w", err)
+	}
+	if cfg == nil {
 		cfg = &config.TeamConfig{}
 	}
 
 	switch key {
 	case "session_recording":
 		cfg.SessionRecording = value
+
+	case "timezone":
+		cfg.Timezone = value
 
 	default:
 		return fmt.Errorf("setting %s not supported at team level", key)

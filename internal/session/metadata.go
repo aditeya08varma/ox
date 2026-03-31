@@ -79,7 +79,7 @@ func NewSessionMeta(sessionID, oxsid, agentType, projectRemote, endpointURL stri
 		AgentType:     agentType,
 		SessionID:     sessionID,
 		OxSID:         oxsid,
-		StartedAt:     time.Now(),
+		StartedAt:     time.Now().UTC(),
 		ProjectRemote: projectRemote,
 	}
 }
@@ -93,7 +93,7 @@ func NewSessionMetaWithVersion(sessionID, oxsid, agentType, agentVersion, projec
 
 // NewSessionFooter creates a footer with session statistics.
 func NewSessionFooter(startedAt time.Time, entryCount int) *SessionFooter {
-	endedAt := time.Now()
+	endedAt := time.Now().UTC()
 	durationMins := int(endedAt.Sub(startedAt).Minutes())
 
 	return &SessionFooter{
@@ -111,7 +111,7 @@ func getOxUsername(ep string) string {
 
 // Close finalizes the metadata with end time.
 func (m *SessionMeta) Close() {
-	m.EndedAt = time.Now()
+	m.EndedAt = time.Now().UTC()
 }
 
 // Duration returns the session duration.

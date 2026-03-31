@@ -427,7 +427,7 @@ func TestGroupObservationsByDay_ZeroTimestamps(t *testing.T) {
 		{Content: "zero timestamp", RecordedAt: time.Time{}},
 	}
 
-	groups := groupObservationsByDay(observations)
+	groups := groupObservationsByDay(observations, nil)
 	// zero timestamp entries should be skipped
 	assert.Len(t, groups, 1, "zero timestamp entries should be excluded")
 	assert.Len(t, groups["2026-03-15"], 1)
@@ -435,7 +435,7 @@ func TestGroupObservationsByDay_ZeroTimestamps(t *testing.T) {
 }
 
 func TestGroupObservationsByDay_Empty(t *testing.T) {
-	groups := groupObservationsByDay(nil)
+	groups := groupObservationsByDay(nil, nil)
 	assert.Empty(t, groups)
 }
 
@@ -446,7 +446,7 @@ func TestGroupObservationsByDay_MultipleDays(t *testing.T) {
 		{Content: "day1-b", RecordedAt: time.Date(2026, 3, 15, 14, 0, 0, 0, time.UTC)},
 	}
 
-	groups := groupObservationsByDay(observations)
+	groups := groupObservationsByDay(observations, nil)
 	assert.Len(t, groups, 2)
 	assert.Len(t, groups["2026-03-15"], 2)
 	assert.Len(t, groups["2026-03-16"], 1)
