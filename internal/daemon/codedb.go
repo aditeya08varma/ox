@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -142,6 +143,19 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 	return dir
 }
 
+// ledgerRootForDataDir returns the ledger root directory if dataDir is inside a
+// ledger's .sageox/cache/ tree. Returns "" if dataDir is not a ledger-based path.
+// The shared CodeDB path is <ledger_root>/.sageox/cache/codedb/, so we look for
+// the /.sageox/cache/ suffix to extract the ledger root.
+func (m *CodeDBManager) ledgerRootForDataDir(dataDir string) string {
+	// CodeDBSharedDir produces: <ledger_root>/.sageox/cache/codedb
+	const marker = string(filepath.Separator) + ".sageox" + string(filepath.Separator) + "cache" + string(filepath.Separator)
+	if idx := strings.Index(dataDir, marker); idx > 0 {
+		return dataDir[:idx]
+	}
+	return ""
+}
+
 // SetLedgerPath sets the ledger checkout path for GitHub data indexing.
 // Called by the daemon when the ledger workspace is discovered.
 func (m *CodeDBManager) SetLedgerPath(path string) {
@@ -211,6 +225,17 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	}
 
 	dataDir := m.resolveSharedDataDir()
+
+	// Guard: if dataDir lives inside a ledger that hasn't been cloned yet,
+	// skip indexing. Without this check, os.MkdirAll(dataDir) creates the
+	// ledger root directory as a side effect, which causes the subsequent
+	// git clone to fail with "already exists and is not an empty directory".
+	if ledgerRoot := m.ledgerRootForDataDir(dataDir); ledgerRoot != "" {
+		gitDir := filepath.Join(ledgerRoot, ".git")
+		if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+			return nil, fmt.Errorf("ledger not yet cloned at %s, skipping index", ledgerRoot)
+		}
+	}
 
 	target := projectRoot
 	if payload.URL != "" {
