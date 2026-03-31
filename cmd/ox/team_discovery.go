@@ -5,8 +5,12 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/paths"
 )
 
 // enrichedTeam is a fully-resolved team with all fields populated.
@@ -44,6 +48,15 @@ func discoverAllTeams(projectRoot string) []enrichedTeam {
 		return nil
 	}
 
+	// load credentials for name/slug enrichment
+	var creds *gitserver.GitCredentials
+	if projectCfg != nil {
+		ep := endpoint.GetForProject(projectRoot)
+		if ep != "" {
+			creds, _ = gitserver.LoadCredentialsForEndpoint(ep)
+		}
+	}
+
 	// enrich: fill missing names/slugs, mark primary
 	for i := range teams {
 		t := &teams[i]
@@ -52,6 +65,28 @@ func discoverAllTeams(projectRoot string) []enrichedTeam {
 		// enrich primary team name from project config
 		if t.Name == "" && t.Primary && projectCfg != nil {
 			t.Name = projectCfg.TeamName
+		}
+		// enrich from credentials (has server-provided names/slugs)
+		if (t.Name == "" || t.Slug == "") && creds != nil {
+			repo, ok := creds.Repos[t.TeamID]
+			if !ok {
+				// fallback: scan values for legacy name-keyed credentials
+				for _, r := range creds.Repos {
+					if r.TeamID == t.TeamID {
+						repo = r
+						ok = true
+						break
+					}
+				}
+			}
+			if ok {
+				if t.Name == "" {
+					t.Name = repo.Name
+				}
+				if t.Slug == "" && repo.Slug != "" {
+					t.Slug = repo.Slug
+				}
+			}
 		}
 		if t.Name == "" {
 			t.Name = t.TeamID
@@ -74,6 +109,65 @@ func discoverAllTeams(projectRoot string) []enrichedTeam {
 		}
 	}
 	return append(primary, others...)
+}
+
+// discoverTeamsGlobal returns teams from all authenticated endpoints.
+// Used when not inside a SageOx project (no project root available).
+// Discovers teams from git credentials across all endpoints.
+func discoverTeamsGlobal() []enrichedTeam {
+	endpoints, err := auth.ListEndpoints()
+	if err != nil || len(endpoints) == 0 {
+		return nil
+	}
+
+	var teams []enrichedTeam
+	seen := make(map[string]bool)
+
+	for _, ep := range endpoints {
+		creds, err := gitserver.LoadCredentialsForEndpoint(ep)
+		if err != nil || creds == nil {
+			continue
+		}
+		for key, repo := range creds.Repos {
+			if repo.Type != "team-context" {
+				continue
+			}
+			teamID := repo.StableID()
+			if teamID == "" {
+				// legacy name-keyed credentials may have TeamID in the key
+				if strings.HasPrefix(key, "team_") {
+					teamID = key
+				} else {
+					continue
+				}
+			}
+			if seen[teamID] {
+				continue
+			}
+			seen[teamID] = true
+
+			name := repo.Name
+			if name == "" {
+				name = teamID
+			}
+			slug := repo.Slug
+			if slug == "" {
+				slug = api.DeriveSlug(name)
+			}
+			if slug == "" {
+				slug = teamID
+			}
+
+			teamPath := paths.TeamContextDir(teamID, ep)
+			teams = append(teams, enrichedTeam{
+				TeamID: teamID,
+				Name:   name,
+				Slug:   slug,
+				Path:   teamPath,
+			})
+		}
+	}
+	return teams
 }
 
 // resolveTeamByQuery finds a team by slug, team ID, or name.

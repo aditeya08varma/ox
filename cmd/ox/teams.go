@@ -74,20 +74,16 @@ func runTeams(cmd *cobra.Command, args []string) error {
 	jsonMode, _ := cmd.Flags().GetBool("json")
 	out := cmd.OutOrStdout()
 
-	projectRoot, err := findProjectRoot()
-	if err != nil {
-		if jsonMode {
-			return json.NewEncoder(out).Encode(teamsOutput{
-				Teams:    []teamEntry{},
-				Guidance: "Run 'ox init' to set up a project.",
-			})
-		}
-		fmt.Fprintln(out, "Not in a SageOx project.")
-		fmt.Fprintln(out, "Run 'ox init' to set up.")
-		return nil
+	projectRoot, _ := findProjectRoot()
+
+	var teams []enrichedTeam
+	if projectRoot != "" {
+		teams = discoverAllTeams(projectRoot)
+	} else {
+		// not in a project — discover from credentials across all endpoints
+		teams = discoverTeamsGlobal()
 	}
 
-	teams := discoverAllTeams(projectRoot)
 	var primaryTeamID string
 	for _, t := range teams {
 		if t.Primary {
@@ -122,7 +118,10 @@ func runTeams(cmd *cobra.Command, args []string) error {
 	}
 
 	// compute root dir — path is always root/team_id so no need to show per-team
-	ep := endpoint.GetForProject(projectRoot)
+	var ep string
+	if projectRoot != "" {
+		ep = endpoint.GetForProject(projectRoot)
+	}
 	var rootDir string
 	if ep != "" {
 		rootDir = paths.TeamsDataDir(ep)
@@ -216,7 +215,7 @@ func runTeams(cmd *cobra.Command, args []string) error {
 func enrichedTeamsToEntries(teams []enrichedTeam) []teamEntry {
 	entries := make([]teamEntry, 0, len(teams))
 	for _, t := range teams {
-		sync := "unknown"
+		sync := "never"
 		if !t.LastSync.IsZero() {
 			sync = formatAge(time.Since(t.LastSync))
 		}
