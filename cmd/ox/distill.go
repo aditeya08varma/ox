@@ -420,7 +420,7 @@ func (s *distillStateV2) setGitHubFactsTime(repoID string, t time.Time) {
 // migrateToPerRepo migrates flat v2 state into per-repo maps for the given repoID.
 // Called once when transitioning from single-repo to multi-repo mode.
 func (s *distillStateV2) migrateToPerRepo(repoID string) {
-	if len(s.ProcessedSessions) > 0 && (s.RepoSessions == nil || len(s.RepoSessions) == 0) {
+	if len(s.ProcessedSessions) > 0 && len(s.RepoSessions) == 0 {
 		if s.RepoSessions == nil {
 			s.RepoSessions = make(map[string]map[string]string)
 		}
@@ -430,7 +430,7 @@ func (s *distillStateV2) migrateToPerRepo(repoID string) {
 		}
 		s.RepoSessions[repoID] = copied
 	}
-	if s.LastGitHubFacts != "" && (s.RepoGitHubFacts == nil || len(s.RepoGitHubFacts) == 0) {
+	if s.LastGitHubFacts != "" && len(s.RepoGitHubFacts) == 0 {
 		if s.RepoGitHubFacts == nil {
 			s.RepoGitHubFacts = make(map[string]string)
 		}
