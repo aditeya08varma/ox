@@ -33,15 +33,36 @@ func resolveCodeDBDir(root string) string {
 	return paths.CodeDBDataDir(root)
 }
 
-// isCodeDBIndexing checks whether the daemon is actively indexing.
+// resolveBaselineCodeDBDir returns the baseline CodeDB directory if it exists on disk.
+// Returns empty string if baseline is not available (graceful fallback to legacy).
+func resolveBaselineCodeDBDir(root string) string {
+	ctx, err := config.LoadProjectContext(root)
+	if err == nil {
+		if dir := paths.CodeDBBaselineDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
+			if _, statErr := os.Stat(dir); statErr == nil {
+				return dir
+			}
+		}
+	}
+	return ""
+}
+
+// isCodeDBIndexing checks whether the daemon is actively indexing the selected backend.
 // Bleve's BoltDB backend holds an exclusive file lock during writes,
 // so codedb.Open from the CLI would block until indexing finishes.
+// useBaseline selects which flag to check: baseline vs worktree.
 //
 // Exposed as a variable so tests can override it.
-var isCodeDBIndexing = func() bool {
+var isCodeDBIndexing = func(useBaseline bool) bool {
 	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	cs, err := client.CodeStatus()
-	return err == nil && cs.IndexingNow
+	if err != nil {
+		return false
+	}
+	if useBaseline {
+		return cs.BaselineIndexingNow
+	}
+	return cs.IndexingNow
 }
 
 var codeCmd = &cobra.Command{
@@ -70,8 +91,13 @@ var codeSearchCmd = &cobra.Command{
 
 		query := strings.Join(args, " ")
 		dataDir := resolveCodeDBDir(root)
+		useBaseline := false
+		if baselineDir := resolveBaselineCodeDBDir(root); baselineDir != "" {
+			dataDir = baselineDir
+			useBaseline = true
+		}
 
-		if isCodeDBIndexing() {
+		if isCodeDBIndexing(useBaseline) {
 			return fmt.Errorf("code index is currently being built — search is unavailable until indexing completes. Run 'ox code status' to check progress")
 		}
 
@@ -260,8 +286,13 @@ var codeSQLCmd = &cobra.Command{
 		}
 
 		dataDir := resolveCodeDBDir(root)
+		useBaseline := false
+		if baselineDir := resolveBaselineCodeDBDir(root); baselineDir != "" {
+			dataDir = baselineDir
+			useBaseline = true
+		}
 
-		if isCodeDBIndexing() {
+		if isCodeDBIndexing(useBaseline) {
 			return fmt.Errorf("code index is currently being built — SQL queries unavailable until indexing completes")
 		}
 
@@ -295,6 +326,11 @@ var codeStatusCmd = &cobra.Command{
 		}
 
 		dataDir := resolveCodeDBDir(root)
+		useBaseline := false
+		if baselineDir := resolveBaselineCodeDBDir(root); baselineDir != "" {
+			dataDir = baselineDir
+			useBaseline = true
+		}
 		indexExists := false
 		if _, err := os.Stat(dataDir); err == nil {
 			indexExists = true
@@ -325,7 +361,7 @@ var codeStatusCmd = &cobra.Command{
 		}
 		var repos []repoRow
 
-		daemonIndexing := codeStats != nil && codeStats.IndexingNow
+		daemonIndexing := codeStats != nil && ((useBaseline && codeStats.BaselineIndexingNow) || (!useBaseline && codeStats.IndexingNow))
 		if indexExists && !daemonIndexing {
 			db, err := codedb.Open(dataDir)
 			if err == nil {
