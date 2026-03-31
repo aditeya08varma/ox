@@ -94,12 +94,9 @@ func TestCheckHealth_RepoCloned(t *testing.T) {
 }
 
 func TestCheckHealth_RecordingActive(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-
-	// create project root with recording state in session folder
-	projectRoot := t.TempDir()
-	sessionPath := filepath.Join(projectRoot, "sessions", "2026-01-06T14-30-user-Oxa7b3")
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-Oxa7b3")
 
 	state := &RecordingState{
 		OutputFile:  "/path/to/session.jsonl",
@@ -120,11 +117,9 @@ func TestCheckHealth_RecordingActive(t *testing.T) {
 }
 
 func TestCheckHealth_StopIncomplete(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-
-	projectRoot := t.TempDir()
-	sessionPath := filepath.Join(projectRoot, "sessions", "2026-01-06T14-30-user-OxInc1")
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-OxInc1")
 
 	state := &RecordingState{
 		AgentID:        "OxInc1",

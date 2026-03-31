@@ -124,8 +124,8 @@ func getSessionsBasePath(projectRoot string) string {
 		}
 	}
 
-	// fallback to project-local sessions
-	return filepath.Join(projectRoot, "sessions")
+	// no session path found — caller must handle empty return
+	return ""
 }
 
 // MergeHistoryWithRecording merges captured history into an active recording's raw.jsonl.
