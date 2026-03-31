@@ -84,12 +84,9 @@ func TestSaveRecordingState(t *testing.T) {
 
 func TestLoadRecordingState(t *testing.T) {
 	t.Run("loads saved state from session folder", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
-
-		tmpDir := t.TempDir()
-		sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-06T14-30-user-OxA1b2")
+		cacheDir := t.TempDir()
+		projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+		sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-OxA1b2")
 
 		originalState := &RecordingState{
 			OutputFile:  "/path/to/session.md",
@@ -100,10 +97,10 @@ func TestLoadRecordingState(t *testing.T) {
 			SessionPath: sessionPath,
 		}
 
-		err := SaveRecordingState(tmpDir, originalState)
+		err := SaveRecordingState(projectRoot, originalState)
 		require.NoError(t, err, "failed to save state")
 
-		loadedState, err := LoadRecordingState(tmpDir)
+		loadedState, err := LoadRecordingState(projectRoot)
 		require.NoError(t, err)
 		require.NotNil(t, loadedState, "expected state to be loaded")
 
@@ -115,12 +112,9 @@ func TestLoadRecordingState(t *testing.T) {
 	})
 
 	t.Run("loads state with title", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
-
-		tmpDir := t.TempDir()
-		sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-06T14-30-user-OxA1b2")
+		cacheDir := t.TempDir()
+		projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+		sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-OxA1b2")
 
 		originalState := &RecordingState{
 			AgentID:     "OxA1b2",
@@ -129,23 +123,20 @@ func TestLoadRecordingState(t *testing.T) {
 			SessionPath: sessionPath,
 		}
 
-		err := SaveRecordingState(tmpDir, originalState)
+		err := SaveRecordingState(projectRoot, originalState)
 		require.NoError(t, err, "failed to save state")
 
-		loadedState, err := LoadRecordingState(tmpDir)
+		loadedState, err := LoadRecordingState(projectRoot)
 		require.NoError(t, err)
 
 		assert.Equal(t, originalState.Title, loadedState.Title)
 	})
 
 	t.Run("returns nil for non-existent state", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
 
-		tmpDir := t.TempDir()
-
-		state, err := LoadRecordingState(tmpDir)
+		state, err := LoadRecordingState(projectRoot)
 		require.NoError(t, err)
 		assert.Nil(t, state, "expected nil state for non-existent file")
 	})
@@ -156,14 +147,11 @@ func TestLoadRecordingState(t *testing.T) {
 	})
 
 	t.Run("skips invalid JSON in session folder and continues", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
-
-		tmpDir := t.TempDir()
+		cacheDir := t.TempDir()
+		projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
 
 		// create a session folder with invalid .recording.json
-		sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-06T14-30-user-OxBad")
+		sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-OxBad")
 		err := os.MkdirAll(sessionPath, 0755)
 		require.NoError(t, err, "failed to create session dir")
 
@@ -172,7 +160,7 @@ func TestLoadRecordingState(t *testing.T) {
 		require.NoError(t, err, "failed to write invalid state")
 
 		// should return nil without error (skips invalid entries)
-		state, err := LoadRecordingState(tmpDir)
+		state, err := LoadRecordingState(projectRoot)
 		require.NoError(t, err)
 		assert.Nil(t, state, "expected nil state when only invalid JSON exists")
 	})
@@ -180,12 +168,9 @@ func TestLoadRecordingState(t *testing.T) {
 
 func TestClearRecordingState(t *testing.T) {
 	t.Run("clears existing state from session folder", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
-
-		tmpDir := t.TempDir()
-		sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-06T14-30-user-OxA1b2")
+		cacheDir := t.TempDir()
+		projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+		sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-OxA1b2")
 
 		state := &RecordingState{
 			AgentID:     "OxA1b2",
@@ -193,10 +178,10 @@ func TestClearRecordingState(t *testing.T) {
 			SessionPath: sessionPath,
 		}
 
-		err := SaveRecordingState(tmpDir, state)
+		err := SaveRecordingState(projectRoot, state)
 		require.NoError(t, err, "failed to save state")
 
-		err = ClearRecordingState(tmpDir)
+		err = ClearRecordingState(projectRoot)
 		require.NoError(t, err)
 
 		// verify file is gone from session folder
@@ -206,12 +191,9 @@ func TestClearRecordingState(t *testing.T) {
 	})
 
 	t.Run("cleans up stale lock files", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
-
-		tmpDir := t.TempDir()
-		sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-06T14-30-user-OxLock")
+		cacheDir := t.TempDir()
+		projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+		sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-OxLock")
 
 		state := &RecordingState{
 			AgentID:     "OxLock",
@@ -219,14 +201,14 @@ func TestClearRecordingState(t *testing.T) {
 			SessionPath: sessionPath,
 		}
 
-		err := SaveRecordingState(tmpDir, state)
+		err := SaveRecordingState(projectRoot, state)
 		require.NoError(t, err)
 
 		// create stale lock files
 		lockFile := filepath.Join(sessionPath, "input.jsonl.lock")
 		require.NoError(t, os.WriteFile(lockFile, []byte(""), 0600))
 
-		err = ClearRecordingState(tmpDir)
+		err = ClearRecordingState(projectRoot)
 		require.NoError(t, err)
 
 		// lock file should be cleaned up
@@ -235,13 +217,10 @@ func TestClearRecordingState(t *testing.T) {
 	})
 
 	t.Run("succeeds when no state exists", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
 
-		tmpDir := t.TempDir()
-
-		err := ClearRecordingState(tmpDir)
+		err := ClearRecordingState(projectRoot)
 		require.NoError(t, err, "expected no error when clearing non-existent state")
 	})
 
@@ -253,12 +232,9 @@ func TestClearRecordingState(t *testing.T) {
 
 func TestIsRecording(t *testing.T) {
 	t.Run("returns true when recording exists in session folder", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
-
-		tmpDir := t.TempDir()
-		sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-06T14-30-user-OxA1b2")
+		cacheDir := t.TempDir()
+		projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+		sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-OxA1b2")
 
 		state := &RecordingState{
 			AgentID:     "OxA1b2",
@@ -266,20 +242,17 @@ func TestIsRecording(t *testing.T) {
 			SessionPath: sessionPath,
 		}
 
-		err := SaveRecordingState(tmpDir, state)
+		err := SaveRecordingState(projectRoot, state)
 		require.NoError(t, err, "failed to save state")
 
-		assert.True(t, IsRecording(tmpDir), "expected IsRecording to return true")
+		assert.True(t, IsRecording(projectRoot), "expected IsRecording to return true")
 	})
 
 	t.Run("returns false when no recording exists", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
 
-		tmpDir := t.TempDir()
-
-		assert.False(t, IsRecording(tmpDir), "expected IsRecording to return false")
+		assert.False(t, IsRecording(projectRoot), "expected IsRecording to return false")
 	})
 
 	t.Run("returns false for empty project root", func(t *testing.T) {
@@ -289,12 +262,9 @@ func TestIsRecording(t *testing.T) {
 
 func TestGetRecordingDuration(t *testing.T) {
 	t.Run("returns duration for active recording", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
-
-		tmpDir := t.TempDir()
-		sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-06T14-30-user-OxA1b2")
+		cacheDir := t.TempDir()
+		projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+		sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-OxA1b2")
 
 		startTime := time.Now().Add(-5 * time.Minute)
 		state := &RecordingState{
@@ -303,22 +273,19 @@ func TestGetRecordingDuration(t *testing.T) {
 			SessionPath: sessionPath,
 		}
 
-		err := SaveRecordingState(tmpDir, state)
+		err := SaveRecordingState(projectRoot, state)
 		require.NoError(t, err, "failed to save state")
 
-		duration := GetRecordingDuration(tmpDir)
+		duration := GetRecordingDuration(projectRoot)
 		assert.GreaterOrEqual(t, duration, 5*time.Minute, "expected duration >= 5m")
 		assert.Less(t, duration, 6*time.Minute, "expected duration < 6m")
 	})
 
 	t.Run("returns 0 when no recording exists", func(t *testing.T) {
-		tempHome := t.TempDir()
-		t.Setenv("HOME", tempHome)
-		t.Setenv("XDG_CACHE_HOME", "")
+		cacheDir := t.TempDir()
+		projectRoot := setupRecordingTest(t, cacheDir)
 
-		tmpDir := t.TempDir()
-
-		duration := GetRecordingDuration(tmpDir)
+		duration := GetRecordingDuration(projectRoot)
 		assert.Equal(t, time.Duration(0), duration)
 	})
 
@@ -332,7 +299,16 @@ func TestGetRecordingDuration(t *testing.T) {
 // Returns projectRoot and sets up XDG cache to point to the given cacheDir.
 func setupRecordingTest(t *testing.T, cacheDir string) string {
 	t.Helper()
-	projectRoot := t.TempDir()
+	projectRoot, _ := setupRecordingTestWithSessionsBase(t, cacheDir)
+	return projectRoot
+}
+
+// setupRecordingTestWithSessionsBase creates a properly initialized project and
+// returns both the project root and the sessions base path (in XDG cache).
+// Session data must be placed under the returned sessionsBase, never under projectRoot.
+func setupRecordingTestWithSessionsBase(t *testing.T, cacheDir string) (projectRoot, sessionsBase string) {
+	t.Helper()
+	projectRoot = t.TempDir()
 	repoID := "test-repo-id"
 
 	// create .sageox/config.json with repo_id (canonical format)
@@ -346,7 +322,9 @@ func setupRecordingTest(t *testing.T, cacheDir string) string {
 	t.Setenv("HOME", cacheDir)
 	t.Setenv("XDG_CACHE_HOME", cacheDir)
 
-	return projectRoot
+	// compute sessions base path (matches what sessionsSearchPaths resolves)
+	sessionsBase = filepath.Join(GetContextPath(repoID), "sessions")
+	return projectRoot, sessionsBase
 }
 
 func TestStartRecording(t *testing.T) {
@@ -684,26 +662,23 @@ func TestGetSessionName(t *testing.T) {
 }
 
 func TestLoadRecordingState_MultipleRecordingsReturnsFirst(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	tmpDir := t.TempDir()
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
 
 	// create two sessions with .recording.json — ReadDir returns alphabetically
 	for _, agentID := range []string{"OxFirst", "OxSecnd"} {
 		name := "2026-01-06T14-30-user-" + agentID
-		sessionPath := filepath.Join(tmpDir, "sessions", name)
+		sessionPath := filepath.Join(sessionsBase, name)
 		state := &RecordingState{
 			AgentID:     agentID,
 			StartedAt:   time.Now(),
 			SessionPath: sessionPath,
 		}
-		err := SaveRecordingState(tmpDir, state)
+		err := SaveRecordingState(projectRoot, state)
 		require.NoError(t, err)
 	}
 
-	state, err := LoadRecordingState(tmpDir)
+	state, err := LoadRecordingState(projectRoot)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 
@@ -713,41 +688,38 @@ func TestLoadRecordingState_MultipleRecordingsReturnsFirst(t *testing.T) {
 }
 
 func TestClearRecordingState_WithMultipleRecordings_OnlyClearsFirst(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	tmpDir := t.TempDir()
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
 
 	// create two recording states
-	paths := map[string]string{}
+	statePaths := map[string]string{}
 	for _, agentID := range []string{"OxAAAA", "OxBBBB"} {
 		name := "2026-01-06T14-30-user-" + agentID
-		sessionPath := filepath.Join(tmpDir, "sessions", name)
+		sessionPath := filepath.Join(sessionsBase, name)
 		state := &RecordingState{
 			AgentID:     agentID,
 			StartedAt:   time.Now(),
 			SessionPath: sessionPath,
 		}
-		err := SaveRecordingState(tmpDir, state)
+		err := SaveRecordingState(projectRoot, state)
 		require.NoError(t, err)
-		paths[agentID] = filepath.Join(sessionPath, recordingFile)
+		statePaths[agentID] = filepath.Join(sessionPath, recordingFile)
 	}
 
 	// clear — should only remove the first one found (alphabetically)
-	err := ClearRecordingState(tmpDir)
+	err := ClearRecordingState(projectRoot)
 	require.NoError(t, err)
 
 	// first recording should be gone
-	_, err = os.Stat(paths["OxAAAA"])
+	_, err = os.Stat(statePaths["OxAAAA"])
 	assert.True(t, os.IsNotExist(err), "first recording should be cleared")
 
 	// second recording should survive
-	_, err = os.Stat(paths["OxBBBB"])
+	_, err = os.Stat(statePaths["OxBBBB"])
 	assert.False(t, os.IsNotExist(err), "second recording should survive ClearRecordingState")
 
 	// LoadRecordingState should now find the second one
-	state, err := LoadRecordingState(tmpDir)
+	state, err := LoadRecordingState(projectRoot)
 	require.NoError(t, err)
 	require.NotNil(t, state)
 	assert.Equal(t, "OxBBBB", state.AgentID)
@@ -1128,26 +1100,25 @@ func TestStopThenStartSameAgent(t *testing.T) {
 }
 
 func TestExplicitStopMarker(t *testing.T) {
-	tmpDir := t.TempDir()
-	sessionsDir := filepath.Join(tmpDir, "sessions")
-	require.NoError(t, os.MkdirAll(sessionsDir, 0755))
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
 
 	// no marker initially
-	assert.False(t, ConsumeExplicitStop(tmpDir, "test-agent"), "no marker should exist initially")
+	assert.False(t, ConsumeExplicitStop(projectRoot, "test-agent"), "no marker should exist initially")
 
 	// write marker
-	require.NoError(t, MarkExplicitStop(tmpDir, "test-agent"))
+	require.NoError(t, MarkExplicitStop(projectRoot, "test-agent"))
 
 	// marker file should exist
-	markerPath := filepath.Join(sessionsDir, explicitStopMarker+".test-agent")
+	markerPath := filepath.Join(sessionsBase, explicitStopMarker+".test-agent")
 	_, err := os.Stat(markerPath)
 	assert.NoError(t, err, "marker file should exist after MarkExplicitStop")
 
 	// consume removes it and returns true
-	assert.True(t, ConsumeExplicitStop(tmpDir, "test-agent"), "ConsumeExplicitStop should return true when marker exists")
+	assert.True(t, ConsumeExplicitStop(projectRoot, "test-agent"), "ConsumeExplicitStop should return true when marker exists")
 
 	// second consume returns false (already consumed)
-	assert.False(t, ConsumeExplicitStop(tmpDir, "test-agent"), "ConsumeExplicitStop should return false after already consumed")
+	assert.False(t, ConsumeExplicitStop(projectRoot, "test-agent"), "ConsumeExplicitStop should return false after already consumed")
 
 	// marker file should be gone
 	_, err = os.Stat(markerPath)
@@ -1358,12 +1329,9 @@ func TestMultiAgentUpdateForAgent_Isolation(t *testing.T) {
 // --- Gap 3: cleanupStaleEmptyRecordings tests ---
 
 func TestCleanupStaleEmptyRecordings_RemovesOldStubs(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	tmpDir := t.TempDir()
-	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxStale")
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxStale")
 	require.NoError(t, os.MkdirAll(sessionPath, 0755))
 
 	// create a .recording.json with StartedAt > 48h ago, no raw.jsonl
@@ -1376,7 +1344,7 @@ func TestCleanupStaleEmptyRecordings_RemovesOldStubs(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
 
-	cleanupStaleEmptyRecordings(tmpDir)
+	cleanupStaleEmptyRecordings(projectRoot)
 
 	// .recording.json should be removed
 	_, err = os.Stat(filepath.Join(sessionPath, recordingFile))
@@ -1384,12 +1352,9 @@ func TestCleanupStaleEmptyRecordings_RemovesOldStubs(t *testing.T) {
 }
 
 func TestCleanupStaleEmptyRecordings_KeepsRecentStubs(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	tmpDir := t.TempDir()
-	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxNew1")
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxNew1")
 	require.NoError(t, os.MkdirAll(sessionPath, 0755))
 
 	// create a .recording.json with StartedAt < 48h ago, no raw.jsonl
@@ -1403,7 +1368,7 @@ func TestCleanupStaleEmptyRecordings_KeepsRecentStubs(t *testing.T) {
 	recPath := filepath.Join(sessionPath, recordingFile)
 	require.NoError(t, os.WriteFile(recPath, data, 0600))
 
-	cleanupStaleEmptyRecordings(tmpDir)
+	cleanupStaleEmptyRecordings(projectRoot)
 
 	// .recording.json should still exist
 	_, err = os.Stat(recPath)
@@ -1411,12 +1376,9 @@ func TestCleanupStaleEmptyRecordings_KeepsRecentStubs(t *testing.T) {
 }
 
 func TestCleanupStaleEmptyRecordings_KeepsWithRawJSONL(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	tmpDir := t.TempDir()
-	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxHasR")
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxHasR")
 	require.NoError(t, os.MkdirAll(sessionPath, 0755))
 
 	// create a .recording.json with StartedAt > 48h ago AND raw.jsonl present
@@ -1431,7 +1393,7 @@ func TestCleanupStaleEmptyRecordings_KeepsWithRawJSONL(t *testing.T) {
 	require.NoError(t, os.WriteFile(recPath, data, 0600))
 	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, "raw.jsonl"), []byte("{}\n"), 0600))
 
-	cleanupStaleEmptyRecordings(tmpDir)
+	cleanupStaleEmptyRecordings(projectRoot)
 
 	// .recording.json should still exist because raw.jsonl is present
 	_, err = os.Stat(recPath)
@@ -1439,12 +1401,9 @@ func TestCleanupStaleEmptyRecordings_KeepsWithRawJSONL(t *testing.T) {
 }
 
 func TestCleanupStaleEmptyRecordings_RemovesEmptyDir(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	tmpDir := t.TempDir()
-	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxEmDr")
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxEmDr")
 	require.NoError(t, os.MkdirAll(sessionPath, 0755))
 
 	// create a stale .recording.json (only file in the dir)
@@ -1457,7 +1416,7 @@ func TestCleanupStaleEmptyRecordings_RemovesEmptyDir(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), data, 0600))
 
-	cleanupStaleEmptyRecordings(tmpDir)
+	cleanupStaleEmptyRecordings(projectRoot)
 
 	// session directory should be removed since it became empty after cleanup
 	_, err = os.Stat(sessionPath)
@@ -1467,48 +1426,39 @@ func TestCleanupStaleEmptyRecordings_RemovesEmptyDir(t *testing.T) {
 // --- Gap 4: Corrupted .recording.json recovery tests ---
 
 func TestLoadRecordingState_CorruptJSON(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	tmpDir := t.TempDir()
-	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxBadJ")
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxBadJ")
 	require.NoError(t, os.MkdirAll(sessionPath, 0755))
 
 	// write truncated JSON
 	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), []byte(`{"agent_id": "Ox`), 0600))
 
-	state, err := LoadRecordingState(tmpDir)
+	state, err := LoadRecordingState(projectRoot)
 	require.NoError(t, err, "corrupt JSON should not return an error")
 	assert.Nil(t, state, "corrupt JSON should return nil state")
 }
 
 func TestLoadRecordingState_EmptyFile(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	tmpDir := t.TempDir()
-	sessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxMtyF")
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxMtyF")
 	require.NoError(t, os.MkdirAll(sessionPath, 0755))
 
 	// write empty file
 	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), []byte{}, 0600))
 
-	state, err := LoadRecordingState(tmpDir)
+	state, err := LoadRecordingState(projectRoot)
 	require.NoError(t, err, "empty file should not return an error")
 	assert.Nil(t, state, "empty file should return nil state")
 }
 
 func TestLoadAllRecordingStates_MixedValidAndCorrupt(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-	t.Setenv("XDG_CACHE_HOME", "")
-
-	tmpDir := t.TempDir()
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
 
 	// create a valid session
-	validSessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxGood")
+	validSessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxGood")
 	require.NoError(t, os.MkdirAll(validSessionPath, 0755))
 	validState := &RecordingState{
 		AgentID:     "OxGood",
@@ -1520,11 +1470,11 @@ func TestLoadAllRecordingStates_MixedValidAndCorrupt(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(validSessionPath, recordingFile), validData, 0600))
 
 	// create a corrupt session
-	corruptSessionPath := filepath.Join(tmpDir, "sessions", "2026-01-01T00-00-user-OxBad1")
+	corruptSessionPath := filepath.Join(sessionsBase, "2026-01-01T00-00-user-OxBad1")
 	require.NoError(t, os.MkdirAll(corruptSessionPath, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(corruptSessionPath, recordingFile), []byte(`{corrupted`), 0600))
 
-	states, err := LoadAllRecordingStates(tmpDir)
+	states, err := LoadAllRecordingStates(projectRoot)
 	require.NoError(t, err, "mixed valid/corrupt should not return an error")
 	require.Len(t, states, 1, "should return only the valid recording state")
 	assert.Equal(t, "OxGood", states[0].AgentID)
