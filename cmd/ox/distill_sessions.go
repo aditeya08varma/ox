@@ -36,33 +36,27 @@ type sessionInput struct {
 	Summary *sessionsummary.SummarizeResponse // parsed summary.json
 }
 
-// extractSessionFacts scans the ledger for sessions with summary.json,
+// extractSessionFacts scans the given ledger for sessions with summary.json,
 // transforms structured session data into facts, and writes JSONL files
 // to memory/.session-facts/<date>/ in the team context.
 //
+// repoID identifies the repo for per-repo state tracking.
+// ledgerPath is the path to the ledger directory containing sessions/.
+//
 // No LLM calls — pure data transformation from structured summary.json.
-func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *distillStateV2, projectRoot string) error {
-	if state.ProcessedSessions == nil {
-		state.ProcessedSessions = make(map[string]string)
-	}
-
-	// resolve ledger path via project context (respects endpoint + repo ID)
-	projCtx, err := config.LoadProjectContext(projectRoot)
-	if err != nil {
-		slog.Debug("cannot load project context for session fact extraction", "error", err)
-		return nil
-	}
-	ledgerPath := projCtx.DefaultLedgerPath()
+func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *distillStateV2, repoID, ledgerPath string) error {
 	if ledgerPath == "" {
-		slog.Debug("no ledger path configured, skipping session fact extraction")
+		slog.Debug("no ledger path, skipping session fact extraction", "repo", repoID)
 		return nil
 	}
 	if _, err := os.Stat(filepath.Join(ledgerPath, "sessions")); err != nil {
-		slog.Debug("no sessions directory in ledger, skipping", "path", ledgerPath)
+		slog.Debug("no sessions directory in ledger, skipping", "repo", repoID, "path", ledgerPath)
 		return nil
 	}
 
-	pending, err := scanPendingSessions(ledgerPath, tc.Path, state.ProcessedSessions)
+	processed := state.sessionsForRepo(repoID)
+
+	pending, err := scanPendingSessions(ledgerPath, tc.Path, processed)
 	if err != nil {
 		return fmt.Errorf("scan sessions: %w", err)
 	}
@@ -95,7 +89,7 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 			if err := facts.WriteFacts(filepath.Join(tc.Path, markerFile), markerHeader, nil); err != nil {
 				slog.Warn("failed to write empty session fact marker", "session", s.DirName, "error", err)
 			} else {
-				state.ProcessedSessions[s.DirName] = s.Hash
+				processed[s.DirName] = s.Hash
 			}
 			continue
 		}
@@ -124,7 +118,7 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 			continue
 		}
 
-		state.ProcessedSessions[s.DirName] = s.Hash
+		processed[s.DirName] = s.Hash
 
 		fmt.Fprintf(cmd.OutOrStdout(), "Extracted %d facts from session: %s\n", len(extractedFacts), s.Summary.Title)
 	}

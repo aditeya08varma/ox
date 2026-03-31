@@ -903,3 +903,120 @@ func TestParseFactDate(t *testing.T) {
 		})
 	}
 }
+
+// --- Multi-ledger (per-repo state) tests ---
+
+func TestDistillStateV2_SessionsForRepo(t *testing.T) {
+	t.Parallel()
+	state := &distillStateV2{}
+
+	// first access creates the map
+	m := state.sessionsForRepo("repo-a")
+	require.NotNil(t, m)
+	m["session-1"] = "hash1"
+
+	// same repo returns same map
+	m2 := state.sessionsForRepo("repo-a")
+	assert.Equal(t, "hash1", m2["session-1"])
+
+	// different repo gets independent map
+	m3 := state.sessionsForRepo("repo-b")
+	assert.Empty(t, m3)
+}
+
+func TestDistillStateV2_GitHubFactsTimeForRepo(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	state := &distillStateV2{}
+
+	// no per-repo state, no flat state, no fact files on disk →
+	// falls through to the 7-day default in githubFactsSince
+	tcDir := t.TempDir()
+	since := state.githubFactsTimeForRepo("repo-a", tcDir)
+	expectedDefault := now.AddDate(0, 0, -7)
+	assert.InDelta(t, expectedDefault.Unix(), since.Unix(), 5,
+		"empty state should fall back to ~7 days ago, got %s", since)
+
+	// set per-repo time — should return exactly that
+	state.setGitHubFactsTime("repo-a", now)
+	since = state.githubFactsTimeForRepo("repo-a", tcDir)
+	assert.Equal(t, now.Format(time.RFC3339), since.Format(time.RFC3339))
+
+	// different repo has no per-repo entry → falls back to 7-day default,
+	// NOT to repo-a's timestamp
+	since2 := state.githubFactsTimeForRepo("repo-b", tcDir)
+	assert.InDelta(t, expectedDefault.Unix(), since2.Unix(), 5,
+		"repo-b should get the 7-day default, not repo-a's time; got %s", since2)
+}
+
+func TestDistillStateV2_MigrateToPerRepo(t *testing.T) {
+	t.Parallel()
+
+	state := &distillStateV2{
+		ProcessedSessions: map[string]string{
+			"session-1": "hash-a",
+			"session-2": "hash-b",
+		},
+		LastGitHubFacts: "2026-03-20T10:00:00Z",
+	}
+
+	state.migrateToPerRepo("repo-primary")
+
+	// sessions migrated
+	require.Contains(t, state.RepoSessions, "repo-primary")
+	assert.Equal(t, "hash-a", state.RepoSessions["repo-primary"]["session-1"])
+	assert.Equal(t, "hash-b", state.RepoSessions["repo-primary"]["session-2"])
+
+	// github facts migrated
+	require.Contains(t, state.RepoGitHubFacts, "repo-primary")
+	assert.Equal(t, "2026-03-20T10:00:00Z", state.RepoGitHubFacts["repo-primary"])
+}
+
+func TestDistillStateV2_MigrateToPerRepo_NoOp(t *testing.T) {
+	t.Parallel()
+
+	// already has per-repo state — migration should not overwrite
+	state := &distillStateV2{
+		ProcessedSessions: map[string]string{"old": "data"},
+		RepoSessions: map[string]map[string]string{
+			"repo-a": {"session-x": "hash-x"},
+		},
+		RepoGitHubFacts: map[string]string{
+			"repo-a": "2026-03-25T00:00:00Z",
+		},
+	}
+
+	state.migrateToPerRepo("repo-a")
+
+	// per-repo state should be unchanged
+	assert.Equal(t, "hash-x", state.RepoSessions["repo-a"]["session-x"])
+	assert.Equal(t, "2026-03-25T00:00:00Z", state.RepoGitHubFacts["repo-a"])
+}
+
+func TestResolveDistillRepos_NoEnv(t *testing.T) {
+	t.Parallel()
+
+	// With no DISTILL_REPOS env, falls back to resolving from projectRoot.
+	// We pass a non-project dir, so it should return nil repos (no error).
+	repos, err := resolveDistillRepos(t.TempDir())
+	assert.NoError(t, err)
+	assert.Nil(t, repos)
+}
+
+func TestResolveDistillRepos_InvalidPath(t *testing.T) {
+	// NOT parallel: mutates environment
+	t.Setenv("DISTILL_REPOS", "/nonexistent/path")
+
+	_, err := resolveDistillRepos(t.TempDir())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "not a SageOx project")
+}
+
+func TestResolveDistillRepos_EmptyEnv(t *testing.T) {
+	// NOT parallel: mutates environment
+	t.Setenv("DISTILL_REPOS", ":::")
+
+	_, err := resolveDistillRepos(t.TempDir())
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "no valid repos")
+}
