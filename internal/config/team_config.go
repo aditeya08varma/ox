@@ -23,6 +23,11 @@ type TeamConfig struct {
 	// SessionNotification is the message shown to users when recording starts.
 	// If empty, uses the default notification message.
 	SessionNotification string `toml:"session_notification,omitempty"`
+
+	// Timezone is the team's IANA timezone for daily/weekly/monthly summary grouping.
+	// Example: "America/New_York", "Europe/London", "Asia/Tokyo"
+	// If empty, falls back to system default (UTC).
+	Timezone string `toml:"timezone,omitempty"`
 }
 
 // LoadTeamConfig loads team configuration from <teamContextPath>/config.toml.

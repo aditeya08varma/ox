@@ -140,7 +140,7 @@ func TestEnumerateWeeks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			weeks := enumerateWeeks(tt.lastTime, tt.now)
+			weeks := enumerateWeeks(tt.lastTime, tt.now, time.UTC)
 			assert.GreaterOrEqual(t, len(weeks), tt.wantMin, "got %d weeks: %v", len(weeks), weeks)
 			assert.LessOrEqual(t, len(weeks), tt.wantMax, "got %d weeks: %v", len(weeks), weeks)
 
@@ -183,7 +183,7 @@ func TestEnumerateMonths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			months := enumerateMonths(tt.lastTime, tt.now)
+			months := enumerateMonths(tt.lastTime, tt.now, nil)
 			if tt.want != nil {
 				assert.Equal(t, tt.want, months)
 			}
@@ -279,7 +279,7 @@ func TestContentHash_Properties(t *testing.T) {
 
 func TestGroupObservationsByDay_EdgeCases(t *testing.T) {
 	t.Run("empty input", func(t *testing.T) {
-		groups := groupObservationsByDay(nil)
+		groups := groupObservationsByDay(nil, nil)
 		assert.Empty(t, groups)
 	})
 
@@ -288,7 +288,7 @@ func TestGroupObservationsByDay_EdgeCases(t *testing.T) {
 			{Content: "has time", RecordedAt: time.Date(2026, 3, 10, 9, 0, 0, 0, time.UTC)},
 			{Content: "no time", RecordedAt: time.Time{}},
 		}
-		groups := groupObservationsByDay(obs)
+		groups := groupObservationsByDay(obs, nil)
 		assert.Len(t, groups, 1)
 		assert.Len(t, groups["2026-03-10"], 1)
 	})
@@ -299,7 +299,7 @@ func TestGroupObservationsByDay_EdgeCases(t *testing.T) {
 			{Content: "second", RecordedAt: time.Date(2026, 3, 10, 14, 0, 0, 0, time.UTC)},
 			{Content: "third", RecordedAt: time.Date(2026, 3, 10, 18, 0, 0, 0, time.UTC)},
 		}
-		groups := groupObservationsByDay(obs)
+		groups := groupObservationsByDay(obs, nil)
 		require.Len(t, groups["2026-03-10"], 3)
 		assert.Equal(t, "first", groups["2026-03-10"][0].Content)
 		assert.Equal(t, "second", groups["2026-03-10"][1].Content)
@@ -387,7 +387,7 @@ func TestSaveAndLoadDistillStateV2(t *testing.T) {
 
 func TestDetermineLayers_ExplicitMonthly(t *testing.T) {
 	now := time.Date(2026, 3, 25, 12, 0, 0, 0, time.UTC)
-	plan := determineLayers(&distillStateV2{}, "monthly", now)
+	plan := determineLayers(&distillStateV2{}, "monthly", now, nil)
 	assert.False(t, plan.Daily, "daily should be false for explicit monthly")
 	assert.Empty(t, plan.Weeks, "weeks should be empty for explicit monthly")
 	assert.NotEmpty(t, plan.Months, "months should be non-empty for explicit monthly")

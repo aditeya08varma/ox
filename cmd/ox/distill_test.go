@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -14,7 +15,7 @@ func TestDetermineLayers(t *testing.T) {
 	now := time.Now().UTC()
 
 	t.Run("explicit daily", func(t *testing.T) {
-		plan := determineLayers(&distillStateV2{}, "daily", now)
+		plan := determineLayers(&distillStateV2{}, "daily", now, nil)
 		if !plan.Daily {
 			t.Error("expected Daily=true")
 		}
@@ -24,7 +25,7 @@ func TestDetermineLayers(t *testing.T) {
 	})
 
 	t.Run("fresh state triggers all layers", func(t *testing.T) {
-		plan := determineLayers(&distillStateV2{}, "", now)
+		plan := determineLayers(&distillStateV2{}, "", now, nil)
 		if !plan.Daily {
 			t.Error("expected Daily=true")
 		}
@@ -41,7 +42,7 @@ func TestDetermineLayers(t *testing.T) {
 			LastWeekly:  now.Add(-24 * time.Hour).Format(time.RFC3339),
 			LastMonthly: now.Add(-24 * time.Hour).Format(time.RFC3339),
 		}
-		plan := determineLayers(state, "", now)
+		plan := determineLayers(state, "", now, nil)
 		if !plan.Daily {
 			t.Error("expected Daily=true")
 		}
@@ -58,7 +59,7 @@ func TestDetermineLayers(t *testing.T) {
 			LastWeekly:  now.Add(-8 * 24 * time.Hour).Format(time.RFC3339),
 			LastMonthly: now.Add(-24 * time.Hour).Format(time.RFC3339),
 		}
-		plan := determineLayers(state, "", now)
+		plan := determineLayers(state, "", now, nil)
 		if !plan.Daily {
 			t.Error("expected Daily=true")
 		}
@@ -75,10 +76,16 @@ func TestDetermineLayers_MultipleWeeks(t *testing.T) {
 		LastWeekly:  now.Add(-21 * 24 * time.Hour).Format(time.RFC3339),
 		LastMonthly: now.Add(-24 * time.Hour).Format(time.RFC3339),
 	}
-	plan := determineLayers(state, "", now)
-	if len(plan.Weeks) < 2 {
-		t.Errorf("expected at least 2 weeks for 3-week gap, got %d", len(plan.Weeks))
+	plan := determineLayers(state, "", now, nil)
+	require.GreaterOrEqual(t, len(plan.Weeks), 2, "expected at least 2 weeks for 3-week gap")
+	// verify actual ISO week values: Feb 19 is W08, now Mar 12 is W11
+	// determineLayers returns W08, W09, W10 (all completed weeks in the gap)
+	weekNums := make([]int, len(plan.Weeks))
+	for i, w := range plan.Weeks {
+		weekNums[i] = w.Week
 	}
+	assert.Contains(t, weekNums, 9, "should contain W09")
+	assert.Contains(t, weekNums, 10, "should contain W10")
 }
 
 func TestDetermineLayers_MultipleMonths(t *testing.T) {
@@ -88,15 +95,13 @@ func TestDetermineLayers_MultipleMonths(t *testing.T) {
 		LastWeekly:  now.Add(-24 * time.Hour).Format(time.RFC3339),
 		LastMonthly: time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 	}
-	plan := determineLayers(state, "", now)
-	if len(plan.Months) < 2 {
-		t.Errorf("expected at least 2 months, got %d: %v", len(plan.Months), plan.Months)
-	}
+	plan := determineLayers(state, "", now, nil)
+	require.ElementsMatch(t, []string{"2026-01", "2026-02"}, plan.Months, "expected exactly Jan and Feb 2026")
 }
 
 func TestDetermineLayers_ExplicitLayer(t *testing.T) {
 	now := time.Now().UTC()
-	plan := determineLayers(&distillStateV2{}, "weekly", now)
+	plan := determineLayers(&distillStateV2{}, "weekly", now, nil)
 	if plan.Daily {
 		t.Error("expected Daily=false for explicit weekly")
 	}
@@ -220,8 +225,9 @@ func TestReadRecentMemoryFiles(t *testing.T) {
 	if len(contents) != 2 {
 		t.Errorf("expected 2 files, got %d", len(contents))
 	}
-	// most recent first
-	if len(names) > 0 && names[0] != "2026-03-11.md" {
+	// most recent first — guard against empty slice hiding a real bug
+	require.Len(t, names, 2, "expected 2 names after reading 2 files")
+	if names[0] != "2026-03-11.md" {
 		t.Errorf("expected most recent first, got %s", names[0])
 	}
 }
@@ -560,7 +566,7 @@ func TestGroupObservationsByDay(t *testing.T) {
 		{Content: "obs4", RecordedAt: time.Date(2026, 3, 12, 8, 0, 0, 0, time.UTC)},
 	}
 
-	groups := groupObservationsByDay(obs)
+	groups := groupObservationsByDay(obs, nil)
 	if len(groups) != 3 {
 		t.Errorf("expected 3 day groups, got %d", len(groups))
 	}
@@ -581,7 +587,7 @@ func TestGroupObservationsByDay_SingleDay(t *testing.T) {
 		{Content: "obs2", RecordedAt: time.Date(2026, 3, 10, 14, 0, 0, 0, time.UTC)},
 	}
 
-	groups := groupObservationsByDay(obs)
+	groups := groupObservationsByDay(obs, nil)
 	if len(groups) != 1 {
 		t.Errorf("expected 1 day group, got %d", len(groups))
 	}
@@ -777,7 +783,7 @@ func TestReadWeeklyFilesForMonth(t *testing.T) {
 	// Week 5: Jan 26 - Feb 1. Does not overlap March.
 	os.WriteFile(filepath.Join(weeklyDir, "2026-W05.md"), []byte("week 5"), 0o644)
 
-	contents, names, err := readWeeklyFilesForMonth(weeklyDir, 2026, 3) // March
+	contents, names, err := readWeeklyFilesForMonth(weeklyDir, 2026, 3, nil) // March
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

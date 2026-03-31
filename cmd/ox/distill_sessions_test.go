@@ -638,6 +638,169 @@ func TestReadPendingSessionFacts(t *testing.T) {
 	})
 }
 
+func TestReadSessionStartedAt(t *testing.T) {
+	t.Run("valid raw.jsonl with started_at", func(t *testing.T) {
+		dir := t.TempDir()
+		raw := `{"_meta":{"schema_version":"1","agent_type":"claude-code","session_id":"abc","started_at":"2026-03-10T17:32:00-07:00"}}
+{"seq":1,"type":"user","content":"hello"}
+`
+		if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(raw), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := readSessionStartedAt(dir)
+		if got.IsZero() {
+			t.Fatal("expected non-zero time")
+		}
+		// The original timestamp is -07:00, so UTC should be 2026-03-11T00:32:00Z
+		want, _ := time.Parse(time.RFC3339, "2026-03-11T00:32:00Z")
+		if !got.Equal(want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("missing raw.jsonl returns zero", func(t *testing.T) {
+		dir := t.TempDir()
+		got := readSessionStartedAt(dir)
+		if !got.IsZero() {
+			t.Errorf("expected zero time, got %v", got)
+		}
+	})
+
+	t.Run("raw.jsonl without _meta returns zero", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(`{"seq":1,"type":"user"}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := readSessionStartedAt(dir)
+		if !got.IsZero() {
+			t.Errorf("expected zero time, got %v", got)
+		}
+	})
+
+	t.Run("malformed JSON returns zero", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(`{invalid`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := readSessionStartedAt(dir)
+		if !got.IsZero() {
+			t.Errorf("expected zero time, got %v", got)
+		}
+	})
+
+	t.Run("empty file returns zero", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(""), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := readSessionStartedAt(dir)
+		if !got.IsZero() {
+			t.Errorf("expected zero time, got %v", got)
+		}
+	})
+}
+
+func TestScanPendingSessionsStartedAt(t *testing.T) {
+	t.Run("date from raw.jsonl overrides dir name date", func(t *testing.T) {
+		ledgerPath := t.TempDir()
+		tcPath := t.TempDir()
+		sessionsDir := filepath.Join(ledgerPath, "sessions")
+
+		// Dir name says 2026-03-10 (local time), but raw.jsonl started_at
+		// is 2026-03-10T23:30:00-07:00 which is 2026-03-11 in UTC
+		dirName := "2026-03-10T23-30-ryan-Ox7f3a"
+		createSessionDir(t, sessionsDir, dirName, testSummary("Timezone test", 0.8))
+		rawContent := `{"_meta":{"schema_version":"1","started_at":"2026-03-10T23:30:00-07:00"}}`
+		if err := os.WriteFile(filepath.Join(sessionsDir, dirName, "raw.jsonl"), []byte(rawContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("got %d pending, want 1", len(pending))
+		}
+		// Date should be UTC date from started_at, not dir name date
+		if pending[0].Date != "2026-03-11" {
+			t.Errorf("Date = %q, want %q (UTC from started_at)", pending[0].Date, "2026-03-11")
+		}
+		if pending[0].StartedAt.IsZero() {
+			t.Error("StartedAt should be populated")
+		}
+	})
+
+	t.Run("falls back to dir name date without raw.jsonl", func(t *testing.T) {
+		ledgerPath := t.TempDir()
+		tcPath := t.TempDir()
+		sessionsDir := filepath.Join(ledgerPath, "sessions")
+
+		dirName := "2026-03-10T14-23-ryan-Ox7f3a"
+		createSessionDir(t, sessionsDir, dirName, testSummary("No raw", 0.8))
+
+		pending, err := scanPendingSessions(ledgerPath, tcPath, nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("got %d pending, want 1", len(pending))
+		}
+		if pending[0].Date != "2026-03-10" {
+			t.Errorf("Date = %q, want %q (from dir name)", pending[0].Date, "2026-03-10")
+		}
+		if !pending[0].StartedAt.IsZero() {
+			t.Errorf("StartedAt should be zero without raw.jsonl, got %v", pending[0].StartedAt)
+		}
+	})
+}
+
+func TestSessionSummaryToFactsStartedAt(t *testing.T) {
+	t.Run("uses StartedAt for timestamp when available", func(t *testing.T) {
+		startedAt, _ := time.Parse(time.RFC3339, "2026-03-10T23:30:00-07:00")
+		input := sessionInput{
+			DirName:   "2026-03-10T23-30-ryan-Ox7f3a",
+			Date:      "2026-03-11", // UTC date
+			Who:       "ryan",
+			StartedAt: startedAt,
+			Summary: &sessionsummary.SummarizeResponse{
+				Title:   "Timezone test",
+				Summary: "Testing timezone handling",
+			},
+		}
+
+		result := sessionSummaryToFacts(input)
+		if len(result) != 1 {
+			t.Fatalf("got %d facts, want 1", len(result))
+		}
+		want := "2026-03-11T06:30:00Z"
+		if result[0].Timestamp != want {
+			t.Errorf("Timestamp = %q, want %q", result[0].Timestamp, want)
+		}
+	})
+
+	t.Run("falls back to date when StartedAt is zero", func(t *testing.T) {
+		input := sessionInput{
+			DirName: "2026-03-10T14-23-ryan-Ox7f3a",
+			Date:    "2026-03-10",
+			Who:     "ryan",
+			Summary: &sessionsummary.SummarizeResponse{
+				Title:   "Legacy session",
+				Summary: "No raw.jsonl available",
+			},
+		}
+
+		result := sessionSummaryToFacts(input)
+		if len(result) != 1 {
+			t.Fatalf("got %d facts, want 1", len(result))
+		}
+		want := "2026-03-10T00:00:00Z"
+		if result[0].Timestamp != want {
+			t.Errorf("Timestamp = %q, want %q", result[0].Timestamp, want)
+		}
+	})
+}
+
 func TestSessionContentHash(t *testing.T) {
 	ledgerPath := t.TempDir()
 	sessionsDir := filepath.Join(ledgerPath, "sessions", "test-session")

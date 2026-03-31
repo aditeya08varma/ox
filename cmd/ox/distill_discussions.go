@@ -353,8 +353,9 @@ var factFilenameDateRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})`)
 // readPendingDiscussionFacts reads fact files from memory/.discussion-facts/
 // that were created since the given timestamp, grouped by parsed date.
 // Dates are parsed from content (footer) or filename, not filesystem mtime.
+// If tz is non-nil, RFC3339 timestamps are converted to that timezone for date grouping.
 // Returns a map of YYYY-MM-DD → []discussionFactEntry.
-func readPendingDiscussionFacts(tcPath string, since time.Time) (map[string][]discussionFactEntry, error) {
+func readPendingDiscussionFacts(tcPath string, since time.Time, tz ...*time.Location) (map[string][]discussionFactEntry, error) {
 	factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
 	entries, err := os.ReadDir(factsDir)
 	if err != nil {
@@ -381,7 +382,7 @@ func readPendingDiscussionFacts(tcPath string, since time.Time) (map[string][]di
 		}
 
 		// parse date from footer first, then fallback to filename
-		date := parseFactDate(content, entry.Name())
+		date := parseFactDate(content, entry.Name(), tz...)
 		if date == "" {
 			continue
 		}
@@ -406,7 +407,12 @@ func readPendingDiscussionFacts(tcPath string, since time.Time) (map[string][]di
 
 // parseFactDate extracts a YYYY-MM-DD date from fact file content.
 // Tries (in order): JSONL _meta header, markdown footer, filename prefix.
-func parseFactDate(content, filename string) string {
+// If tz is non-nil, RFC3339 timestamps are converted to that timezone before extracting the date.
+func parseFactDate(content, filename string, tz ...*time.Location) string {
+	var loc *time.Location
+	if len(tz) > 0 {
+		loc = tz[0]
+	}
 	// try JSONL _meta header: {"_meta":{"recorded_at":"2026-03-10T14:23:00Z",...}}
 	if firstLine, _, ok := strings.Cut(content, "\n"); ok || content != "" {
 		if !ok {
@@ -416,6 +422,9 @@ func parseFactDate(content, filename string) string {
 		var header facts.FileHeader
 		if err := json.Unmarshal([]byte(firstLine), &header); err == nil && header.Meta.RecordedAt != "" {
 			if t, err := time.Parse(time.RFC3339, header.Meta.RecordedAt); err == nil && t.Year() > 1 {
+				if loc != nil {
+					return t.In(loc).Format("2006-01-02")
+				}
 				return t.Format("2006-01-02")
 			}
 		}

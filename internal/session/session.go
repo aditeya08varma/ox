@@ -70,7 +70,7 @@ func NewSession(meta *SessionMeta) *Session {
 // NewSessionEntry creates a new entry with the current timestamp.
 func NewSessionEntry(entryType SessionEntryType, content string) SessionEntry {
 	return SessionEntry{
-		Timestamp: time.Now(),
+		Timestamp: time.Now().UTC(),
 		Type:      entryType,
 		Content:   content,
 	}
@@ -79,7 +79,7 @@ func NewSessionEntry(entryType SessionEntryType, content string) SessionEntry {
 // NewToolSessionEntry creates a new tool entry with the current timestamp.
 func NewToolSessionEntry(toolName, toolInput, toolOutput string) SessionEntry {
 	return SessionEntry{
-		Timestamp:  time.Now(),
+		Timestamp:  time.Now().UTC(),
 		Type:       SessionEntryTypeTool,
 		ToolName:   toolName,
 		ToolInput:  toolInput,
@@ -110,7 +110,7 @@ func NewCoworkerLoadEntry(name, model string) SessionEntry {
 		content += " (model: " + model + ")"
 	}
 	return SessionEntry{
-		Timestamp:     time.Now(),
+		Timestamp:     time.Now().UTC(),
 		Type:          SessionEntryTypeSystem,
 		Content:       content,
 		CoworkerName:  name,

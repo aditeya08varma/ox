@@ -164,21 +164,36 @@ func inferMonthlyHighWater(tcPath string) time.Time {
 	return endOfMonth(t)
 }
 
-// endOfDay returns 23:59:59 UTC of the given date.
-func endOfDay(t time.Time) time.Time {
-	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, time.UTC)
+// endOfDay returns 23:59:59 of the given date in the specified timezone.
+// If no timezone is provided, UTC is used.
+func endOfDay(t time.Time, tz ...*time.Location) time.Time {
+	loc := time.UTC
+	if len(tz) > 0 && tz[0] != nil {
+		loc = tz[0]
+	}
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, loc)
 }
 
-// endOfMonth returns the last second of the given month in UTC.
-func endOfMonth(t time.Time) time.Time {
+// endOfMonth returns the last second of the given month in the specified timezone.
+// If no timezone is provided, UTC is used.
+func endOfMonth(t time.Time, tz ...*time.Location) time.Time {
+	loc := time.UTC
+	if len(tz) > 0 && tz[0] != nil {
+		loc = tz[0]
+	}
 	// first day of next month, minus one second
-	return time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, time.UTC).Add(-time.Second)
+	return time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, loc).Add(-time.Second)
 }
 
-// isoWeekRange returns the Monday 00:00:00 and Sunday 23:59:59 UTC of the given ISO week.
-func isoWeekRange(year, week int) (start, end time.Time) {
+// isoWeekRange returns the Monday 00:00:00 and Sunday 23:59:59 of the given ISO week
+// in the specified timezone. Pass nil for UTC.
+func isoWeekRange(year, week int, tz ...*time.Location) (start, end time.Time) {
+	loc := time.UTC
+	if len(tz) > 0 && tz[0] != nil {
+		loc = tz[0]
+	}
 	// Jan 4 is always in ISO week 1
-	jan4 := time.Date(year, 1, 4, 0, 0, 0, 0, time.UTC)
+	jan4 := time.Date(year, 1, 4, 0, 0, 0, 0, loc)
 	// Find Monday of ISO week 1
 	weekday := jan4.Weekday()
 	if weekday == 0 {
@@ -188,19 +203,23 @@ func isoWeekRange(year, week int) (start, end time.Time) {
 
 	start = week1Monday.AddDate(0, 0, (week-1)*7)
 	end = start.AddDate(0, 0, 6) // Sunday
-	end = time.Date(end.Year(), end.Month(), end.Day(), 23, 59, 59, 0, time.UTC)
+	end = time.Date(end.Year(), end.Month(), end.Day(), 23, 59, 59, 0, loc)
 	return start, end
 }
 
-// groupObservationsByDay groups observations by their RecordedAt date.
+// groupObservationsByDay groups observations by their RecordedAt date in the given timezone.
 // Keys are YYYY-MM-DD strings. Observations within each group maintain their sort order.
-func groupObservationsByDay(observations []distillObservation) map[string][]distillObservation {
+// If tz is nil, UTC is used.
+func groupObservationsByDay(observations []distillObservation, tz *time.Location) map[string][]distillObservation {
+	if tz == nil {
+		tz = time.UTC
+	}
 	groups := make(map[string][]distillObservation)
 	for _, obs := range observations {
 		if obs.RecordedAt.IsZero() {
 			continue
 		}
-		day := obs.RecordedAt.Format("2006-01-02")
+		day := obs.RecordedAt.In(tz).Format("2006-01-02")
 		groups[day] = append(groups[day], obs)
 	}
 	return groups
@@ -259,7 +278,11 @@ func readDailyFilesForDateRange(dailyDir, startDate, endDate string) ([]string, 
 
 // readWeeklyFilesForMonth reads weekly .md files whose ISO week overlaps with
 // the given year-month. Returns contents and filenames.
-func readWeeklyFilesForMonth(weeklyDir string, year, month int) ([]string, []string, error) {
+// tz is used for week boundary calculations; if nil, UTC is used.
+func readWeeklyFilesForMonth(weeklyDir string, year, month int, tz *time.Location) ([]string, []string, error) {
+	if tz == nil {
+		tz = time.UTC
+	}
 	entries, err := os.ReadDir(weeklyDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -268,8 +291,8 @@ func readWeeklyFilesForMonth(weeklyDir string, year, month int) ([]string, []str
 		return nil, nil, err
 	}
 
-	monthStart := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
-	monthEnd := time.Date(year, time.Month(month+1), 1, 0, 0, 0, 0, time.UTC).Add(-time.Second)
+	monthStart := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, tz)
+	monthEnd := time.Date(year, time.Month(month+1), 1, 0, 0, 0, 0, tz).Add(-time.Second)
 
 	type weeklyFile struct {
 		name string
@@ -290,7 +313,7 @@ func readWeeklyFilesForMonth(weeklyDir string, year, month int) ([]string, []str
 		fmt.Sscanf(m[1], "%d", &wy)
 		fmt.Sscanf(m[2], "%d", &ww)
 
-		wStart, wEnd := isoWeekRange(wy, ww)
+		wStart, wEnd := isoWeekRange(wy, ww, tz)
 		// week overlaps month if week starts before month ends AND week ends after month starts
 		if wStart.Before(monthEnd.Add(time.Second)) && wEnd.After(monthStart.Add(-time.Second)) {
 			matched = append(matched, weeklyFile{name: e.Name(), year: wy, week: ww})
@@ -429,7 +452,7 @@ func syncBeforeDistill() error {
 
 	// sync ledger
 	if err := cli.WithSpinnerNoResult("Syncing ledger...", func() error {
-		client := daemon.NewClientWithTimeout(30 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(30 * time.Second)
 		return client.SyncWithProgress(func(stage string, percent *int, message string) {
 			// progress handled by spinner
 		})
@@ -439,7 +462,7 @@ func syncBeforeDistill() error {
 
 	// sync team contexts
 	if err := cli.WithSpinnerNoResult("Syncing team contexts...", func() error {
-		client := daemon.NewClientWithTimeout(60 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
 		return client.TeamSyncWithProgress(func(stage string, percent *int, message string) {
 			// progress handled by spinner
 		})
@@ -449,7 +472,7 @@ func syncBeforeDistill() error {
 
 	// update code index
 	if err := cli.WithSpinnerNoResult("Updating code index...", func() error {
-		client := daemon.NewClientWithTimeout(60 * time.Second)
+		client := daemon.NewClientForCurrentRepoWithTimeout(60 * time.Second)
 		_, err := client.CodeIndex(daemon.CodeIndexPayload{}, func(stage string, percent *int, message string) {
 			// progress handled by spinner
 		})
@@ -537,10 +560,13 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	extractGuidelines := loadGuidance(tc.Path, "EXTRACT.md")
 	distillGuidelines := loadGuidance(tc.Path, "DISTILL.md")
 
-	now := time.Now().UTC()
+	// resolve team timezone for date bucketing
+	tz := config.ResolveTimezone(projectRoot)
+
+	now := time.Now().In(tz)
 
 	// determine which layers to run
-	plan := determineLayers(state, distillLayer, now)
+	plan := determineLayers(state, distillLayer, now, tz)
 
 	if plan.isEmpty() {
 		fmt.Fprintln(cmd.OutOrStdout(), "Nothing to distill")
@@ -581,19 +607,19 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	}
 
 	if plan.Daily {
-		if err := distillDaily(ctx, cmd, backend, tc, state, projectRoot, now, distillGuidelines); err != nil {
+		if err := distillDaily(ctx, cmd, backend, tc, state, projectRoot, now, distillGuidelines, tz); err != nil {
 			return fmt.Errorf("daily distill: %w", err)
 		}
 	}
 
 	for _, week := range plan.Weeks {
-		if err := distillWeekly(ctx, cmd, backend, tc, state, week, distillGuidelines); err != nil {
+		if err := distillWeekly(ctx, cmd, backend, tc, state, week, distillGuidelines, tz); err != nil {
 			return fmt.Errorf("weekly distill (%d-W%02d): %w", week.Year, week.Week, err)
 		}
 	}
 
 	for _, month := range plan.Months {
-		if err := distillMonthly(ctx, cmd, backend, tc, state, month, distillGuidelines); err != nil {
+		if err := distillMonthly(ctx, cmd, backend, tc, state, month, distillGuidelines, tz); err != nil {
 			return fmt.Errorf("monthly distill (%s): %w", month, err)
 		}
 	}
@@ -610,7 +636,11 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 
 // determineLayers returns a distillPlan describing which layers and periods to distill.
 // When multiple week/month boundaries have been crossed since last run, each gets its own entry.
-func determineLayers(state *distillStateV2, explicit string, now time.Time) distillPlan {
+// tz is used for date boundary calculations; if nil, UTC is used.
+func determineLayers(state *distillStateV2, explicit string, now time.Time, tz *time.Location) distillPlan {
+	if tz == nil {
+		tz = time.UTC
+	}
 	var plan distillPlan
 
 	if explicit == "daily" || explicit == "" {
@@ -621,16 +651,18 @@ func determineLayers(state *distillStateV2, explicit string, now time.Time) dist
 		lastWeekly := state.lastWeeklyTime()
 		if now.Sub(lastWeekly) >= 7*24*time.Hour {
 			// enumerate each ISO week from lastWeekly to now
-			plan.Weeks = enumerateWeeks(lastWeekly, now)
+			plan.Weeks = enumerateWeeks(lastWeekly, now, tz)
 		}
 	}
 
 	if explicit == "monthly" || explicit == "" {
 		lastMonthly := state.lastMonthlyTime()
-		// Use calendar month comparison instead of duration to avoid
-		// missing short months (e.g., Feb has 28 days, not 30).
-		if lastMonthly.IsZero() || lastMonthly.Year() < now.Year() || lastMonthly.Month() < now.Month() {
-			plan.Months = enumerateMonths(lastMonthly, now)
+		// Normalize both sides to the team timezone before comparing calendar
+		// months, so a timezone change between runs doesn't skip or reprocess months.
+		lastInTZ := lastMonthly.In(tz)
+		nowInTZ := now.In(tz)
+		if lastMonthly.IsZero() || lastInTZ.Year() < nowInTZ.Year() || lastInTZ.Month() < nowInTZ.Month() {
+			plan.Months = enumerateMonths(lastMonthly, now, tz)
 		}
 	}
 
@@ -644,7 +676,11 @@ func (p distillPlan) isEmpty() bool {
 
 // enumerateWeeks returns each completed ISO week between lastTime and now.
 // A week is "completed" if its Sunday has passed relative to now.
-func enumerateWeeks(lastTime, now time.Time) []isoWeek {
+// tz is used for week boundary calculations; if nil, UTC is used.
+func enumerateWeeks(lastTime, now time.Time, tz *time.Location) []isoWeek {
+	if tz == nil {
+		tz = time.UTC
+	}
 	var weeks []isoWeek
 
 	// Start from the week after lastTime
@@ -657,7 +693,7 @@ func enumerateWeeks(lastTime, now time.Time) []isoWeek {
 	for {
 		// Move cursor to the start of the next week
 		y, w := cursor.ISOWeek()
-		_, weekEnd := isoWeekRange(y, w)
+		_, weekEnd := isoWeekRange(y, w, tz)
 		// Include this week only if its Sunday has passed (completed) and falls after our cursor
 		if weekEnd.After(cursor) && !weekEnd.After(now) {
 			weeks = append(weeks, isoWeek{Year: y, Week: w})
@@ -675,20 +711,24 @@ func enumerateWeeks(lastTime, now time.Time) []isoWeek {
 // enumerateMonths returns each completed month between lastTime and now.
 // A month is "completed" if its last day has passed relative to now.
 // Starts from the month after lastTime to avoid re-processing.
-func enumerateMonths(lastTime, now time.Time) []string {
+// tz is used for month boundary calculations; if nil, UTC is used.
+func enumerateMonths(lastTime, now time.Time, tz *time.Location) []string {
+	if tz == nil {
+		tz = time.UTC
+	}
 	var months []string
 
 	var cursor time.Time
 	if lastTime.IsZero() {
 		// If no prior monthly, start from a reasonable lookback (12 months max)
-		cursor = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(-1, 0, 0)
+		cursor = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, tz).AddDate(-1, 0, 0)
 	} else {
 		// Start from the next month after last processed
-		cursor = time.Date(lastTime.Year(), lastTime.Month()+1, 1, 0, 0, 0, 0, time.UTC)
+		cursor = time.Date(lastTime.Year(), lastTime.Month()+1, 1, 0, 0, 0, 0, tz)
 	}
 
 	for !cursor.After(now) {
-		monthEnd := endOfMonth(cursor)
+		monthEnd := endOfMonth(cursor, tz)
 		if monthEnd.After(now) {
 			break
 		}
@@ -811,7 +851,7 @@ func extractSingleDiscussionFacts(ctx context.Context, cmd *cobra.Command, backe
 	return sb.String(), nil
 }
 
-func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, projectRoot string, now time.Time, guidelines string) error {
+func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, projectRoot string, now time.Time, guidelines string, tz *time.Location) error {
 	obsDir := filepath.Join(tc.Path, "memory", ".observations")
 	since := state.lastDailyTime()
 
@@ -821,13 +861,13 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 	}
 
 	// read discussion facts grouped by date (content-based timestamps)
-	factsByDay, err := readPendingDiscussionFacts(tc.Path, since)
+	factsByDay, err := readPendingDiscussionFacts(tc.Path, since, tz)
 	if err != nil {
 		slog.Warn("failed to read discussion facts", "error", err)
 	}
 
 	// read github facts grouped by date
-	ghFactsByDay, err := readPendingGitHubFacts(tc.Path, since)
+	ghFactsByDay, err := readPendingGitHubFacts(tc.Path, since, tz)
 	if err != nil {
 		slog.Warn("failed to read github facts", "error", err)
 	}
@@ -840,7 +880,7 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 	}
 
 	// read session facts grouped by date
-	sessionFactsByDay, err := readPendingSessionFacts(tc.Path, since)
+	sessionFactsByDay, err := readPendingSessionFacts(tc.Path, since, tz)
 	if err != nil {
 		slog.Warn("failed to read session facts", "error", err)
 	}
@@ -856,8 +896,8 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		return nil
 	}
 
-	// group observations by day
-	obsByDay := groupObservationsByDay(observations)
+	// group observations by day (in team timezone)
+	obsByDay := groupObservationsByDay(observations, tz)
 
 	// union all day keys
 	daySet := make(map[string]bool)
@@ -943,12 +983,14 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 	return nil
 }
 
-func distillWeekly(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, week isoWeek, guidelines string) error {
+func distillWeekly(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, week isoWeek, guidelines string, tz *time.Location) error {
 	dailyDir := filepath.Join(tc.Path, "memory", "daily")
 	weekID := fmt.Sprintf("%d-W%02d", week.Year, week.Week)
-	start, end := isoWeekRange(week.Year, week.Week)
+	start, end := isoWeekRange(week.Year, week.Week, tz)
 	startDate := start.Format("2006-01-02")
 	endDate := end.Format("2006-01-02")
+
+	slog.Debug("distill weekly", "week", weekID, "start", startDate, "end", endDate, "tz", tz, "daily_dir", dailyDir)
 
 	dailySummaries, dailyFiles, err := readDailyFilesForDateRange(dailyDir, startDate, endDate)
 	if err != nil {
@@ -966,10 +1008,12 @@ func distillWeekly(ctx context.Context, cmd *cobra.Command, backend agentcli.Bac
 
 	prompt := agentcli.WeeklyPrompt(dailySummaries, weekID, guidelines)
 	logPrompt(cmd, "weekly:"+weekID, prompt)
+	slog.Info("distill weekly: sending to AI coworker", "week", weekID, "daily_count", len(dailySummaries), "daily_files", dailyFiles, "prompt_bytes", len(prompt))
 	fmt.Fprintf(cmd.OutOrStdout(), "Synthesizing %d daily summaries into weekly %s...\n", len(dailySummaries), weekID)
 
 	output, err := backend.Run(ctx, prompt)
 	if err != nil {
+		slog.Error("distill weekly: AI coworker failed", "week", weekID, "error", err, "daily_files", dailyFiles, "prompt_bytes", len(prompt))
 		return fmt.Errorf("AI coworker: %w", err)
 	}
 
@@ -992,7 +1036,7 @@ func distillWeekly(ctx context.Context, cmd *cobra.Command, backend agentcli.Bac
 	return nil
 }
 
-func distillMonthly(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, month string, guidelines string) error {
+func distillMonthly(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, month string, guidelines string, tz *time.Location) error {
 	weeklyDir := filepath.Join(tc.Path, "memory", "weekly")
 
 	// parse month string to get year and month
@@ -1001,7 +1045,7 @@ func distillMonthly(ctx context.Context, cmd *cobra.Command, backend agentcli.Ba
 		return fmt.Errorf("parse month %q: %w", month, err)
 	}
 
-	weeklySummaries, weeklyFiles, err := readWeeklyFilesForMonth(weeklyDir, t.Year(), int(t.Month()))
+	weeklySummaries, weeklyFiles, err := readWeeklyFilesForMonth(weeklyDir, t.Year(), int(t.Month()), tz)
 	if err != nil {
 		return fmt.Errorf("read weekly files for %s: %w", month, err)
 	}
@@ -1036,7 +1080,7 @@ func distillMonthly(ctx context.Context, cmd *cobra.Command, backend agentcli.Ba
 		slog.Warn("failed to commit monthly memory", "error", err)
 	}
 
-	state.LastMonthly = endOfMonth(t).Format(time.RFC3339)
+	state.LastMonthly = endOfMonth(t, tz).Format(time.RFC3339)
 	state.LastMonthlyHash = "" // hash no longer used
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", filePath)
