@@ -305,6 +305,17 @@ func buildGitHubExtractorPrompt(clustersJSON, interval, guidelines string) strin
 // If tz is non-nil, RFC3339 timestamps are converted to that timezone for date grouping.
 func readPendingGitHubFacts(tcPath string, since time.Time, tz ...*time.Location) (map[string][]discussionFactEntry, error) {
 	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
+
+	// compute cutoff date in the same timezone used by parseFactDate
+	var cutoffDate string
+	if !since.IsZero() {
+		cutoff := since
+		if len(tz) > 0 && tz[0] != nil {
+			cutoff = since.In(tz[0])
+		}
+		cutoffDate = cutoff.Format("2006-01-02")
+	}
+
 	entries, err := os.ReadDir(factsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -335,11 +346,9 @@ func readPendingGitHubFacts(tcPath string, since time.Time, tz ...*time.Location
 			continue
 		}
 
-		if !since.IsZero() {
-			factDate, err := time.Parse("2006-01-02", date)
-			if err == nil && factDate.Before(since.Truncate(24*time.Hour)) {
-				continue
-			}
+		// filter by since (using same timezone as parseFactDate)
+		if cutoffDate != "" && date < cutoffDate {
+			continue
 		}
 
 		result[date] = append(result[date], discussionFactEntry{

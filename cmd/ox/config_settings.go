@@ -552,7 +552,10 @@ func setTeamConfig(key, value, projectRoot string) error {
 
 	teamPath := tc.Path
 	cfg, err := config.LoadTeamConfig(teamPath)
-	if err != nil || cfg == nil {
+	if err != nil {
+		return fmt.Errorf("failed to load team config: %w", err)
+	}
+	if cfg == nil {
 		cfg = &config.TeamConfig{}
 	}
 

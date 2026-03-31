@@ -9,6 +9,7 @@ import (
 )
 
 func TestResolveTimezone_NoConfig(t *testing.T) {
+	t.Setenv("OX_TIMEZONE", "") // ensure env doesn't interfere
 	// With no project root, should return UTC
 	loc := ResolveTimezone("")
 	if loc != time.UTC {
@@ -17,6 +18,7 @@ func TestResolveTimezone_NoConfig(t *testing.T) {
 }
 
 func TestResolveTimezone_NonInitializedProject(t *testing.T) {
+	t.Setenv("OX_TIMEZONE", "") // ensure env doesn't interfere
 	tmpDir := t.TempDir()
 	loc := ResolveTimezone(tmpDir)
 	if loc != time.UTC {
@@ -44,6 +46,7 @@ func TestResolveTimezone_InvalidEnvVar_FallsThrough(t *testing.T) {
 }
 
 func TestResolveTimezone_ProjectConfig(t *testing.T) {
+	t.Setenv("OX_TIMEZONE", "") // ensure env doesn't interfere
 	tmpDir := CreateInitializedProject(t)
 
 	cfg, err := LoadProjectConfig(tmpDir)
@@ -83,6 +86,7 @@ func TestResolveTimezone_EnvOverridesProjectConfig(t *testing.T) {
 }
 
 func TestResolveTimezone_InvalidProjectConfig_FallsThrough(t *testing.T) {
+	t.Setenv("OX_TIMEZONE", "") // ensure env doesn't interfere
 	tmpDir := CreateInitializedProject(t)
 
 	cfg, err := LoadProjectConfig(tmpDir)

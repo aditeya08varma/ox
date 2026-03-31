@@ -285,7 +285,7 @@ func TestSessionSummaryToFacts(t *testing.T) {
 			if f.SourceRef != "sessions/2026-01-06T14-32-ryan-Ox7f3a" {
 				t.Errorf("fact[%d] source_ref = %q", i, f.SourceRef)
 			}
-			if f.Timestamp != "2026-01-06T00:00:00Z" {
+			if f.Timestamp != "2026-01-06" {
 				t.Errorf("fact[%d] timestamp = %q", i, f.Timestamp)
 			}
 		}
@@ -794,7 +794,7 @@ func TestSessionSummaryToFactsStartedAt(t *testing.T) {
 		if len(result) != 1 {
 			t.Fatalf("got %d facts, want 1", len(result))
 		}
-		want := "2026-03-10T00:00:00Z"
+		want := "2026-03-10"
 		if result[0].Timestamp != want {
 			t.Errorf("Timestamp = %q, want %q", result[0].Timestamp, want)
 		}

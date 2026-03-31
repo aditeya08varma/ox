@@ -76,7 +76,9 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, state *dist
 	}
 
 	for _, s := range pending {
-		recordedAt := s.Date + "T00:00:00Z"
+		// Use actual UTC StartedAt when available; fall back to date-only string
+		// so parseFactDate uses the directory date as-is (no false UTC instant).
+		recordedAt := s.Date
 		if !s.StartedAt.IsZero() {
 			recordedAt = s.StartedAt.UTC().Format(time.RFC3339)
 		}
@@ -279,7 +281,7 @@ func sessionContentHash(ledgerPath, dirName string) string {
 func sessionSummaryToFacts(input sessionInput) []facts.Fact {
 	var result []facts.Fact
 	s := input.Summary
-	ts := input.Date + "T00:00:00Z"
+	ts := input.Date
 	if !input.StartedAt.IsZero() {
 		ts = input.StartedAt.UTC().Format(time.RFC3339)
 	}

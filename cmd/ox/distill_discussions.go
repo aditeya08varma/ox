@@ -357,6 +357,17 @@ var factFilenameDateRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})`)
 // Returns a map of YYYY-MM-DD → []discussionFactEntry.
 func readPendingDiscussionFacts(tcPath string, since time.Time, tz ...*time.Location) (map[string][]discussionFactEntry, error) {
 	factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
+
+	// compute cutoff date in the same timezone used by parseFactDate
+	var cutoffDate string
+	if !since.IsZero() {
+		cutoff := since
+		if len(tz) > 0 && tz[0] != nil {
+			cutoff = since.In(tz[0])
+		}
+		cutoffDate = cutoff.Format("2006-01-02")
+	}
+
 	entries, err := os.ReadDir(factsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -387,12 +398,9 @@ func readPendingDiscussionFacts(tcPath string, since time.Time, tz ...*time.Loca
 			continue
 		}
 
-		// filter by since
-		if !since.IsZero() {
-			factDate, err := time.Parse("2006-01-02", date)
-			if err == nil && factDate.Before(since.Truncate(24*time.Hour)) {
-				continue
-			}
+		// filter by since (using same timezone as parseFactDate)
+		if cutoffDate != "" && date < cutoffDate {
+			continue
 		}
 
 		result[date] = append(result[date], discussionFactEntry{

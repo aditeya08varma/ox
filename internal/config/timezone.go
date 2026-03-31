@@ -15,7 +15,8 @@ import (
 func ResolveTimezone(projectRoot string) *time.Location {
 	// 1. Check OX_TIMEZONE env var — highest priority (for pipelines/automation)
 	if envTZ := os.Getenv(EnvTimezone); envTZ != "" {
-		if loc, err := time.LoadLocation(envTZ); err == nil {
+		if IsValidTimezone(envTZ) {
+			loc, _ := time.LoadLocation(envTZ)
 			return loc
 		}
 		slog.Warn("invalid OX_TIMEZONE env var, falling through to config", "value", envTZ)
@@ -25,7 +26,8 @@ func ResolveTimezone(projectRoot string) *time.Location {
 	if projectRoot != "" && IsInitialized(projectRoot) {
 		projectCfg, err := LoadProjectConfig(projectRoot)
 		if err == nil && projectCfg != nil && projectCfg.Timezone != "" {
-			if loc, err := time.LoadLocation(projectCfg.Timezone); err == nil {
+			if IsValidTimezone(projectCfg.Timezone) {
+				loc, _ := time.LoadLocation(projectCfg.Timezone)
 				return loc
 			}
 			slog.Warn("invalid timezone in project config, falling through", "value", projectCfg.Timezone)
@@ -35,9 +37,11 @@ func ResolveTimezone(projectRoot string) *time.Location {
 	// 3. Check team config (config.toml in team context)
 	if projectRoot != "" {
 		if tz := loadTeamTimezone(projectRoot); tz != "" {
-			if loc, err := time.LoadLocation(tz); err == nil {
+			if IsValidTimezone(tz) {
+				loc, _ := time.LoadLocation(tz)
 				return loc
 			}
+			slog.Warn("invalid timezone in team config, falling through", "value", tz)
 		}
 	}
 
