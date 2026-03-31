@@ -708,11 +708,12 @@ func (m configModel) editView(width int) string {
 
 	b.WriteString("\n")
 	levelLabel := string(m.editLevel) + "-level"
-	if m.editLevel == ConfigLevelUser {
+	switch m.editLevel {
+	case ConfigLevelUser:
 		levelLabel += " override (highest priority)"
-	} else if m.editLevel == ConfigLevelRepo {
+	case ConfigLevelRepo:
 		levelLabel += " setting"
-	} else if m.editLevel == ConfigLevelTeam {
+	case ConfigLevelTeam:
 		levelLabel += " default"
 	}
 	b.WriteString(detailMutedStyle.Render("Sets " + levelLabel))
