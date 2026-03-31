@@ -151,24 +151,26 @@ type Daemon struct {
 	wg     sync.WaitGroup
 
 	// components
-	server          *Server
-	scheduler       *SyncScheduler
-	watcher         *Watcher
-	heartbeat       *HeartbeatHandler
-	telemetry       *TelemetryCollector
-	friction        *FrictionCollector
-	issues          *IssueTracker
-	codedb          *CodeDBManager
-	agentWorker     *agentwork.Manager
-	whisperRegistry    *WhisperRegistry
-	murmurNudgeSource  *MurmurNudgeSource
-	dbMaintenance      *DBMaintenanceScheduler
+	server            *Server
+	service           *daemonServiceImpl
+	scheduler         *SyncScheduler
+	watcher           *Watcher
+	heartbeat         *HeartbeatHandler
+	telemetry         *TelemetryCollector
+	friction          *FrictionCollector
+	issues            *IssueTracker
+	codedb            *CodeDBManager
+	agentWorker       *agentwork.Manager
+	whisperRegistry   *WhisperRegistry
+	murmurNudgeSource *MurmurNudgeSource
+	projectWatcher    *ProjectWatcher
+	dbMaintenance     *DBMaintenanceScheduler
 
 	// state
 	mu               sync.Mutex
 	running          bool
-	restartRequested bool // set when version mismatch triggers restart
-	wasSuperseded    bool // set when exiting because another daemon took over
+	restartRequested bool      // set when version mismatch triggers restart
+	wasSuperseded    bool      // set when exiting because another daemon took over
 	startTime        time.Time // daemon start time for uptime tracking
 	lastActivity     time.Time // tracks last activity for inactivity timeout
 
@@ -269,7 +271,8 @@ func (d *Daemon) Start() error {
 	// start IPC server — daemonServiceImpl is a thin shim over *Daemon that
 	// implements DaemonService; components (scheduler, heartbeat, etc.) are
 	// initialized below, so all methods guard against nil receivers.
-	d.server = NewServerWithService(d.logger, &daemonServiceImpl{d})
+	d.service = &daemonServiceImpl{d}
+	d.server = NewServerWithService(d.logger, d.service)
 
 	setupDuration := d.initComponents()
 
@@ -396,6 +399,41 @@ func (d *Daemon) getAgentSessions() []AgentSession {
 	}
 
 	return sessions
+}
+
+// heartbeatAgentResolver adapts HeartbeatHandler to ActiveAgentResolver
+// for use by the file-change murmur publisher.
+type heartbeatAgentResolver struct {
+	heartbeat *HeartbeatHandler
+}
+
+func (r *heartbeatAgentResolver) ActiveAgentIDs() []string {
+	if r.heartbeat == nil {
+		return nil
+	}
+	tracker := r.heartbeat.GetAgentActivity()
+	keys := tracker.Keys()
+	now := time.Now()
+	var active []string
+	for _, id := range keys {
+		last := tracker.Last(id)
+		elapsed := now.Sub(last)
+		if elapsed > StaleThreshold {
+			continue
+		}
+		// Check PID liveness — a dead PID with a stale-ish heartbeat means exited.
+		pid := r.heartbeat.GetAgentPID(id)
+		if pid > 0 {
+			proc, err := os.FindProcess(pid)
+			if err != nil || proc.Signal(syscall.Signal(0)) != nil {
+				if elapsed > IdleThreshold {
+					continue
+				}
+			}
+		}
+		active = append(active, id)
+	}
+	return active
 }
 
 // getAgentInstances returns active agent instances from the heartbeat handler.
@@ -913,6 +951,30 @@ func (d *Daemon) startWorkers() {
 		if d.config.MurmurNudgeInterval > 0 {
 			d.murmurNudgeSource = NewMurmurNudgeSource(d.whisperRegistry.LedgerStore(), d.heartbeat, d.config.MurmurNudgeInterval, d.config.ProjectRoot)
 			ws.RegisterSource(d.murmurNudgeSource)
+		}
+		if d.config.ProjectRoot != "" && d.config.LedgerPath != "" {
+			accumulator := NewChangeAccumulator(3 * time.Second)
+			tracker := NewGitTrackedMatcher(d.config.ProjectRoot, d.logger)
+			d.projectWatcher = NewProjectWatcher(
+				d.config.ProjectRoot, d.logger,
+				DefaultWatcherFactory, &RealFileSystem{},
+				accumulator, tracker,
+			)
+			murmurPub := NewFileChangeMurmurPublisher(
+				accumulator, d.service,
+				d.config.LedgerPath, d.config.ProjectRoot,
+				d.logger,
+			)
+			murmurPub.SetAgentResolver(&heartbeatAgentResolver{heartbeat: d.heartbeat})
+			d.wg.Add(2)
+			go func() {
+				defer d.wg.Done()
+				d.projectWatcher.Start(d.ctx)
+			}()
+			go func() {
+				defer d.wg.Done()
+				murmurPub.Start(d.ctx)
+			}()
 		}
 		ws.Start(d.ctx, &d.wg)
 	}
