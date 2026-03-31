@@ -44,7 +44,7 @@ func TestEnrichedTeamsToEntries(t *testing.T) {
 			},
 		},
 		{
-			name: "team with zero sync time shows unknown",
+			name: "team with zero sync time shows never",
 			teams: []enrichedTeam{
 				{
 					TeamID: "team_xyz",
@@ -57,7 +57,7 @@ func TestEnrichedTeamsToEntries(t *testing.T) {
 					TeamID:   "team_xyz",
 					Name:     "Unsynced",
 					Slug:     "unsynced",
-					LastSync: "unknown",
+					LastSync: "never",
 				},
 			},
 		},
@@ -69,9 +69,9 @@ func TestEnrichedTeamsToEntries(t *testing.T) {
 				{TeamID: "team_3", Name: "Third", Slug: "third"},
 			},
 			want: []teamEntry{
-				{TeamID: "team_1", Name: "First", Slug: "first", LastSync: "unknown"},
-				{TeamID: "team_2", Name: "Second", Slug: "second", Primary: true, LastSync: "unknown"},
-				{TeamID: "team_3", Name: "Third", Slug: "third", LastSync: "unknown"},
+				{TeamID: "team_1", Name: "First", Slug: "first", LastSync: "never"},
+				{TeamID: "team_2", Name: "Second", Slug: "second", Primary: true, LastSync: "never"},
+				{TeamID: "team_3", Name: "Third", Slug: "third", LastSync: "never"},
 			},
 		},
 	}
@@ -89,11 +89,11 @@ func TestEnrichedTeamsToEntries(t *testing.T) {
 				assert.Equal(t, want.Primary, got[i].Primary)
 				assert.Equal(t, want.Path, got[i].Path)
 
-				if want.LastSync == "unknown" {
-					assert.Equal(t, "unknown", got[i].LastSync)
+				if want.LastSync == "never" {
+					assert.Equal(t, "never", got[i].LastSync)
 				} else if want.LastSync != "" {
-					// for non-zero sync times, just verify it's not "unknown"
-					assert.NotEqual(t, "unknown", got[i].LastSync)
+					// for non-zero sync times, just verify it's not "never"
+					assert.NotEqual(t, "never", got[i].LastSync)
 				}
 			}
 		})
@@ -115,7 +115,7 @@ func TestEnrichedTeamsToEntries_RecentSync(t *testing.T) {
 
 	entries := enrichedTeamsToEntries(teams)
 	assert.Len(t, entries, 1)
-	assert.NotEqual(t, "unknown", entries[0].LastSync)
+	assert.NotEqual(t, "never", entries[0].LastSync)
 	// should be a short duration string
 	assert.NotEmpty(t, entries[0].LastSync)
 }
@@ -134,5 +134,5 @@ func TestEnrichedTeamsToEntries_OldSync(t *testing.T) {
 
 	entries := enrichedTeamsToEntries(teams)
 	assert.Len(t, entries, 1)
-	assert.NotEqual(t, "unknown", entries[0].LastSync)
+	assert.NotEqual(t, "never", entries[0].LastSync)
 }

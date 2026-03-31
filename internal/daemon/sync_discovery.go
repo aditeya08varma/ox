@@ -154,7 +154,7 @@ func (s *SyncScheduler) discoverTeams() {
 			TeamID: repo.StableID(),
 			Slug:   repo.Slug,
 		}
-		newRepos[entry.Name] = entry
+		newRepos[entry.StableID()] = entry
 	}
 
 	// check if repos changed before writing
