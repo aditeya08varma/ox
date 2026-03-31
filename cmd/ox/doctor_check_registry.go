@@ -465,6 +465,37 @@ func init() {
 		},
 	})
 
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugDaemonDedup,
+		Name:        "Daemon deduplication",
+		Category:    "Daemon",
+		FixLevel:    FixLevelConfirm,
+		Description: "Detects and stops duplicate daemon processes for the same repo",
+		Run:         checkDaemonDeduplication,
+	})
+
+	// ============================================================
+	// Ledger Infrastructure checks
+	// ============================================================
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerSparseCheckout,
+		Name:        "Ledger sparse checkout",
+		Category:    "Ledger Git Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Ensures ledger sparse-checkout cone includes .sageox",
+		Run:         checkLedgerSparseCheckout,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugCodeDBConsistency,
+		Name:        "CodeDB consistency",
+		Category:    "Code Search",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Detects codedb index missing after successful build",
+		Run:         checkCodeDBConsistency,
+	})
+
 	// ============================================================
 	// Session checks
 	// ============================================================

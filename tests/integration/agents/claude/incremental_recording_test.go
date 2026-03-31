@@ -18,6 +18,7 @@ import (
 
 	"github.com/sageox/ox/internal/daemon/agentwork"
 	"github.com/sageox/ox/tests/integration/agents/common"
+	"github.com/stretchr/testify/require"
 )
 
 // TestIncrementalRecording_PostToolUse verifies the full incremental recording
@@ -176,7 +177,7 @@ func TestIncrementalRecording_PostToolUse(t *testing.T) {
 			}
 		}
 		if !toolEntryFound {
-			t.Log("no tool entries with tool_name found (tool metadata may not be captured in incremental path)")
+			t.Error("no tool entries with tool_name found — tool metadata not captured in incremental path")
 		}
 	})
 }
@@ -220,13 +221,11 @@ func TestIncrementalRecording_ContinueSession(t *testing.T) {
 	}
 	t.Logf("first invocation completed in %v", result1.Duration)
 
-	// Count entries after first invocation
+	// Count entries after first invocation — must be non-zero
 	rawPath := findRawJSONL(t, env)
-	var entriesAfterFirst int
-	if rawPath != "" {
-		entriesAfterFirst = len(readRawJSONL(t, rawPath))
-		t.Logf("entries after first invocation: %d", entriesAfterFirst)
-	}
+	require.NotEmpty(t, rawPath, "raw.jsonl should exist after first invocation")
+	entriesAfterFirst := len(readRawJSONL(t, rawPath))
+	require.Greater(t, entriesAfterFirst, 0, "should have entries after first invocation")
 
 	// Second invocation — continue the same session
 	// This triggers SessionStart with source=resume, exercising re-prime
@@ -321,8 +320,7 @@ func TestIncrementalRecording_CompactHook(t *testing.T) {
 	t.Run("compact_reprime_succeeded", func(t *testing.T) {
 		// The compact hook should re-prime (output contains agent_id or prime data)
 		if !strings.Contains(hookResult, "agent_id") && !strings.Contains(hookResult, agentID) {
-			t.Log("compact hook output doesn't contain agent_id — may not have re-primed")
-			t.Log("this is acceptable if the hook returned silently (recording state preserved)")
+			t.Errorf("compact hook output doesn't contain agent_id — re-prime may have failed\noutput: %.200s", hookResult)
 		}
 	})
 
@@ -1042,8 +1040,11 @@ FILE B (ox raw.jsonl):
 		t.Logf("judge notes: %s", verdict.Notes)
 	}
 
-	if verdict.Verdict == "fail" {
+	switch verdict.Verdict {
+	case "fail":
 		t.Errorf("recording fidelity too low: %d%% coverage (need >= 80%%)", verdict.CoveragePct)
+	case "unknown":
+		t.Skipf("LLM judge returned unknown verdict — could not parse judge output; manual review needed: %s", verdict.Notes)
 	}
 }
 
@@ -1418,6 +1419,10 @@ func TestSlashCommand_SessionList(t *testing.T) {
 		if strings.Contains(string(output), "panic") {
 			t.Error("ox session list panicked")
 		}
+		// output should contain something meaningful (not just empty)
+		if len(strings.TrimSpace(string(output))) == 0 {
+			t.Error("ox session list returned empty output after creating a session")
+		}
 	})
 
 	// Test via Claude using the actual slash command
@@ -1432,7 +1437,9 @@ func TestSlashCommand_SessionList(t *testing.T) {
 		if strings.Contains(output, "panic") {
 			t.Error("ox session list panicked when run via claude")
 		}
-		t.Logf("claude session list completed (%d bytes output)", len(listResult.RawOutput))
+		if len(listResult.RawOutput) == 0 {
+			t.Error("claude session list returned empty output")
+		}
 	})
 }
 
@@ -1480,7 +1487,7 @@ func TestSlashCommand_SessionAbort(t *testing.T) {
 		// After abort, recording state should be gone
 		recordingsAfter := findFilesRecursive(env.RootDir, ".recording.json")
 		if len(recordingsAfter) >= len(recordingsBefore) && len(recordingsBefore) > 0 {
-			t.Log("recording state not fully cleared after abort (may be due to multiple agents)")
+			t.Errorf("recording state not fully cleared after abort: had %d before, still have %d after", len(recordingsBefore), len(recordingsAfter))
 		}
 	})
 
@@ -1735,8 +1742,8 @@ waitLoop:
 		info, statErr := os.Stat(path)
 		if statErr != nil {
 			t.Errorf("missing artifact after anti-entropy finalization: %s", artifact)
-		} else {
-			t.Logf("artifact %s generated (%d bytes)", artifact, info.Size())
+		} else if info.Size() == 0 {
+			t.Errorf("artifact %s is empty (0 bytes)", artifact)
 		}
 	}
 

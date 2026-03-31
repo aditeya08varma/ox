@@ -60,7 +60,7 @@ conventions and knowledge that apply to ALL repos your team owns.`,
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
 	},
 	{
-		Key:         "murmuring",
+		Key:         "murmur_send",
 		Description: "Auto work-in-progress signals",
 		LongDescription: `Controls work-in-progress signals to teammates.
 
@@ -74,7 +74,23 @@ coworkers.
 		Category:    "Collaboration",
 		ValidValues: []string{"manual", "auto"},
 		Default:     "auto",
-		Levels:      []ConfigLevel{ConfigLevelRepo},
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
+	},
+	{
+		Key:         "murmur_receive",
+		Description: "Receive murmurs from other coworkers",
+		LongDescription: `Controls whether work-in-progress signals from other coworkers
+appear in your whisper stream.
+
+  on  - Receive murmurs as whispers (default)
+  off - Suppress murmur whispers (other coworkers still receive them)
+
+This is a personal preference — it only affects YOUR whisper
+delivery, not whether murmurs are relayed for others.`,
+		Category:    "Collaboration",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
 	{
 		Key:         "telemetry",
@@ -259,9 +275,20 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.TeamVal = config.NormalizeSessionRecording(teamCfg.SessionRecording)
 		}
 
-	case "murmuring":
-		if repoCfg != nil && repoCfg.Murmuring != "" {
-			cv.RepoVal = repoCfg.Murmuring
+	case "murmur_send":
+		if userCfg != nil && userCfg.GetMurmuring() != "" {
+			cv.UserVal = config.NormalizeMurmuring(userCfg.GetMurmuring())
+		}
+		if repoCfg != nil && repoCfg.GetMurmuring() != "" {
+			cv.RepoVal = config.NormalizeMurmuring(repoCfg.GetMurmuring())
+		}
+
+	case "murmur_receive":
+		if userCfg != nil && userCfg.MurmurReceive != "" {
+			cv.UserVal = config.NormalizeMurmurReceive(userCfg.MurmurReceive)
+		}
+		if repoCfg != nil && repoCfg.MurmurReceive != "" {
+			cv.RepoVal = config.NormalizeMurmurReceive(repoCfg.MurmurReceive)
 		}
 
 	case "telemetry":
@@ -343,6 +370,37 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 	}
 
 	return cv, nil
+}
+
+// UnsetConfigValue clears a config value at a specific level, causing it to
+// fall back to the next level in the precedence chain (user > repo > team > default).
+func UnsetConfigValue(key string, level ConfigLevel, projectRoot string) error {
+	setting := GetSetting(key)
+	if setting == nil {
+		return fmt.Errorf("unknown setting: %s", key)
+	}
+
+	levelSupported := false
+	for _, l := range setting.Levels {
+		if l == level {
+			levelSupported = true
+			break
+		}
+	}
+	if !levelSupported {
+		return fmt.Errorf("setting %s cannot be set at %s level", key, level)
+	}
+
+	switch level {
+	case ConfigLevelUser:
+		return unsetUserConfig(key)
+	case ConfigLevelRepo:
+		return unsetRepoConfig(key, projectRoot)
+	case ConfigLevelTeam:
+		return unsetTeamConfig(key, projectRoot)
+	default:
+		return fmt.Errorf("cannot unset config at %s level", level)
+	}
 }
 
 // SetConfigValue sets a config value at a specific level.
@@ -432,6 +490,12 @@ func setUserConfig(key, value string) error {
 	case "view_format":
 		cfg.ViewFormat = value
 
+	case "murmur_send":
+		cfg.SetMurmuring(value)
+
+	case "murmur_receive":
+		cfg.SetMurmurReceive(value)
+
 	case "agent_worker":
 		if value == "auto" {
 			cfg.SetAgentWorkerAgent("") // empty = auto-detect
@@ -460,8 +524,11 @@ func setRepoConfig(key, value, projectRoot string) error {
 	case "session_recording":
 		cfg.SessionRecording = value
 
-	case "murmuring":
-		cfg.Murmuring = value
+	case "murmur_send":
+		cfg.SetMurmuring(value)
+
+	case "murmur_receive":
+		cfg.MurmurReceive = value
 
 	case "timezone":
 		cfg.Timezone = value
@@ -495,6 +562,117 @@ func setTeamConfig(key, value, projectRoot string) error {
 
 	case "timezone":
 		cfg.Timezone = value
+
+	default:
+		return fmt.Errorf("setting %s not supported at team level", key)
+	}
+
+	return config.SaveTeamConfig(teamPath, cfg)
+}
+
+func unsetUserConfig(key string) error {
+	cfg, err := config.LoadUserConfig()
+	if err != nil {
+		cfg = &config.UserConfig{}
+	}
+
+	switch key {
+	case "session_recording":
+		if cfg.Sessions != nil {
+			cfg.Sessions.Mode = ""
+			// nil the struct if nothing else is set
+			if cfg.Sessions.GetMode() == "" {
+				cfg.Sessions = nil
+			}
+		}
+
+	case "telemetry":
+		cfg.TelemetryEnabled = nil
+
+	case "tips":
+		cfg.TipsEnabled = nil
+
+	case "context_git.auto_commit":
+		if cfg.ContextGit != nil {
+			cfg.ContextGit.AutoCommit = nil
+			if cfg.ContextGit.AutoPush == nil {
+				cfg.ContextGit = nil
+			}
+		}
+
+	case "context_git.auto_push":
+		if cfg.ContextGit != nil {
+			cfg.ContextGit.AutoPush = nil
+			if cfg.ContextGit.AutoCommit == nil {
+				cfg.ContextGit = nil
+			}
+		}
+
+	case "view_format":
+		cfg.ViewFormat = ""
+
+	case "murmur_send":
+		cfg.SetMurmuring("")
+
+	case "murmur_receive":
+		cfg.SetMurmurReceive("")
+
+	case "agent_worker":
+		cfg.AgentWorker = nil
+
+	default:
+		return fmt.Errorf("unknown user setting: %s", key)
+	}
+
+	return config.SaveUserConfig(cfg)
+}
+
+func unsetRepoConfig(key, projectRoot string) error {
+	if projectRoot == "" {
+		return fmt.Errorf("not in a SageOx project")
+	}
+
+	cfg, err := config.LoadProjectConfig(projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to load project config: %w", err)
+	}
+
+	switch key {
+	case "session_recording":
+		cfg.SessionRecording = ""
+
+	case "murmur_send":
+		cfg.SetMurmuring("")
+
+	case "murmur_receive":
+		cfg.MurmurReceive = ""
+
+	default:
+		return fmt.Errorf("setting %s not supported at repo level", key)
+	}
+
+	return config.SaveProjectConfig(projectRoot, cfg)
+}
+
+func unsetTeamConfig(key, projectRoot string) error {
+	if projectRoot == "" {
+		return fmt.Errorf("not in a SageOx project")
+	}
+
+	tc := config.FindRepoTeamContext(projectRoot)
+	if tc == nil {
+		return fmt.Errorf("no team context configured")
+	}
+
+	teamPath := tc.Path
+	cfg, err := config.LoadTeamConfig(teamPath)
+	if err != nil {
+		cfg = &config.TeamConfig{}
+	}
+
+	switch key {
+	case "session_recording":
+		cfg.SessionRecording = ""
 
 	default:
 		return fmt.Errorf("setting %s not supported at team level", key)

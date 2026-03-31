@@ -118,6 +118,7 @@ const (
 	CheckSlugDaemonRunning = "daemon-running"
 	CheckSlugDaemonSocket  = "daemon-socket"
 	CheckSlugDaemonVersion = "daemon-version"
+	CheckSlugDaemonDedup   = "daemon-dedup"
 
 	// Integration checks
 	CheckSlugClaudeCodeHooks     = "claude-code-hooks"
@@ -172,5 +173,9 @@ const (
 	CheckSlugAgentWorkerBinary = "agent-worker-binary"
 
 	// Code Search checks
-	CheckSlugCodeIndex = "code-index"
+	CheckSlugCodeIndex          = "code-index"
+	CheckSlugCodeDBConsistency  = "codedb-consistency"
+
+	// Ledger Infrastructure checks
+	CheckSlugLedgerSparseCheckout = "ledger-sparse-checkout"
 )

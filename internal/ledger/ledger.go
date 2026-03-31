@@ -385,6 +385,10 @@ func InitForEndpoint(endpointURL string, remoteURL string) (*Ledger, error) {
 // to save space. Exported for use by the daemon's GC reclone (fresh clone with
 // sparse checkout).
 func CloneWithSparseCheckout(path, remoteURL string) error {
+	if remoteURL == "" {
+		return fmt.Errorf("git clone: remote URL is empty")
+	}
+
 	// remove existing directory if empty
 	entries, _ := os.ReadDir(path)
 	if len(entries) == 0 {
@@ -423,14 +427,24 @@ func CloneWithSparseCheckout(path, remoteURL string) error {
 // clone/sparse/pull plumbing but different implementations. See team context's
 // ComputeSparseSet() and manifest-driven approach vs this static list + sliding window.
 func ConfigureSparseCheckout(path string) error {
-	// init sparse checkout in cone mode
-	initCmd := exec.Command("git", "-C", path, "sparse-checkout", "init", "--cone")
-	if output, err := initCmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("sparse-checkout init: %w: %s", err, output)
+	// Only run sparse-checkout init on repos that don't have it yet.
+	// Re-running "init --cone" is destructive: it reapplies the cone rules,
+	// which deletes untracked files in directories outside the cone (e.g.
+	// .sageox/cache/codedb/) before "sparse-checkout set" can protect them.
+	// This function is called every ~60s by the sync scheduler to refresh
+	// the rolling murmur/github data window — "sparse-checkout set" alone
+	// is sufficient for that.
+	checkCmd := exec.Command("git", "-C", path, "config", "--type=bool", "--get", "core.sparseCheckout")
+	if out, err := checkCmd.CombinedOutput(); err != nil || strings.TrimSpace(string(out)) != "true" {
+		initCmd := exec.Command("git", "-C", path, "sparse-checkout", "init", "--cone")
+		if output, err := initCmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("sparse-checkout init: %w: %s", err, output)
+		}
 	}
 
 	// base directories always included
 	dirs := []string{
+		".sageox",
 		".sync",
 		"sessions",
 		"audit",
@@ -444,6 +458,19 @@ func ConfigureSparseCheckout(path string) error {
 	// hourly granularity keeps the checkout tight while ensuring the daemon
 	// can read murmur files after git pull
 	dirs = append(dirs, ComputeMurmurDataPaths(DefaultMurmurWindowHours)...)
+
+	// protect staged/dirty files: "sparse-checkout set" removes tracked files
+	// outside the cone from the working tree. If the CLI has staged files in a
+	// directory not in our computed set (e.g. data/linear/, data/custom/), those
+	// files would be deleted from disk before the CLI commits+pushes.
+	// Detect such directories and include them in the cone.
+	dirs = append(dirs, dirtyDirsOutsideCone(path, dirs)...)
+
+	// runtime guard: .sageox MUST be in the sparse-checkout set.
+	// without it, git sparse-checkout set deletes .sageox/cache/ (codedb, etc.)
+	if err := validateSparseCheckoutDirs(dirs); err != nil {
+		return err
+	}
 
 	// set directories to include (excludes everything else like assets/)
 	args := append([]string{"-C", path, "sparse-checkout", "set"}, dirs...)
@@ -459,6 +486,99 @@ func ConfigureSparseCheckout(path string) error {
 	}
 
 	return nil
+}
+
+// validateSparseCheckoutDirs returns an error if required directories are missing
+// from the sparse-checkout set. Defense-in-depth: if .sageox is ever dropped from
+// dirs, git sparse-checkout set would silently delete .sageox/cache/ (codedb, etc.).
+func validateSparseCheckoutDirs(dirs []string) error {
+	for _, d := range dirs {
+		if d == ".sageox" {
+			return nil
+		}
+	}
+	return fmt.Errorf("BUG: .sageox missing from sparse-checkout dirs; refusing to run git sparse-checkout set")
+}
+
+// dirtyDirsOutsideCone returns top-level directories that contain staged or
+// modified tracked files but are not already in the cone dirs list.
+// This prevents "sparse-checkout set" from deleting files the CLI has staged
+// but not yet committed+pushed.
+func dirtyDirsOutsideCone(repoPath string, coneDirs []string) []string {
+	cmd := exec.Command("git", "-C", repoPath, "status", "--porcelain", "-z")
+	out, err := cmd.Output()
+	if err != nil || len(out) == 0 {
+		return nil
+	}
+	return parseDirtyDirsFromPorcelain(out, coneDirs)
+}
+
+// parseDirtyDirsFromPorcelain extracts top-level directories from NUL-delimited
+// "git status --porcelain -z" output that are not already in coneDirs.
+//
+// Porcelain -z format:
+//   - Normal entries:  "XY path\0"
+//   - Rename/copy:     "XY new_path\0orig_path\0" (orig_path is a bare token)
+func parseDirtyDirsFromPorcelain(porcelainOutput []byte, coneDirs []string) []string {
+	// normalize cone dirs by stripping trailing slashes so prefix matching
+	// works against path components (e.g. "data/github/2026/03/30/" → "data/github/2026/03/30")
+	coneSet := make(map[string]bool, len(coneDirs))
+	for _, d := range coneDirs {
+		coneSet[strings.TrimRight(d, "/")] = true
+	}
+
+	seen := make(map[string]bool)
+	var extra []string
+
+	addIfUncovered := func(filePath string) {
+		if filePath == "" {
+			return
+		}
+		// check if any path prefix is already covered by a cone entry
+		// e.g. for "data/github/2026/03/30/prs.json", check:
+		//   "data", "data/github", "data/github/2026", ... "data/github/2026/03/30"
+		for i := 0; i < len(filePath); i++ {
+			if filePath[i] == '/' {
+				if coneSet[filePath[:i]] {
+					return
+				}
+			}
+		}
+		// check the full path for root-level files or exact matches
+		if coneSet[filePath] {
+			return
+		}
+		// not covered — add the first path segment (top-level dir)
+		topDir := filePath
+		if idx := strings.IndexByte(filePath, '/'); idx > 0 {
+			topDir = filePath[:idx]
+		}
+		if !seen[topDir] {
+			seen[topDir] = true
+			extra = append(extra, topDir)
+		}
+	}
+
+	entries := strings.Split(string(porcelainOutput), "\x00")
+	expectBarePath := false
+	for _, entry := range entries {
+		if expectBarePath {
+			expectBarePath = false
+			addIfUncovered(entry)
+			continue
+		}
+		if len(entry) < 4 {
+			continue
+		}
+		statusX := entry[0]
+		filePath := entry[3:] // skip "XY " status prefix
+		addIfUncovered(filePath)
+		// rename (R) and copy (C) entries emit a second bare path
+		if statusX == 'R' || statusX == 'C' {
+			expectBarePath = true
+		}
+	}
+	return extra
 }
 
 // EnableSparseCheckout enables sparse checkout on an existing ledger.

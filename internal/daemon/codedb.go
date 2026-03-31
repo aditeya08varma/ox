@@ -2,10 +2,12 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +40,19 @@ type CodeDBManager struct {
 	lastErr   error
 	stats     CodeDBStats // cached after each index run; read by Stats() without opening DB
 	dataDir   string      // cached data dir; resolved once on first use
+
+	// testHook is called at the start of doIndex; nil in production.
+	// Tests use it to synchronize with or measure the indexing goroutine.
+	testHook func()
+
+	issues *IssueTracker // emits structured issues for ox status / ox doctor
+
+	// baseline index state (separate lifecycle from worktree indexing)
+	baselineIndexing bool
+	baselineStats    CodeDBStats
+	baselineDataDir  string // cached baseline dir; resolved once on first use
+	// baselineTestHook is called at the start of BuildBaseline; nil in production.
+	baselineTestHook func()
 }
 
 // CodeDBStats tracks index statistics.
@@ -54,6 +69,11 @@ type CodeDBStats struct {
 	LastError   string      `json:"last_error,omitempty"`
 	DataDir     string      `json:"data_dir"`
 	IndexExists bool        `json:"index_exists"`
+
+	// baseline index fields (ledger main branch, worktree-independent)
+	BaselineExists      bool `json:"baseline_exists"`
+	BaselineCommits     int  `json:"baseline_commits"`
+	BaselineIndexingNow bool `json:"baseline_indexing_now"`
 }
 
 // RepoStats tracks per-repo statistics within the index.
@@ -135,6 +155,19 @@ func (m *CodeDBManager) resolveSharedDataDir() string {
 	return dir
 }
 
+// ledgerRootForDataDir returns the ledger root directory if dataDir is inside a
+// ledger's .sageox/cache/ tree. Returns "" if dataDir is not a ledger-based path.
+// The shared CodeDB path is <ledger_root>/.sageox/cache/codedb/, so we look for
+// the /.sageox/cache/ suffix to extract the ledger root.
+func (m *CodeDBManager) ledgerRootForDataDir(dataDir string) string {
+	// CodeDBSharedDir produces: <ledger_root>/.sageox/cache/codedb
+	const marker = string(filepath.Separator) + ".sageox" + string(filepath.Separator) + "cache" + string(filepath.Separator)
+	if idx := strings.Index(dataDir, marker); idx > 0 {
+		return dataDir[:idx]
+	}
+	return ""
+}
+
 // SetLedgerPath sets the ledger checkout path for GitHub data indexing.
 // Called by the daemon when the ledger workspace is discovered.
 func (m *CodeDBManager) SetLedgerPath(path string) {
@@ -142,6 +175,126 @@ func (m *CodeDBManager) SetLedgerPath(path string) {
 	defer m.mu.Unlock()
 	m.ledgerPath = path
 }
+
+// SetIssueTracker wires the daemon's issue tracker so doIndex can emit
+// structured issues when the cache directory is missing.
+func (m *CodeDBManager) SetIssueTracker(tracker *IssueTracker) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.issues = tracker
+}
+
+// resolveBaselineDataDir returns the baseline CodeDB directory from project config.
+// Returns empty string if project config is unavailable.
+// Result is cached after first resolution.
+func (m *CodeDBManager) resolveBaselineDataDir() string {
+	m.mu.Lock()
+	if m.baselineDataDir != "" {
+		dir := m.baselineDataDir
+		m.mu.Unlock()
+		return dir
+	}
+	projectRoot := m.projectRoot
+	m.mu.Unlock()
+
+	ctx, err := config.LoadProjectContext(projectRoot)
+	if err != nil {
+		return ""
+	}
+	dir := paths.CodeDBBaselineDir(ctx.RepoID(), ctx.Endpoint())
+	if dir == "" {
+		return ""
+	}
+	m.mu.Lock()
+	m.baselineDataDir = dir
+	m.mu.Unlock()
+	return dir
+}
+
+// BuildBaseline builds or refreshes the baseline index from the ledger's main branch.
+// This is independent of the worktree index — baseline provides committed content search
+// even when no worktree is active.
+// Non-blocking: if a baseline build is already in progress, returns immediately.
+func (m *CodeDBManager) BuildBaseline(ctx context.Context, ledgerPath string) {
+	if ledgerPath == "" {
+		return
+	}
+
+	m.mu.Lock()
+	if m.baselineIndexing {
+		m.mu.Unlock()
+		return
+	}
+	m.baselineIndexing = true
+	m.mu.Unlock()
+
+	defer func() {
+		m.mu.Lock()
+		m.baselineIndexing = false
+		m.mu.Unlock()
+	}()
+
+	if m.baselineTestHook != nil {
+		m.baselineTestHook()
+	}
+
+	baselineDir := m.resolveBaselineDataDir()
+	if baselineDir == "" {
+		m.logger.Debug("codedb baseline: no baseline dir available")
+		return
+	}
+
+	if _, err := os.Stat(ledgerPath); os.IsNotExist(err) {
+		m.logger.Debug("codedb baseline: ledger path gone", "path", ledgerPath)
+		return
+	}
+
+	if err := os.MkdirAll(baselineDir, 0o755); err != nil {
+		m.logger.Warn("codedb baseline: create dir failed", "error", err)
+		return
+	}
+
+	indexCtx, cancel := context.WithTimeout(ctx, maxIndexDuration)
+	defer cancel()
+
+	start := time.Now()
+	m.logger.Info("codedb baseline build started", "ledger", ledgerPath, "dir", baselineDir)
+
+	db, err := codedb.Open(baselineDir)
+	if err != nil {
+		m.logger.Warn("codedb baseline: open failed", "error", err)
+		return
+	}
+	defer db.Close()
+
+	opts := index.IndexOptions{}
+
+	if err := db.IndexLocalRepo(indexCtx, ledgerPath, opts); err != nil {
+		m.logger.Warn("codedb baseline: index failed", "error", err)
+		return
+	}
+
+	if _, err := db.ParseSymbols(indexCtx, nil); err != nil {
+		m.logger.Warn("codedb baseline: parse symbols failed", "error", err)
+		// non-fatal: committed content is already indexed
+	}
+
+	if _, err := db.ParseComments(indexCtx, nil); err != nil {
+		m.logger.Warn("codedb baseline: parse comments failed", "error", err)
+		// non-fatal
+	}
+
+	cached := queryStatsFromDB(db, baselineDir)
+	m.mu.Lock()
+	m.baselineStats = cached
+	m.mu.Unlock()
+
+	m.logger.Info("codedb baseline build complete", "duration", time.Since(start).Round(time.Millisecond), "commits", cached.Commits, "symbols", cached.Symbols)
+}
+
+// maxIndexDuration caps how long a single indexing run may take before being
+// canceled. 21h+ runaway burns were observed when a worktree was deleted mid-index.
+const maxIndexDuration = 2 * time.Hour
 
 // Index runs indexing with progress reporting. Only one indexing operation runs at a time.
 // If indexing is already in progress, returns an error immediately.
@@ -160,7 +313,6 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		return nil, fmt.Errorf("indexing already in progress")
 	}
 	m.indexing = true
-	projectRoot := m.projectRoot // snapshot under lock to avoid races with UpdateProjectRoot
 	m.mu.Unlock()
 
 	defer func() {
@@ -169,7 +321,41 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 		m.mu.Unlock()
 	}()
 
+	return m.doIndex(ctx, payload, pw)
+}
+
+// doIndex executes the full indexing pipeline. Callers must already own the
+// m.indexing flag (i.e. have set it to true under m.mu before calling).
+func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, pw *ProgressWriter) (*CodeIndexResult, error) {
+	if m.testHook != nil {
+		m.testHook()
+	}
+
+	m.mu.Lock()
+	projectRoot := m.projectRoot // snapshot under lock to avoid races with UpdateProjectRoot
+	m.mu.Unlock()
+
+	// Fail fast if the worktree no longer exists (e.g. Conductor deleted it).
+	// go-git can still open the gitdir and iterate all of history indefinitely
+	// even after the worktree directory is removed.
+	if payload.URL == "" {
+		if _, err := os.Stat(projectRoot); os.IsNotExist(err) {
+			return nil, fmt.Errorf("project root no longer exists, skipping index %s: %w", projectRoot, err)
+		}
+	}
+
 	dataDir := m.resolveSharedDataDir()
+
+	// Guard: if dataDir lives inside a ledger that hasn't been cloned yet,
+	// skip indexing. Without this check, os.MkdirAll(dataDir) creates the
+	// ledger root directory as a side effect, which causes the subsequent
+	// git clone to fail with "already exists and is not an empty directory".
+	if ledgerRoot := m.ledgerRootForDataDir(dataDir); ledgerRoot != "" {
+		gitDir := filepath.Join(ledgerRoot, ".git")
+		if _, err := os.Stat(gitDir); os.IsNotExist(err) {
+			return nil, fmt.Errorf("ledger not yet cloned at %s, skipping index", ledgerRoot)
+		}
+	}
 
 	target := projectRoot
 	if payload.URL != "" {
@@ -290,6 +476,15 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 			m.logger.Debug("dirty index built", "files", dirtyCount)
 		}
 		dirtyDuration = time.Since(dirtyStart)
+
+		// also write dirty overlay to baseline dir so CLI search finds it
+		if baseDir := m.resolveBaselineDataDir(); baseDir != "" && baseDir != dataDir {
+			baseDB, bErr := codedb.Open(baseDir)
+			if bErr == nil {
+				baseDB.BuildDirtyIndex(ctx, projectRoot, opts)
+				baseDB.Close()
+			}
+		}
 	}
 	totalDuration := time.Since(totalStart)
 
@@ -354,33 +549,86 @@ func (m *CodeDBManager) Index(ctx context.Context, payload CodeIndexPayload, pw 
 // re-index if needed. If no index exists yet, creates the initial index.
 // This is non-blocking and safe to call from the scheduler or daemon startup.
 func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
+	// Claim the indexing flag BEFORE launching the goroutine.
+	// Without this, rapid CheckFreshness calls (e.g. from the file-watcher path)
+	// can see m.indexing=false, all launch goroutines, and then race to call
+	// m.Index() — the losers immediately return "indexing already in progress"
+	// and call gcDirtyIndexes, which opens codedb while the winner holds bbolt's
+	// exclusive lock. That open fails with a timeout (not ENOENT), which
+	// openOrCreateBleveIndex misinterprets as corruption and wipes the bleve
+	// directory mid-index.
 	m.mu.Lock()
 	if m.indexing {
 		m.mu.Unlock()
 		return
 	}
+	m.indexing = true
 	m.mu.Unlock()
+
+	// guard: skip dirty rebuild when worktree is gone (baseline is unaffected)
+	m.mu.Lock()
+	projectRoot := m.projectRoot
+	m.mu.Unlock()
+	if _, err := os.Stat(projectRoot); os.IsNotExist(err) {
+		m.logger.Debug("codedb skipping freshness check, worktree gone", "path", projectRoot)
+		m.mu.Lock()
+		m.indexing = false
+		m.mu.Unlock()
+		return
+	}
 
 	dataDir := m.resolveSharedDataDir()
 	isInitial := false
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
 		isInitial = true
+	} else {
+		// dir exists but check if it was never successfully indexed
+		// (e.g. a prior run created the schema then crashed before writing commits)
+		m.mu.Lock()
+		emptyDB := m.stats.Commits == 0 && !m.stats.IndexExists
+		m.mu.Unlock()
+		if emptyDB {
+			isInitial = true
+		}
 	}
 
 	// run background index (initial build or incremental refresh)
 	go func() {
+		defer func() {
+			m.mu.Lock()
+			m.indexing = false
+			m.mu.Unlock()
+		}()
+
 		if isInitial {
 			m.logger.Info("codedb auto-indexing repo for first time")
 		} else {
 			m.logger.Info("codedb freshness check starting")
 		}
-		result, err := m.Index(ctx, CodeIndexPayload{}, nil)
+		// Cap indexing time — without a deadline, a deleted worktree can cause
+		// go-git to iterate git history indefinitely (observed: 21+ hours).
+		indexCtx, cancel := context.WithTimeout(ctx, maxIndexDuration)
+		defer cancel()
+		// Call doIndex directly — we already own m.indexing, so Index() would
+		// deadlock (it also tries to claim the flag).
+		result, err := m.doIndex(indexCtx, CodeIndexPayload{}, nil)
 		if err != nil {
+			if errors.Is(err, os.ErrNotExist) && m.issues != nil {
+				m.issues.SetIssue(DaemonIssue{
+					Type:     IssueTypeCodeDBCacheWiped,
+					Severity: SeverityWarning,
+					Repo:     "codedb",
+					Summary:  "codedb cache directory missing; sparse-checkout may have wiped .sageox/cache/",
+				})
+			}
 			if isInitial {
 				m.logger.Warn("codedb initial index failed", "error", err)
 			} else {
 				m.logger.Debug("codedb freshness check failed", "error", err)
 			}
+		}
+		if err == nil && m.issues != nil {
+			m.issues.ClearIssue(IssueTypeCodeDBCacheWiped, "codedb")
 		}
 		if m.telemetry != nil && result != nil {
 			m.telemetry.RecordCodeIndexComplete(result, "success")
@@ -419,9 +667,18 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 	lastIndex := m.lastIndex
 	lastErr := m.lastErr
 	cached := m.stats
+	baselineIndexing := m.baselineIndexing
+	baselineStats := m.baselineStats
 	m.mu.Unlock()
 
 	dataDir := m.resolveSharedDataDir()
+
+	// merge baseline fields into result
+	mergeBaseline := func(s *CodeDBStats) {
+		s.BaselineIndexingNow = baselineIndexing
+		s.BaselineExists = baselineStats.IndexExists
+		s.BaselineCommits = baselineStats.Commits
+	}
 
 	// if we have cached stats, return them with live metadata
 	if cached.IndexExists {
@@ -432,6 +689,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 		if lastErr != nil {
 			cached.LastError = lastErr.Error()
 		}
+		mergeBaseline(&cached)
 		return cached
 	}
 
@@ -450,6 +708,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 		if _, err := os.Stat(dataDir); err == nil {
 			result.IndexExists = true
 		}
+		mergeBaseline(&result)
 		return result
 	}
 
@@ -474,6 +733,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 		}
 	}
 
+	mergeBaseline(&result)
 	return result
 }
 
@@ -514,15 +774,28 @@ func queryStatsFromDB(db *codedb.DB, dataDir string) CodeDBStats {
 // UpdateProjectRoot updates the project root path used for indexing.
 // Called when a heartbeat arrives from a different workspace (e.g., Conductor
 // creates a new workspace after deleting the old one).
+//
+// dataDir is intentionally NOT reset here: all worktrees of the same repo share
+// the same dataDir (keyed by repo ID + endpoint). Resetting it on every heartbeat
+// from a different worktree causes repeated config re-resolution on repos with
+// many active Conductor workspaces, producing log spam and unnecessary I/O.
 func (m *CodeDBManager) UpdateProjectRoot(path string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if path == "" || path == m.projectRoot {
 		return
 	}
+	// Only switch if the current project root no longer exists on disk.
+	// This handles the Conductor pattern (old workspace deleted, new one created)
+	// while preventing oscillation when multiple sessions share the same daemon
+	// (e.g., one session in the main worktree, one in a Conductor worktree,
+	// both alive simultaneously — without this guard, their heartbeats cause
+	// the root to flip every 60s, triggering repeated full re-indexes).
+	if _, err := os.Stat(m.projectRoot); err == nil {
+		return
+	}
 	old := m.projectRoot
 	m.projectRoot = path
-	m.dataDir = "" // force re-resolve under the new root
 	m.logger.Info("codedb project root updated", "old", old, "new", path)
 }
 

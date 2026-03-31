@@ -23,6 +23,7 @@ import (
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/lfs"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
@@ -176,7 +177,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	// For generic adapters, create the drop file for the agent to write to.
 	// Must happen BEFORE StartRecording because it validates SessionFile exists.
-	if sessionFile == "" && adapterName == "generic" {
+	if needsGenericDropFile(sessionFile, adapterName) {
 		username := getSessionUsername()
 		sessionName := session.GenerateSessionName(inst.AgentID, username)
 
@@ -201,6 +202,15 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 
 	useragent.SetAgentType(adapterName)
 
+	// capture file size before recording starts — entries before this offset are pre-session
+	// (e.g., buffered messages from before /ox-session-start was called)
+	var startOffset int64
+	if sessionFile != "" {
+		if fi, err := os.Stat(sessionFile); err == nil {
+			startOffset = fi.Size()
+		}
+	}
+
 	// start recording with agent ID from session
 	opts := session.StartRecordingOptions{
 		AgentID:       inst.AgentID,
@@ -211,7 +221,8 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		Username:      getSessionUsername(),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
-		ParentPID:     os.Getppid(), // use current parent, not stale prime-time PID (fixes Conductor orphan detection)
+		ParentPID:     proc.FindAgentAncestorPID(),
+		StartOffset:   startOffset,
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)
@@ -381,38 +392,35 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	if state == nil {
 		return fmt.Errorf("not currently recording\nRun 'ox agent %s session start' to begin recording", inst.AgentID)
 	}
-	if pipeline.IsGenericAdapter(state.AdapterName) && state.SessionFile != "" {
-		info, statErr := os.Stat(state.SessionFile)
-		if statErr != nil || info.Size() == 0 {
-			// mark recording as incomplete (allows restart without "already recording" error)
-			_ = session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
-				s.StopIncomplete = true
-			})
+	if isGenericDropFileEmpty(state) {
+		// mark recording as incomplete (allows restart without "already recording" error)
+		_ = session.UpdateRecordingStateForAgent(projectRoot, inst.AgentID, func(s *session.RecordingState) {
+			s.StopIncomplete = true
+		})
 
-			type retryOutput struct {
-				Success       bool     `json:"success"`
-				Type          string   `json:"type"`
-				AgentID       string   `json:"agent_id"`
-				SessionFile   string   `json:"session_file,omitempty"`
-				RetryGuidance string   `json:"retry_guidance,omitempty"`
-				NextActions   []string `json:"next_actions,omitempty"`
-			}
-			retry := retryOutput{
-				Success:       false,
-				Type:          "session_stop_retry",
-				AgentID:       inst.AgentID,
-				SessionFile:   state.SessionFile,
-				RetryGuidance: fmt.Sprintf("No session data captured. Use 'ox agent %s session log --stdin' to write your conversation, then re-run this command.", inst.AgentID),
-				NextActions: []string{
-					fmt.Sprintf("Dump conversation as JSONL: ox agent %s session log --role user --stdin", inst.AgentID),
-					fmt.Sprintf("Re-run: ox agent %s session stop", inst.AgentID),
-				},
-			}
-			jsonOut, _ := json.MarshalIndent(retry, "", "  ")
-			trackContextBytes(int64(len(jsonOut)))
-			fmt.Println(string(jsonOut))
-			return nil
+		type retryOutput struct {
+			Success       bool     `json:"success"`
+			Type          string   `json:"type"`
+			AgentID       string   `json:"agent_id"`
+			SessionFile   string   `json:"session_file,omitempty"`
+			RetryGuidance string   `json:"retry_guidance,omitempty"`
+			NextActions   []string `json:"next_actions,omitempty"`
 		}
+		retry := retryOutput{
+			Success:       false,
+			Type:          "session_stop_retry",
+			AgentID:       inst.AgentID,
+			SessionFile:   state.SessionFile,
+			RetryGuidance: fmt.Sprintf("No session data captured. Use 'ox agent %s session log --stdin' to write your conversation, then re-run this command.", inst.AgentID),
+			NextActions: []string{
+				fmt.Sprintf("Dump conversation as JSONL: ox agent %s session log --role user --stdin", inst.AgentID),
+				fmt.Sprintf("Re-run: ox agent %s session stop", inst.AgentID),
+			},
+		}
+		jsonOut, _ := json.MarshalIndent(retry, "", "  ")
+		trackContextBytes(int64(len(jsonOut)))
+		fmt.Println(string(jsonOut))
+		return nil
 	}
 
 	// mark explicit stop so /clear hook doesn't silently auto-restart the session
@@ -879,10 +887,13 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	if _, statErr := os.Stat(planSrcPath); statErr == nil {
 		cacheDir := filepath.Dir(result.RawPath)
 		planDstPath := filepath.Join(cacheDir, ledgerFilePlan)
-		if data, readErr := os.ReadFile(planSrcPath); readErr == nil {
-			if writeErr := os.WriteFile(planDstPath, data, 0644); writeErr == nil {
-				result.PlanPath = planDstPath
-			}
+		data, readErr := os.ReadFile(planSrcPath)
+		if readErr != nil {
+			slog.Warn("plan.md read failed", "path", planSrcPath, "error", readErr)
+		} else if writeErr := os.WriteFile(planDstPath, data, 0644); writeErr != nil {
+			slog.Warn("plan.md copy failed", "dst", planDstPath, "error", writeErr)
+		} else {
+			result.PlanPath = planDstPath
 		}
 	}
 
@@ -1049,7 +1060,7 @@ func copySessionCacheToLedger(result *agentSessionResult, ledgerPath, sessionNam
 // to upload and finalize a session asynchronously. Returns an error if the daemon
 // is unreachable or the IPC message fails (caller should flag for doctor).
 func signalDaemonSessionFinalize(sessionName, ledgerPath, cachePath, projectRoot string) error {
-	client := daemon.NewClientWithTimeout(100 * time.Millisecond)
+	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
 	return client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
 		SessionName: sessionName,
 		LedgerPath:  ledgerPath,
@@ -1819,4 +1830,23 @@ func rawJSONLHasEntries(rawPath string) bool {
 		}
 	}
 	return false
+}
+
+// needsGenericDropFile returns true when a generic adapter session needs a drop
+// file created (no session file provided and adapter is generic).
+func needsGenericDropFile(sessionFile, adapterName string) bool {
+	return sessionFile == "" && pipeline.IsGenericAdapter(adapterName)
+}
+
+// isGenericDropFileEmpty returns true when a generic adapter's drop file is
+// missing or empty (0 bytes). Non-generic adapters always return false.
+func isGenericDropFileEmpty(state *session.RecordingState) bool {
+	if !pipeline.IsGenericAdapter(state.AdapterName) || state.SessionFile == "" {
+		return false
+	}
+	info, err := os.Stat(state.SessionFile)
+	if err != nil {
+		return errors.Is(err, os.ErrNotExist)
+	}
+	return info.Size() == 0
 }

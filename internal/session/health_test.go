@@ -44,15 +44,23 @@ func TestCheckHealth_StorageNotWritable(t *testing.T) {
 }
 
 func TestCheckHealth_RepoNotCloned(t *testing.T) {
-	// CheckHealth uses ledger.DefaultPath() based on cwd git root
-	// since tests run from ox repo, this finds the sibling ledger pattern
-	// the result depends on whether that ledger exists
-	status := CheckHealth("")
+	// isolate HOME/XDG_DATA_HOME so ledger resolution can't find a real ledger
+	tempHome := t.TempDir()
+	t.Setenv("HOME", tempHome)
+	t.Setenv("XDG_DATA_HOME", filepath.Join(tempHome, ".local", "share"))
 
-	// either RepoCloned is true (ledger exists) or false with error
-	if !status.RepoCloned {
-		assert.Equal(t, "ledger not provisioned", status.RepoError)
-	}
+	// use a temp dir with .sageox/ but no ledger
+	tmpDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0755))
+	// write a minimal config so ledgerPathFromProject returns a non-existent path
+	configData := []byte(`{"repo_id":"nonexistent-repo","endpoint":"https://test.sageox.ai"}`)
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), configData, 0644))
+
+	status := CheckHealth(tmpDir)
+
+	// the ledger for "nonexistent-repo" won't exist → RepoCloned should be false
+	assert.False(t, status.RepoCloned, "RepoCloned should be false when ledger doesn't exist")
+	assert.NotEmpty(t, status.RepoError, "should have a repo error when ledger doesn't exist")
 }
 
 func TestCheckHealth_RepoCloned(t *testing.T) {
@@ -86,12 +94,9 @@ func TestCheckHealth_RepoCloned(t *testing.T) {
 }
 
 func TestCheckHealth_RecordingActive(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-
-	// create project root with recording state in session folder
-	projectRoot := t.TempDir()
-	sessionPath := filepath.Join(projectRoot, "sessions", "2026-01-06T14-30-user-Oxa7b3")
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-Oxa7b3")
 
 	state := &RecordingState{
 		OutputFile:  "/path/to/session.jsonl",
@@ -112,11 +117,9 @@ func TestCheckHealth_RecordingActive(t *testing.T) {
 }
 
 func TestCheckHealth_StopIncomplete(t *testing.T) {
-	tempHome := t.TempDir()
-	t.Setenv("HOME", tempHome)
-
-	projectRoot := t.TempDir()
-	sessionPath := filepath.Join(projectRoot, "sessions", "2026-01-06T14-30-user-OxInc1")
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-06T14-30-user-OxInc1")
 
 	state := &RecordingState{
 		AgentID:        "OxInc1",

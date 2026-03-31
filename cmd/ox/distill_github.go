@@ -94,11 +94,16 @@ If you are uncertain whether something is meaningful, include it with a note in 
 
 // extractGitHubFacts queries CodeDB for GitHub activity, partitions by day,
 // calls the LLM extractor per day, and writes facts to memory/.github-facts/{date}-{uuid7}.jsonl.
-func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, projectRoot, guidelines string) error {
-	// resolve CodeDB
-	dataDir := resolveCodeDBDir(projectRoot)
+//
+// repoID identifies the repo for per-repo state tracking.
+// dataDir is the path to the CodeDB data directory.
+func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, state *distillStateV2, repoID, dataDir, guidelines string) error {
+	if dataDir == "" {
+		slog.Debug("no CodeDB dir, skipping github fact extraction", "repo", repoID)
+		return nil
+	}
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
-		slog.Debug("no CodeDB for github fact extraction, skipping")
+		slog.Debug("no CodeDB for github fact extraction, skipping", "repo", repoID)
 		return nil
 	}
 
@@ -108,9 +113,9 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 	}
 	defer db.Close()
 
-	// compute time window from distill state
+	// compute time window from distill state (per-repo)
 	now := time.Now().UTC()
-	since := githubFactsSince(state, tc.Path)
+	since := state.githubFactsTimeForRepo(repoID, tc.Path)
 
 	result, err := query.AssembleActivity(ctx, db.Store(), since, now)
 	if err != nil {
@@ -122,7 +127,7 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 		slog.Debug("no github activity in window, skipping extraction",
 			"since", since.Format(time.RFC3339), "until", now.Format(time.RFC3339))
 		if !distillDryRun {
-			state.LastGitHubFacts = now.Format(time.RFC3339)
+			state.setGitHubFactsTime(repoID, now)
 		}
 		return nil
 	}
@@ -218,7 +223,7 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 		fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s\n", factFile)
 	}
 
-	state.LastGitHubFacts = now.Format(time.RFC3339)
+	state.setGitHubFactsTime(repoID, now)
 	return nil
 }
 

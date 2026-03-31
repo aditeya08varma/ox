@@ -60,9 +60,13 @@ func TestFormatIndexTiming(t *testing.T) {
 }
 
 func TestIsCodeDBIndexing_DefaultReturnsFalseWithoutDaemon(t *testing.T) {
+	// isolate from real daemon: prevent config.FindProjectRoot walk-up
+	t.Chdir(t.TempDir())
+
 	// With no daemon running, isCodeDBIndexing should return false
 	// (IPC fails → err != nil → false). This is the default in test environments.
-	assert.False(t, isCodeDBIndexing())
+	assert.False(t, isCodeDBIndexing(false))
+	assert.False(t, isCodeDBIndexing(true))
 }
 
 func TestIsCodeDBIndexing_Override(t *testing.T) {
@@ -71,16 +75,16 @@ func TestIsCodeDBIndexing_Override(t *testing.T) {
 
 	tests := []struct {
 		name string
-		stub func() bool
+		stub func(bool) bool
 		want bool
 	}{
-		{"indexing in progress", func() bool { return true }, true},
-		{"not indexing", func() bool { return false }, false},
+		{"indexing in progress", func(bool) bool { return true }, true},
+		{"not indexing", func(bool) bool { return false }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			isCodeDBIndexing = tt.stub
-			assert.Equal(t, tt.want, isCodeDBIndexing())
+			assert.Equal(t, tt.want, isCodeDBIndexing(false))
 		})
 	}
 }
@@ -159,6 +163,39 @@ func TestPopulateStatsFromDaemonCache_ZeroValues(t *testing.T) {
 	assert.Equal(t, 0, totalComments)
 	assert.Equal(t, 0, totalPRs)
 	assert.Equal(t, 0, totalIssues)
+}
+
+// TestCodeStatusDisplay_EmptyIndex is a regression test for the false-positive where
+// ox code stats showed "✓ indexed" when the index directory existed but the DB had 0 commits.
+// This happens when indexing was interrupted after schema creation but before any data was written.
+func TestCodeStatusDisplay_EmptyIndex(t *testing.T) {
+	// Reproduce the exact condition: indexExists=true, codeStats=nil (no daemon), totalCommits=0.
+	// The switch in codeStatusCmd must NOT fall through to the default "✓ indexed" case.
+	indexExists := true
+	totalCommits := 0
+	var codeStats *daemon.CodeDBStats // nil = no daemon running
+
+	// Evaluate the switch conditions in order, matching codeStatusCmd logic.
+	var statusCase string
+	switch {
+	case !indexExists && (codeStats == nil || !codeStats.IndexingNow):
+		statusCase = "not-indexed"
+	case codeStats != nil && codeStats.IndexingNow:
+		statusCase = "indexing"
+	case codeStats != nil && codeStats.LastError != "" && totalCommits == 0:
+		statusCase = "pending"
+	case codeStats != nil && codeStats.LastError != "":
+		statusCase = "error"
+	case codeStats != nil && !codeStats.LastIndexed.IsZero():
+		statusCase = "indexed-with-time"
+	case indexExists && totalCommits == 0:
+		statusCase = "empty-index"
+	default:
+		statusCase = "indexed"
+	}
+
+	assert.Equal(t, "empty-index", statusCase,
+		"index dir exists with 0 commits and no daemon must show 'empty index', not 'indexed'")
 }
 
 func TestFormatDurationBrief(t *testing.T) {

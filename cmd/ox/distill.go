@@ -389,14 +389,76 @@ type distillStateV2 struct {
 	// Map-based (not timestamp cursor) because discussions arrive out of order via daemon sync.
 	ProcessedDiscussions map[string]string `json:"processed_discussions,omitempty"`
 	// LastGitHubFacts is the RFC3339 timestamp of the last successful GitHub fact extraction.
+	// Used for single-repo mode (v2 compat). Multi-repo uses RepoGitHubFacts.
 	LastGitHubFacts string `json:"last_github_facts,omitempty"`
 	// ProcessedSessions tracks which session dirs have been processed.
-	// Key: directory name, Value: content hash of summary.json at time of processing.
-	// Map-based (not timestamp cursor) because sessions arrive out of order via daemon sync.
+	// Used for single-repo mode (v2 compat). Multi-repo uses RepoSessions.
 	ProcessedSessions map[string]string `json:"processed_sessions,omitempty"`
+
+	// Per-repo fields (v3): keyed by RepoID for multi-ledger support.
+	// When DISTILL_REPOS is set, extraction state is tracked per-repo.
+	RepoSessions    map[string]map[string]string `json:"repo_sessions,omitempty"`
+	RepoGitHubFacts map[string]string            `json:"repo_github_facts,omitempty"`
+
 	// v1 compat fields (read for migration, not written)
 	LastDistilled    string `json:"last_distilled,omitempty"`
 	ObservationCount int    `json:"observation_count,omitempty"`
+}
+
+// sessionsForRepo returns the processed sessions map for a specific repo.
+// Handles migration from flat ProcessedSessions to per-repo RepoSessions.
+func (s *distillStateV2) sessionsForRepo(repoID string) map[string]string {
+	if s.RepoSessions == nil {
+		s.RepoSessions = make(map[string]map[string]string)
+	}
+	if m, ok := s.RepoSessions[repoID]; ok {
+		return m
+	}
+	s.RepoSessions[repoID] = make(map[string]string)
+	return s.RepoSessions[repoID]
+}
+
+// githubFactsTimeForRepo returns the last GitHub extraction timestamp for a repo.
+// Falls back to the flat LastGitHubFacts for single-repo compat.
+func (s *distillStateV2) githubFactsTimeForRepo(repoID, tcPath string) time.Time {
+	if s.RepoGitHubFacts != nil {
+		if ts, ok := s.RepoGitHubFacts[repoID]; ok {
+			if t, err := time.Parse(time.RFC3339, ts); err == nil {
+				return t
+			}
+		}
+	}
+	// fall back to flat field for single-repo compat
+	return githubFactsSince(&distillStateV2{LastGitHubFacts: s.LastGitHubFacts}, tcPath)
+}
+
+// setGitHubFactsTime records the last GitHub extraction timestamp for a repo.
+func (s *distillStateV2) setGitHubFactsTime(repoID string, t time.Time) {
+	if s.RepoGitHubFacts == nil {
+		s.RepoGitHubFacts = make(map[string]string)
+	}
+	s.RepoGitHubFacts[repoID] = t.Format(time.RFC3339)
+}
+
+// migrateToPerRepo migrates flat v2 state into per-repo maps for the given repoID.
+// Called once when transitioning from single-repo to multi-repo mode.
+func (s *distillStateV2) migrateToPerRepo(repoID string) {
+	if len(s.ProcessedSessions) > 0 && len(s.RepoSessions) == 0 {
+		if s.RepoSessions == nil {
+			s.RepoSessions = make(map[string]map[string]string)
+		}
+		copied := make(map[string]string, len(s.ProcessedSessions))
+		for k, v := range s.ProcessedSessions {
+			copied[k] = v
+		}
+		s.RepoSessions[repoID] = copied
+	}
+	if s.LastGitHubFacts != "" && len(s.RepoGitHubFacts) == 0 {
+		if s.RepoGitHubFacts == nil {
+			s.RepoGitHubFacts = make(map[string]string)
+		}
+		s.RepoGitHubFacts[repoID] = s.LastGitHubFacts
+	}
 }
 
 // lastDailyTime returns the effective last daily distill time,
@@ -483,6 +545,106 @@ func syncBeforeDistill() error {
 	}
 
 	return nil
+}
+
+// distillRepo holds resolved paths for a single repo in a multi-ledger distill run.
+type distillRepo struct {
+	ProjectRoot string // path to the project root
+	RepoID      string // unique repo identifier from ProjectConfig
+	LedgerPath  string // path to the ledger (contains sessions/)
+	CodeDBDir   string // path to the CodeDB data directory
+}
+
+// resolveDistillRepos returns the list of repos to process for fact extraction.
+// If DISTILL_REPOS is set, parses colon-separated project root paths.
+// Otherwise, falls back to findProjectRoot() for single-repo behavior.
+// All repos must be initialized SageOx projects belonging to the same team.
+func resolveDistillRepos(primaryRoot string) ([]distillRepo, error) {
+	env := os.Getenv("DISTILL_REPOS")
+	if env == "" {
+		// single-repo mode: resolve from the primary project root
+		repo, err := resolveOneDistillRepo(primaryRoot)
+		if err != nil {
+			slog.Debug("primary repo not resolvable for extraction", "error", err)
+			return nil, nil
+		}
+		return []distillRepo{repo}, nil
+	}
+
+	parts := strings.Split(env, ":")
+	var repos []distillRepo
+	seen := make(map[string]bool)
+	var teamID string
+	var teamEndpoint string
+
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return nil, fmt.Errorf("invalid path %q in DISTILL_REPOS: %w", p, err)
+		}
+		if seen[abs] {
+			continue // deduplicate
+		}
+		seen[abs] = true
+
+		if !config.IsInitialized(abs) {
+			return nil, fmt.Errorf("path %q in DISTILL_REPOS is not a SageOx project", abs)
+		}
+
+		// validate team + endpoint consistency
+		projCfg, err := config.LoadProjectConfig(abs)
+		if err != nil {
+			return nil, fmt.Errorf("cannot load project config for %q: %w", abs, err)
+		}
+		repoEP := endpoint.NormalizeEndpoint(projCfg.Endpoint)
+		if teamID == "" {
+			teamID = projCfg.TeamID
+			teamEndpoint = repoEP
+		} else {
+			if projCfg.TeamID != teamID {
+				return nil, fmt.Errorf("repo %q belongs to team %q, expected %q — all DISTILL_REPOS must be in the same team", abs, projCfg.TeamID, teamID)
+			}
+			if repoEP != teamEndpoint {
+				return nil, fmt.Errorf("repo %q uses endpoint %q, expected %q — all DISTILL_REPOS must use the same endpoint", abs, repoEP, teamEndpoint)
+			}
+		}
+
+		repo, err := resolveOneDistillRepo(abs)
+		if err != nil {
+			return nil, fmt.Errorf("failed to resolve repo %q in DISTILL_REPOS: %w", abs, err)
+		}
+		repos = append(repos, repo)
+	}
+
+	if len(repos) == 0 {
+		return nil, fmt.Errorf("DISTILL_REPOS contains no valid repos")
+	}
+	return repos, nil
+}
+
+// resolveOneDistillRepo loads project context and resolves paths for a single repo.
+func resolveOneDistillRepo(root string) (distillRepo, error) {
+	projCtx, err := config.LoadProjectContext(root)
+	if err != nil {
+		return distillRepo{}, fmt.Errorf("load project context: %w", err)
+	}
+	repoID := projCtx.RepoID()
+	if repoID == "" {
+		return distillRepo{}, fmt.Errorf("no repo ID in project context")
+	}
+	ledgerPath := projCtx.DefaultLedgerPath()
+	codeDBDir := resolveCodeDBDir(root)
+
+	return distillRepo{
+		ProjectRoot: root,
+		RepoID:      repoID,
+		LedgerPath:  ledgerPath,
+		CodeDBDir:   codeDBDir,
+	}, nil
 }
 
 func runDistill(cmd *cobra.Command, _ []string) error {
@@ -573,7 +735,28 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
+	// resolve repos for multi-ledger extraction
+	repos, err := resolveDistillRepos(projectRoot)
+	if err != nil {
+		return fmt.Errorf("resolve distill repos: %w", err)
+	}
+
+	// migrate flat state to per-repo if transitioning to multi-repo.
+	// attribute existing flat state to the CWD project (whose state file we loaded),
+	// not repos[0] which may differ depending on DISTILL_REPOS order.
+	if len(repos) > 0 {
+		migrateRepoID := repos[0].RepoID
+		for _, r := range repos {
+			if r.ProjectRoot == projectRoot {
+				migrateRepoID = r.RepoID
+				break
+			}
+		}
+		state.migrateToPerRepo(migrateRepoID)
+	}
+
 	// extract facts from unprocessed discussions before daily distill
+	// (discussions live in team context, not per-ledger — no multi-repo loop needed)
 	if plan.Daily {
 		if err := extractDiscussionFacts(ctx, cmd, backend, tc, state, extractGuidelines); err != nil {
 			slog.Warn("discussion fact extraction failed", "error", err)
@@ -584,24 +767,27 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	// extract facts from GitHub activity before daily distill
+	// extract facts from all repos' ledgers (sessions + GitHub)
 	if plan.Daily {
-		if err := extractGitHubFacts(ctx, cmd, backend, tc, state, projectRoot, extractGuidelines); err != nil {
-			slog.Warn("github fact extraction failed", "error", err)
-		} else if !distillDryRun {
-			if err := saveDistillStateV2(projectRoot, state); err != nil {
-				slog.Warn("failed to save distill state after github extraction", "error", err)
+		for _, repo := range repos {
+			repoLabel := repo.RepoID
+			if len(repos) > 1 {
+				fmt.Fprintf(cmd.OutOrStdout(), "Processing repo %s (%s)...\n", repo.RepoID, repo.ProjectRoot)
 			}
-		}
-	}
 
-	// extract facts from session summaries before daily distill
-	if plan.Daily {
-		if err := extractSessionFacts(cmd, tc, state, projectRoot); err != nil {
-			slog.Warn("session fact extraction failed", "error", err)
-		} else if !distillDryRun {
-			if err := saveDistillStateV2(projectRoot, state); err != nil {
-				slog.Warn("failed to save distill state after session extraction", "error", err)
+			if err := extractSessionFacts(cmd, tc, state, repo.RepoID, repo.LedgerPath); err != nil {
+				slog.Warn("session fact extraction failed", "repo", repoLabel, "error", err)
+			}
+
+			if err := extractGitHubFacts(ctx, cmd, backend, tc, state, repo.RepoID, repo.CodeDBDir, extractGuidelines); err != nil {
+				slog.Warn("github fact extraction failed", "repo", repoLabel, "error", err)
+			}
+
+			// save state after each repo for crash resilience
+			if !distillDryRun {
+				if err := saveDistillStateV2(projectRoot, state); err != nil {
+					slog.Warn("failed to save distill state after repo extraction", "repo", repoLabel, "error", err)
+				}
 			}
 		}
 	}

@@ -112,6 +112,7 @@ type indexState struct {
 	diffBatch      *bleve.Batch
 	codeBatchN     int
 	diffBatchN     int
+	diffIndexFailed bool // set on first diff Bleve write failure; skips further diff writes
 	knownCommits   map[string]bool
 	treeCache      map[plumbing.Hash]map[string]plumbing.Hash
 	treeOrder      []plumbing.Hash // FIFO insertion order for per-entry eviction
@@ -140,15 +141,23 @@ func (st *indexState) flushCodeBatch(force bool) error {
 }
 
 // flushDiffBatch commits the diff batch if it has reached the threshold.
+// Diff index failures are non-fatal: SQL commits/blobs are the source of truth.
+// A diff Bleve failure means type:diff searches return incomplete results but
+// the core index (commits, blobs, symbols) is unaffected. On first failure the
+// run logs a warning and skips further diff writes to avoid cascading errors.
 func (st *indexState) flushDiffBatch(force bool) error {
-	if st.diffBatchN == 0 {
+	if st.diffIndexFailed || st.diffBatchN == 0 {
 		return nil
 	}
 	if !force && st.diffBatchN < bleveBatchSize {
 		return nil
 	}
 	if err := st.store.DiffIndex.Batch(st.diffBatch); err != nil {
-		return fmt.Errorf("flush diff batch: %w", err)
+		st.diffIndexFailed = true
+		slog.Warn("codedb: diff index write failed, type:diff search will be incomplete for this run", "err", err)
+		st.diffBatch = st.store.DiffIndex.NewBatch()
+		st.diffBatchN = 0
+		return nil // non-fatal: SQL data is preserved
 	}
 	st.diffBatch = st.store.DiffIndex.NewBatch()
 	st.diffBatchN = 0
@@ -1485,8 +1494,17 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 	}
 	inClause := strings.Join(placeholders, ", ")
 
+	// Only parse blobs visible at a branch tip (referenced by file_revs).
+	// Symbol queries always JOIN through file_revs, so symbols on
+	// historical-only blobs are never reachable. Skipping them avoids
+	// ~60-70% of tree-sitter parsing work on repos with long histories.
+	// Historical blobs keep parsed=0 so they'll be picked up if a future
+	// ref tip re-exposes them via buildTipFileRevs.
 	query := fmt.Sprintf(
-		"SELECT id, content_hash, language FROM blobs WHERE parsed = 0 AND language IN (%s)",
+		`SELECT DISTINCT b.id, b.content_hash, b.language
+		 FROM blobs b
+		 JOIN file_revs fr ON fr.blob_id = b.id
+		 WHERE b.parsed = 0 AND b.language IN (%s)`,
 		inClause,
 	)
 	rows, err := s.Query(query, args...)

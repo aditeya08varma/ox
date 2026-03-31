@@ -331,11 +331,37 @@ func IsRecording(projectRoot string) bool {
 	return err == nil && state != nil
 }
 
+// resolveSessionsWritePath returns the single canonical directory for writing
+// session data (markers, recording state). Prefers ledger cache, falls back to
+// XDG cache. Returns "" if no writable path can be resolved.
+//
+// This must NEVER return a path inside the user's repository.
+func resolveSessionsWritePath(projectRoot string) string {
+	repoID := getRepoIDFromProject(projectRoot)
+	if repoID != "" {
+		ep := getProjectEndpoint(projectRoot)
+		if ep != "" {
+			ledgerBase := paths.LedgerSessionCacheBase(repoID, ep)
+			if ledgerBase != "" {
+				return filepath.Join(ledgerBase, "sessions")
+			}
+		}
+		contextPath := GetContextPath(repoID)
+		if contextPath != "" {
+			return filepath.Join(contextPath, "sessions")
+		}
+	}
+	return ""
+}
+
 const explicitStopMarker = ".session_stopped"
 
 // MarkExplicitStop writes a per-agent breadcrumb indicating the user explicitly
 // stopped recording. This prevents the next auto-start cycle (e.g. from /clear
 // hook re-prime) from silently restarting the session for this specific agent.
+//
+// Writes to the canonical sessions directory (ledger cache or XDG cache),
+// never into the user's repository.
 func MarkExplicitStop(projectRoot, agentID string) error {
 	if projectRoot == "" {
 		return fmt.Errorf("%w: project root", ErrEmptyPath)
@@ -343,18 +369,23 @@ func MarkExplicitStop(projectRoot, agentID string) error {
 	if agentID == "" {
 		return fmt.Errorf("agentID must not be empty")
 	}
-	marker := explicitStopMarker + "." + agentID
-	for _, dir := range sessionsSearchPaths(projectRoot) {
-		if err := os.MkdirAll(dir, 0755); err != nil {
-			continue
-		}
-		markerPath := filepath.Join(dir, marker)
-		if err := os.WriteFile(markerPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0600); err != nil {
-			continue
-		}
-		return nil
+
+	// Resolve canonical write path — same logic as StartRecording.
+	dir := resolveSessionsWritePath(projectRoot)
+	if dir == "" {
+		return fmt.Errorf("could not write explicit stop marker for project=%s agent=%s: no sessions directory", projectRoot, agentID)
 	}
-	return fmt.Errorf("could not write explicit stop marker for project=%s agent=%s", projectRoot, agentID)
+
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("create sessions dir for marker: %w", err)
+	}
+
+	marker := explicitStopMarker + "." + agentID
+	markerPath := filepath.Join(dir, marker)
+	if err := os.WriteFile(markerPath, []byte(time.Now().UTC().Format(time.RFC3339)), 0600); err != nil {
+		return fmt.Errorf("write explicit stop marker: %w", err)
+	}
+	return nil
 }
 
 // ConsumeExplicitStop checks for and removes the per-agent explicit-stop marker.
@@ -382,18 +413,22 @@ func ConsumeExplicitStop(projectRoot, agentID string) bool {
 	return found
 }
 
-// sessionsSearchPaths returns the sessions directory paths to search
-// (project-local, current XDG cache, and legacy/alternate cache dirs).
+// sessionsSearchPaths returns the sessions directory paths to search for reads.
+// Used by LoadRecordingState, ConsumeExplicitStop, and cleanup functions.
+//
+// IMPORTANT: This function is for READ paths only. Write operations (StartRecording,
+// MarkExplicitStop) must resolve their own canonical write path — never iterate
+// these search paths to find a writable location, as that was the source of the
+// bug where session files leaked into the user's repository at projectRoot/sessions/.
+//
 // Includes alternate cache locations because processes with different
 // XDG_CACHE_HOME values (e.g., Conductor GUI vs terminal shell) may
 // create recording states in different directories.
 func sessionsSearchPaths(projectRoot string) []string {
-	searchPaths := []string{
-		filepath.Join(projectRoot, "sessions"),
-	}
+	var searchPaths []string
 	repoID := getRepoIDFromProject(projectRoot)
 	if repoID != "" {
-		// ledger cache — canonical write location, environment-independent.
+		// ledger cache — canonical location, environment-independent.
 		// Only include when project has an explicit endpoint configured
 		// (avoids using default endpoint for test projects or uninitialized repos).
 		ep := getProjectEndpoint(projectRoot)
@@ -413,6 +448,16 @@ func sessionsSearchPaths(projectRoot string) []string {
 			searchPaths = append(searchPaths, filepath.Join(altDir, "sessions"))
 		}
 	}
+
+	// Legacy fallback: older ox versions wrote session data into the user's repo
+	// at projectRoot/sessions/. Include as a read-only fallback so in-flight
+	// sessions started on older versions can still be found and finalized.
+	// This path must NEVER be used for writes — see MarkExplicitStop, StartRecording.
+	legacyPath := filepath.Join(projectRoot, "sessions")
+	if _, err := os.Stat(legacyPath); err == nil {
+		searchPaths = append(searchPaths, legacyPath)
+	}
+
 	return searchPaths
 }
 
@@ -520,9 +565,13 @@ func cleanupGhosts(states []*RecordingState) GhostCleanupResult {
 			continue
 		}
 
-		// parent is dead — check if there's any real data
-		if RawJSONLHasData(state.SessionPath) {
-			// has raw.jsonl with content — this is an orphan, not a ghost.
+		// parent is dead — check if there's any real data beyond the header line.
+		// Use HasSubstantiveEntries (2+ lines) rather than RawJSONLHasData (size > 0)
+		// because writeRawHeader always writes a 1-line metadata header at session start.
+		// A header-only file has no recoverable session content and should be cleaned up.
+		rawPath := filepath.Join(state.SessionPath, "raw.jsonl")
+		if HasSubstantiveEntries(rawPath) {
+			// has session entries — this is an orphan, not a ghost.
 			// don't delete: it has recoverable data.
 			continue
 		}
@@ -604,10 +653,11 @@ type StartRecordingOptions struct {
 	ParentSessionPath string // path to parent's session folder (optional)
 	ParentAgentID     string // parent's agent ID (optional)
 
-	AgentType string // original agent type for metadata (e.g., "codex", "amp")
-	Model     string // LLM model for generic adapters
-	ParentPID int    // parent agent process ID for liveness detection
-	Origin    string // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
+	AgentType   string // original agent type for metadata (e.g., "codex", "amp")
+	Model       string // LLM model for generic adapters
+	ParentPID   int    // parent agent process ID for liveness detection
+	Origin      string // session origin: "human", "subagent", "agent" (from agentx.DetectOrigin)
+	StartOffset int64  // byte offset of SessionFile at recording start; entries before this are pre-session
 }
 
 // StartRecording begins a new recording session.
@@ -734,6 +784,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 		ParentPID:         opts.ParentPID,
 		Origin:            origin,
 		CacheDir:          paths.CacheDir(),
+		StartOffset:       opts.StartOffset,
 	}
 
 	// always capture parent PID for liveness detection and ghost cleanup

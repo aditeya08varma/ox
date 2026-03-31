@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/repotools"
 )
 
@@ -32,7 +33,7 @@ func TryConnectOrDirectForCheckout() *Client {
 // On transient failures, retries up to maxRetries times with exponential backoff.
 // initialDelay is the delay before the first retry.
 func TryConnectWithRetry(maxRetries int, initialDelay time.Duration) *Client {
-	client := NewClient()
+	client := NewClientForCurrentRepo()
 
 	// first attempt
 	if err := client.Ping(); err == nil {
@@ -57,7 +58,7 @@ func TryConnectWithRetry(maxRetries int, initialDelay time.Duration) *Client {
 
 // TryConnectForSyncWithRetry is like TryConnectWithRetry but uses longer timeouts for sync operations.
 func TryConnectForSyncWithRetry(maxRetries int, initialDelay time.Duration) *Client {
-	client := NewClientWithTimeout(30 * time.Second)
+	client := NewClientForCurrentRepoWithTimeout(30 * time.Second)
 
 	// first attempt
 	if err := client.Ping(); err == nil {
@@ -81,7 +82,7 @@ func TryConnectForSyncWithRetry(maxRetries int, initialDelay time.Duration) *Cli
 
 // TryConnectForCheckoutWithRetry is like TryConnectWithRetry but uses longer timeouts for checkout operations.
 func TryConnectForCheckoutWithRetry(maxRetries int, initialDelay time.Duration) *Client {
-	client := NewClientWithTimeout(60 * time.Second)
+	client := NewClientForCurrentRepoWithTimeout(60 * time.Second)
 
 	// first attempt
 	if err := client.Ping(); err == nil {
@@ -162,7 +163,7 @@ func ensureDaemonInternal() error {
 	// Kill any stale daemon for this workspace before starting a new one.
 	// Reached when: daemon stopped, daemon stuck (past startup window), or
 	// wait loop expired. IPC stop will likely fail; SIGTERM is the fallback.
-	if err := killStaleDaemon(CurrentWorkspaceID()); err != nil {
+	if err := KillStaleDaemon(CurrentWorkspaceID()); err != nil {
 		return fmt.Errorf("failed to stop stale daemon: %w", err)
 	}
 
@@ -193,6 +194,12 @@ func ensureDaemonInternal() error {
 	cmd := exec.Command(exe, buildDaemonArgs(resolveRepoName())...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	// set CWD to project root so daemon computes correct repo-based workspace ID
+	// from .sageox/config.json (without this, subdirectory CWDs cause fallback
+	// to path-based hashing, creating duplicate daemons per clone/worktree)
+	if root := findProjectRootForDaemon(); root != "" {
+		cmd.Dir = root
+	}
 
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
@@ -213,11 +220,13 @@ func ensureDaemonInternal() error {
 	return fmt.Errorf("daemon started but not responding")
 }
 
-// killStaleDaemon kills any existing daemon for the given workspace before starting a new one.
+// KillStaleDaemon kills any existing daemon for the given workspace before starting a new one.
 // Escalation: IPC stop (graceful) → SIGTERM (forceful) → error.
 // Returns nil if the stale daemon was successfully stopped or none existed.
 // Returns an error if the stale daemon could not be stopped (caller should not start a new one).
-func killStaleDaemon(workspaceID string) error {
+// KillStaleDaemon stops a daemon by workspace ID using the full cleanup flow:
+// IPC stop → wait → SIGTERM (with PID-reuse guard) → wait → cleanup registry/files.
+func KillStaleDaemon(workspaceID string) error {
 	reg, err := LoadRegistry()
 	if err != nil {
 		slog.Debug("failed to load registry for stale daemon check", "error", err)
@@ -246,7 +255,7 @@ func killStaleDaemon(workspaceID string) error {
 		if err := client.Stop(); err != nil {
 			slog.Warn("IPC stop failed, falling back to SIGTERM", "workspace_id", workspaceID, "pid", info.PID, "error", err)
 		}
-		if waitForProcessExit(info.PID, 5*time.Second) {
+		if WaitForProcessExit(info.PID, 5*time.Second) {
 			_ = reg.Unregister(workspaceID)
 			_ = os.Remove(PidPathForWorkspace(workspaceID))
 			_ = os.Remove(info.SocketPath)
@@ -270,7 +279,7 @@ func killStaleDaemon(workspaceID string) error {
 		slog.Warn("failed to SIGTERM stale daemon", "workspace_id", workspaceID, "pid", info.PID, "error", err)
 	}
 
-	if waitForProcessExit(info.PID, 2*time.Second) {
+	if WaitForProcessExit(info.PID, 2*time.Second) {
 		_ = reg.Unregister(workspaceID)
 		_ = os.Remove(PidPathForWorkspace(workspaceID))
 		_ = os.Remove(info.SocketPath)
@@ -279,9 +288,9 @@ func killStaleDaemon(workspaceID string) error {
 	return fmt.Errorf("stale daemon %d did not exit after SIGTERM", info.PID)
 }
 
-// waitForProcessExit polls signal 0 until the process exits or timeout is reached.
-// Returns true if the process exited, false if it's still alive at timeout.
-func waitForProcessExit(pid int, timeout time.Duration) bool {
+// WaitForProcessExit polls signal 0 until the process exits or timeout is reached.
+// Returns true if the process exited, false if it's still alive after timeout.
+func WaitForProcessExit(pid int, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if err := signalProcess(pid, 0); err != nil {
@@ -295,7 +304,7 @@ func waitForProcessExit(pid int, timeout time.Duration) bool {
 // KillStaleDaemonForCurrentWorkspace is the public entry point for pre-start kill.
 // Called by `ox daemon start` CLI command.
 func KillStaleDaemonForCurrentWorkspace() error {
-	return killStaleDaemon(CurrentWorkspaceID())
+	return KillStaleDaemon(CurrentWorkspaceID())
 }
 
 // buildDaemonArgs constructs command-line arguments for starting a daemon subprocess.
@@ -315,6 +324,19 @@ func resolveRepoName() string {
 		return ""
 	}
 	return repotools.GetRepoName(cwd)
+}
+
+// findProjectRootForDaemon returns the project root for setting daemon CWD.
+// Uses canonical config.FindProjectRoot; falls back to os.Getwd if no .sageox/ found.
+func findProjectRootForDaemon() string {
+	if root := config.FindProjectRoot(); root != "" {
+		return root
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+	return cwd
 }
 
 // stopLegacyDaemon stops a daemon running under the old path-based workspace ID.

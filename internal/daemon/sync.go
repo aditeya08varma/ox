@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -172,6 +173,9 @@ type SyncScheduler struct {
 
 	// murmur relay for converting murmur files to whisper entries
 	murmurRelay *MurmurRelay
+
+	// tracks last ledger HEAD sha to detect changes and trigger baseline rebuilds
+	lastBaselineSha string
 }
 
 // syncError tracks a sync error with timestamp.
@@ -594,6 +598,15 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		defer distillTicker.Stop()
 	}
 
+	// baseline check ticker — checks if codedb baseline needs rebuild
+	var baselineTicker *time.Ticker
+	var baselineChan <-chan time.Time
+	if s.config.BaselineCheckInterval > 0 && s.config.ProjectRoot != "" && s.codedb != nil {
+		baselineTicker = time.NewTicker(s.config.BaselineCheckInterval)
+		baselineChan = baselineTicker.C
+		defer baselineTicker.Stop()
+	}
+
 	// github sync ticker — fetches PRs/issues from GitHub API
 	var githubSyncTicker *time.Ticker
 	var githubSyncChan <-chan time.Time
@@ -664,9 +677,14 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 				}
 			}
 
+		case <-baselineChan:
+			s.triggerBaselineRebuild(ctx)
+
 		case <-s.triggerChan:
-			// triggered by file watcher, do full sync
-			s.syncAll(ctx)
+			// watcher-triggered sync: skip sparse-checkout refresh to avoid
+			// feedback loop where .sageox/cache/ writes trigger sync which
+			// runs ConfigureSparseCheckout which could wipe cache
+			s.syncFromWatcher(ctx)
 		}
 	}
 }
@@ -742,7 +760,7 @@ func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	// the scheduler for minutes (the caller ctx has no deadline)
 	pullCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	_ = s.doPull(pullCtx, nil, false)
+	_ = s.doPull(pullCtx, nil, false, true)
 
 	// check code index freshness (non-blocking)
 	if s.codedb != nil {
@@ -883,7 +901,7 @@ func isValidGitRepo(path string) bool {
 //     is required for clean linear history on shared ledger repos
 //   - lock file safety: if a git process crashes, its .git/index.lock is released
 //     by the OS; an in-process crash may leave stale locks in the same process
-func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool) error {
+func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool, refreshSparse bool) error {
 	if s.config.LedgerPath == "" {
 		return nil
 	}
@@ -973,8 +991,10 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// refresh sparse checkout so the rolling murmur window stays current.
 		// Without this, hourly directories computed at clone time go stale and
 		// new murmur files pulled from remote are not materialized on disk.
-		if err := ledger.ConfigureSparseCheckout(s.config.LedgerPath); err != nil {
-			s.logger.Warn("failed to refresh ledger sparse checkout", "error", err)
+		if refreshSparse {
+			if err := ledger.ConfigureSparseCheckout(s.config.LedgerPath); err != nil {
+				s.logger.Warn("failed to refresh ledger sparse checkout", "error", err)
+			}
 		}
 
 		// ledger repos don't have a sync.manifest — use the manifest defaults
@@ -1141,6 +1161,86 @@ func (s *SyncScheduler) syncAll(ctx context.Context) {
 	s.pullChanges(ctx)
 }
 
+// syncFromWatcher handles watcher-triggered sync without sparse-checkout refresh.
+// The file watcher fires on .sageox/cache/ writes (codedb indexing), and running
+// ConfigureSparseCheckout on that path creates a feedback loop that can wipe the
+// cache mid-index. The watcher only needs to pull remote changes, not reconfigure
+// the sparse-checkout cone.
+func (s *SyncScheduler) syncFromWatcher(ctx context.Context) {
+	s.triggerMissingClones()
+	pullCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	_ = s.doPull(pullCtx, nil, false, false)
+	if s.codedb != nil {
+		if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
+			s.codedb.SetLedgerPath(l.Path)
+		}
+		s.codedb.CheckFreshness(ctx)
+	}
+}
+
+// triggerBaselineRebuild checks if content sources (ledger, team contexts) have
+// changed since the last baseline build and fires a background rebuild if so.
+// Runs on its own tick (BaselineCheckInterval), independent of ledger pull cadence.
+func (s *SyncScheduler) triggerBaselineRebuild(ctx context.Context) {
+	if s.codedb == nil {
+		return
+	}
+	ledger := s.workspaceRegistry.GetLedger()
+	if ledger == nil || ledger.Path == "" || !ledger.Exists {
+		return
+	}
+
+	// build composite fingerprint from all content sources
+	fingerprint := s.contentSourceFingerprint(ctx, ledger.Path)
+	s.mu.Lock()
+	if fingerprint == "" || fingerprint == s.lastBaselineSha {
+		s.mu.Unlock()
+		return
+	}
+	oldFingerprint := s.lastBaselineSha
+	s.mu.Unlock()
+
+	s.logger.Info("codedb baseline rebuild triggered", "old_fingerprint", oldFingerprint, "new_fingerprint", fingerprint)
+	go func(fp, ledgerPath string) {
+		s.codedb.BuildBaseline(ctx, ledgerPath)
+		// only advance fingerprint after successful build so failed builds retry
+		s.mu.Lock()
+		s.lastBaselineSha = fp
+		s.mu.Unlock()
+	}(fingerprint, ledger.Path)
+}
+
+// contentSourceFingerprint returns a composite hash of HEAD shas from all content
+// sources: ledger + team contexts. Any change in any source triggers a rebuild.
+func (s *SyncScheduler) contentSourceFingerprint(ctx context.Context, ledgerPath string) string {
+	// start with ledger HEAD
+	out, err := exec.CommandContext(ctx, "git", "-C", ledgerPath, "rev-parse", "HEAD").Output()
+	if err != nil {
+		s.logger.Debug("codedb baseline: failed to get ledger HEAD", "error", err)
+		return ""
+	}
+	parts := []string{"ledger=" + strings.TrimSpace(string(out))}
+
+	// append team context HEADs sorted by path for deterministic fingerprint
+	teamContexts := s.workspaceRegistry.GetTeamContexts()
+	sort.Slice(teamContexts, func(i, j int) bool {
+		return teamContexts[i].Path < teamContexts[j].Path
+	})
+	for _, tc := range teamContexts {
+		if tc.Path == "" || !tc.Exists {
+			continue
+		}
+		tcOut, tcErr := exec.CommandContext(ctx, "git", "-C", tc.Path, "rev-parse", "HEAD").Output()
+		if tcErr != nil {
+			continue // skip unavailable team contexts
+		}
+		parts = append(parts, tc.Path+"="+strings.TrimSpace(string(tcOut)))
+	}
+
+	return strings.Join(parts, ":")
+}
+
 // Sync performs an immediate full sync. Used for manual requests via IPC.
 func (s *SyncScheduler) Sync() error {
 	return s.SyncWithProgress(nil)
@@ -1162,7 +1262,7 @@ func (s *SyncScheduler) doSyncAll(ctx context.Context, progress *ProgressWriter)
 	// refresh credentials if expired or near expiry
 	s.refreshCredentialsIfNeeded()
 
-	return s.doPull(ctx, progress, true)
+	return s.doPull(ctx, progress, true, true)
 }
 
 // isValidRepoPath validates that a repo path is safe to use.
@@ -1514,6 +1614,7 @@ func (s *SyncScheduler) Checkout(payload CheckoutPayload, progress *ProgressWrit
 //
 // This is cheaper than git fetch because ls-remote only hits /info/refs (1 HTTP
 // round-trip) without git-upload-pack negotiation or packfile transfer.
+// offline-safe: returns false on any error, causing fallback to normal fetch+pull path
 func (s *SyncScheduler) remoteRefCheck(ctx context.Context, repoPath string) bool {
 	lsCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()

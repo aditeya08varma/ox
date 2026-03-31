@@ -10,6 +10,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/status"
 	"github.com/sageox/ox/internal/version"
 )
@@ -64,7 +65,7 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 	pendingHeartbeats.Add(1)
 	go func() {
 		defer pendingHeartbeats.Done()
-		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
+		client := daemon.NewClientForCurrentRepoWithTimeout(50 * time.Millisecond)
 
 		parentAgentID, agentType := resolveAgentMetadata(agentID)
 		payload := daemon.HeartbeatPayload{
@@ -76,7 +77,7 @@ func Heartbeat(repoPath string, teamIDs []string, agentID string) {
 			CLIVersion:    version.Full(),
 			ParentAgentID: parentAgentID,
 			AgentType:     agentType,
-			ParentPID:     os.Getppid(),
+			ParentPID:     proc.FindAgentAncestorPID(),
 		}
 
 		// include workspace ID if available
@@ -127,7 +128,7 @@ func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
 	pendingHeartbeats.Add(1)
 	go func() {
 		defer pendingHeartbeats.Done()
-		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
+		client := daemon.NewClientForCurrentRepoWithTimeout(50 * time.Millisecond)
 		parentAgentID, agentType := resolveAgentMetadata(agentID)
 		payload := daemon.HeartbeatPayload{
 			AgentID:       agentID,
@@ -136,7 +137,7 @@ func sendContextHeartbeat(agentID string, bytes int64, commandName string) {
 			Timestamp:     time.Now().UTC(),
 			ParentAgentID: parentAgentID,
 			AgentType:     agentType,
-			ParentPID:     os.Getppid(),
+			ParentPID:     proc.FindAgentAncestorPID(),
 		}
 		data, err := json.Marshal(payload)
 		if err != nil {
@@ -156,7 +157,7 @@ func HeartbeatWithCreds(repoPath string, teamIDs []string, agentID string, creds
 	pendingHeartbeats.Add(1)
 	go func() {
 		defer pendingHeartbeats.Done()
-		client := daemon.NewClientWithTimeout(50 * time.Millisecond)
+		client := daemon.NewClientForCurrentRepoWithTimeout(50 * time.Millisecond)
 
 		parentAgentID, agentType := resolveAgentMetadata(agentID)
 		payload := daemon.HeartbeatPayload{
@@ -168,7 +169,7 @@ func HeartbeatWithCreds(repoPath string, teamIDs []string, agentID string, creds
 			CLIVersion:    version.Full(),
 			ParentAgentID: parentAgentID,
 			AgentType:     agentType,
-			ParentPID:     os.Getppid(),
+			ParentPID:     proc.FindAgentAncestorPID(),
 		}
 
 		// include workspace ID if available

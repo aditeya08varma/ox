@@ -162,13 +162,13 @@ func TestReadPendingGitHubFacts_V2MetaHeader(t *testing.T) {
 // team context directory for testing extractGitHubFacts.
 // The populateFn runs while the store is open for inserting test data;
 // the store is closed before returning so extractGitHubFacts can reopen it.
-func setupExtractGitHubFacts(t *testing.T, populateFn func(s *store.Store)) (projectRoot string, tcPath string) {
+func setupExtractGitHubFacts(t *testing.T, populateFn func(s *store.Store)) (projectRoot string, tcPath string, codeDBDir string) {
 	t.Helper()
 
 	projectRoot = t.TempDir()
 
 	// Create CodeDB at the fallback path, populate, then close
-	codeDBDir := filepath.Join(projectRoot, ".sageox", "cache", "codedb")
+	codeDBDir = filepath.Join(projectRoot, ".sageox", "cache", "codedb")
 	s, err := store.Open(codeDBDir)
 	require.NoError(t, err)
 	if populateFn != nil {
@@ -188,14 +188,14 @@ func setupExtractGitHubFacts(t *testing.T, populateFn func(s *store.Store)) (pro
 	gitCfgEmail.Dir = tcPath
 	require.NoError(t, gitCfgEmail.Run())
 
-	return projectRoot, tcPath
+	return projectRoot, tcPath, codeDBDir
 }
 
 func TestExtractGitHubFacts_Integration(t *testing.T) {
 	t.Parallel()
 
 	ts := time.Now().UTC().Add(-1 * time.Hour).Unix()
-	projectRoot, tcPath := setupExtractGitHubFacts(t, func(s *store.Store) {
+	_, tcPath, codeDBDir := setupExtractGitHubFacts(t, func(s *store.Store) {
 		res, err := s.Exec(`INSERT INTO pull_requests
 			(number, title, body, author, state, labels, created_at, updated_at, merged_at, url)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -220,7 +220,7 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	// Verify prompt was sent to backend
@@ -254,7 +254,7 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 	assert.True(t, found, "expected UUID7 fact file for %s", expectedDay)
 
 	// Verify state was updated
-	assert.NotEmpty(t, state.LastGitHubFacts)
+	assert.NotEmpty(t, state.RepoGitHubFacts["test-repo"])
 }
 
 func TestExtractGitHubFacts_DryRun(t *testing.T) {
@@ -262,7 +262,7 @@ func TestExtractGitHubFacts_DryRun(t *testing.T) {
 
 	prTime := time.Now().UTC().Add(-1 * time.Hour)
 	ts := prTime.Unix()
-	projectRoot, tcPath := setupExtractGitHubFacts(t, func(s *store.Store) {
+	_, tcPath, codeDBDir := setupExtractGitHubFacts(t, func(s *store.Store) {
 		_, err := s.Exec(`INSERT INTO pull_requests
 			(number, title, body, author, state, labels, created_at, updated_at, merged_at, url)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -281,13 +281,13 @@ func TestExtractGitHubFacts_DryRun(t *testing.T) {
 	distillDryRun = true
 	defer func() { distillDryRun = oldDryRun }()
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	// Backend should NOT have been called
 	assert.Empty(t, backend.promptReceived)
 	// State should NOT have been updated
-	assert.Empty(t, state.LastGitHubFacts)
+	assert.Empty(t, state.RepoGitHubFacts["test-repo"])
 	// Output should show what would be processed, with per-day date
 	output := buf.String()
 	assert.Contains(t, output, "GitHub activity")
@@ -298,7 +298,7 @@ func TestExtractGitHubFacts_DryRun(t *testing.T) {
 func TestExtractGitHubFacts_EmptySkip(t *testing.T) {
 	t.Parallel()
 
-	projectRoot, tcPath := setupExtractGitHubFacts(t, nil)
+	_, tcPath, codeDBDir := setupExtractGitHubFacts(t, nil)
 
 	backend := &mockBackend{}
 	state := &distillStateV2{}
@@ -307,13 +307,13 @@ func TestExtractGitHubFacts_EmptySkip(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	// Backend should NOT have been called (no activity)
 	assert.Empty(t, backend.promptReceived)
 	// State should be updated even on empty skip
-	assert.NotEmpty(t, state.LastGitHubFacts)
+	assert.NotEmpty(t, state.RepoGitHubFacts["test-repo"])
 }
 
 // insertPRInCodeDB opens the CodeDB store, inserts a PR, and closes it.
@@ -334,7 +334,7 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 	t.Parallel()
 
 	baseTime := time.Now().UTC().Add(-2 * time.Hour)
-	projectRoot, tcPath := setupExtractGitHubFacts(t, func(s *store.Store) {
+	projectRoot, tcPath, codeDBDir := setupExtractGitHubFacts(t, func(s *store.Store) {
 		for i := 1; i <= 3; i++ {
 			ts := baseTime.Add(time.Duration(i) * time.Minute).Unix()
 			_, err := s.Exec(`INSERT INTO pull_requests
@@ -352,9 +352,9 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 
 	// First run: processes PRs #1-3
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
-	assert.NotEmpty(t, state.LastGitHubFacts)
+	assert.NotEmpty(t, state.RepoGitHubFacts["test-repo"])
 	assert.Contains(t, backend.promptReceived, "<batch>")
 
 	// Verify first run wrote UUID7 fact file(s)
@@ -364,12 +364,12 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 	assert.GreaterOrEqual(t, len(entries1), 1, "first run should produce at least 1 fact file")
 
 	// Record state after first run
-	firstRunState := state.LastGitHubFacts
+	firstRunState := state.RepoGitHubFacts["test-repo"]
 
 	// Artificially set the state back a bit so the second run has a wider window
 	// This simulates "time passing" between extraction runs
 	adjustedState, _ := time.Parse(time.RFC3339, firstRunState)
-	state.LastGitHubFacts = adjustedState.Add(-5 * time.Minute).Format(time.RFC3339)
+	state.setGitHubFactsTime("test-repo", adjustedState.Add(-5*time.Minute))
 
 	// Insert PR #4 with current timestamp (within the adjusted window)
 	ts4 := time.Now().UTC().Unix()
@@ -380,13 +380,13 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 	backend.output = `{"headline":"second run","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`
 	cmd.SetOut(&bytes.Buffer{})
 
-	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
+	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	// The second run should have processed PR #4 (high-water mark works)
 	assert.Contains(t, backend.promptReceived, "New PR")
 	// State should still be updated
-	assert.NotEmpty(t, state.LastGitHubFacts)
+	assert.NotEmpty(t, state.RepoGitHubFacts["test-repo"])
 
 	// Both runs should have created separate UUID7 files (no overwrite)
 	entries2, err := os.ReadDir(factsDir)
@@ -398,7 +398,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	t.Parallel()
 
 	ts := time.Now().UTC().Add(-1 * time.Hour).Unix()
-	projectRoot, tcPath := setupExtractGitHubFacts(t, func(s *store.Store) {
+	projectRoot, tcPath, codeDBDir := setupExtractGitHubFacts(t, func(s *store.Store) {
 		_, err := s.Exec(`INSERT INTO pull_requests
 			(number, title, body, author, state, labels, created_at, updated_at, merged_at, url)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -413,7 +413,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 
 	// First run
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
@@ -423,7 +423,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	assert.GreaterOrEqual(t, firstRunCount, 1, "first run should produce fact files")
 
 	// Reset state to simulate same-day re-run with new activity
-	state.LastGitHubFacts = time.Now().UTC().Add(-30 * time.Minute).Format(time.RFC3339)
+	state.setGitHubFactsTime("test-repo", time.Now().UTC().Add(-30*time.Minute))
 	insertPRInCodeDB(t, projectRoot, 43, "Second PR", "bob", "open", time.Now().UTC().Unix())
 
 	backend.promptReceived = ""
@@ -431,7 +431,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 
 	// Second run same day
-	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, projectRoot, "")
+	err = extractGitHubFacts(context.Background(), cmd, backend, tc, state, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	entries2, err := os.ReadDir(factsDir)
@@ -460,7 +460,7 @@ func TestExtractGitHubFacts_MultiDayCatchup(t *testing.T) {
 	day2 := time.Now().UTC().AddDate(0, 0, -2) // 2 days ago
 	day3 := time.Now().UTC().AddDate(0, 0, -1) // yesterday
 
-	projectRoot, tcPath := setupExtractGitHubFacts(t, func(s *store.Store) {
+	_, tcPath, codeDBDir := setupExtractGitHubFacts(t, func(s *store.Store) {
 		for i, dayTS := range []time.Time{day1, day2, day3} {
 			ts := dayTS.Unix()
 			_, err := s.Exec(`INSERT INTO pull_requests
@@ -476,12 +476,12 @@ func TestExtractGitHubFacts_MultiDayCatchup(t *testing.T) {
 
 	state := &distillStateV2{}
 	// Set state to before all 3 days
-	state.LastGitHubFacts = time.Now().UTC().AddDate(0, 0, -4).Format(time.RFC3339)
+	state.setGitHubFactsTime("test-repo", time.Now().UTC().AddDate(0, 0, -4))
 	tc := &config.TeamContext{Path: tcPath}
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
 
-	err := extractGitHubFacts(context.Background(), cmd, tracker, tc, state, projectRoot, "")
+	err := extractGitHubFacts(context.Background(), cmd, tracker, tc, state, "test-repo", codeDBDir, "")
 	require.NoError(t, err)
 
 	// Verify fact files were created for each day
@@ -518,7 +518,7 @@ func TestExtractGitHubFacts_HighWaterInference(t *testing.T) {
 
 	// Insert a PR from 2 days ago
 	twoDaysAgo := time.Now().UTC().AddDate(0, 0, -2)
-	_, tcPath := setupExtractGitHubFacts(t, func(s *store.Store) {
+	_, tcPath, _ := setupExtractGitHubFacts(t, func(s *store.Store) {
 		ts := twoDaysAgo.Unix()
 		_, err := s.Exec(`INSERT INTO pull_requests
 			(number, title, body, author, state, labels, created_at, updated_at, merged_at, url)

@@ -33,15 +33,36 @@ func resolveCodeDBDir(root string) string {
 	return paths.CodeDBDataDir(root)
 }
 
-// isCodeDBIndexing checks whether the daemon is actively indexing.
+// resolveBaselineCodeDBDir returns the baseline CodeDB directory if it exists on disk.
+// Returns empty string if baseline is not available (graceful fallback to legacy).
+func resolveBaselineCodeDBDir(root string) string {
+	ctx, err := config.LoadProjectContext(root)
+	if err == nil {
+		if dir := paths.CodeDBBaselineDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
+			if _, statErr := os.Stat(dir); statErr == nil {
+				return dir
+			}
+		}
+	}
+	return ""
+}
+
+// isCodeDBIndexing checks whether the daemon is actively indexing the selected backend.
 // Bleve's BoltDB backend holds an exclusive file lock during writes,
 // so codedb.Open from the CLI would block until indexing finishes.
+// useBaseline selects which flag to check: baseline vs worktree.
 //
 // Exposed as a variable so tests can override it.
-var isCodeDBIndexing = func() bool {
-	client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+var isCodeDBIndexing = func(useBaseline bool) bool {
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	cs, err := client.CodeStatus()
-	return err == nil && cs.IndexingNow
+	if err != nil {
+		return false
+	}
+	if useBaseline {
+		return cs.BaselineIndexingNow
+	}
+	return cs.IndexingNow
 }
 
 var codeCmd = &cobra.Command{
@@ -70,8 +91,13 @@ var codeSearchCmd = &cobra.Command{
 
 		query := strings.Join(args, " ")
 		dataDir := resolveCodeDBDir(root)
+		useBaseline := false
+		if baselineDir := resolveBaselineCodeDBDir(root); baselineDir != "" {
+			dataDir = baselineDir
+			useBaseline = true
+		}
 
-		if isCodeDBIndexing() {
+		if isCodeDBIndexing(useBaseline) {
 			return fmt.Errorf("code index is currently being built — search is unavailable until indexing completes. Run 'ox code status' to check progress")
 		}
 
@@ -260,8 +286,13 @@ var codeSQLCmd = &cobra.Command{
 		}
 
 		dataDir := resolveCodeDBDir(root)
+		useBaseline := false
+		if baselineDir := resolveBaselineCodeDBDir(root); baselineDir != "" {
+			dataDir = baselineDir
+			useBaseline = true
+		}
 
-		if isCodeDBIndexing() {
+		if isCodeDBIndexing(useBaseline) {
 			return fmt.Errorf("code index is currently being built — SQL queries unavailable until indexing completes")
 		}
 
@@ -295,6 +326,11 @@ var codeStatusCmd = &cobra.Command{
 		}
 
 		dataDir := resolveCodeDBDir(root)
+		useBaseline := false
+		if baselineDir := resolveBaselineCodeDBDir(root); baselineDir != "" {
+			dataDir = baselineDir
+			useBaseline = true
+		}
 		indexExists := false
 		if _, err := os.Stat(dataDir); err == nil {
 			indexExists = true
@@ -303,7 +339,7 @@ var codeStatusCmd = &cobra.Command{
 		// get daemon stats for freshness and next-check info
 		var codeStats *daemon.CodeDBStats
 		var syncInterval time.Duration
-		client := daemon.NewClientWithTimeout(500 * time.Millisecond)
+		client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 		if cs, err := client.CodeStatus(); err == nil {
 			codeStats = cs
 		}
@@ -315,7 +351,7 @@ var codeStatusCmd = &cobra.Command{
 		// Skip the direct open when the daemon reports indexing in progress —
 		// Bleve's BoltDB backend holds an exclusive file lock during writes,
 		// so codedb.Open would block until indexing finishes.
-		var totalCommits, totalBlobs, totalSymbols, totalComments, totalPRs, totalIssues int
+		var totalCommits, totalBlobs, totalSymbols, totalPRs, totalIssues int
 		type repoRow struct {
 			name       string
 			path       string
@@ -325,14 +361,13 @@ var codeStatusCmd = &cobra.Command{
 		}
 		var repos []repoRow
 
-		daemonIndexing := codeStats != nil && codeStats.IndexingNow
+		daemonIndexing := codeStats != nil && ((useBaseline && codeStats.BaselineIndexingNow) || (!useBaseline && codeStats.IndexingNow))
 		if indexExists && !daemonIndexing {
 			db, err := codedb.Open(dataDir)
 			if err == nil {
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM commits").Scan(&totalCommits)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM blobs").Scan(&totalBlobs)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM symbols").Scan(&totalSymbols)
-				_ = db.Store().QueryRow("SELECT COUNT(*) FROM comments").Scan(&totalComments)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM pull_requests").Scan(&totalPRs)
 				_ = db.Store().QueryRow("SELECT COUNT(*) FROM issues").Scan(&totalIssues)
 
@@ -361,7 +396,6 @@ var codeStatusCmd = &cobra.Command{
 			totalCommits = codeStats.Commits
 			totalBlobs = codeStats.Blobs
 			totalSymbols = codeStats.Symbols
-			totalComments = codeStats.Comments
 			totalPRs = codeStats.PRs
 			totalIssues = codeStats.Issues
 			for _, r := range codeStats.Repos {
@@ -381,9 +415,9 @@ var codeStatusCmd = &cobra.Command{
 				Commits     int             `json:"commits"`
 				Blobs       int             `json:"blobs"`
 				Symbols     int             `json:"symbols"`
-				Comments    int             `json:"comments"`
 				PRs         int             `json:"prs"`
 				Issues      int             `json:"issues"`
+				DiskBytes   int64           `json:"disk_bytes"`
 				Repos       []jsonRepoStats `json:"repos"`
 				DataDir     string          `json:"data_dir"`
 				IndexExists bool            `json:"index_exists"`
@@ -395,9 +429,9 @@ var codeStatusCmd = &cobra.Command{
 				Commits:     totalCommits,
 				Blobs:       totalBlobs,
 				Symbols:     totalSymbols,
-				Comments:    totalComments,
 				PRs:         totalPRs,
 				Issues:      totalIssues,
+				DiskBytes:   dirSize(dataDir),
 				DataDir:     dataDir,
 				IndexExists: indexExists,
 			}
@@ -425,6 +459,17 @@ var codeStatusCmd = &cobra.Command{
 
 		// human-readable output — Tufte-inspired, matching ox status
 		var b strings.Builder
+
+		// check for daemon-reported codedb cache wipe
+		if ds, issueErr := client.Status(); issueErr == nil && ds.NeedsHelp {
+			for _, issue := range ds.Issues {
+				if issue.Type == daemon.IssueTypeCodeDBCacheWiped {
+					b.WriteString(statusWarningStyle.Render("⚠ codedb cache was wiped — run 'ox code index' to rebuild"))
+					b.WriteString("\n\n")
+					break
+				}
+			}
+		}
 
 		b.WriteString(statusHeaderStyle.Render("Code Index"))
 		b.WriteString("\n")
@@ -455,6 +500,14 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusMutedStyle.Render(codeStats.LastError))
 		case codeStats != nil && !codeStats.LastIndexed.IsZero():
 			b.WriteString(statusSuccessStyle.Render("✓ indexed (" + status.FormatTimeAgo(codeStats.LastIndexed) + ")"))
+		case indexExists && totalCommits == 0:
+			// index dir and schema exist but no data — prior indexing was interrupted or failed
+			b.WriteString(statusWarningStyle.Render("⚠ empty index"))
+			b.WriteString("\n")
+			b.WriteString(statusLabelStyle.Render(""))
+			b.WriteString(statusMutedStyle.Render("Run "))
+			b.WriteString(statusHighlightStyle.Render("ox code index"))
+			b.WriteString(statusMutedStyle.Render(" to populate it"))
 		default:
 			b.WriteString(statusSuccessStyle.Render("✓ indexed"))
 		}
@@ -464,6 +517,13 @@ var codeStatusCmd = &cobra.Command{
 		if ghOwner != "" && ghRepo != "" {
 			b.WriteString(statusLabelStyle.Render("Repository"))
 			b.WriteString(statusHighlightStyle.Render(ghOwner + "/" + ghRepo))
+			b.WriteString("\n")
+		}
+
+		// disk usage
+		if indexExists {
+			b.WriteString(statusLabelStyle.Render("Disk"))
+			b.WriteString(statusValueStyle.Render(humanSize(dirSize(dataDir))))
 			b.WriteString("\n")
 		}
 
@@ -483,13 +543,6 @@ var codeStatusCmd = &cobra.Command{
 			b.WriteString(statusLabelStyle.Render("Symbols"))
 			if totalSymbols > 0 {
 				b.WriteString(statusHighlightStyle.Render(formatComma(totalSymbols)))
-			} else {
-				b.WriteString(statusWarningStyle.Render("0"))
-			}
-			b.WriteString("\n")
-			b.WriteString(statusLabelStyle.Render("Comments"))
-			if totalComments > 0 {
-				b.WriteString(statusHighlightStyle.Render(formatComma(totalComments)))
 			} else {
 				b.WriteString(statusWarningStyle.Render("0"))
 			}

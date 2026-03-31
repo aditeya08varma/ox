@@ -54,7 +54,7 @@ var indexCodeCmd = &cobra.Command{
 			fmt.Fprintf(cmd.ErrOrStderr(), "Indexing local repo...\n")
 		}
 
-		client := daemon.NewClientWithTimeout(5 * time.Minute)
+		client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Minute)
 		result, err := client.CodeIndex(payload, func(stage string, percent *int, message string) {
 			if message != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "  %s\n", message)
@@ -214,6 +214,7 @@ func runIndexGitHub(cmd *cobra.Command, args []string) error {
 }
 
 // detectGitHubRemote finds the GitHub owner/repo from git remotes.
+// offline-safe: returns error for non-GitHub/local-only repos; caller handles gracefully
 func detectGitHubRemote() (owner, repo string, err error) {
 	urls, err := repotools.GetRemoteURLs()
 	if err != nil {

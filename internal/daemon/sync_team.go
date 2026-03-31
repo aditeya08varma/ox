@@ -204,7 +204,7 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 		}
 
 		if err := s.workspaceRegistry.UpdateConfigLastSync(r.ws.ID); err != nil {
-			s.logger.Warn("failed to update config last sync", "team", r.ws.TeamName, "error", err)
+			s.logger.Warn("failed to update config last sync", "team", r.ws.TeamName, "path", r.ws.Path, "error", err)
 		}
 		s.recordSyncState(ctx, r.ws.Path)
 
