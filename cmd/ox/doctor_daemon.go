@@ -202,7 +202,7 @@ func checkDaemonVersion(fix bool) checkResult {
 		}
 	}
 
-	cliVersion := version.Version
+	cliVersion := version.Full()
 	daemonVersion := status.Version
 
 	if daemonVersion == cliVersion {
