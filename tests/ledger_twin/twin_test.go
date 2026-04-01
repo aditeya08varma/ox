@@ -3,12 +3,16 @@
 package ledger_twin
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/glance"
+	"github.com/sageox/ox/internal/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,8 +25,6 @@ func TestMain(m *testing.M) {
 		fmt.Fprintf(os.Stderr, "failed to create temp dir: %v\n", err)
 		os.Exit(1)
 	}
-	// Intentionally NOT cleaning up — leave for human inspection.
-
 	manifest = BuildManifest()
 	manifest.LedgerPath = ledgerPath
 
@@ -34,16 +36,18 @@ func TestMain(m *testing.M) {
 	fmt.Fprintf(os.Stderr, "\n╔══════════════════════════════════════════════════════════════╗\n")
 	fmt.Fprintf(os.Stderr, "║  LEDGER TWIN: %s\n", ledgerPath)
 	fmt.Fprintf(os.Stderr, "║  Sessions:    %d\n", len(manifest.Sessions))
+	fmt.Fprintf(os.Stderr, "║  Murmurs:     %d\n", len(manifest.Murmurs))
 	fmt.Fprintf(os.Stderr, "║  Windows:     %d\n", len(manifest.Windows))
-	fmt.Fprintf(os.Stderr, "║  Inspect:     ls %s/sessions/\n", ledgerPath)
 	fmt.Fprintf(os.Stderr, "╚══════════════════════════════════════════════════════════════╝\n\n")
 
-	os.Exit(m.Run())
+	code := m.Run()
+	os.RemoveAll(ledgerPath)
+	os.Exit(code)
 }
 
-func harvest(t *testing.T, w Window) *glance.HarvestResult {
+func harvestMurmurs(t *testing.T, w Window) *glance.HarvestResult {
 	t.Helper()
-	result, err := glance.HarvestSessions(manifest.LedgerPath, w.Since, w.Until, glance.HarvestOptions{})
+	result, err := glance.HarvestMurmurs(manifest.LedgerPath, w.Since, w.Until)
 	require.NoError(t, err)
 	return result
 }
@@ -75,17 +79,17 @@ func windowByName(name string) Window {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Conflict detection tests
+// Pre-crime detection tests (murmur-based)
 // ═══════════════════════════════════════════════════════════════
 
-func TestHotZone(t *testing.T) {
+func TestPreCrimePositive_HotZone(t *testing.T) {
 	w := windowByName("hot_zone")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
-	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions, "session count")
+	assert.GreaterOrEqual(t, len(result.Murmurs), w.MinMurmurs, "murmur count")
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors, "author count")
 	assert.GreaterOrEqual(t, len(conflicts.Overlaps), w.MinConflicts, "conflict count")
 
@@ -100,28 +104,28 @@ func TestHotZone(t *testing.T) {
 	}
 }
 
-func TestParallelStreams(t *testing.T) {
+func TestPreCrimeNegative_ParallelStreams(t *testing.T) {
 	w := windowByName("parallel_streams")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
-	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
+	assert.GreaterOrEqual(t, len(result.Murmurs), w.MinMurmurs)
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors)
-	assert.Equal(t, 0, len(conflicts.Overlaps), "parallel streams should have zero conflicts")
+	assert.Equal(t, 0, len(conflicts.Overlaps), "parallel streams should have zero collisions")
 }
 
-func TestPairConvergence(t *testing.T) {
+func TestPreCrime_PairConvergence(t *testing.T) {
 	w := windowByName("pair_convergence")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
-	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
+	assert.GreaterOrEqual(t, len(result.Murmurs), w.MinMurmurs)
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors)
-	assert.Equal(t, 2, len(conflicts.Overlaps), "should have exactly 2 conflicts")
+	assert.Equal(t, 2, len(conflicts.Overlaps), "should detect exactly 2 collisions")
 
 	fm := conflictFileMap(conflicts.Overlaps)
 	assert.Equal(t, 2, fm["internal/auth/middleware.go"], "middleware.go: alice+bob")
@@ -133,14 +137,14 @@ func TestPairConvergence(t *testing.T) {
 	}
 }
 
-func TestSprintEndRush(t *testing.T) {
+func TestPreCrime_SprintEndRush(t *testing.T) {
 	w := windowByName("sprint_end_rush")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
-	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
+	assert.GreaterOrEqual(t, len(result.Murmurs), w.MinMurmurs)
 	assert.GreaterOrEqual(t, len(authors), w.MinAuthors, "all 6 devs should appear")
 	assert.GreaterOrEqual(t, len(conflicts.Overlaps), w.MinConflicts)
 
@@ -148,34 +152,19 @@ func TestSprintEndRush(t *testing.T) {
 	assert.GreaterOrEqual(t, fm["docs/getting-started.md"], 2, "getting-started.md: frank+bob")
 }
 
-func TestActiveRecording(t *testing.T) {
-	w := windowByName("active_recording")
-	result := harvest(t, w)
-
-	assert.GreaterOrEqual(t, len(result.Sessions), w.MinSessions)
-
-	recordingCount := 0
-	for _, s := range result.Sessions {
-		if s.Recording {
-			recordingCount++
-		}
-	}
-	assert.Equal(t, w.ExpectedRecording, recordingCount, "recording sessions")
-}
-
 // ═══════════════════════════════════════════════════════════════
-// Pattern detection tests
+// Pattern detection tests (murmur-based)
 // ═══════════════════════════════════════════════════════════════
 
 func TestClusterBridge(t *testing.T) {
 	w := windowByName("cluster_bridge")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	conflicts := glance.DetectConflicts(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 	assert.GreaterOrEqual(t, len(conflicts.Overlaps), w.MinConflicts)
 
 	// carol bridges auth/ and cli/ clusters
-	patterns := glance.DetectPatterns(result.Sessions)
+	patterns := glance.DetectPatterns(result.Murmurs)
 	var bridges []glance.Pattern
 	for _, p := range patterns {
 		if p.Type == "cluster_bridge" && p.Authors[0] == "carol" {
@@ -186,11 +175,10 @@ func TestClusterBridge(t *testing.T) {
 }
 
 func TestHotFileDetection(t *testing.T) {
-	// In the hot zone, root.go and output.go are touched by 3 authors each
 	w := windowByName("hot_zone")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	patterns := glance.DetectPatterns(result.Sessions)
+	patterns := glance.DetectPatterns(result.Murmurs)
 
 	var hotFiles []glance.Pattern
 	for _, p := range patterns {
@@ -209,11 +197,10 @@ func TestHotFileDetection(t *testing.T) {
 }
 
 func TestSoloSiloDetection(t *testing.T) {
-	// In parallel streams, each dev works in isolation
 	w := windowByName("parallel_streams")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	patterns := glance.DetectPatterns(result.Sessions)
+	patterns := glance.DetectPatterns(result.Murmurs)
 
 	var silos []glance.Pattern
 	for _, p := range patterns {
@@ -225,54 +212,35 @@ func TestSoloSiloDetection(t *testing.T) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Escalation / velocity tests
+// Escalation / velocity tests (murmur-based)
 // ═══════════════════════════════════════════════════════════════
 
-func TestEscalation(t *testing.T) {
+func TestPreCrimeEscalation(t *testing.T) {
 	day1 := windowByName("escalation_day1")
 	day2 := windowByName("escalation_day2")
 	day3 := windowByName("escalation_day3")
 
-	r1 := harvest(t, day1)
-	r2 := harvest(t, day2)
-	r3 := harvest(t, day3)
+	r1 := harvestMurmurs(t, day1)
+	r2 := harvestMurmurs(t, day2)
+	r3 := harvestMurmurs(t, day3)
 
-	c1 := glance.DetectConflicts(r1.Sessions)
-	c2 := glance.DetectConflicts(r2.Sessions)
-	c3 := glance.DetectConflicts(r3.Sessions)
+	c1 := glance.DetectConflicts(r1.Murmurs)
+	c2 := glance.DetectConflicts(r2.Murmurs)
+	c3 := glance.DetectConflicts(r3.Murmurs)
 
 	assert.GreaterOrEqual(t, len(c1.Overlaps), day1.MinConflicts, "day 1 conflicts")
 	assert.GreaterOrEqual(t, len(c2.Overlaps), day2.MinConflicts, "day 2 conflicts")
 	assert.GreaterOrEqual(t, len(c3.Overlaps), day3.MinConflicts, "day 3 conflicts")
 
 	// Verify escalation via ConflictVelocity
-	allSessions := append(append(r1.Sessions, r2.Sessions...), r3.Sessions...)
+	allMurmurs := append(append(r1.Murmurs, r2.Murmurs...), r3.Murmurs...)
 	day := 24 * time.Hour
-	points := glance.ConflictVelocity(allSessions, ts(10, 0, 0), ts(13, 0, 0), day, day)
+	points := glance.ConflictVelocity(allMurmurs, ts(10, 0, 0), ts(13, 0, 0), day, day)
 
 	assert.Len(t, points, 3, "should have 3 daily velocity points")
 	assert.True(t, glance.IsEscalating(points, 3),
-		"conflicts should be escalating: day1=%d day2=%d day3=%d",
+		"collisions should be escalating: day1=%d day2=%d day3=%d",
 		points[0].Conflicts, points[1].Conflicts, points[2].Conflicts)
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Subagent filtering test
-// ═══════════════════════════════════════════════════════════════
-
-func TestSubagentExcluded(t *testing.T) {
-	w := windowByName("subagent_excluded")
-
-	result := harvest(t, w)
-	assert.Equal(t, w.MinSessions, len(result.Sessions), "should exclude subagent sessions by default")
-
-	resultWithSub, err := glance.HarvestSessions(
-		manifest.LedgerPath, w.Since, w.Until,
-		glance.HarvestOptions{IncludeSubagents: true},
-	)
-	require.NoError(t, err)
-	assert.Greater(t, len(resultWithSub.Sessions), len(result.Sessions),
-		"including subagents should return more sessions")
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -282,11 +250,21 @@ func TestSubagentExcluded(t *testing.T) {
 func TestFullEnrich(t *testing.T) {
 	allSince := ts(10, 0, 0)
 	allUntil := ts(25, 0, 0)
-	result, err := glance.HarvestSessions(manifest.LedgerPath, allSince, allUntil, glance.HarvestOptions{})
+	result, err := glance.HarvestMurmurs(manifest.LedgerPath, allSince, allUntil)
 	require.NoError(t, err)
 
-	authors := glance.GroupByAuthor(result.Sessions)
-	conflicts := glance.DetectConflicts(result.Sessions)
+	authors := glance.GroupByAuthor(result.Murmurs)
+	conflicts := glance.DetectConflicts(result.Murmurs)
+
+	var wipCount, fcCount int
+	for _, m := range result.Murmurs {
+		switch m.Topic {
+		case "wip":
+			wipCount++
+		case "file-changes":
+			fcCount++
+		}
+	}
 
 	data := glance.ActivityData{
 		Since:     allSince,
@@ -296,25 +274,29 @@ func TestFullEnrich(t *testing.T) {
 		Conflicts: conflicts.Overlaps,
 		Overlap:   conflicts.OverlapPairs(),
 		Stats: glance.Stats{
-			TotalSessions:  len(result.Sessions),
-			TotalAuthors:   len(authors),
-			TotalConflicts: len(conflicts.Overlaps),
+			TotalMurmurs:    len(result.Murmurs),
+			TotalAuthors:    len(authors),
+			TotalConflicts:  len(conflicts.Overlaps),
+			WIPCount:        wipCount,
+			FileChangeCount: fcCount,
 		},
 	}
 	data.Enrich()
 
 	assert.NotEmpty(t, data.Headline)
 	assert.NotEmpty(t, data.Guidance)
-	assert.Contains(t, data.Headline, "sessions by")
-	assert.Contains(t, data.Headline, "conflict")
+	assert.Contains(t, data.Headline, "signals from")
+	assert.Contains(t, data.Headline, "collision")
+	assert.Greater(t, wipCount, 0, "should have WIP murmurs")
+	assert.Greater(t, fcCount, 0, "should have file-change murmurs")
 	assert.Equal(t, 6, data.Stats.TotalAuthors, "all 6 devs across all windows")
 }
 
 func TestSameAuthorNoConflict(t *testing.T) {
 	w := windowByName("sprint_end_rush")
-	result := harvest(t, w)
+	result := harvestMurmurs(t, w)
 
-	conflicts := glance.DetectConflicts(result.Sessions)
+	conflicts := glance.DetectConflicts(result.Murmurs)
 
 	for _, overlap := range conflicts.Overlaps {
 		assert.GreaterOrEqual(t, len(overlap.Authors), 2,
@@ -322,35 +304,186 @@ func TestSameAuthorNoConflict(t *testing.T) {
 	}
 }
 
-func TestMailmapResolution(t *testing.T) {
-	mailmap := map[string]string{"alice": "Alice Johnson"}
+func TestWindowIsolation(t *testing.T) {
+	w := windowByName("parallel_streams")
+	result := harvestMurmurs(t, w)
 
-	result, err := glance.HarvestSessions(
-		manifest.LedgerPath, ts(20, 10, 0), ts(20, 18, 0),
-		glance.HarvestOptions{Mailmap: mailmap},
-	)
-	require.NoError(t, err)
-
-	foundAlice := false
-	for _, s := range result.Sessions {
-		if s.User == "Alice Johnson" {
-			foundAlice = true
+	for _, m := range result.Murmurs {
+		assert.False(t, m.Time.Before(w.Since),
+			"murmur %s should not be before window since", m.ID)
+		if !w.Until.IsZero() {
+			assert.False(t, m.Time.After(w.Until),
+				"murmur %s should not be after window until", m.ID)
 		}
-		assert.NotEqual(t, "alice", s.User, "raw 'alice' should be remapped")
 	}
-	assert.True(t, foundAlice, "should find sessions attributed to 'Alice Johnson'")
 }
 
-func TestWindowIsolation(t *testing.T) {
-	w2 := windowByName("parallel_streams")
-	result := harvest(t, w2)
+// ═══════════════════════════════════════════════════════════════
+// Low-level murmur file tests
+// ═══════════════════════════════════════════════════════════════
 
-	for _, s := range result.Sessions {
-		assert.False(t, s.Time.Before(w2.Since),
-			"session %s should not be before window since", s.Name)
-		if !w2.Until.IsZero() {
-			assert.False(t, s.Time.After(w2.Until),
-				"session %s should not be after window until", s.Name)
+// readMurmursInRange reads murmur files between since and until.
+// Cannot use ledger.ReadMurmursInWindow because it uses time.Now().
+// Surfaces I/O and unmarshal errors so broken fixtures fail loudly.
+func readMurmursInRange(baseDir string, since, until time.Time) ([]ledger.MurmurFile, error) {
+	var murmurs []ledger.MurmurFile
+	current := since.Truncate(time.Hour)
+	end := until
+	if end.IsZero() {
+		end = time.Now().UTC()
+	}
+	for !current.After(end) {
+		dir := filepath.Join(baseDir, ledger.MurmurDateHourDir(current))
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				current = current.Add(time.Hour)
+				continue
+			}
+			return nil, fmt.Errorf("read murmur dir %s: %w", dir, err)
+		}
+		for _, e := range entries {
+			if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
+				continue
+			}
+			path := filepath.Join(dir, e.Name())
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("read murmur file %s: %w", path, err)
+			}
+			var m ledger.MurmurFile
+			if err := json.Unmarshal(data, &m); err != nil {
+				return nil, fmt.Errorf("unmarshal murmur %s: %w", path, err)
+			}
+			if m.Timestamp.Before(since) {
+				continue
+			}
+			if !until.IsZero() && m.Timestamp.After(until) {
+				continue
+			}
+			murmurs = append(murmurs, m)
+		}
+		current = current.Add(time.Hour)
+	}
+	return murmurs, nil
+}
+
+func TestMurmurGeneration(t *testing.T) {
+	for _, w := range manifest.Windows {
+		if w.MinMurmurs == 0 && len(w.ExpectedTopics) == 0 {
+			continue
+		}
+		t.Run(w.Name, func(t *testing.T) {
+			murmurs, err := readMurmursInRange(manifest.LedgerPath, w.Since, w.Until)
+			require.NoError(t, err)
+
+			assert.GreaterOrEqual(t, len(murmurs), w.MinMurmurs, "murmur count")
+
+			topicSet := make(map[string]bool)
+			for _, m := range murmurs {
+				topicSet[m.Topic] = true
+			}
+			for _, topic := range w.ExpectedTopics {
+				assert.True(t, topicSet[topic], "expected topic %q", topic)
+			}
+
+			if w.ExpectedMurmurImportance != "" {
+				found := false
+				for _, m := range murmurs {
+					if m.Importance == w.ExpectedMurmurImportance {
+						found = true
+						break
+					}
+				}
+				assert.True(t, found, "expected at least one %s murmur", w.ExpectedMurmurImportance)
+			}
+		})
+	}
+}
+
+func TestMurmurEscalationDensity(t *testing.T) {
+	d1, err := readMurmursInRange(manifest.LedgerPath, ts(10, 0, 0), ts(10, 23, 59))
+	require.NoError(t, err)
+	d2, err := readMurmursInRange(manifest.LedgerPath, ts(11, 0, 0), ts(11, 23, 59))
+	require.NoError(t, err)
+	d3, err := readMurmursInRange(manifest.LedgerPath, ts(12, 0, 0), ts(12, 23, 59))
+	require.NoError(t, err)
+
+	// Raw count escalation
+	assert.Less(t, len(d1), len(d2), "day2 murmurs (%d) > day1 (%d)", len(d2), len(d1))
+	assert.Less(t, len(d2), len(d3), "day3 murmurs (%d) > day2 (%d)", len(d3), len(d2))
+
+	// Conflict density escalation via glance pipeline
+	toRecords := func(murmurs []ledger.MurmurFile) []glance.MurmurRecord {
+		var records []glance.MurmurRecord
+		for _, m := range murmurs {
+			records = append(records, glance.MurmurRecord{
+				ID:    m.ID,
+				User:  m.PrincipalID,
+				Topic: m.Topic,
+				Files: extractFiles(m.Metadata),
+			})
+		}
+		return records
+	}
+
+	c1 := glance.DetectConflicts(toRecords(d1))
+	c2 := glance.DetectConflicts(toRecords(d2))
+	c3 := glance.DetectConflicts(toRecords(d3))
+
+	assert.Less(t, len(c1.Overlaps), len(c2.Overlaps),
+		"day2 conflicts (%d) > day1 (%d)", len(c2.Overlaps), len(c1.Overlaps))
+	assert.Less(t, len(c2.Overlaps), len(c3.Overlaps),
+		"day3 conflicts (%d) > day2 (%d)", len(c3.Overlaps), len(c2.Overlaps))
+}
+
+func TestMurmurAgentIDs(t *testing.T) {
+	allMurmurs, err := readMurmursInRange(manifest.LedgerPath, ts(10, 0, 0), ts(25, 0, 0))
+	require.NoError(t, err)
+	require.NotEmpty(t, allMurmurs)
+
+	expectedByID := make(map[string]MurmurSpec, len(manifest.Murmurs))
+	for _, spec := range manifest.Murmurs {
+		expectedByID[spec.ID] = spec
+	}
+	for _, m := range allMurmurs {
+		spec, ok := expectedByID[m.ID]
+		require.True(t, ok, "unexpected murmur %s", m.ID)
+		assert.Equal(t, spec.Dev.AgentID, m.AgentID, "murmur %s agent ID", m.ID)
+		assert.Equal(t, spec.Dev.Username, m.PrincipalID, "murmur %s principal ID", m.ID)
+		assert.Equal(t, "human", m.PrincipalType, "murmur %s principal type", m.ID)
+		assert.Empty(t, m.AgentType, "agent_type should be omitted (matches production)")
+		assert.Equal(t, "1", m.SchemaVersion)
+	}
+}
+
+// extractFiles parses Metadata["files"] into a string slice (mirrors glance.extractFilesFromMetadata).
+func extractFiles(metadata map[string]string) []string {
+	raw := metadata["files"]
+	if raw == "" {
+		return nil
+	}
+	var files []string
+	for _, f := range strings.Split(raw, ",") {
+		f = strings.TrimSpace(f)
+		if f != "" {
+			files = append(files, f)
 		}
 	}
+	return files
+}
+
+func TestHotZoneMurmurs(t *testing.T) {
+	murmurs, err := readMurmursInRange(manifest.LedgerPath, ts(20, 10, 0), ts(20, 18, 0))
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, len(murmurs), 5)
+
+	authorSet := make(map[string]bool)
+	for _, m := range murmurs {
+		authorSet[m.PrincipalID] = true
+	}
+	assert.True(t, authorSet["alice"], "alice should have murmurs in hot zone")
+	assert.True(t, authorSet["bob"], "bob should have murmurs in hot zone")
+	assert.True(t, authorSet["dave"], "dave should have murmurs in hot zone")
 }

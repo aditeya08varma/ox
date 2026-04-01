@@ -410,3 +410,28 @@ func TestMurmurAgentIDFromEnv(t *testing.T) {
 		t.Error("agent-id should not be marked Changed when using default")
 	}
 }
+
+func TestResolveMurmurFiles(t *testing.T) {
+	tests := []struct {
+		name        string
+		flagValue   string
+		flagChanged bool
+		jsonValue   string
+		want        string
+	}{
+		{"flag set, no JSON", "cmd/ox/root.go", true, "", "cmd/ox/root.go"},
+		{"no flag, JSON provided", "", false, "cmd/ox/root.go", "cmd/ox/root.go"},
+		{"flag beats JSON", "cmd/ox/glance.go", true, "cmd/ox/root.go", "cmd/ox/glance.go"},
+		{"neither set", "", false, "", ""},
+		{"flag set to same as JSON", "a.go", true, "a.go", "a.go"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveMurmurFiles(tt.flagValue, tt.flagChanged, tt.jsonValue)
+			if got != tt.want {
+				t.Errorf("resolveMurmurFiles(%q, %v, %q) = %q, want %q",
+					tt.flagValue, tt.flagChanged, tt.jsonValue, got, tt.want)
+			}
+		})
+	}
+}

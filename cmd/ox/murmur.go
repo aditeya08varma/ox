@@ -60,6 +60,7 @@ func init() {
 	murmurCmd.Flags().String("importance", "normal", "importance level: critical, normal, ambient")
 	murmurCmd.Flags().String("scope", "ledger", "scope: ledger (this repo) or team (all repos)")
 	murmurCmd.Flags().String("agent-id", "", "agent ID (falls back to SAGEOX_AGENT_ID env)")
+	murmurCmd.Flags().String("files", "", "comma-separated repo-relative file paths being modified")
 
 	murmurPauseCmd.Flags().String("agent-id", "", "agent ID (falls back to SAGEOX_AGENT_ID env)")
 	murmurResumeCmd.Flags().String("agent-id", "", "agent ID (falls back to SAGEOX_AGENT_ID env)")
@@ -76,6 +77,19 @@ type murmurInput struct {
 	Content    string `json:"content"`
 	Topic      string `json:"topic,omitempty"`
 	Importance string `json:"importance,omitempty"`
+	Files      string `json:"files,omitempty"` // comma-separated repo-relative paths
+}
+
+// resolveMurmurFiles returns the files value applying flag-beats-JSON precedence.
+// If the --files flag was explicitly set, it wins; otherwise the JSON value is used.
+func resolveMurmurFiles(flagValue string, flagChanged bool, jsonValue string) string {
+	if flagChanged {
+		return flagValue
+	}
+	if jsonValue != "" {
+		return jsonValue
+	}
+	return flagValue
 }
 
 func runMurmur(cmd *cobra.Command, args []string) error {
@@ -92,8 +106,8 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 	topic, _ := cmd.Flags().GetString("topic")
 	importance, _ := cmd.Flags().GetString("importance")
 
+	var input murmurInput
 	if strings.HasPrefix(rawContent, "{") {
-		var input murmurInput
 		if err := json.Unmarshal([]byte(rawContent), &input); err != nil {
 			return fmt.Errorf("invalid JSON input: %w", err)
 		}
@@ -108,6 +122,9 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 			importance = input.Importance
 		}
 	}
+
+	flagFiles, _ := cmd.Flags().GetString("files")
+	files := resolveMurmurFiles(flagFiles, cmd.Flags().Changed("files"), input.Files)
 
 	if !validImportanceLevels[importance] {
 		return fmt.Errorf("invalid importance %q: must be critical, normal, or ambient", importance)
@@ -167,6 +184,9 @@ func runMurmur(cmd *cobra.Command, args []string) error {
 		Importance:    importance,
 		Content:       rawContent,
 		Scope:         scope,
+	}
+	if files != "" {
+		murmur.Metadata = map[string]string{"files": files}
 	}
 
 	// serialize the murmur for IPC — daemon owns all file I/O and git operations
