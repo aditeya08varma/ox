@@ -31,6 +31,7 @@ type DirtyOverlayDebouncer struct {
 	timer    *time.Timer
 	lastFire time.Time
 	ctx      context.Context
+	stopped  bool // prevents stale fire() callbacks from mutating state
 }
 
 // NewDirtyOverlayDebouncer creates a debouncer that triggers dirty overlay
@@ -48,13 +49,15 @@ func NewDirtyOverlayDebouncer(codedb *CodeDBManager, logger *slog.Logger) *Dirty
 func (d *DirtyOverlayDebouncer) Start(ctx context.Context) {
 	d.mu.Lock()
 	d.ctx = ctx
+	d.stopped = false
 	d.mu.Unlock()
 }
 
-// Stop cancels any pending timer.
+// Stop cancels any pending timer and prevents in-flight callbacks from executing.
 func (d *DirtyOverlayDebouncer) Stop() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	d.stopped = true
 	if d.timer != nil {
 		d.timer.Stop()
 		d.timer = nil
@@ -67,6 +70,10 @@ func (d *DirtyOverlayDebouncer) Stop() {
 func (d *DirtyOverlayDebouncer) OnSettled() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+
+	if d.stopped {
+		return
+	}
 
 	if d.timer != nil {
 		d.timer.Stop()
@@ -88,8 +95,14 @@ func (d *DirtyOverlayDebouncer) OnSettled() {
 }
 
 // fire triggers the dirty overlay rebuild.
+// Checks the stopped flag to avoid mutating state after Stop() or when a stale
+// timer fires concurrently with OnSettled() installing a new timer.
 func (d *DirtyOverlayDebouncer) fire() {
 	d.mu.Lock()
+	if d.stopped {
+		d.mu.Unlock()
+		return
+	}
 	d.lastFire = time.Now()
 	d.timer = nil
 	ctx := d.ctx

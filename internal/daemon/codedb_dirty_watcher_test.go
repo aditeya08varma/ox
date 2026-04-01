@@ -726,10 +726,10 @@ func TestRefreshDirtyOverlay_BaselineFailureDoesNotBlockShared(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "shared_only.go"),
 		[]byte("package main\n// shared_only_sentinel_abc88\nfunc SharedOnly() {}\n"), 0o644))
 
-	// baseline dir points to a path that will fail codedb.Open (not a valid codedb)
+	// baseline dir points to a regular file — codedb.Open requires a directory,
+	// so this forces the "baseline write failed" branch to actually fail
 	badBaselineDir := filepath.Join(t.TempDir(), "bad-baseline")
-	require.NoError(t, os.MkdirAll(badBaselineDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(badBaselineDir, "garbage"), []byte("not a db"), 0o644))
+	require.NoError(t, os.WriteFile(badBaselineDir, []byte("not a directory"), 0o644))
 
 	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
 	mgr.mu.Lock()

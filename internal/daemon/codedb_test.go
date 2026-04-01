@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/codedb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -886,7 +887,7 @@ func TestReadHeadFingerprint(t *testing.T) {
 
 	t.Run("normal repo returns ref:hash", func(t *testing.T) {
 		dir := initCodeDBTestRepo(t)
-		fp := readHeadFingerprint(dir)
+		fp := readHeadFingerprint(context.Background(), dir)
 		require.NotEmpty(t, fp, "should return fingerprint for valid git repo")
 		assert.Contains(t, fp, "refs/heads/main:")
 		// hash should be 40 hex chars after the colon
@@ -896,13 +897,13 @@ func TestReadHeadFingerprint(t *testing.T) {
 
 	t.Run("no git dir returns empty", func(t *testing.T) {
 		dir := t.TempDir()
-		fp := readHeadFingerprint(dir)
+		fp := readHeadFingerprint(context.Background(), dir)
 		assert.Empty(t, fp, "should return empty for non-git directory")
 	})
 
 	t.Run("changes after commit", func(t *testing.T) {
 		dir := initCodeDBTestRepo(t)
-		fp1 := readHeadFingerprint(dir)
+		fp1 := readHeadFingerprint(context.Background(), dir)
 
 		// add a new commit
 		require.NoError(t, os.WriteFile(filepath.Join(dir, "new.go"), []byte("package main\n"), 0o644))
@@ -917,20 +918,20 @@ func TestReadHeadFingerprint(t *testing.T) {
 		)
 		require.NoError(t, cmd.Run())
 
-		fp2 := readHeadFingerprint(dir)
+		fp2 := readHeadFingerprint(context.Background(), dir)
 		require.NotEmpty(t, fp2)
 		assert.NotEqual(t, fp1, fp2, "fingerprint should change after commit")
 	})
 
 	t.Run("changes after branch switch", func(t *testing.T) {
 		dir := initCodeDBTestRepo(t)
-		fp1 := readHeadFingerprint(dir)
+		fp1 := readHeadFingerprint(context.Background(), dir)
 
 		cmd := exec.Command("git", "checkout", "-b", "feature")
 		cmd.Dir = dir
 		require.NoError(t, cmd.Run())
 
-		fp2 := readHeadFingerprint(dir)
+		fp2 := readHeadFingerprint(context.Background(), dir)
 		require.NotEmpty(t, fp2)
 		// same commit but different ref name
 		assert.NotEqual(t, fp1, fp2, "fingerprint should change on branch switch")
@@ -963,18 +964,29 @@ func TestCheckFreshness_SkipsWhenHeadUnchanged(t *testing.T) {
 		callCount.Add(1)
 	}
 
+	// create a minimal codedb on disk so the fast-path doesn't skip due to missing dataDir
+	dataDir := filepath.Join(t.TempDir(), "codedb-data")
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+	db, err := codedb.Open(dataDir)
+	require.NoError(t, err)
+	db.Close()
+
+	mgr.mu.Lock()
+	mgr.dataDir = dataDir
+	mgr.mu.Unlock()
+
 	// seed the cache with current HEAD (simulates successful prior index)
-	fp := readHeadFingerprint(dir)
+	fp := readHeadFingerprint(context.Background(), dir)
 	require.NotEmpty(t, fp)
 	mgr.mu.Lock()
 	mgr.lastIndexedHead = fp
 	mgr.mu.Unlock()
 
-	// CheckFreshness should skip — HEAD hasn't changed
+	// CheckFreshness should skip — HEAD hasn't changed and index exists on disk
 	mgr.CheckFreshness(context.Background())
 	time.Sleep(100 * time.Millisecond) // give goroutine time to start if it were to launch
 
-	assert.Equal(t, int64(0), callCount.Load(), "doIndex should not run when HEAD is unchanged")
+	assert.Equal(t, int64(0), callCount.Load(), "doIndex should not run when HEAD is unchanged and index exists")
 }
 
 // TestCheckFreshness_RunsOnFirstCall verifies that the first CheckFreshness
@@ -1028,7 +1040,7 @@ func TestCheckFreshness_RunsAfterNewCommit(t *testing.T) {
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
 
 	// seed cache with current HEAD
-	fp1 := readHeadFingerprint(dir)
+	fp1 := readHeadFingerprint(context.Background(), dir)
 	mgr.mu.Lock()
 	mgr.lastIndexedHead = fp1
 	mgr.mu.Unlock()

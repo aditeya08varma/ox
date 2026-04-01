@@ -100,7 +100,7 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		SyncIntervalRead:        60 * time.Second,  // git pull from remote (ledger, team contexts)
-		CodeDBCheckInterval:     5 * time.Minute,  // full reindex for new commits; dirty overlay handles file edits via fsnotify
+		CodeDBCheckInterval:     15 * time.Minute, // full reindex for new commits; dirty overlay handles file edits via fsnotify
 		TeamContextSyncInterval: 15 * time.Second,
 		DebounceWindow:          500 * time.Millisecond,
 		VersionCheckInterval:    30 * time.Minute, // ETag conditional requests make this cheap

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -15,6 +14,7 @@ import (
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -475,26 +475,37 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	m.logger.Info("codedb stage complete", "stage", "comments", "duration", commentDuration.Round(time.Millisecond), "extracted", cStats.CommentsExtracted)
 
 	// stage 4: build dirty overlay index for uncommitted worktree files
+	// Skip when fsnotify already rebuilt the dirty overlay recently — BuildDirtyIndex
+	// is a full tear-down-and-rebuild (git status + re-read all files + new Bleve index),
+	// so running it again here is pure waste when the overlay is already fresh.
 	var dirtyDuration time.Duration
 	if payload.URL == "" {
-		dirtyStart := time.Now()
-		if pw != nil {
-			_ = pw.WriteStage("dirty", "Indexing dirty files...")
-		}
-		dirtyCount, dirtyErr := db.BuildDirtyIndex(ctx, projectRoot, opts)
-		if dirtyErr != nil {
-			m.logger.Warn("dirty index build failed", "error", dirtyErr)
-		} else if dirtyCount > 0 {
-			m.logger.Debug("dirty index built", "files", dirtyCount)
-		}
-		dirtyDuration = time.Since(dirtyStart)
+		m.mu.Lock()
+		dirtyFresh := !m.lastDirtyRefresh.IsZero() && time.Since(m.lastDirtyRefresh) < 2*time.Minute
+		m.mu.Unlock()
 
-		// also write dirty overlay to baseline dir so CLI search finds it
-		if baseDir := m.resolveBaselineDataDir(); baseDir != "" && baseDir != dataDir {
-			baseDB, bErr := codedb.Open(baseDir)
-			if bErr == nil {
-				baseDB.BuildDirtyIndex(ctx, projectRoot, opts)
-				baseDB.Close()
+		if dirtyFresh {
+			m.logger.Debug("codedb skipping dirty overlay in doIndex, fsnotify overlay is fresh")
+		} else {
+			dirtyStart := time.Now()
+			if pw != nil {
+				_ = pw.WriteStage("dirty", "Indexing dirty files...")
+			}
+			dirtyCount, dirtyErr := db.BuildDirtyIndex(ctx, projectRoot, opts)
+			if dirtyErr != nil {
+				m.logger.Warn("dirty index build failed", "error", dirtyErr)
+			} else if dirtyCount > 0 {
+				m.logger.Debug("dirty index built", "files", dirtyCount)
+			}
+			dirtyDuration = time.Since(dirtyStart)
+
+			// also write dirty overlay to baseline dir so CLI search finds it
+			if baseDir := m.resolveBaselineDataDir(); baseDir != "" && baseDir != dataDir {
+				baseDB, bErr := codedb.Open(baseDir)
+				if bErr == nil {
+					baseDB.BuildDirtyIndex(ctx, projectRoot, opts)
+					baseDB.Close()
+				}
 			}
 		}
 	}
@@ -562,7 +573,7 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 // Uses pure filesystem reads (~0.1ms). Falls back to git CLI for packed-refs
 // or linked worktrees (~5ms). Returns "" on any error (caller treats as "unknown,
 // must reindex").
-func readHeadFingerprint(repoPath string) string {
+func readHeadFingerprint(ctx context.Context, repoPath string) string {
 	dotGit := filepath.Join(repoPath, ".git")
 
 	// handle linked worktrees: .git is a file containing "gitdir: <path>"
@@ -573,7 +584,7 @@ func readHeadFingerprint(repoPath string) string {
 	gitDir := dotGit
 	if !info.IsDir() {
 		// linked worktree — fall back to git CLI (go-git's HEAD is the main repo's)
-		return readHeadFingerprintGit(repoPath)
+		return readHeadFingerprintGit(ctx, repoPath)
 	}
 
 	// read .git/HEAD → "ref: refs/heads/main\n" or detached hash
@@ -628,22 +639,17 @@ func lookupPackedRef(gitDir, refName string) string {
 }
 
 // readHeadFingerprintGit uses git CLI as fallback for linked worktrees.
-func readHeadFingerprintGit(repoPath string) string {
-	nameCmd := exec.Command("git", "symbolic-ref", "HEAD")
-	nameCmd.Dir = repoPath
-	nameOut, err := nameCmd.Output()
+func readHeadFingerprintGit(ctx context.Context, repoPath string) string {
 	refName := "HEAD"
-	if err == nil {
-		refName = strings.TrimSpace(string(nameOut))
+	if nameOut, err := gitutil.RunGit(ctx, repoPath, "symbolic-ref", "HEAD"); err == nil {
+		refName = nameOut
 	}
 
-	hashCmd := exec.Command("git", "rev-parse", "HEAD")
-	hashCmd.Dir = repoPath
-	hashOut, err := hashCmd.Output()
+	hashOut, err := gitutil.RunGit(ctx, repoPath, "rev-parse", "HEAD")
 	if err != nil {
 		return ""
 	}
-	return refName + ":" + strings.TrimSpace(string(hashOut))
+	return refName + ":" + hashOut
 }
 
 // CheckFreshness checks if the index needs refreshing and triggers a background
@@ -660,14 +666,23 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 	projectRoot := m.projectRoot
 	m.mu.Unlock()
 
-	// cheap pre-check: read HEAD from filesystem (~0.1ms) and compare against cache
-	if fingerprint := readHeadFingerprint(projectRoot); fingerprint != "" {
+	// cheap pre-check: read HEAD from filesystem (~0.1ms) and compare against cache.
+	// Also verify the index still exists on disk — if someone wiped .sageox/cache/
+	// while the daemon was running, the cached fingerprint would be stale.
+	if fingerprint := readHeadFingerprint(ctx, projectRoot); fingerprint != "" {
 		m.mu.Lock()
 		cached := m.lastIndexedHead
 		m.mu.Unlock()
 		if cached != "" && cached == fingerprint {
-			m.logger.Debug("codedb freshness check skipped, HEAD unchanged")
-			return
+			dataDir := m.resolveSharedDataDir()
+			if _, err := os.Stat(dataDir); err == nil {
+				m.logger.Debug("codedb freshness check skipped, HEAD unchanged")
+				return
+			}
+			// index was wiped — clear cache and fall through to rebuild
+			m.mu.Lock()
+			m.lastIndexedHead = ""
+			m.mu.Unlock()
 		}
 	}
 
@@ -755,7 +770,7 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 
 		// update HEAD cache on success so next CheckFreshness can skip
 		if err == nil {
-			if fp := readHeadFingerprint(projectRoot); fp != "" {
+			if fp := readHeadFingerprint(ctx, projectRoot); fp != "" {
 				m.mu.Lock()
 				m.lastIndexedHead = fp
 				m.mu.Unlock()
