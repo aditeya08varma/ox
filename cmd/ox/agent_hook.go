@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/proc"
@@ -40,6 +39,7 @@ const (
 //   Hook event          │ stdout injected into model context?
 //   ────────────────────┼────────────────────────────────────
 //   UserPromptSubmit    │ YES — only reliable channel for Claude Code
+//   PreToolUse          │ NO  — stdout discarded, same as PostToolUse
 //   PostToolUse         │ NO  — stdout is COMPLETELY DISCARDED by Claude Code
 //   Stop                │ NO  — fires after session ends, model never sees it
 //   SessionStart        │ YES — but only fires once at session start
