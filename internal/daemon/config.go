@@ -58,6 +58,13 @@ type Config struct {
 	// Zero disables automatic distillation.
 	DistillInterval time.Duration
 
+	// CodeDBCheckInterval is how often to run CheckFreshness to detect new commits
+	// (branch switches, manual commits, pulled history). Decoupled from git pull
+	// cadence because the dirty overlay (via fsnotify) handles uncommitted file
+	// search with ~5s latency — full reindex only needs to catch new commits.
+	// Zero disables automatic codedb freshness checks.
+	CodeDBCheckInterval time.Duration
+
 	// BaselineCheckInterval is how often to check if the codedb baseline index
 	// needs rebuilding (ledger HEAD changed). Independent of ledger pull cadence
 	// so baseline rebuilds don't scale with sync frequency.
@@ -92,7 +99,8 @@ type Config struct {
 // DefaultConfig returns the default daemon configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		SyncIntervalRead:        60 * time.Second, // includes anti-entropy checks
+		SyncIntervalRead:        60 * time.Second,  // git pull from remote (ledger, team contexts)
+		CodeDBCheckInterval:     15 * time.Minute, // full reindex for new commits; dirty overlay handles file edits via fsnotify
 		TeamContextSyncInterval: 15 * time.Second,
 		DebounceWindow:          500 * time.Millisecond,
 		VersionCheckInterval:    30 * time.Minute, // ETag conditional requests make this cheap

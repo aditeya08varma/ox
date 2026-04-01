@@ -113,8 +113,9 @@ const (
 	IssueTypeCloneFailed        = "clone_failed"
 	IssueTypeSyncBackoff        = "sync_backoff"
 	IssueTypeDirtyWorkspace     = "dirty_workspace"
-	IssueTypeCodeDBCacheWiped   = "codedb_cache_wiped"
-	IssueTypeRebaseStuck        = "rebase_stuck"
+	IssueTypeCodeDBCacheWiped     = "codedb_cache_wiped"
+	IssueTypeDirtyOverlayFailed   = "dirty_overlay_failed"
+	IssueTypeRebaseStuck          = "rebase_stuck"
 )
 
 // severityRank returns a numeric rank for sorting (higher = more severe).

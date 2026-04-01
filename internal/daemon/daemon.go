@@ -978,6 +978,12 @@ func (d *Daemon) startWorkers() {
 				d.logger,
 			)
 			murmurPub.SetAgentResolver(&heartbeatAgentResolver{heartbeat: d.heartbeat})
+			// wire fsnotify-triggered dirty overlay rebuilds to codedb
+			if d.codedb != nil {
+				debouncer := NewDirtyOverlayDebouncer(d.codedb, d.logger)
+				debouncer.Start(d.ctx)
+				accumulator.SetOnSettled(debouncer.OnSettled)
+			}
 			d.wg.Add(2)
 			go func() {
 				defer d.wg.Done()
