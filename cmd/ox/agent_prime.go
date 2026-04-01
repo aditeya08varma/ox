@@ -31,6 +31,7 @@ import (
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/internal/tips"
@@ -829,6 +830,12 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 		}
 	}
 
+	// determine watch mode: hook-driven agents use hooks, hookless agents use daemon tail
+	watchMode := "hook"
+	if agent := GetAgent(agentType); agent != nil && !agent.SupportsHooks() {
+		watchMode = "tail"
+	}
+
 	opts := session.StartRecordingOptions{
 		AgentID:       agentID,
 		AdapterName:   agentType,
@@ -838,6 +845,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 		Username:      getSessionUsername(),
 		WorkspacePath: projectRoot,
 		Branch:        repotools.GetCurrentBranch(projectRoot),
+		WatchMode:     watchMode,
 	}
 
 	// propagate parent agent info so the recording state knows this is a subagent
@@ -877,6 +885,15 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 		slog.Warn("failed to write raw.jsonl header at auto-start", "error", writeErr)
 	}
 
+	// for tail-mode sessions: try to find the agent's session file and tell
+	// the daemon to start tailing it. If TryConnect returns nil (daemon not
+	// yet running), no data is lost: DetectAndRestart reads from
+	// SourceOffset=0, catching up from the beginning of the file once the
+	// daemon starts and discovers the active recording.
+	if state.WatchMode == "tail" {
+		sendSessionWatchStart(state, projectRoot)
+	}
+
 	// build user notification message
 	notificationMsg := "Recording session. Discussions may be shared with your team. Run /ox-session-stop to end recording."
 	if resolved.IsAuto() {
@@ -891,6 +908,43 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 		AutoStarted:      true,
 		UserNotification: notificationMsg,
 	}
+}
+
+// sendSessionWatchStart attempts to find the agent's session file and tell
+// the daemon to start tailing it. Best-effort: if the file doesn't exist yet
+// or daemon isn't running, the doctor interval picks it up later.
+func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
+	// try to discover the agent's native session file
+	sessionFile := state.SessionFile
+	if sessionFile == "" {
+		adapter, err := adapters.GetAdapter(state.AdapterName)
+		if err != nil {
+			return
+		}
+		sf, err := adapter.FindSessionFile(state.AgentID, state.StartedAt)
+		if err != nil {
+			slog.Debug("tail-mode: session file not found yet, daemon will discover later",
+				"agent_id", state.AgentID, "adapter", state.AdapterName)
+			return
+		}
+		sessionFile = sf
+		// persist the discovered session file so daemon can find it via DetectAndRestart
+		state.SessionFile = sf
+		if saveErr := session.SaveRecordingState(projectRoot, state); saveErr != nil {
+			slog.Warn("failed to save session file to recording state", "error", saveErr)
+		}
+	}
+
+	client := daemon.TryConnect()
+	if client == nil {
+		return
+	}
+
+	_ = client.SessionWatchStart(daemon.SessionWatchStartPayload{
+		SessionName: filepath.Base(state.SessionPath),
+		SessionFile: sessionFile,
+		AdapterName: state.AdapterName,
+	})
 }
 
 // outputAgentPrime emits bootstrap output based on the selected output mode.

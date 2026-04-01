@@ -223,6 +223,7 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		Branch:        repotools.GetCurrentBranch(projectRoot),
 		ParentPID:     proc.FindAgentAncestorPID(),
 		StartOffset:   startOffset,
+		WatchMode:     "hook", // CLI-started sessions use hook mode (CLI hooks drive recording)
 	}
 
 	state, err := session.StartRecording(projectRoot, opts)
@@ -423,8 +424,18 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 		return nil
 	}
 
-	// mark explicit stop so /clear hook doesn't silently auto-restart the session
+	// mark explicit stop BEFORE daemon RPC so anti-entropy cannot restart
+	// the watcher in the window between RPC and mark
 	_ = session.MarkExplicitStop(projectRoot, inst.AgentID)
+
+	// for tail-mode sessions: tell the daemon to stop tailing before we process
+	if state.WatchMode == "tail" {
+		if client := daemon.TryConnect(); client != nil {
+			_ = client.SessionWatchStop(daemon.SessionWatchStopPayload{
+				SessionName: filepath.Base(state.SessionPath),
+			})
+		}
+	}
 
 	duration := formatDurationHuman(state.Duration())
 

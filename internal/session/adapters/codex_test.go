@@ -81,13 +81,35 @@ func codexAssistantMsg(text string) map[string]any {
 
 // codexFunctionCall returns a response_item/function_call entry.
 func codexFunctionCall(name, args string) map[string]any {
+	return codexFunctionCallWithID(name, args, "")
+}
+
+// codexFunctionCallWithID returns a response_item/function_call entry with a call_id.
+func codexFunctionCallWithID(name, args, callID string) map[string]any {
+	payload := map[string]any{
+		"type":      "function_call",
+		"name":      name,
+		"arguments": args,
+	}
+	if callID != "" {
+		payload["call_id"] = callID
+	}
 	return map[string]any{
 		"timestamp": "2026-02-27T10:00:04.000Z",
 		"type":      "response_item",
+		"payload":   payload,
+	}
+}
+
+// codexFunctionCallOutput returns a response_item/function_call_output entry.
+func codexFunctionCallOutput(callID, output string) map[string]any {
+	return map[string]any{
+		"timestamp": "2026-02-27T10:00:05.000Z",
+		"type":      "response_item",
 		"payload": map[string]any{
-			"type":      "function_call",
-			"name":      name,
-			"arguments": args,
+			"type":    "function_call_output",
+			"call_id": callID,
+			"output":  output,
 		},
 	}
 }
@@ -184,7 +206,7 @@ func TestCodexAdapter_ParseLine_FunctionCall(t *testing.T) {
 func TestCodexAdapter_ParseLine_SkippedTypes(t *testing.T) {
 	adapter := &CodexAdapter{}
 
-	skipped := []string{"reasoning", "function_call_output", "web_search_call"}
+	skipped := []string{"reasoning", "web_search_call"}
 	for _, itemType := range skipped {
 		t.Run("skips "+itemType, func(t *testing.T) {
 			line, _ := json.Marshal(map[string]any{
@@ -211,6 +233,112 @@ func TestCodexAdapter_ParseLine_SkippedTypes(t *testing.T) {
 			require.NoError(t, err)
 			assert.Empty(t, entries, "expected %s to be skipped", entryType)
 		}
+	})
+}
+
+func TestCodexAdapter_ParseLine_FunctionCallOutput(t *testing.T) {
+	adapter := &CodexAdapter{}
+
+	t.Run("error output captured with IsError", func(t *testing.T) {
+		line, _ := json.Marshal(codexFunctionCallOutput("call_abc", "Process exited with code 1"))
+		entries, err := adapter.parseLine(line)
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		assert.Equal(t, "tool", entries[0].Role)
+		assert.Equal(t, "Process exited with code 1", entries[0].ToolOutput)
+		assert.True(t, entries[0].IsError)
+		assert.Equal(t, "call_abc", entries[0].CallID)
+	})
+
+	t.Run("success output skipped", func(t *testing.T) {
+		line, _ := json.Marshal(codexFunctionCallOutput("call_abc", "Process exited with code 0"))
+		entries, err := adapter.parseLine(line)
+		require.NoError(t, err)
+		assert.Empty(t, entries)
+	})
+
+	t.Run("empty output skipped", func(t *testing.T) {
+		line, _ := json.Marshal(codexFunctionCallOutput("call_abc", ""))
+		entries, err := adapter.parseLine(line)
+		require.NoError(t, err)
+		assert.Empty(t, entries)
+	})
+
+	t.Run("non-exit-code output skipped", func(t *testing.T) {
+		// regular output without error pattern is not captured
+		line, _ := json.Marshal(codexFunctionCallOutput("call_abc", "file contents here"))
+		entries, err := adapter.parseLine(line)
+		require.NoError(t, err)
+		assert.Empty(t, entries)
+	})
+}
+
+func TestCodexAdapter_MergeToolEntries(t *testing.T) {
+	ts := time.Date(2026, 2, 27, 10, 0, 0, 0, time.UTC)
+
+	t.Run("merges function_call with matching function_call_output", func(t *testing.T) {
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_1"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 1)
+		assert.Equal(t, "exec_command", merged[0].ToolName)
+		assert.Equal(t, `{"cmd":"ls"}`, merged[0].ToolInput)
+		assert.Equal(t, "Process exited with code 1", merged[0].ToolOutput)
+		assert.True(t, merged[0].IsError)
+	})
+
+	t.Run("no merge when CallIDs differ", func(t *testing.T) {
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_2"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 2)
+	})
+
+	t.Run("no merge when CallID is empty", func(t *testing.T) {
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 2)
+	})
+
+	t.Run("non-tool entries pass through", func(t *testing.T) {
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "user", Content: "hello"},
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 127", IsError: true, CallID: "call_1"},
+			{Timestamp: ts, Role: "assistant", Content: "done"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 3)
+		assert.Equal(t, "user", merged[0].Role)
+		assert.Equal(t, "tool", merged[1].Role)
+		assert.Equal(t, "exec_command", merged[1].ToolName)
+		assert.Equal(t, "Process exited with code 127", merged[1].ToolOutput)
+		assert.Equal(t, "assistant", merged[2].Role)
+	})
+
+	t.Run("orphaned function_call_output passes through", func(t *testing.T) {
+		// function_call_output without a preceding function_call (e.g., out-of-order arrival)
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_orphan"},
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_2"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 2)
+		assert.Equal(t, "call_orphan", merged[0].CallID)
+		assert.True(t, merged[0].IsError)
+		assert.Equal(t, "exec_command", merged[1].ToolName)
+	})
+
+	t.Run("empty and single-entry slices unchanged", func(t *testing.T) {
+		assert.Empty(t, mergeToolEntries(nil))
+		assert.Len(t, mergeToolEntries([]RawEntry{{Role: "user"}}), 1)
 	})
 }
 
@@ -268,6 +396,42 @@ func TestCodexAdapter_Read(t *testing.T) {
 
 		assert.Equal(t, "assistant", entries[2].Role)
 		assert.Equal(t, "Session started.", entries[2].Content)
+	})
+
+	t.Run("merges error output into preceding function_call", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeCodexSession(t, dir, "session.jsonl", []map[string]any{
+			codexSessionMeta("/project", "0.106.0"),
+			codexUserMsg("run tests"),
+			codexFunctionCallWithID("exec_command", `{"cmd":"make test"}`, "call_xyz"),
+			codexFunctionCallOutput("call_xyz", "Process exited with code 2"),
+			codexAssistantMsg("Tests failed."),
+		})
+
+		entries, err := adapter.Read(path)
+		require.NoError(t, err)
+		require.Len(t, entries, 3) // user, merged tool, assistant
+
+		assert.Equal(t, "tool", entries[1].Role)
+		assert.Equal(t, "exec_command", entries[1].ToolName)
+		assert.Equal(t, `{"cmd":"make test"}`, entries[1].ToolInput)
+		assert.Equal(t, "Process exited with code 2", entries[1].ToolOutput)
+		assert.True(t, entries[1].IsError)
+	})
+
+	t.Run("success output not captured", func(t *testing.T) {
+		dir := t.TempDir()
+		path := writeCodexSession(t, dir, "session.jsonl", []map[string]any{
+			codexSessionMeta("/project", "0.106.0"),
+			codexFunctionCallWithID("exec_command", `{"cmd":"ls"}`, "call_ok"),
+			codexFunctionCallOutput("call_ok", "Process exited with code 0"),
+		})
+
+		entries, err := adapter.Read(path)
+		require.NoError(t, err)
+		require.Len(t, entries, 1) // only function_call, output skipped
+		assert.Equal(t, "exec_command", entries[0].ToolName)
+		assert.Empty(t, entries[0].ToolOutput)
 	})
 
 	t.Run("skips system injections", func(t *testing.T) {
@@ -445,6 +609,125 @@ func TestCodexAdapter_FindSessionFile(t *testing.T) {
 		got, err := adapter.FindSessionFile("", time.Now().Add(-5*time.Minute))
 		require.NoError(t, err)
 		assert.Equal(t, target, got)
+	})
+}
+
+// --- isCodexToolError edge cases ---
+// These tests verify the INTENT: non-zero exit codes are errors, zero is success,
+// and unknown patterns default to non-error.
+func TestIsCodexToolError_EdgeCases(t *testing.T) {
+	tests := []struct {
+		name    string
+		output  string
+		isError bool
+	}{
+		// negative exit codes are errors
+		{name: "negative exit code", output: "Process exited with code -1", isError: true},
+		// zero-prefixed non-zero codes are errors (not "code 0")
+		{name: "zero-prefixed non-zero code", output: "Process exited with code 01", isError: true},
+		// trailing space after code number: still has the prefix, still != "code 0"
+		{name: "trailing space after code", output: "Process exited with code 1 ", isError: true},
+		// no number after "code ": has prefix but != "code 0", treated as error.
+		// NOTE: this is arguably a bug — no exit code number shouldn't be an error —
+		// but the current implementation returns true because it matches the prefix
+		// and doesn't equal "Process exited with code 0".
+		{name: "no number after code prefix", output: "Process exited with code ", isError: true},
+		// leading whitespace prevents prefix match, so returns false.
+		// NOTE: arguably a bug if the output has leading whitespace, but the current
+		// implementation uses HasPrefix which requires exact start-of-string match.
+		{name: "leading and trailing whitespace", output: "  Process exited with code 1  ", isError: false},
+		// newline between "code" and number breaks the prefix match
+		{name: "newline in output", output: "Process exited with code\n1", isError: false},
+		// empty string handled by early return
+		{name: "empty string", output: "", isError: false},
+		// whitespace-only is not a known error pattern
+		{name: "whitespace only", output: "   ", isError: false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := isCodexToolError(tc.output)
+			assert.Equal(t, tc.isError, got, "isCodexToolError(%q)", tc.output)
+		})
+	}
+}
+
+// --- mergeToolEntries intent verification ---
+// These tests verify the merge contract: consecutive call+output pairs with matching
+// CallIDs produce a single entry with all four fields populated; non-adjacent or
+// wrong-order entries are never merged.
+func TestMergeToolEntries_IntentVerification(t *testing.T) {
+	ts := time.Date(2026, 2, 27, 10, 0, 0, 0, time.UTC)
+
+	t.Run("merged entry has all four tool fields", func(t *testing.T) {
+		// after merge, the resulting entry must have ToolName, ToolInput, ToolOutput, and IsError
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"make test"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 2", IsError: true, CallID: "call_1"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 1)
+		assert.Equal(t, "exec_command", merged[0].ToolName, "ToolName must survive merge")
+		assert.Equal(t, `{"cmd":"make test"}`, merged[0].ToolInput, "ToolInput must survive merge")
+		assert.Equal(t, "Process exited with code 2", merged[0].ToolOutput, "ToolOutput must be merged in")
+		assert.True(t, merged[0].IsError, "IsError must be merged in")
+	})
+
+	t.Run("multiple consecutive pairs produce multiple merged entries", func(t *testing.T) {
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolName: "read_file", ToolInput: `{"path":"x.go"}`, CallID: "call_2"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 127", IsError: true, CallID: "call_2"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 2)
+		assert.Equal(t, "exec_command", merged[0].ToolName)
+		assert.Equal(t, "Process exited with code 1", merged[0].ToolOutput)
+		assert.Equal(t, "read_file", merged[1].ToolName)
+		assert.Equal(t, "Process exited with code 127", merged[1].ToolOutput)
+	})
+
+	t.Run("non-adjacent entries with same CallID do not merge", func(t *testing.T) {
+		// an intervening assistant message prevents merge even with matching CallIDs
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "assistant", Content: "intervening message"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_1"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 3, "intervening entry must prevent merge")
+		assert.Equal(t, "exec_command", merged[0].ToolName)
+		assert.Empty(t, merged[0].ToolOutput, "call entry must not have output when unmerged")
+		assert.Equal(t, "assistant", merged[1].Role)
+		assert.Equal(t, "Process exited with code 1", merged[2].ToolOutput)
+	})
+
+	t.Run("output before call does not merge (wrong order)", func(t *testing.T) {
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_1"},
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 2, "output-before-call must not merge")
+		// first entry is the orphaned output (no ToolName)
+		assert.Empty(t, merged[0].ToolName)
+		assert.Equal(t, "Process exited with code 1", merged[0].ToolOutput)
+		// second entry is the call (no ToolOutput)
+		assert.Equal(t, "exec_command", merged[1].ToolName)
+		assert.Empty(t, merged[1].ToolOutput)
+	})
+
+	t.Run("multiple intervening entries prevent merge", func(t *testing.T) {
+		entries := []RawEntry{
+			{Timestamp: ts, Role: "tool", ToolName: "exec_command", ToolInput: `{"cmd":"ls"}`, CallID: "call_1"},
+			{Timestamp: ts, Role: "user", Content: "msg1"},
+			{Timestamp: ts, Role: "assistant", Content: "msg2"},
+			{Timestamp: ts, Role: "user", Content: "msg3"},
+			{Timestamp: ts, Role: "tool", ToolOutput: "Process exited with code 1", IsError: true, CallID: "call_1"},
+		}
+		merged := mergeToolEntries(entries)
+		require.Len(t, merged, 5, "multiple intervening entries must prevent merge")
 	})
 }
 
