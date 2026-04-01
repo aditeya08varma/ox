@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -465,4 +466,84 @@ func TestProjectWatcher_NewFileCreationPassesThrough(t *testing.T) {
 // slogDiscard returns a logger that discards output.
 func slogDiscard() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError + 1}))
+}
+
+// --- OnSettled callback tests ---
+
+// TestChangeAccumulator_OnSettledCallback verifies that the onSettled callback
+// fires after changes settle.
+// Failure prevented: ChangeAccumulator settles but codedb never learns about it.
+func TestChangeAccumulator_OnSettledCallback(t *testing.T) {
+	t.Parallel()
+
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+
+	called := make(chan struct{}, 1)
+	acc.SetOnSettled(func() {
+		select {
+		case called <- struct{}{}:
+		default:
+		}
+	})
+
+	acc.AddEvent("src/main.go", fsnotify.Write, false)
+
+	select {
+	case <-called:
+		// success
+	case <-time.After(2 * time.Second):
+		t.Fatal("onSettled callback not called after settle")
+	}
+}
+
+// TestChangeAccumulator_OnSettledNotCalledAfterStop verifies that the callback
+// doesn't fire after the accumulator is stopped.
+// Failure prevented: stale callback fires during daemon shutdown.
+func TestChangeAccumulator_OnSettledNotCalledAfterStop(t *testing.T) {
+	t.Parallel()
+
+	acc := NewChangeAccumulator(100 * time.Millisecond)
+
+	var count int64
+	acc.SetOnSettled(func() {
+		atomic.AddInt64(&count, 1)
+	})
+
+	acc.AddEvent("src/main.go", fsnotify.Write, false)
+	// stop before settle fires
+	time.Sleep(20 * time.Millisecond)
+	acc.Stop()
+
+	// wait past settle window
+	time.Sleep(200 * time.Millisecond)
+
+	assert.Equal(t, int64(0), atomic.LoadInt64(&count), "callback should not fire after Stop()")
+}
+
+// TestChangeAccumulator_OnSettledNotCalledWhenEmpty verifies that the callback
+// doesn't fire when there are no pending changes (settle with empty pending).
+// Failure prevented: spurious dirty overlay rebuilds when no files changed.
+func TestChangeAccumulator_OnSettledNotCalledWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	acc := NewChangeAccumulator(50 * time.Millisecond)
+	defer acc.Stop()
+
+	var count int64
+	acc.SetOnSettled(func() {
+		atomic.AddInt64(&count, 1)
+	})
+
+	// add and drain before settle
+	acc.AddEvent("src/main.go", fsnotify.Write, false)
+	time.Sleep(100 * time.Millisecond) // wait for settle
+
+	// first settle should have fired
+	first := atomic.LoadInt64(&count)
+	assert.Equal(t, int64(1), first, "first settle should fire callback")
+
+	// no new events — next settle timer shouldn't fire the callback
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, int64(1), atomic.LoadInt64(&count), "callback should not fire with no pending changes")
 }

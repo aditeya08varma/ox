@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -845,6 +846,228 @@ func TestBuildBaseline_ContextCanceled_Stops(t *testing.T) {
 	flag := mgr.baselineIndexing
 	mgr.mu.Unlock()
 	assert.False(t, flag, "baselineIndexing flag must be released after context cancellation")
+}
+
+// --- A2. CheckFreshness HEAD pre-check ---
+// These tests verify the cheap HEAD fingerprint pre-check that skips the
+// expensive doIndex pipeline when nothing has changed.
+
+// initCodeDBTestRepo creates a minimal git repo with one commit for testing.
+func initCodeDBTestRepo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox
+			"GIT_AUTHOR_NAME=test",
+			"GIT_AUTHOR_EMAIL=test@test.local",
+			"GIT_COMMITTER_NAME=test",
+			"GIT_COMMITTER_EMAIL=test@test.local",
+		)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "git %v: %s", args, out)
+	}
+	run("init", "-b", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "file.go"), []byte("package main\n"), 0o644))
+	run("add", "file.go")
+	run("commit", "-m", "initial")
+	return dir
+}
+
+// TestReadHeadFingerprint_NormalRepo verifies filesystem-based HEAD reading.
+// Failure prevented: pre-check returns "" for valid repos, disabling the optimization.
+func TestReadHeadFingerprint(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git init")
+	}
+
+	t.Run("normal repo returns ref:hash", func(t *testing.T) {
+		dir := initCodeDBTestRepo(t)
+		fp := readHeadFingerprint(dir)
+		require.NotEmpty(t, fp, "should return fingerprint for valid git repo")
+		assert.Contains(t, fp, "refs/heads/main:")
+		// hash should be 40 hex chars after the colon
+		parts := splitFingerprint(fp)
+		assert.Len(t, parts[1], 40, "commit hash should be 40 hex chars")
+	})
+
+	t.Run("no git dir returns empty", func(t *testing.T) {
+		dir := t.TempDir()
+		fp := readHeadFingerprint(dir)
+		assert.Empty(t, fp, "should return empty for non-git directory")
+	})
+
+	t.Run("changes after commit", func(t *testing.T) {
+		dir := initCodeDBTestRepo(t)
+		fp1 := readHeadFingerprint(dir)
+
+		// add a new commit
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "new.go"), []byte("package main\n"), 0o644))
+		cmd := exec.Command("git", "add", "new.go")
+		cmd.Dir = dir
+		require.NoError(t, cmd.Run())
+		cmd = exec.Command("git", "commit", "-m", "second")
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.local",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.local",
+		)
+		require.NoError(t, cmd.Run())
+
+		fp2 := readHeadFingerprint(dir)
+		require.NotEmpty(t, fp2)
+		assert.NotEqual(t, fp1, fp2, "fingerprint should change after commit")
+	})
+
+	t.Run("changes after branch switch", func(t *testing.T) {
+		dir := initCodeDBTestRepo(t)
+		fp1 := readHeadFingerprint(dir)
+
+		cmd := exec.Command("git", "checkout", "-b", "feature")
+		cmd.Dir = dir
+		require.NoError(t, cmd.Run())
+
+		fp2 := readHeadFingerprint(dir)
+		require.NotEmpty(t, fp2)
+		// same commit but different ref name
+		assert.NotEqual(t, fp1, fp2, "fingerprint should change on branch switch")
+		assert.Contains(t, fp2, "refs/heads/feature:")
+	})
+}
+
+func splitFingerprint(fp string) [2]string {
+	idx := len(fp) - 41 // 40-char hash + colon
+	if idx < 0 {
+		return [2]string{fp, ""}
+	}
+	return [2]string{fp[:idx], fp[idx+1:]}
+}
+
+// TestCheckFreshness_SkipsWhenHeadUnchanged verifies that the pre-check
+// prevents doIndex from running when HEAD hasn't changed.
+// Failure prevented: wasted CPU opening SQLite/Bleve/go-git every 5 minutes for nothing.
+func TestCheckFreshness_SkipsWhenHeadUnchanged(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git init")
+	}
+
+	dir := initCodeDBTestRepo(t)
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	var callCount atomic.Int64
+	mgr.testHook = func() {
+		callCount.Add(1)
+	}
+
+	// seed the cache with current HEAD (simulates successful prior index)
+	fp := readHeadFingerprint(dir)
+	require.NotEmpty(t, fp)
+	mgr.mu.Lock()
+	mgr.lastIndexedHead = fp
+	mgr.mu.Unlock()
+
+	// CheckFreshness should skip — HEAD hasn't changed
+	mgr.CheckFreshness(context.Background())
+	time.Sleep(100 * time.Millisecond) // give goroutine time to start if it were to launch
+
+	assert.Equal(t, int64(0), callCount.Load(), "doIndex should not run when HEAD is unchanged")
+}
+
+// TestCheckFreshness_RunsOnFirstCall verifies that the first CheckFreshness
+// (empty cache) always runs doIndex, catching offline changes.
+// Failure prevented: changes made while daemon was stopped are never indexed.
+func TestCheckFreshness_RunsOnFirstCall(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git init")
+	}
+
+	dir := initCodeDBTestRepo(t)
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan struct{}, 1)
+	mgr.testHook = func() {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		cancel() // cancel context to abort doIndex quickly
+	}
+
+	// lastIndexedHead is empty (daemon just started)
+	mgr.CheckFreshness(ctx)
+
+	select {
+	case <-started:
+		// success — doIndex was called despite HEAD being valid
+	case <-time.After(5 * time.Second):
+		t.Fatal("doIndex should run on first CheckFreshness (empty cache)")
+	}
+
+	// wait for goroutine to finish so temp dirs are released
+	waitForIndexingDone(t, mgr)
+}
+
+// TestCheckFreshness_RunsAfterNewCommit verifies that a new commit
+// invalidates the cache and triggers doIndex.
+// Failure prevented: new commits are never indexed after initial build.
+func TestCheckFreshness_RunsAfterNewCommit(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: git init")
+	}
+
+	dir := initCodeDBTestRepo(t)
+	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
+
+	// seed cache with current HEAD
+	fp1 := readHeadFingerprint(dir)
+	mgr.mu.Lock()
+	mgr.lastIndexedHead = fp1
+	mgr.mu.Unlock()
+
+	// add a new commit
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "new.go"), []byte("package main\n"), 0o644))
+	cmd := exec.Command("git", "add", "new.go")
+	cmd.Dir = dir
+	require.NoError(t, cmd.Run())
+	cmd = exec.Command("git", "commit", "-m", "second")
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(), // safe: git subprocess in temp dir, not ox
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.local",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.local",
+	)
+	require.NoError(t, cmd.Run())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	started := make(chan struct{}, 1)
+	mgr.testHook = func() {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		cancel() // abort doIndex quickly
+	}
+
+	mgr.CheckFreshness(ctx)
+
+	select {
+	case <-started:
+		// success — HEAD changed, doIndex was triggered
+	case <-time.After(5 * time.Second):
+		t.Fatal("doIndex should run after a new commit invalidates the HEAD cache")
+	}
+
+	waitForIndexingDone(t, mgr)
 }
 
 // --- B. CheckFreshness worktree guard ---

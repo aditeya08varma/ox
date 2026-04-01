@@ -598,6 +598,16 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 		defer distillTicker.Stop()
 	}
 
+	// codedb freshness check ticker — detects new commits (branch switch, manual commit, pulled history).
+	// Decoupled from git pull: dirty overlay via fsnotify handles file edits with ~5s latency.
+	var codedbCheckTicker *time.Ticker
+	var codedbCheckChan <-chan time.Time
+	if s.config.CodeDBCheckInterval > 0 && s.config.ProjectRoot != "" && s.codedb != nil {
+		codedbCheckTicker = time.NewTicker(s.config.CodeDBCheckInterval)
+		codedbCheckChan = codedbCheckTicker.C
+		defer codedbCheckTicker.Stop()
+	}
+
 	// baseline check ticker — checks if codedb baseline needs rebuild
 	var baselineTicker *time.Ticker
 	var baselineChan <-chan time.Time
@@ -633,6 +643,9 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	// immediate initial pull so last_sync gets populated right away
 	// (don't wait 5 minutes for the first readTicker)
 	go s.pullChanges(ctx)
+
+	// initial codedb check on startup (don't wait for CodeDBCheckInterval)
+	go s.checkCodeDBFreshness(ctx)
 
 	for {
 		select {
@@ -675,6 +688,12 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 				if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
 					s.githubSync.CheckAndSync(ctx, l.Path)
 				}
+			}
+
+		case <-codedbCheckChan:
+			s.checkCodeDBFreshness(ctx)
+			if codedbCheckTicker != nil {
+				codedbCheckTicker.Reset(jitteredDuration(s.config.CodeDBCheckInterval, 0.10))
 			}
 
 		case <-baselineChan:
@@ -761,15 +780,20 @@ func (s *SyncScheduler) pullChanges(ctx context.Context) {
 	pullCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	_ = s.doPull(pullCtx, nil, false, true)
+}
 
-	// check code index freshness (non-blocking)
-	if s.codedb != nil {
-		// update ledger path so CodeDB can index GitHub data from the ledger
-		if ledger := s.workspaceRegistry.GetLedger(); ledger != nil && ledger.Path != "" && ledger.Exists {
-			s.codedb.SetLedgerPath(ledger.Path)
-		}
-		s.codedb.CheckFreshness(ctx)
+// checkCodeDBFreshness runs the codedb freshness check on its own schedule.
+// Decoupled from pullChanges because dirty overlay (via fsnotify) handles
+// uncommitted file search with ~5s latency — this only catches new commits.
+func (s *SyncScheduler) checkCodeDBFreshness(ctx context.Context) {
+	if s.codedb == nil {
+		return
 	}
+	// update ledger path so CodeDB can index GitHub data from the ledger
+	if ledger := s.workspaceRegistry.GetLedger(); ledger != nil && ledger.Path != "" && ledger.Exists {
+		s.codedb.SetLedgerPath(ledger.Path)
+	}
+	s.codedb.CheckFreshness(ctx)
 }
 
 // checkLatestVersion fetches the latest GitHub release using ETag conditional requests.
@@ -1171,12 +1195,8 @@ func (s *SyncScheduler) syncFromWatcher(ctx context.Context) {
 	pullCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 	_ = s.doPull(pullCtx, nil, false, false)
-	if s.codedb != nil {
-		if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
-			s.codedb.SetLedgerPath(l.Path)
-		}
-		s.codedb.CheckFreshness(ctx)
-	}
+	// watcher events may indicate branch switch or commit — check for new commits
+	s.checkCodeDBFreshness(ctx)
 }
 
 // triggerBaselineRebuild checks if content sources (ledger, team contexts) have

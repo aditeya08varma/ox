@@ -41,6 +41,7 @@ type ChangeAccumulator struct {
 	settlePeriod time.Duration
 	settleTimer  *time.Timer
 	stopped      bool
+	onSettled    func() // called (in a goroutine) when pending changes settle
 }
 
 // NewChangeAccumulator creates an accumulator with the given settle period.
@@ -132,6 +133,14 @@ func (a *ChangeAccumulator) resetSettleTimer() {
 	})
 }
 
+// SetOnSettled registers a callback invoked (in a goroutine) each time pending
+// changes settle. Used by the dirty overlay debouncer to trigger index rebuilds.
+func (a *ChangeAccumulator) SetOnSettled(fn func()) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.onSettled = fn
+}
+
 // settle moves pending changes to settled. Called when settle timer fires.
 func (a *ChangeAccumulator) settle() {
 	a.mu.Lock()
@@ -145,6 +154,10 @@ func (a *ChangeAccumulator) settle() {
 		a.settled = append(a.settled, *fc)
 	}
 	a.pending = make(map[string]*FileChange)
+
+	if a.onSettled != nil {
+		go a.onSettled()
+	}
 }
 
 // DrainSettled returns and clears all settled changes.
