@@ -343,6 +343,167 @@ func (h *SessionFinalizeHandler) detectInDir(sessionsDir, ledgerPath string) ([]
 	return items, nil
 }
 
+// DetectOrphanedForAgent scans for recordings belonging to a specific agent
+// and returns work items for immediate finalization. Unlike Detect(), this
+// skips the normal stale-recording threshold and immediately considers any
+// recording for the given agent as orphaned.
+//
+// heartbeatPID is the PID from the heartbeat tracker. The function cross-checks
+// it against the recording's ParentPID to avoid misclassifying live sessions
+// whose heartbeat recorded a short-lived shell PID.
+func (h *SessionFinalizeHandler) DetectOrphanedForAgent(ledgerPath, agentID string, heartbeatPID int) []*WorkItem {
+	if agentID == "" || ledgerPath == "" {
+		return nil
+	}
+
+	var items []*WorkItem
+	seen := make(map[string]bool)
+
+	scanDirs := []string{
+		filepath.Join(ledgerPath, ".sageox", "cache", "sessions"),
+		filepath.Join(ledgerPath, "sessions"),
+	}
+
+	// also scan XDG/legacy cache paths (mirrors Detect())
+	repoID := filepath.Base(ledgerPath)
+	if repoID != "" && repoID != "." {
+		xdgDirs := []string{filepath.Join(paths.SessionCacheDir(repoID), "sessions")}
+		for _, d := range paths.AlternateSessionCacheDirs(repoID) {
+			xdgDirs = append(xdgDirs, filepath.Join(d, "sessions"))
+		}
+		for _, d := range xdgDirs {
+			if d == scanDirs[0] || d == scanDirs[1] {
+				continue // already covered
+			}
+			scanDirs = append(scanDirs, d)
+		}
+	}
+
+	for _, sessionsDir := range scanDirs {
+		entries, err := os.ReadDir(sessionsDir)
+		if err != nil {
+			continue
+		}
+
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+
+			name := entry.Name()
+			if name == "raw" || name == "events" {
+				continue
+			}
+
+			sessionDir := filepath.Join(sessionsDir, name)
+			recPath := filepath.Join(sessionDir, recordingMarker)
+
+			// read .recording.json to check agent ID
+			data, err := os.ReadFile(recPath)
+			if err != nil {
+				continue // no active recording
+			}
+
+			var state struct {
+				AgentID   string     `json:"agent_id"`
+				ParentPID int        `json:"parent_pid,omitempty"`
+				StoppedAt *time.Time `json:"stopped_at,omitempty"`
+			}
+			if jsonErr := json.Unmarshal(data, &state); jsonErr != nil {
+				continue
+			}
+			if state.AgentID != agentID {
+				continue
+			}
+
+			// cross-check heartbeat PID against recording's ParentPID to avoid
+			// misclassifying live sessions whose heartbeat recorded a short-lived shell PID
+			if state.StoppedAt == nil {
+				if state.ParentPID > 0 && state.ParentPID != heartbeatPID {
+					if isPIDAlive(state.ParentPID) {
+						h.logger.Debug("skipping live session (ParentPID alive, heartbeat PID mismatch)",
+							"session", name, "agent_id", agentID,
+							"parent_pid", state.ParentPID, "heartbeat_pid", heartbeatPID,
+						)
+						continue
+					}
+				} else if state.ParentPID == 0 && heartbeatPID > 0 {
+					// rollout compat: old recordings missing parent_pid —
+					// fall back to checking the heartbeat PID itself
+					if isPIDAlive(heartbeatPID) {
+						h.logger.Debug("skipping live session (parent_pid missing, heartbeat PID alive)",
+							"session", name, "agent_id", agentID,
+							"heartbeat_pid", heartbeatPID,
+						)
+						continue
+					}
+				}
+			}
+
+			// check if already fully finalized
+			rawPath := filepath.Join(sessionDir, artifactRaw)
+			hasRaw := false
+			if _, statErr := os.Stat(rawPath); statErr == nil {
+				hasRaw = true
+			}
+
+			if !hasRaw {
+				// attempt recovery from adapter source file
+				if recoverRawFromSessionFile(h.logger, recPath, sessionDir, rawPath) {
+					hasRaw = true
+				} else {
+					h.logger.Warn("orphaned recording unrecoverable for agent",
+						"session", name, "agent_id", agentID,
+					)
+					_ = os.Remove(recPath)
+					continue
+				}
+			}
+
+			// clear the recording marker so finalization can proceed
+			h.logger.Info("clearing orphaned recording for agent exit finalization",
+				"session", name, "agent_id", agentID,
+			)
+			if err := os.Remove(recPath); err != nil {
+				h.logger.Warn("failed to remove orphaned recording marker", "session", name, "err", err)
+				continue
+			}
+
+			if !session.HasSubstantiveEntries(rawPath) {
+				continue
+			}
+
+			missing := missingArtifacts(sessionDir)
+			if len(missing) == 0 {
+				continue
+			}
+
+			dedupKey := sessionFinalizeType + ":" + name
+			if seen[dedupKey] {
+				continue
+			}
+			seen[dedupKey] = true
+
+			items = append(items, &WorkItem{
+				Type:     sessionFinalizeType,
+				Priority: sessionFinalizePriority,
+				DedupKey: dedupKey,
+				Payload: &SessionFinalizePayload{
+					SessionDir: sessionDir,
+					RawPath:    rawPath,
+					Missing:    missing,
+					LedgerPath: ledgerPath,
+				},
+			})
+		}
+	}
+
+	if len(items) > 0 {
+		h.logger.Info("detected orphaned sessions for agent", "agent_id", agentID, "count", len(items))
+	}
+	return items
+}
+
 // BuildPrompt reads the raw session and constructs a summarization prompt.
 func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error) {
 	payload, err := extractPayload(item)
@@ -911,4 +1072,16 @@ func recoverRawFromSessionFile(logger *slog.Logger, recPath, sessionDir, rawPath
 		"source", state.SessionFile,
 	)
 	return true
+}
+
+// isPIDAlive checks if a process with the given PID exists.
+func isPIDAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
 }
