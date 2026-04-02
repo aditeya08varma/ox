@@ -38,6 +38,7 @@ const (
 
 	// startupMaxAge caps how far back we report on first murmur after startup.
 	startupMaxAge = 30 * time.Minute
+
 )
 
 // FileChangeMurmurPublisher drains the ChangeAccumulator frequently and
@@ -200,6 +201,12 @@ func (p *FileChangeMurmurPublisher) publish() {
 	p.pending = make(map[string]*FileChange)
 	p.mu.Unlock()
 
+	// filter infrastructure noise before formatting
+	changes = filterFileChangeNoise(changes)
+	if len(changes) == 0 {
+		return
+	}
+
 	now := time.Now()
 	branch := repotools.GetCurrentBranch(p.projectRoot)
 	content := formatFileChangeMurmur(changes, branch, p.projectRoot)
@@ -351,8 +358,6 @@ func formatFileChangeMurmur(changes []FileChange, branch, projectRoot string) st
 
 	count := len(changes)
 	switch {
-	case count > 100:
-		return ctx + formatHugeChanges(changes)
 	case count > 20:
 		return ctx + formatLargeChanges(changes)
 	case count > 5:
@@ -425,9 +430,13 @@ func formatMediumChanges(changes []FileChange) string {
 	return fmt.Sprintf("%d files: %s", len(changes), strings.Join(parts, " "))
 }
 
-// formatLargeChanges shows top directories only (21-100 files).
+// formatLargeChanges shows top directories with change types (21+ files).
+// Used for both large and huge change sets — always provides actionable signal
+// about which areas are changing and how.
 func formatLargeChanges(changes []FileChange) string {
-	dirs := make(map[string]int)
+	type dirSummary struct{ created, modified, deleted, total int }
+	dirs := make(map[string]*dirSummary)
+
 	for _, c := range changes {
 		dir := filepath.Dir(c.Path)
 		if dir == "." {
@@ -435,27 +444,50 @@ func formatLargeChanges(changes []FileChange) string {
 		} else {
 			dir += "/"
 		}
-		dirs[dir]++
+		s, ok := dirs[dir]
+		if !ok {
+			s = &dirSummary{}
+			dirs[dir] = s
+		}
+		s.total++
+		switch c.ChangeType {
+		case ChangeCreated:
+			s.created++
+		case ChangeDeleted:
+			s.deleted++
+		default:
+			s.modified++
+		}
 	}
 
-	type dirCount struct {
-		dir   string
-		count int
+	type dirEntry struct {
+		dir string
+		s   *dirSummary
 	}
-	sorted := make([]dirCount, 0, len(dirs))
-	for d, n := range dirs {
-		sorted = append(sorted, dirCount{d, n})
+	sorted := make([]dirEntry, 0, len(dirs))
+	for d, s := range dirs {
+		sorted = append(sorted, dirEntry{d, s})
 	}
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].count > sorted[j].count })
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].s.total > sorted[j].s.total })
 
-	// show top 5 dirs
+	// show top 5 dirs with change types
 	var parts []string
 	shown := 0
-	for _, dc := range sorted {
+	for _, de := range sorted {
 		if shown >= 5 {
 			break
 		}
-		parts = append(parts, fmt.Sprintf("%s(%d)", dc.dir, dc.count))
+		var counts []string
+		if de.s.modified > 0 {
+			counts = append(counts, fmt.Sprintf("%dM", de.s.modified))
+		}
+		if de.s.created > 0 {
+			counts = append(counts, fmt.Sprintf("%dA", de.s.created))
+		}
+		if de.s.deleted > 0 {
+			counts = append(counts, fmt.Sprintf("%dD", de.s.deleted))
+		}
+		parts = append(parts, fmt.Sprintf("%s(%s)", de.dir, strings.Join(counts, ",")))
 		shown++
 	}
 	rest := len(dirs) - shown
@@ -466,11 +498,44 @@ func formatLargeChanges(changes []FileChange) string {
 	return summary
 }
 
-// formatHugeChanges is ultra-terse for 100+ files (branch switch, codegen).
-func formatHugeChanges(changes []FileChange) string {
-	dirs := make(map[string]struct{})
+// filterFileChangeNoise removes infrastructure paths that shouldn't appear
+// in file-change murmurs: paths outside the project root (ledger/team-context
+// writes that filepath.Rel turns into ../../../...) and atomic-write temp files.
+func filterFileChangeNoise(changes []FileChange) []FileChange {
+	filtered := changes[:0]
 	for _, c := range changes {
-		dirs[filepath.Dir(c.Path)] = struct{}{}
+		if !isFileChangeNoise(c.Path) {
+			filtered = append(filtered, c)
+		}
 	}
-	return fmt.Sprintf("%d files across %d dirs", len(changes), len(dirs))
+	return filtered
+}
+
+// localStatePrefixes are directory prefixes containing local tool state
+// that shouldn't appear in file-change murmurs.
+var localStatePrefixes = []string{
+	".sageox/",
+	".beads/",
+	".claude/",
+	".codegraph/",
+	".cursor/",
+}
+
+// isFileChangeNoise returns true if the path is infrastructure noise.
+func isFileChangeNoise(path string) bool {
+	// paths outside project root (ledger/team-context daemon writes)
+	if strings.HasPrefix(path, "../") {
+		return true
+	}
+	// atomic-write temp files (e.g. foo.go.tmp.22532.17751)
+	if strings.Contains(filepath.Base(path), ".tmp.") {
+		return true
+	}
+	// local tool state directories
+	for _, prefix := range localStatePrefixes {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
