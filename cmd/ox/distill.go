@@ -611,6 +611,7 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		if err != nil {
 			return fmt.Errorf("create sandbox: %w", err)
 		}
+		// print results before cleanup removes the temp dir (LIFO order)
 		defer cleanup()
 		defer printSandboxResults(sb.TC.Path)
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,7 +33,7 @@ func TestLocalCloneWithBareRemote(t *testing.T) {
 	cloneDir := filepath.Join(t.TempDir(), "clone")
 	bareDir := filepath.Join(t.TempDir(), "remote.git")
 
-	err := localCloneWithBareRemote(srcDir, cloneDir, bareDir)
+	err := localCloneWithBareRemote(context.Background(), srcDir, cloneDir, bareDir)
 	require.NoError(t, err)
 
 	// clone should have all files

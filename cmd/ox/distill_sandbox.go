@@ -1,15 +1,18 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/config"
 )
+
 
 // distillSandbox holds the isolated environment for a sandbox distill run.
 // All git operations (commit, push) target the sandbox clones, leaving the
@@ -40,6 +43,8 @@ func createDistillSandbox(
 	realRepos []distillRepo,
 	extractOverride, distillOverride string,
 ) (*distillSandbox, func(), error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
 	root, err := os.MkdirTemp("", "ox-distill-sandbox-*")
 	if err != nil {
@@ -49,7 +54,7 @@ func createDistillSandbox(
 
 	// --- sandbox team context ---
 	sandboxTCPath := filepath.Join(root, "team-context")
-	if err := localCloneWithBareRemote(realTC.Path, sandboxTCPath, filepath.Join(root, "remote-tc.git")); err != nil {
+	if err := localCloneWithBareRemote(ctx, realTC.Path, sandboxTCPath, filepath.Join(root, "remote-tc.git")); err != nil {
 		cleanup()
 		return nil, nil, fmt.Errorf("sandbox team context: %w", err)
 	}
@@ -85,7 +90,7 @@ func createDistillSandbox(
 
 		sandboxLedger := filepath.Join(root, fmt.Sprintf("ledger-%d", i))
 		bareRemote := filepath.Join(root, fmt.Sprintf("remote-ledger-%d.git", i))
-		if err := localCloneWithBareRemote(repo.LedgerPath, sandboxLedger, bareRemote); err != nil {
+		if err := localCloneWithBareRemote(ctx, repo.LedgerPath, sandboxLedger, bareRemote); err != nil {
 			cleanup()
 			return nil, nil, fmt.Errorf("sandbox ledger %s: %w", repo.RepoID, err)
 		}
@@ -118,21 +123,21 @@ func createDistillSandbox(
 //
 // Fix: after checkout, remove index entries for files not in the working
 // tree (i.e., outside the sparse cone). This only affects the sandbox clone.
-func localCloneWithBareRemote(srcRepo, cloneDir, bareDir string) error {
+func localCloneWithBareRemote(ctx context.Context, srcRepo, cloneDir, bareDir string) error {
 	// step 1: local clone without checkout (hardlinks pack files, near-instant)
-	cmd := exec.Command("git", "clone", "--local", "--no-checkout", srcRepo, cloneDir)
+	cmd := exec.CommandContext(ctx, "git", "clone", "--local", "--no-checkout", srcRepo, cloneDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git clone --local: %s: %w", string(out), err)
 	}
 
 	// step 2: immediately sever the link to the source repo so no
 	// subsequent git operation can accidentally reach it.
-	cmd = exec.Command("git", "-C", cloneDir, "remote", "remove", "origin")
+	cmd = exec.CommandContext(ctx, "git", "-C", cloneDir, "remote", "remove", "origin")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("remove origin: %s: %w", string(out), err)
 	}
 
-	// step 3: copy sparse-checkout config if the source uses it
+	// step 3: copy sparse-checkout config from source if present
 	srcSparse := filepath.Join(srcRepo, ".git", "info", "sparse-checkout")
 	if data, err := os.ReadFile(srcSparse); err == nil {
 		destInfo := filepath.Join(cloneDir, ".git", "info")
@@ -142,20 +147,20 @@ func localCloneWithBareRemote(srcRepo, cloneDir, bareDir string) error {
 		if err := os.WriteFile(filepath.Join(destInfo, "sparse-checkout"), data, 0o644); err != nil {
 			return fmt.Errorf("write sparse-checkout: %w", err)
 		}
-		cfgCmd := exec.Command("git", "-C", cloneDir, "config", "core.sparseCheckout", "true")
+		cfgCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "config", "core.sparseCheckout", "true")
 		if out, err := cfgCmd.CombinedOutput(); err != nil {
 			return fmt.Errorf("enable sparse checkout: %s: %w", string(out), err)
 		}
 	}
 
-	// step 3: checkout (respects sparse-checkout rules)
-	cmd = exec.Command("git", "-C", cloneDir, "checkout")
+	// step 4: checkout (respects sparse-checkout rules)
+	cmd = exec.CommandContext(ctx, "git", "-C", cloneDir, "checkout")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		// checkout may warn about missing promisor objects but still succeed
 		slog.Debug("checkout warnings", "output", string(out))
 	}
 
-	// step 4: remove index entries for files not in the working tree.
+	// step 5: remove index entries for files not in the working tree.
 	//
 	// In a partial clone with sparse checkout, the index has entries for ALL
 	// tracked files, but blobs outside the sparse cone may only exist on the
@@ -163,7 +168,7 @@ func localCloneWithBareRemote(srcRepo, cloneDir, bareDir string) error {
 	// relationship, so git commit fails with "invalid object" for these
 	// entries. Removing them from the index is safe because the files aren't
 	// in the working tree anyway.
-	rmCmd := exec.Command("git", "-C", cloneDir, "ls-files", "--sparse", "--full-name", "-z")
+	rmCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "ls-files", "--sparse", "--full-name", "-z")
 	lsOut, err := rmCmd.Output()
 	if err == nil {
 		var toRemove []string
@@ -177,34 +182,34 @@ func localCloneWithBareRemote(srcRepo, cloneDir, bareDir string) error {
 		}
 		if len(toRemove) > 0 {
 			args := append([]string{"-C", cloneDir, "rm", "--cached", "--sparse", "--quiet", "--"}, toRemove...)
-			rmCached := exec.Command("git", args...)
+			rmCached := exec.CommandContext(ctx, "git", args...)
 			if out, err := rmCached.CombinedOutput(); err != nil {
-				slog.Debug("failed to remove non-sparse index entries", "error", string(out))
+				slog.Warn("failed to remove non-sparse index entries — git commit may fail with 'invalid object'", "error", string(out))
 			}
 		}
 	}
 
-	// step 5: create bare repo as the sandbox push target.
-	initCmd := exec.Command("git", "init", "--bare", bareDir)
+	// step 6: create bare repo as the sandbox push target.
+	initCmd := exec.CommandContext(ctx, "git", "init", "--bare", bareDir)
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git init --bare: %s: %w", string(out), err)
 	}
 
-	// step 6: add the bare repo as the new origin
-	cmd = exec.Command("git", "-C", cloneDir, "remote", "add", "origin", bareDir)
+	// step 7: add the bare repo as the new origin
+	cmd = exec.CommandContext(ctx, "git", "-C", cloneDir, "remote", "add", "origin", bareDir)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git remote add origin: %s: %w", string(out), err)
 	}
 
-	// step 7: commit the index cleanup and tag the pre-distill state.
+	// step 8: commit the index cleanup and tag the pre-distill state.
 	// The commit records the clean index so subsequent distill commits
 	// don't reference missing promisor objects. The tag marks the baseline
 	// for printSandboxResults to diff against.
-	commitCmd := exec.Command("git", "-C", cloneDir, "commit", "--allow-empty", "-m", "sandbox: clean index for distill")
+	commitCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "commit", "--allow-empty", "-m", "sandbox: clean index for distill")
 	if out, err := commitCmd.CombinedOutput(); err != nil {
 		slog.Debug("sandbox index commit", "output", string(out))
 	}
-	tagCmd := exec.Command("git", "-C", cloneDir, "tag", "sandbox-baseline")
+	tagCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "tag", "sandbox-baseline")
 	if out, err := tagCmd.CombinedOutput(); err != nil {
 		slog.Debug("sandbox baseline tag", "output", string(out))
 	}
@@ -215,7 +220,7 @@ func localCloneWithBareRemote(srcRepo, cloneDir, bareDir string) error {
 		{"user.email", "sandbox@ox.local"},
 		{"push.autoSetupRemote", "true"},
 	} {
-		cmd = exec.Command("git", "-C", cloneDir, "config", kv[0], kv[1])
+		cmd = exec.CommandContext(ctx, "git", "-C", cloneDir, "config", kv[0], kv[1])
 		if out, err := cmd.CombinedOutput(); err != nil {
 			slog.Debug("git config in sandbox", "key", kv[0], "error", string(out), "err", err)
 		}
