@@ -35,13 +35,13 @@ func resolveCodeDBDir(root string) string {
 	return paths.CodeDBDataDir(root)
 }
 
-// resolveLedgerCodeDBDir returns the ledger CodeDB directory if it exists on disk.
+// resolveLedgerCodeDBDir returns the ledger CodeDB directory if a built index exists on disk.
 // Returns empty string if the ledger index is not available (graceful fallback to legacy).
 func resolveLedgerCodeDBDir(root string) string {
 	ctx, err := config.LoadProjectContext(root)
 	if err == nil {
 		if dir := paths.CodeDBLedgerDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
-			if _, statErr := os.Stat(dir); statErr == nil {
+			if _, statErr := os.Stat(filepath.Join(dir, store.MetadataDBFile)); statErr == nil {
 				return dir
 			}
 		}

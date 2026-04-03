@@ -30,13 +30,40 @@ func TestResolveLedgerCodeDBDir_Exists(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), cfgData, 0644))
 
-	// compute and create the ledger index dir on disk
+	// compute and create the ledger index dir on disk with metadata.db
 	ledgerDir := paths.CodeDBLedgerDir("repo_01abc123", "https://sageox.ai")
 	require.NotEmpty(t, ledgerDir, "CodeDBLedgerDir must return a non-empty path")
 	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, "metadata.db"), []byte("fake"), 0644))
 
 	got := resolveLedgerCodeDBDir(projectRoot)
 	assert.Equal(t, ledgerDir, got)
+}
+
+func TestResolveLedgerCodeDBDir_EmptyDir_NotValid(t *testing.T) {
+	projectRoot := t.TempDir()
+	xdgData := t.TempDir()
+
+	t.Setenv("OX_XDG_ENABLE", "1")
+	t.Setenv("XDG_DATA_HOME", xdgData)
+
+	sageoxDir := filepath.Join(projectRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+	cfg := map[string]string{
+		"repo_id":  "repo_01abc123",
+		"endpoint": "https://sageox.ai",
+	}
+	cfgData, err := json.Marshal(cfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), cfgData, 0644))
+
+	// create ledger dir but WITHOUT metadata.db (simulates failed BuildLedgerIndex)
+	ledgerDir := paths.CodeDBLedgerDir("repo_01abc123", "https://sageox.ai")
+	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
+
+	got := resolveLedgerCodeDBDir(projectRoot)
+	assert.Empty(t, got, "empty ledger dir without metadata.db should not be treated as valid")
 }
 
 func TestResolveLedgerCodeDBDir_Missing_FallsBack(t *testing.T) {
@@ -120,9 +147,10 @@ func TestResolvePreferredCodeDBDir_FallsBackToLedger(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), cfgData, 0644))
 
-	// create ONLY ledger dir — shared does not exist
+	// create ONLY ledger dir with metadata.db — shared does not have an index
 	ledgerDir := paths.CodeDBLedgerDir("repo_01abc123", "https://sageox.ai")
 	require.NoError(t, os.MkdirAll(ledgerDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, "metadata.db"), []byte("fake"), 0644))
 
 	got, useLedger := resolvePreferredCodeDBDir(projectRoot)
 	assert.Equal(t, ledgerDir, got, "should fall back to ledger when shared does not exist")
