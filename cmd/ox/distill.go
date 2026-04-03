@@ -45,6 +45,9 @@ var weeklyRe = regexp.MustCompile(`^(\d{4})-W(\d{2})`)
 // monthlyRe matches YYYY-MM monthly filenames.
 var monthlyRe = regexp.MustCompile(`^(\d{4}-\d{2})\.md$`)
 
+// sandboxReposKey is a context key for passing pre-resolved repos from sandbox setup.
+type sandboxReposKey struct{}
+
 // distillPlan describes what layers and periods to distill.
 type distillPlan struct {
 	Daily  bool
@@ -349,6 +352,11 @@ var (
 	distillNoPush      bool
 	distillConcurrency int
 	distillAll         bool
+
+	// sandbox mode: run distill in an isolated clone with a local bare remote
+	distillSandboxFlag    bool
+	distillSandboxExtract string
+	distillSandboxDistill string
 )
 
 var distillCmd = &cobra.Command{
@@ -376,6 +384,9 @@ func init() {
 	distillCmd.Flags().BoolVar(&distillNoPush, "no-push", false, "skip pushing team context commits to remote (useful for testing)")
 	distillCmd.Flags().IntVar(&distillConcurrency, "concurrency", 1, "max parallel LLM calls for fact extraction (1-8)")
 	distillCmd.Flags().BoolVar(&distillAll, "all", false, "process all history (default: last 7 days)")
+	distillCmd.Flags().BoolVar(&distillSandboxFlag, "sandbox", false, "run in an isolated clone — commits and pushes go to a local bare repo, not the real remote")
+	distillCmd.Flags().StringVar(&distillSandboxExtract, "sandbox-extract", "", "path to an EXTRACT.md override (implies --sandbox)")
+	distillCmd.Flags().StringVar(&distillSandboxDistill, "sandbox-distill", "", "path to a DISTILL.md override (implies --sandbox)")
 
 	rootCmd.AddCommand(distillCmd)
 }
@@ -584,6 +595,33 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// guidance override flags imply --sandbox
+	if distillSandboxExtract != "" || distillSandboxDistill != "" {
+		distillSandboxFlag = true
+	}
+
+	// sandbox mode: clone repos locally, swap remotes to bare repos
+	if distillSandboxFlag {
+		repos, err := resolveDistillRepos(projectRoot)
+		if err != nil {
+			return fmt.Errorf("resolve distill repos: %w", err)
+		}
+
+		sb, cleanup, err := createDistillSandbox(tc, repos, distillSandboxExtract, distillSandboxDistill)
+		if err != nil {
+			return fmt.Errorf("create sandbox: %w", err)
+		}
+		defer cleanup()
+		defer printSandboxResults(sb.TC.Path)
+
+		fmt.Fprintf(cmd.OutOrStdout(), "Sandbox: %s\n", sb.Root)
+		tc = sb.TC
+		distillNoPush = true // sandbox has no meaningful remote
+		// stash sandbox repos for use below (skip resolveDistillRepos later)
+		cmd.SetContext(context.WithValue(ctx, sandboxReposKey{}, sb.Repos))
+		ctx = cmd.Context()
+	}
+
 	// push team context commits to remote when we're done — even if the
 	// pipeline partially fails, earlier stages may have committed facts or
 	// distilled summaries that should be synced.
@@ -671,10 +709,15 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// resolve repos for multi-ledger extraction
-	repos, err := resolveDistillRepos(projectRoot)
-	if err != nil {
-		return fmt.Errorf("resolve distill repos: %w", err)
+	// resolve repos for multi-ledger extraction (sandbox may have pre-resolved)
+	var repos []distillRepo
+	if sbRepos, ok := ctx.Value(sandboxReposKey{}).([]distillRepo); ok {
+		repos = sbRepos
+	} else {
+		repos, err = resolveDistillRepos(projectRoot)
+		if err != nil {
+			return fmt.Errorf("resolve distill repos: %w", err)
+		}
 	}
 
 	// (per-repo state migration removed — extraction is now stateless via file metadata)
