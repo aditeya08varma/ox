@@ -27,23 +27,23 @@ func waitForIndexingDone(t *testing.T, mgr *CodeDBManager) {
 	t.Fatal("timed out waiting for indexing to complete")
 }
 
-// --- Two-tier baseline+dirty architecture tests ---
-// These tests validate the baseline index lifecycle, its independence from the
+// --- Two-tier ledger+dirty architecture tests ---
+// These tests validate the ledger index lifecycle, its independence from the
 // worktree index, and resilience to real-world failure modes.
 // Each test documents what failure it prevents.
 
-// waitForBaselineIndexingDone polls until the baselineIndexing flag clears or times out.
-func waitForBaselineIndexingDone(t *testing.T, mgr *CodeDBManager) {
+// waitForLedgerIndexingDone polls until the ledgerIndexing flag clears or times out.
+func waitForLedgerIndexingDone(t *testing.T, mgr *CodeDBManager) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		mgr.mu.Lock()
-		done := !mgr.baselineIndexing
+		done := !mgr.ledgerIndexing
 		mgr.mu.Unlock()
 		if done {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("timed out waiting for baseline indexing to complete")
+	t.Fatal("timed out waiting for ledger indexing to complete")
 }

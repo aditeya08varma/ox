@@ -339,10 +339,10 @@ func TestRefreshDirtyOverlay_FlagReleasedOnEarlyExit(t *testing.T) {
 	t.Fatal("dirtyRefreshing flag was not released after early exit (missing dataDir)")
 }
 
-// TestRefreshDirtyOverlay_RunsConcurrentlyWithBaseline verifies that dirty
-// refresh and baseline indexing can run simultaneously without interfering.
-// Failure prevented: dirty refresh blocked by unrelated baseline rebuild.
-func TestRefreshDirtyOverlay_RunsConcurrentlyWithBaseline(t *testing.T) {
+// TestRefreshDirtyOverlay_RunsConcurrentlyWithLedgerIndex verifies that dirty
+// refresh and ledger indexing can run simultaneously without interfering.
+// Failure prevented: dirty refresh blocked by unrelated ledger index rebuild.
+func TestRefreshDirtyOverlay_RunsConcurrentlyWithLedgerIndex(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -356,9 +356,9 @@ func TestRefreshDirtyOverlay_RunsConcurrentlyWithBaseline(t *testing.T) {
 		}
 	}
 
-	// baseline is running — dirty should still proceed
+	// ledger index is running — dirty should still proceed
 	mgr.mu.Lock()
-	mgr.baselineIndexing = true
+	mgr.ledgerIndexing = true
 	mgr.mu.Unlock()
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -368,9 +368,9 @@ func TestRefreshDirtyOverlay_RunsConcurrentlyWithBaseline(t *testing.T) {
 
 	select {
 	case <-fires:
-		// success — dirty refresh runs independently of baseline
+		// success — dirty refresh runs independently of ledger index
 	case <-time.After(2 * time.Second):
-		t.Fatal("dirty refresh should run independently of baseline indexing")
+		t.Fatal("dirty refresh should run independently of ledger indexing")
 	}
 }
 
@@ -615,14 +615,14 @@ func TestDirtyPipeline_E2E_FsnotifyToSearchResult(t *testing.T) {
 	assert.Equal(t, "e2e_dirty.go", results[0].FilePath)
 }
 
-// --- E. Baseline directory dual-write ---
+// --- E. Ledger index directory dual-write ---
 // These tests verify that RefreshDirtyOverlay writes the dirty overlay to both
-// the shared dataDir AND the baseline dataDir (lines 720-725 in codedb.go).
+// the shared dataDir AND the ledger index dataDir (lines 720-725 in codedb.go).
 
-// TestRefreshDirtyOverlay_BaselineDualWrite verifies that the dirty overlay is
-// written to both the shared and baseline codedb directories.
-// Failure prevented: CLI search against baseline index doesn't see dirty files.
-func TestRefreshDirtyOverlay_BaselineDualWrite(t *testing.T) {
+// TestRefreshDirtyOverlay_LedgerDualWrite verifies that the dirty overlay is
+// written to both the shared and ledger codedb directories.
+// Failure prevented: CLI search against ledger index doesn't see dirty files.
+func TestRefreshDirtyOverlay_LedgerDualWrite(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: git clone + codedb indexing")
@@ -630,14 +630,14 @@ func TestRefreshDirtyOverlay_BaselineDualWrite(t *testing.T) {
 
 	repoDir := initDirtyTestRepo(t)
 
-	// create TWO separate codedb directories: shared and baseline
+	// create TWO separate codedb directories: shared and ledger
 	sharedDir := filepath.Join(t.TempDir(), "shared-codedb")
-	baselineDir := filepath.Join(t.TempDir(), "baseline-codedb")
+	ledgerDir := filepath.Join(t.TempDir(), "ledger-codedb")
 	require.NoError(t, os.MkdirAll(sharedDir, 0o755))
-	require.NoError(t, os.MkdirAll(baselineDir, 0o755))
+	require.NoError(t, os.MkdirAll(ledgerDir, 0o755))
 
 	// build initial indexes in both
-	for _, dir := range []string{sharedDir, baselineDir} {
+	for _, dir := range []string{sharedDir, ledgerDir} {
 		db, err := codedb.Open(dir)
 		require.NoError(t, err)
 		require.NoError(t, db.IndexLocalRepo(context.Background(), repoDir, index.IndexOptions{}))
@@ -645,14 +645,14 @@ func TestRefreshDirtyOverlay_BaselineDualWrite(t *testing.T) {
 	}
 
 	// write a dirty file
-	dirtyContent := "package main\n// baseline_dual_write_sentinel_qrs99\nfunc BaselineDirty() {}\n"
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "baseline_dirty.go"), []byte(dirtyContent), 0o644))
+	dirtyContent := "package main\n// ledger_dual_write_sentinel_qrs99\nfunc LedgerDirty() {}\n"
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "ledger_dirty.go"), []byte(dirtyContent), 0o644))
 
 	// set up CodeDBManager pointing to both dirs
 	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
 	mgr.mu.Lock()
 	mgr.dataDir = sharedDir
-	mgr.baselineDataDir = baselineDir
+	mgr.ledgerDataDir = ledgerDir
 	mgr.mu.Unlock()
 
 	refreshDone := make(chan struct{}, 1)
@@ -686,26 +686,26 @@ func TestRefreshDirtyOverlay_BaselineDualWrite(t *testing.T) {
 	}
 
 	// verify dirty content searchable in BOTH codedb directories
-	for _, dir := range []string{sharedDir, baselineDir} {
+	for _, dir := range []string{sharedDir, ledgerDir} {
 		db, err := codedb.Open(dir)
 		require.NoError(t, err, "open %s", dir)
 		require.NoError(t, db.AttachDirtyIndex(repoDir), "attach dirty index %s", dir)
 
-		results, err := db.Search(context.Background(), "baseline_dual_write_sentinel_qrs99")
+		results, err := db.Search(context.Background(), "ledger_dual_write_sentinel_qrs99")
 		require.NoError(t, err, "search %s", dir)
 		require.NotEmpty(t, results, "dirty file should be searchable in %s", dir)
-		assert.Equal(t, "baseline_dirty.go", results[0].FilePath, "wrong file in %s", dir)
+		assert.Equal(t, "ledger_dirty.go", results[0].FilePath, "wrong file in %s", dir)
 
 		db.DetachDirtyOverlay()
 		db.Close()
 	}
 }
 
-// TestRefreshDirtyOverlay_BaselineFailureDoesNotBlockShared verifies that a
-// failure in the baseline directory doesn't prevent the shared dirty overlay
+// TestRefreshDirtyOverlay_LedgerFailureDoesNotBlockShared verifies that a
+// failure in the ledger index directory doesn't prevent the shared dirty overlay
 // from being written.
-// Failure prevented: corrupted baseline blocks all dirty overlay updates.
-func TestRefreshDirtyOverlay_BaselineFailureDoesNotBlockShared(t *testing.T) {
+// Failure prevented: corrupted ledger index blocks all dirty overlay updates.
+func TestRefreshDirtyOverlay_LedgerFailureDoesNotBlockShared(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: git clone + codedb indexing")
@@ -716,7 +716,7 @@ func TestRefreshDirtyOverlay_BaselineFailureDoesNotBlockShared(t *testing.T) {
 	sharedDir := filepath.Join(t.TempDir(), "shared-codedb")
 	require.NoError(t, os.MkdirAll(sharedDir, 0o755))
 
-	// build initial index only in shared (baseline dir points to nonexistent path)
+	// build initial index only in shared (ledger index dir points to nonexistent path)
 	db, err := codedb.Open(sharedDir)
 	require.NoError(t, err)
 	require.NoError(t, db.IndexLocalRepo(context.Background(), repoDir, index.IndexOptions{}))
@@ -726,15 +726,15 @@ func TestRefreshDirtyOverlay_BaselineFailureDoesNotBlockShared(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "shared_only.go"),
 		[]byte("package main\n// shared_only_sentinel_abc88\nfunc SharedOnly() {}\n"), 0o644))
 
-	// baseline dir points to a regular file — codedb.Open requires a directory,
-	// so this forces the "baseline write failed" branch to actually fail
-	badBaselineDir := filepath.Join(t.TempDir(), "bad-baseline")
-	require.NoError(t, os.WriteFile(badBaselineDir, []byte("not a directory"), 0o644))
+	// ledger index dir points to a regular file — codedb.Open requires a directory,
+	// so this forces the "ledger write failed" branch to actually fail
+	badLedgerDir := filepath.Join(t.TempDir(), "bad-ledger")
+	require.NoError(t, os.WriteFile(badLedgerDir, []byte("not a directory"), 0o644))
 
 	mgr := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
 	mgr.mu.Lock()
 	mgr.dataDir = sharedDir
-	mgr.baselineDataDir = badBaselineDir
+	mgr.ledgerDataDir = badLedgerDir
 	mgr.mu.Unlock()
 
 	refreshDone := make(chan struct{}, 1)
@@ -765,7 +765,7 @@ func TestRefreshDirtyOverlay_BaselineFailureDoesNotBlockShared(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// shared dir should still have the dirty overlay despite baseline failure
+	// shared dir should still have the dirty overlay despite ledger failure
 	db2, err := codedb.Open(sharedDir)
 	require.NoError(t, err)
 	defer db2.Close()
@@ -774,7 +774,7 @@ func TestRefreshDirtyOverlay_BaselineFailureDoesNotBlockShared(t *testing.T) {
 
 	results, err := db2.Search(context.Background(), "shared_only_sentinel_abc88")
 	require.NoError(t, err)
-	require.NotEmpty(t, results, "shared dirty overlay must succeed even when baseline fails")
+	require.NotEmpty(t, results, "shared dirty overlay must succeed even when ledger fails")
 }
 
 // --- F. Issue emission on failure ---

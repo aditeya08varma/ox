@@ -232,35 +232,35 @@ func TestCodeDBSharedDir(t *testing.T) {
 	})
 }
 
-func TestCodeDBBaselineDir(t *testing.T) {
+func TestCodeDBLedgerDir(t *testing.T) {
 	saved := saveEnv("OX_XDG_ENABLE", "SAGEOX_ENDPOINT")
 	defer restoreEnv(saved)
 
 	clearXDGEnv()
 	os.Unsetenv("SAGEOX_ENDPOINT")
 
-	t.Run("returns path under shared dir with baseline suffix", func(t *testing.T) {
-		dir := CodeDBBaselineDir("repo123", "https://sageox.ai")
+	t.Run("returns path under shared dir with ledger suffix", func(t *testing.T) {
+		dir := CodeDBLedgerDir("repo123", "https://sageox.ai")
 		shared := CodeDBSharedDir("repo123", "https://sageox.ai")
-		want := filepath.Join(shared, "baseline")
+		want := filepath.Join(shared, "ledger")
 		if dir != want {
-			t.Errorf("CodeDBBaselineDir() = %q, want %q", dir, want)
+			t.Errorf("CodeDBLedgerDir() = %q, want %q", dir, want)
 		}
 	})
 
 	t.Run("path is inside ledger cache not worktree", func(t *testing.T) {
-		dir := CodeDBBaselineDir("repo123", "https://sageox.ai")
-		if !strings.Contains(dir, filepath.Join(".sageox", "cache", "codedb", "baseline")) {
-			t.Errorf("CodeDBBaselineDir() = %q, want path containing .sageox/cache/codedb/baseline", dir)
+		dir := CodeDBLedgerDir("repo123", "https://sageox.ai")
+		if !strings.Contains(dir, filepath.Join(".sageox", "cache", "codedb", "ledger")) {
+			t.Errorf("CodeDBLedgerDir() = %q, want path containing .sageox/cache/codedb/ledger", dir)
 		}
 	})
 
 	t.Run("empty inputs return empty", func(t *testing.T) {
-		if dir := CodeDBBaselineDir("", "https://sageox.ai"); dir != "" {
-			t.Errorf("CodeDBBaselineDir('', endpoint) = %q, want empty", dir)
+		if dir := CodeDBLedgerDir("", "https://sageox.ai"); dir != "" {
+			t.Errorf("CodeDBLedgerDir('', endpoint) = %q, want empty", dir)
 		}
-		if dir := CodeDBBaselineDir("repo123", ""); dir != "" {
-			t.Errorf("CodeDBBaselineDir(repo, '') = %q, want empty", dir)
+		if dir := CodeDBLedgerDir("repo123", ""); dir != "" {
+			t.Errorf("CodeDBLedgerDir(repo, '') = %q, want empty", dir)
 		}
 	})
 }

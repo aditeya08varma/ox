@@ -283,18 +283,18 @@ func TestCheckFreshness_SkipsWhenWorktreeGone(t *testing.T) {
 	assert.False(t, flag, "indexing flag must be released when worktree guard triggers")
 }
 
-// TestCheckFreshness_SkipsWorktreeGone_BaselineUnaffected verifies that worktree
-// disappearing does NOT affect baseline search availability.
-// Failure prevented: worktree disappearance cascades to baseline, breaking all search.
-func TestCheckFreshness_SkipsWorktreeGone_BaselineUnaffected(t *testing.T) {
+// TestCheckFreshness_SkipsWorktreeGone_LedgerIndexUnaffected verifies that worktree
+// disappearing does NOT affect ledger index search availability.
+// Failure prevented: worktree disappearance cascades to ledger index, breaking all search.
+func TestCheckFreshness_SkipsWorktreeGone_LedgerIndexUnaffected(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
 
-	// simulate a prior successful baseline build
+	// simulate a prior successful ledger index build
 	mgr.mu.Lock()
-	mgr.baselineStats = CodeDBStats{
+	mgr.ledgerStats = CodeDBStats{
 		IndexExists: true,
 		Commits:     42,
 		Symbols:     100,
@@ -307,10 +307,10 @@ func TestCheckFreshness_SkipsWorktreeGone_BaselineUnaffected(t *testing.T) {
 	ctx := context.Background()
 	mgr.CheckFreshness(ctx)
 
-	// baseline must still be intact
+	// ledger index must still be intact
 	stats := mgr.Stats()
-	assert.True(t, stats.BaselineExists, "baseline must survive worktree disappearance")
-	assert.Equal(t, 42, stats.BaselineCommits, "baseline commits must be preserved")
+	assert.True(t, stats.LedgerExists, "ledger index must survive worktree disappearance")
+	assert.Equal(t, 42, stats.LedgerCommits, "ledger index commits must be preserved")
 }
 
 // TestCheckFreshness_PermissionError_StillProceeds verifies that only os.IsNotExist
@@ -380,25 +380,25 @@ func TestCheckFreshness_WorktreeDeletedMidIndex_FlagReleased(t *testing.T) {
 	assert.False(t, flag, "indexing flag must be released even when worktree deleted mid-index")
 }
 
-// TestStats_NoBaseline_GracefulDefaults verifies Stats() returns clean defaults
-// before any baseline has been built.
+// TestStats_NoLedgerIndex_GracefulDefaults verifies Stats() returns clean defaults
+// before any ledger index has been built.
 // Failure prevented: NPE or garbage values in ox status for fresh installs.
-func TestStats_NoBaseline_GracefulDefaults(t *testing.T) {
+func TestStats_NoLedgerIndex_GracefulDefaults(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
 
 	stats := mgr.Stats()
-	assert.False(t, stats.BaselineExists, "BaselineExists must be false before any baseline build")
-	assert.Equal(t, 0, stats.BaselineCommits, "BaselineCommits must be zero before any baseline build")
-	assert.False(t, stats.BaselineIndexingNow, "BaselineIndexingNow must be false before any baseline build")
+	assert.False(t, stats.LedgerExists, "LedgerExists must be false before any ledger index build")
+	assert.Equal(t, 0, stats.LedgerCommits, "LedgerCommits must be zero before any ledger index build")
+	assert.False(t, stats.LedgerIndexingNow, "LedgerIndexingNow must be false before any ledger index build")
 }
 
-// TestCheckFreshness_GuardThenBaseline_BothWork verifies the full real-world scenario:
-// worktree deleted → CheckFreshness skips → but baseline build still works.
+// TestCheckFreshness_GuardThenLedgerIndex_BothWork verifies the full real-world scenario:
+// worktree deleted → CheckFreshness skips → but ledger index build still works.
 // Failure prevented: stale worktree blocking all code search functionality.
-func TestCheckFreshness_GuardThenBaseline_BothWork(t *testing.T) {
+func TestCheckFreshness_GuardThenLedgerIndex_BothWork(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -409,11 +409,11 @@ func TestCheckFreshness_GuardThenBaseline_BothWork(t *testing.T) {
 		hookCalled = true
 	}
 
-	baselineEntered := make(chan struct{}, 1)
+	ledgerEntered := make(chan struct{}, 1)
 	release := make(chan struct{})
-	mgr.baselineTestHook = func() {
+	mgr.ledgerTestHook = func() {
 		select {
-		case baselineEntered <- struct{}{}:
+		case ledgerEntered <- struct{}{}:
 		default:
 		}
 		<-release
@@ -427,17 +427,17 @@ func TestCheckFreshness_GuardThenBaseline_BothWork(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	assert.False(t, hookCalled, "doIndex should NOT launch when worktree is gone")
 
-	// but baseline build should still work (uses ledger, not worktree)
+	// but ledger index build should still work (uses ledger, not worktree)
 	ledgerDir := t.TempDir() // fresh dir as fake ledger
-	go mgr.BuildBaseline(context.Background(), ledgerDir)
+	go mgr.BuildLedgerIndex(context.Background(), ledgerDir)
 
 	select {
-	case <-baselineEntered:
-		// baseline build started — the worktree guard did NOT block it
+	case <-ledgerEntered:
+		// ledger index build started — the worktree guard did NOT block it
 	case <-time.After(5 * time.Second):
-		t.Fatal("BuildBaseline should work even when worktree is gone")
+		t.Fatal("BuildLedgerIndex should work even when worktree is gone")
 	}
 
 	close(release)
-	waitForBaselineIndexingDone(t, mgr)
+	waitForLedgerIndexingDone(t, mgr)
 }

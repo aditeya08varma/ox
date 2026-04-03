@@ -13,8 +13,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// initBaselineGitRepo creates a git repo with an initial commit and returns the HEAD sha.
-func initBaselineGitRepo(t *testing.T, dir string) string {
+// initLedgerGitRepo creates a git repo with an initial commit and returns the HEAD sha.
+func initLedgerGitRepo(t *testing.T, dir string) string {
 	t.Helper()
 	require.NoError(t, exec.Command("git", "init", "-b", "main", dir).Run())
 	require.NoError(t, exec.Command("git", "-C", dir, "config", "user.email", "test@test.com").Run())
@@ -34,19 +34,19 @@ func addCommit(t *testing.T, dir, msg string) string {
 	return string(out[:len(out)-1])
 }
 
-// --- D. Sync scheduler baseline trigger tests ---
+// --- D. Sync scheduler ledger index trigger tests ---
 
-// TestTriggerBaselineRebuild_ShaChanged verifies that when the ledger HEAD changes,
-// baseline rebuild fires.
-// Failure prevented: ledger updates don't propagate to baseline index.
-func TestTriggerBaselineRebuild_ShaChanged(t *testing.T) {
+// TestTriggerLedgerIndexRebuild_ShaChanged verifies that when the ledger HEAD changes,
+// ledger index rebuild fires.
+// Failure prevented: ledger updates don't propagate to ledger index.
+func TestTriggerLedgerIndexRebuild_ShaChanged(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
 	}
 	t.Parallel()
 
 	ledgerDir := t.TempDir()
-	initBaselineGitRepo(t, ledgerDir)
+	initLedgerGitRepo(t, ledgerDir)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cfg := DefaultConfig()
@@ -57,9 +57,9 @@ func TestTriggerBaselineRebuild_ShaChanged(t *testing.T) {
 	cdbMgr := NewCodeDBManager(ledgerDir, logger, nil)
 	s.codedb = cdbMgr
 
-	baselineCalls := make(chan string, 10)
-	cdbMgr.baselineTestHook = func() {
-		baselineCalls <- "called"
+	ledgerIndexCalls := make(chan string, 10)
+	cdbMgr.ledgerTestHook = func() {
+		ledgerIndexCalls <- "called"
 	}
 
 	s.workspaceRegistry.ledger = &WorkspaceState{
@@ -72,51 +72,51 @@ func TestTriggerBaselineRebuild_ShaChanged(t *testing.T) {
 	ctx := context.Background()
 
 	// first call — initial sha, should trigger rebuild
-	s.triggerBaselineRebuild(ctx)
+	s.triggerLedgerIndexRebuild(ctx)
 	select {
-	case <-baselineCalls:
+	case <-ledgerIndexCalls:
 	case <-time.After(5 * time.Second):
-		t.Fatal("baseline build was not triggered")
+		t.Fatal("ledger index build was not triggered")
 	}
-	// lastBaselineSha is set asynchronously after BuildBaseline returns
+	// lastLedgerSha is set asynchronously after BuildLedgerIndex returns
 	require.Eventually(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.lastBaselineSha != ""
-	}, 5*time.Second, 10*time.Millisecond, "lastBaselineSha should be set after first trigger")
+		return s.lastLedgerSha != ""
+	}, 5*time.Second, 10*time.Millisecond, "lastLedgerSha should be set after first trigger")
 
 	s.mu.Lock()
-	firstSha := s.lastBaselineSha
+	firstSha := s.lastLedgerSha
 	s.mu.Unlock()
 
 	// add a new commit — sha changes
 	addCommit(t, ledgerDir, "second commit")
 
 	// second call — different sha, should trigger rebuild
-	s.triggerBaselineRebuild(ctx)
+	s.triggerLedgerIndexRebuild(ctx)
 	select {
-	case <-baselineCalls:
+	case <-ledgerIndexCalls:
 	case <-time.After(5 * time.Second):
-		t.Fatal("second baseline build was not triggered")
+		t.Fatal("second ledger index build was not triggered")
 	}
 	require.Eventually(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.lastBaselineSha != firstSha
-	}, 5*time.Second, 10*time.Millisecond, "lastBaselineSha should update when HEAD changes")
+		return s.lastLedgerSha != firstSha
+	}, 5*time.Second, 10*time.Millisecond, "lastLedgerSha should update when HEAD changes")
 }
 
-// TestTriggerBaselineRebuild_SameSha_NoRebuild verifies that identical SHA doesn't
+// TestTriggerLedgerIndexRebuild_SameSha_NoRebuild verifies that identical SHA doesn't
 // trigger redundant rebuilds.
-// Failure prevented: quiet repos burning CPU on redundant baseline rebuilds every tick.
-func TestTriggerBaselineRebuild_SameSha_NoRebuild(t *testing.T) {
+// Failure prevented: quiet repos burning CPU on redundant ledger index rebuilds every tick.
+func TestTriggerLedgerIndexRebuild_SameSha_NoRebuild(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
 	}
 	t.Parallel()
 
 	ledgerDir := t.TempDir()
-	initBaselineGitRepo(t, ledgerDir)
+	initLedgerGitRepo(t, ledgerDir)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cfg := DefaultConfig()
@@ -127,7 +127,7 @@ func TestTriggerBaselineRebuild_SameSha_NoRebuild(t *testing.T) {
 	s.codedb = cdbMgr
 
 	var buildCount int
-	cdbMgr.baselineTestHook = func() {
+	cdbMgr.ledgerTestHook = func() {
 		buildCount++
 	}
 
@@ -141,31 +141,31 @@ func TestTriggerBaselineRebuild_SameSha_NoRebuild(t *testing.T) {
 	ctx := context.Background()
 
 	// first call — triggers build (initial sha)
-	s.triggerBaselineRebuild(ctx)
+	s.triggerLedgerIndexRebuild(ctx)
 	// wait for async sha update
 	require.Eventually(t, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
-		return s.lastBaselineSha != ""
+		return s.lastLedgerSha != ""
 	}, 5*time.Second, 10*time.Millisecond)
 
 	s.mu.Lock()
-	firstSha := s.lastBaselineSha
+	firstSha := s.lastLedgerSha
 	s.mu.Unlock()
 
 	// second call — same sha, should NOT trigger
-	s.triggerBaselineRebuild(ctx)
+	s.triggerLedgerIndexRebuild(ctx)
 	// give a moment for any (unexpected) goroutine to fire
 	time.Sleep(50 * time.Millisecond)
 	s.mu.Lock()
-	assert.Equal(t, firstSha, s.lastBaselineSha, "sha should not change without new commits")
+	assert.Equal(t, firstSha, s.lastLedgerSha, "sha should not change without new commits")
 	s.mu.Unlock()
 }
 
-// TestTriggerBaselineRebuild_NoLedger_Noop verifies that when no ledger is registered,
-// triggerBaselineRebuild is a safe no-op.
+// TestTriggerLedgerIndexRebuild_NoLedger_Noop verifies that when no ledger is registered,
+// triggerLedgerIndexRebuild is a safe no-op.
 // Failure prevented: crash on fresh install before first sync.
-func TestTriggerBaselineRebuild_NoLedger_Noop(t *testing.T) {
+func TestTriggerLedgerIndexRebuild_NoLedger_Noop(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -176,22 +176,22 @@ func TestTriggerBaselineRebuild_NoLedger_Noop(t *testing.T) {
 	s.codedb = cdbMgr
 
 	hookCalled := false
-	cdbMgr.baselineTestHook = func() {
+	cdbMgr.ledgerTestHook = func() {
 		hookCalled = true
 	}
 
 	// no ledger set in workspace registry
 	ctx := context.Background()
-	s.triggerBaselineRebuild(ctx) // must not panic
+	s.triggerLedgerIndexRebuild(ctx) // must not panic
 
-	assert.False(t, hookCalled, "BuildBaseline should not fire when no ledger is registered")
-	assert.Empty(t, s.lastBaselineSha, "lastBaselineSha should remain empty when no ledger exists")
+	assert.False(t, hookCalled, "BuildLedgerIndex should not fire when no ledger is registered")
+	assert.Empty(t, s.lastLedgerSha, "lastLedgerSha should remain empty when no ledger exists")
 }
 
-// TestTriggerBaselineRebuild_NilCodeDB_Noop verifies that when codedb is nil,
-// triggerBaselineRebuild returns immediately without panic.
+// TestTriggerLedgerIndexRebuild_NilCodeDB_Noop verifies that when codedb is nil,
+// triggerLedgerIndexRebuild returns immediately without panic.
 // Failure prevented: NPE when codedb manager hasn't been initialized.
-func TestTriggerBaselineRebuild_NilCodeDB_Noop(t *testing.T) {
+func TestTriggerLedgerIndexRebuild_NilCodeDB_Noop(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -200,15 +200,15 @@ func TestTriggerBaselineRebuild_NilCodeDB_Noop(t *testing.T) {
 	// s.codedb is nil
 
 	ctx := context.Background()
-	s.triggerBaselineRebuild(ctx) // must not panic
+	s.triggerLedgerIndexRebuild(ctx) // must not panic
 
-	assert.Empty(t, s.lastBaselineSha)
+	assert.Empty(t, s.lastLedgerSha)
 }
 
-// TestTriggerBaselineRebuild_GitFailure_NoRebuild verifies that if git rev-parse HEAD
+// TestTriggerLedgerIndexRebuild_GitFailure_NoRebuild verifies that if git rev-parse HEAD
 // fails (e.g. empty repo with no commits), no rebuild is triggered and no panic occurs.
 // Failure prevented: corrupt/empty ledger repo crashes daemon sync loop.
-func TestTriggerBaselineRebuild_GitFailure_NoRebuild(t *testing.T) {
+func TestTriggerLedgerIndexRebuild_GitFailure_NoRebuild(t *testing.T) {
 	t.Parallel()
 
 	// create a dir that exists but is NOT a git repo
@@ -222,7 +222,7 @@ func TestTriggerBaselineRebuild_GitFailure_NoRebuild(t *testing.T) {
 	s.codedb = cdbMgr
 
 	hookCalled := false
-	cdbMgr.baselineTestHook = func() {
+	cdbMgr.ledgerTestHook = func() {
 		hookCalled = true
 	}
 
@@ -234,16 +234,16 @@ func TestTriggerBaselineRebuild_GitFailure_NoRebuild(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	s.triggerBaselineRebuild(ctx) // must not panic
+	s.triggerLedgerIndexRebuild(ctx) // must not panic
 
-	assert.False(t, hookCalled, "BuildBaseline should not fire when git rev-parse fails")
-	assert.Empty(t, s.lastBaselineSha, "lastBaselineSha should remain empty on git failure")
+	assert.False(t, hookCalled, "BuildLedgerIndex should not fire when git rev-parse fails")
+	assert.Empty(t, s.lastLedgerSha, "lastLedgerSha should remain empty on git failure")
 }
 
-// TestTriggerBaselineRebuild_LedgerNotExists_Noop verifies that when ledger is
+// TestTriggerLedgerIndexRebuild_LedgerNotExists_Noop verifies that when ledger is
 // registered but marked as not existing on disk, no rebuild fires.
 // Failure prevented: attempting to index a ledger that hasn't been cloned yet.
-func TestTriggerBaselineRebuild_LedgerNotExists_Noop(t *testing.T) {
+func TestTriggerLedgerIndexRebuild_LedgerNotExists_Noop(t *testing.T) {
 	t.Parallel()
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -254,7 +254,7 @@ func TestTriggerBaselineRebuild_LedgerNotExists_Noop(t *testing.T) {
 	s.codedb = cdbMgr
 
 	hookCalled := false
-	cdbMgr.baselineTestHook = func() {
+	cdbMgr.ledgerTestHook = func() {
 		hookCalled = true
 	}
 
@@ -266,9 +266,9 @@ func TestTriggerBaselineRebuild_LedgerNotExists_Noop(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	s.triggerBaselineRebuild(ctx)
+	s.triggerLedgerIndexRebuild(ctx)
 
-	assert.False(t, hookCalled, "BuildBaseline should not fire when ledger.Exists is false")
+	assert.False(t, hookCalled, "BuildLedgerIndex should not fire when ledger.Exists is false")
 }
 
 // TestContentSourceFingerprint_IncludesTeamContexts verifies that the fingerprint
@@ -282,8 +282,8 @@ func TestContentSourceFingerprint_IncludesTeamContexts(t *testing.T) {
 
 	ledgerDir := t.TempDir()
 	tcDir := t.TempDir()
-	initBaselineGitRepo(t, ledgerDir)
-	initBaselineGitRepo(t, tcDir)
+	initLedgerGitRepo(t, ledgerDir)
+	initLedgerGitRepo(t, tcDir)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cfg := DefaultConfig()
@@ -323,7 +323,7 @@ func TestContentSourceFingerprint_LedgerOnly_NoTeamContexts(t *testing.T) {
 	t.Parallel()
 
 	ledgerDir := t.TempDir()
-	sha := initBaselineGitRepo(t, ledgerDir)
+	sha := initLedgerGitRepo(t, ledgerDir)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cfg := DefaultConfig()
@@ -355,7 +355,7 @@ func TestContentSourceFingerprint_InvalidLedger_ReturnsEmpty(t *testing.T) {
 
 // TestContentSourceFingerprint_SkipsUnavailableTeamContext verifies that a team context
 // with a bad path is silently skipped rather than failing the whole fingerprint.
-// Failure prevented: one broken team context prevents all baseline rebuilds.
+// Failure prevented: one broken team context prevents all ledger index rebuilds.
 func TestContentSourceFingerprint_SkipsUnavailableTeamContext(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: git operations")
@@ -363,7 +363,7 @@ func TestContentSourceFingerprint_SkipsUnavailableTeamContext(t *testing.T) {
 	t.Parallel()
 
 	ledgerDir := t.TempDir()
-	sha := initBaselineGitRepo(t, ledgerDir)
+	sha := initLedgerGitRepo(t, ledgerDir)
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	cfg := DefaultConfig()

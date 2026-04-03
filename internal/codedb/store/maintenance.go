@@ -27,7 +27,7 @@ func (r MaintenanceResult) TotalPruned() int64 {
 
 // DBPath returns the path to the SQLite database file.
 func (s *Store) DBPath() string {
-	return filepath.Join(s.Root, "metadata.db")
+	return filepath.Join(s.Root, MetadataDBFile)
 }
 
 // Maintain runs cleanup: prunes orphaned blobs, old diffs, and vacuums.

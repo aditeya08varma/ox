@@ -65,11 +65,11 @@ type Config struct {
 	// Zero disables automatic codedb freshness checks.
 	CodeDBCheckInterval time.Duration
 
-	// BaselineCheckInterval is how often to check if the codedb baseline index
+	// LedgerCheckInterval is how often to check if the codedb ledger index
 	// needs rebuilding (ledger HEAD changed). Independent of ledger pull cadence
-	// so baseline rebuilds don't scale with sync frequency.
-	// Zero disables automatic baseline checks.
-	BaselineCheckInterval time.Duration
+	// so ledger index rebuilds don't scale with sync frequency.
+	// Zero disables automatic ledger index checks.
+	LedgerCheckInterval time.Duration
 
 	// GitHubSyncInterval is how often to sync PRs/issues from GitHub.
 	// Zero disables automatic GitHub sync.
@@ -111,7 +111,7 @@ func DefaultConfig() *Config {
 		VersionCheckInterval:    30 * time.Minute, // ETag conditional requests make this cheap
 		GCCheckInterval:         1 * time.Hour,    // check hourly, actual GC cadence is per-workspace
 		DistillInterval:         6 * time.Hour,    // distill memory every 6 hours
-		BaselineCheckInterval:   15 * time.Minute, // check if baseline needs rebuild every 15 minutes
+		LedgerCheckInterval:     15 * time.Minute, // check if ledger index needs rebuild every 15 minutes
 		GitHubSyncInterval:      15 * time.Minute, // sync PRs/issues every 15 minutes
 		MurmurNudgeInterval:     15 * time.Minute, // nudge agents to self-report every 15 minutes
 		InactivityTimeout:       1 * time.Hour,    // exit after 1 hour of inactivity
