@@ -966,6 +966,40 @@ Feature: Telemetry
 | Daemon cleanup on disconnect? | **Let daemons run** (inactivity timeout) | Faster reconnection |
 | Logging? | **Log file** `~/.cache/sageox/mcp-server.log` | stdio is protocol-only |
 
+## FAQ
+
+### Why multiple daemon processes instead of a single MCP daemon?
+
+The existing daemon is tightly coupled to a single ledger — it derives its workspace ID, socket path, sync schedule, and GC lifecycle from one ledger path. Rather than redesigning the daemon to manage N ledgers (a significant refactor touching `WorkspaceRegistry`, `SyncScheduler`, socket multiplexing, and GC), we keep each daemon 1:1 with a ledger and let the MCP server act as a router.
+
+This is a deliberate scope-reduction choice for v1. The daemon's architecture is well-tested and stable. Introducing multi-ledger support would create new concurrency and lifecycle edge cases (GC on ledger A while syncing ledger B, socket identity with multiple workspaces, heartbeat routing). By reusing the existing daemon unchanged, we get MCP support with minimal regression risk.
+
+If the per-daemon overhead becomes a concern (e.g., user has 20+ repos), a future version can consolidate to a multi-workspace daemon — but we'd rather prove the MCP value proposition first with the simpler model.
+
+### Is stdio transport secure enough?
+
+Yes, for v1. Here's why:
+
+**What stdio provides:** The MCP client (Claude Desktop, Claude Code) spawns `ox mcp serve` as a child process. Communication happens over the child's stdin/stdout — Unix pipes that are only accessible to the parent process and the child. There's no network socket, no port to scan, no ambient authority. An attacker would need local code execution as the same user to intercept the pipe, at which point they already have access to everything the MCP server can read.
+
+**What stdio doesn't provide:** No authentication of the MCP client. Any process that can exec `ox mcp serve` and read its stdio gets full access to the user's team context and murmur capabilities. This is acceptable because the MCP server runs with the user's own credentials — it's equivalent to running `ox query` in a terminal. The threat model is the same as any CLI tool.
+
+**When we'd need more:** If we ever expose the MCP server over a network transport (SSE, WebSocket), we'd need TLS + authentication. That's a v2 concern and out of scope for stdio.
+
+### Why can't the MCP server just be a long-running daemon that Claude spins up?
+
+This is tempting — Claude already knows how to connect to MCP servers as persistent processes, and a daemon model would avoid per-conversation startup costs. But it doesn't work for several reasons:
+
+1. **MCP transport model mismatch.** MCP clients (Claude Desktop, Claude Code) communicate with MCP servers over **stdio** — the client spawns the server process and talks over stdin/stdout. The client manages the process lifecycle. A pre-existing daemon would need a network transport (SSE/WebSocket), but Claude Desktop's MCP client doesn't support connecting to an already-running server — it expects to spawn the process itself.
+
+2. **Credential freshness.** The MCP server needs fresh auth tokens for API calls and credential delivery via heartbeats. A long-running daemon would need its own token refresh loop, duplicating logic that already exists in the per-ledger daemons and the auth store. By running as a spawned process, the MCP server reads credentials from the auth store on startup — always fresh.
+
+3. **Process lifecycle clarity.** If the MCP server were a daemon, who starts it? Who stops it? What happens when the user logs out and back in? With the stdio model, Claude owns the lifecycle — start on conversation open, stop on close. Clean and predictable. A daemon would need its own inactivity timeout, health monitoring, and crash recovery — all of which already exist in the per-ledger daemons we reuse.
+
+4. **ox already has daemon infrastructure.** Rather than building a second daemon system for MCP, we reuse the existing per-ledger daemons for the heavy lifting (sync, credentials, murmurs) and keep the MCP server as a thin stdio translation layer that routes to them. This separation means the MCP server is stateless and disposable — if it crashes, Claude restarts it and it reconnects to the still-running daemons.
+
+---
+
 ## Remaining Open Questions
 
 1. **Team-level murmurs:** Timeline for murmurs that are team-scoped rather than ledger-scoped? This would simplify the MCP murmur tool significantly (no ledger disambiguation needed).
