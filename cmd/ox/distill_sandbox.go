@@ -201,29 +201,33 @@ func localCloneWithBareRemote(ctx context.Context, srcRepo, cloneDir, bareDir st
 		return fmt.Errorf("git remote add origin: %s: %w", string(out), err)
 	}
 
-	// step 8: commit the index cleanup and tag the pre-distill state.
-	// The commit records the clean index so subsequent distill commits
-	// don't reference missing promisor objects. The tag marks the baseline
-	// for printSandboxResults to diff against.
-	commitCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "commit", "--allow-empty", "-m", "sandbox: clean index for distill")
-	if out, err := commitCmd.CombinedOutput(); err != nil {
-		slog.Debug("sandbox index commit", "output", string(out))
-	}
-	tagCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "tag", "sandbox-baseline")
-	if out, err := tagCmd.CombinedOutput(); err != nil {
-		slog.Debug("sandbox baseline tag", "output", string(out))
-	}
-
-	// set git identity and push defaults for commits
+	// set git identity before committing
 	for _, kv := range [][2]string{
 		{"user.name", "ox-sandbox"},
 		{"user.email", "sandbox@ox.local"},
-		{"push.autoSetupRemote", "true"},
 	} {
 		cmd = exec.CommandContext(ctx, "git", "-C", cloneDir, "config", kv[0], kv[1])
 		if out, err := cmd.CombinedOutput(); err != nil {
 			slog.Debug("git config in sandbox", "key", kv[0], "error", string(out), "err", err)
 		}
+	}
+
+	// step 8: commit the index cleanup, push to bare, and tag the baseline.
+	// The commit records the clean index so subsequent distill commits
+	// don't reference missing promisor objects. The push establishes
+	// tracking so subsequent pushes (from distill) work with plain `git push`.
+	// The tag marks the baseline for printSandboxResults to diff against.
+	commitCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "commit", "--allow-empty", "-m", "sandbox: clean index for distill")
+	if out, err := commitCmd.CombinedOutput(); err != nil {
+		slog.Debug("sandbox index commit", "output", string(out))
+	}
+	pushCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "push", "--set-upstream", "origin", "HEAD")
+	if out, err := pushCmd.CombinedOutput(); err != nil {
+		slog.Debug("sandbox initial push", "output", string(out))
+	}
+	tagCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "tag", "sandbox-baseline")
+	if out, err := tagCmd.CombinedOutput(); err != nil {
+		slog.Debug("sandbox baseline tag", "output", string(out))
 	}
 
 	return nil
