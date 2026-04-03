@@ -223,7 +223,7 @@ func TestManager_RetryOnFailure(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < maxRetries+1; i++ {
 		m.processQueue(ctx)
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // let goroutine complete and release sem before retry
 	}
 
 	require.Eventually(t, func() bool {
@@ -252,7 +252,7 @@ func TestManager_MaxRetriesExceeded(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < maxRetries+2; i++ {
 		m.processQueue(ctx)
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(50 * time.Millisecond) // let goroutine complete and release sem before retry
 	}
 
 	require.Eventually(t, func() bool {
@@ -288,7 +288,7 @@ func TestManager_RateLimiting(t *testing.T) {
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
 		m.processQueue(ctx)
-		time.Sleep(30 * time.Millisecond)
+		time.Sleep(30 * time.Millisecond) // let goroutine complete before next processQueue
 	}
 
 	require.Eventually(t, func() bool {
@@ -302,6 +302,9 @@ func TestManager_RateLimiting(t *testing.T) {
 }
 
 func TestManager_ConcurrencyControl(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: concurrency timing test with 50ms simulated work")
+	}
 	var concurrent atomic.Int32
 	var maxConcurrentSeen atomic.Int32
 
@@ -332,12 +335,12 @@ func TestManager_ConcurrencyControl(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	for i := 0; i < 4; i++ {
+	// drive processQueue inside Eventually to guarantee queue draining
+	require.Eventually(t, func() bool {
 		m.processQueue(ctx)
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	time.Sleep(300 * time.Millisecond)
+		s := m.Status()
+		return s.Stats.TotalInvocations >= 4
+	}, 2*time.Second, 10*time.Millisecond)
 
 	assert.LessOrEqual(t, maxConcurrentSeen.Load(), int32(2), "should never exceed configured concurrency")
 }
@@ -422,6 +425,9 @@ func TestManager_SyncSignalDrainsQueue(t *testing.T) {
 }
 
 func TestManager_RecentCappedAtMax(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: recent entries capping test")
+	}
 	runner := NewMockRunner(true)
 	runner.RunFunc = func(_ context.Context, _ RunRequest) (*RunResult, error) {
 		return &RunResult{Output: "ok"}, nil
@@ -435,11 +441,14 @@ func TestManager_RecentCappedAtMax(t *testing.T) {
 	for i := 0; i < maxRecentEntries+5; i++ {
 		key := fmt.Sprintf("cap-%d", i)
 		m.Enqueue(&WorkItem{Type: "cap-test", Priority: 1, DedupKey: key})
-		m.processQueue(ctx)
-		time.Sleep(20 * time.Millisecond)
 	}
 
-	time.Sleep(200 * time.Millisecond)
+	// drive processQueue inside Eventually to guarantee queue draining
+	require.Eventually(t, func() bool {
+		m.processQueue(ctx)
+		s := m.Status()
+		return s.Stats.TotalInvocations >= maxRecentEntries+5
+	}, 2*time.Second, 10*time.Millisecond)
 
 	status := m.Status()
 	assert.LessOrEqual(t, len(status.Recent), maxRecentEntries)

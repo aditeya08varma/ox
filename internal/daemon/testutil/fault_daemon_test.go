@@ -152,11 +152,13 @@ func TestFaultDaemon_Fast_ConnectionCount(t *testing.T) {
 	d.Start()
 	defer d.Stop()
 
-	assert.Equal(t, int64(0), d.ConnectionCount())
+	// baseline accounts for the probe connection from AwaitUnixSocket in Start()
+	time.Sleep(10 * time.Millisecond)
+	baseline := d.ConnectionCount()
 	_ = daemon.IsHealthy()
-	assert.Equal(t, int64(1), d.ConnectionCount())
+	assert.Equal(t, baseline+1, d.ConnectionCount())
 	_ = daemon.IsHealthy()
-	assert.Equal(t, int64(2), d.ConnectionCount())
+	assert.Equal(t, baseline+2, d.ConnectionCount())
 }
 
 func TestFaultDaemon_Fast_ResponseTooLarge(t *testing.T) {
@@ -272,18 +274,21 @@ func TestFaultDaemon_Slow_FlakyConnection(t *testing.T) {
 	}
 	setupFaultTest(t)
 
-	d := NewFlakyDaemon(t, 2)
+	// DropEveryN=3: every 3rd connection is dropped.
+	// AwaitUnixSocket probe in Start() consumes conn #1, so the first
+	// daemon.IsHealthy() call is conn #2, and conn #3 is the drop.
+	d := NewFlakyDaemon(t, 3)
 	d.Start()
 	defer d.Stop()
 
 	err := daemon.IsHealthy()
-	assert.NoError(t, err) // conn #1
+	assert.NoError(t, err) // conn #2
 
 	err = daemon.IsHealthy()
-	assert.Error(t, err) // conn #2 dropped
+	assert.Error(t, err) // conn #3 dropped
 
 	err = daemon.IsHealthy()
-	assert.NoError(t, err) // conn #3
+	assert.NoError(t, err) // conn #4
 }
 
 func TestFaultDaemon_Slow_SwitchFaultMidTest(t *testing.T) {
