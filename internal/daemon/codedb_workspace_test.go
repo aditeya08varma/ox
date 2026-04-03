@@ -352,18 +352,18 @@ func TestUpdateProjectRoot_Symlink(t *testing.T) {
 
 // --- C. Stats merge ---
 
-// TestStats_BaselineFieldsPopulated verifies Stats() reports baseline info
-// after a baseline build.
-// Failure prevented: ox status not showing baseline info.
-func TestStats_BaselineFieldsPopulated(t *testing.T) {
+// TestStats_LedgerFieldsPopulated verifies Stats() reports ledger index info
+// after a ledger index build.
+// Failure prevented: ox status not showing ledger index info.
+func TestStats_LedgerFieldsPopulated(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
 
-	// simulate successful baseline build
+	// simulate successful ledger index build
 	mgr.mu.Lock()
-	mgr.baselineStats = CodeDBStats{
+	mgr.ledgerStats = CodeDBStats{
 		IndexExists: true,
 		Commits:     15,
 		Symbols:     200,
@@ -372,15 +372,15 @@ func TestStats_BaselineFieldsPopulated(t *testing.T) {
 	mgr.mu.Unlock()
 
 	stats := mgr.Stats()
-	assert.True(t, stats.BaselineExists, "BaselineExists must be true after baseline build")
-	assert.Equal(t, 15, stats.BaselineCommits, "BaselineCommits must reflect baseline stats")
-	assert.False(t, stats.BaselineIndexingNow, "BaselineIndexingNow must be false when not building")
+	assert.True(t, stats.LedgerExists, "LedgerExists must be true after ledger index build")
+	assert.Equal(t, 15, stats.LedgerCommits, "LedgerCommits must reflect ledger index stats")
+	assert.False(t, stats.LedgerIndexingNow, "LedgerIndexingNow must be false when not building")
 }
 
-// TestUpdateProjectRoot_DuringBaselineBuild_NoPanic verifies workspace switch during
-// baseline build doesn't corrupt state.
-// Failure prevented: Conductor switching workspaces while baseline is building.
-func TestUpdateProjectRoot_DuringBaselineBuild_NoPanic(t *testing.T) {
+// TestUpdateProjectRoot_DuringLedgerIndexBuild_NoPanic verifies workspace switch during
+// ledger index build doesn't corrupt state.
+// Failure prevented: Conductor switching workspaces while ledger index is building.
+func TestUpdateProjectRoot_DuringLedgerIndexBuild_NoPanic(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -389,7 +389,7 @@ func TestUpdateProjectRoot_DuringBaselineBuild_NoPanic(t *testing.T) {
 
 	release := make(chan struct{})
 	entered := make(chan struct{}, 1)
-	mgr.baselineTestHook = func() {
+	mgr.ledgerTestHook = func() {
 		select {
 		case entered <- struct{}{}:
 		default:
@@ -402,15 +402,15 @@ func TestUpdateProjectRoot_DuringBaselineBuild_NoPanic(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	go mgr.BuildBaseline(ctx, dir)
+	go mgr.BuildLedgerIndex(ctx, dir)
 
 	select {
 	case <-entered:
 	case <-time.After(5 * time.Second):
-		t.Fatal("baselineTestHook did not run")
+		t.Fatal("ledgerTestHook did not run")
 	}
 	close(release)
-	waitForBaselineIndexingDone(t, mgr)
+	waitForLedgerIndexingDone(t, mgr)
 
 	mgr.mu.Lock()
 	got := mgr.projectRoot
@@ -418,11 +418,11 @@ func TestUpdateProjectRoot_DuringBaselineBuild_NoPanic(t *testing.T) {
 	assert.Equal(t, newDir, got, "projectRoot should reflect the workspace switch")
 }
 
-// TestDoIndex_DirtyOverlayToBaseline_FailureDoesNotBlockWorktreeIndex verifies that
-// if the dirty overlay redirect to baseline dir fails (e.g. baseline dir missing),
+// TestDoIndex_DirtyOverlayToLedger_FailureDoesNotBlockWorktreeIndex verifies that
+// if the dirty overlay redirect to ledger index dir fails (e.g. ledger index dir missing),
 // the main worktree indexing still completes normally.
-// Failure prevented: baseline dir disappearance blocks all worktree indexing.
-func TestDoIndex_DirtyOverlayToBaseline_FailureDoesNotBlockWorktreeIndex(t *testing.T) {
+// Failure prevented: ledger index dir disappearance blocks all worktree indexing.
+func TestDoIndex_DirtyOverlayToLedger_FailureDoesNotBlockWorktreeIndex(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -432,20 +432,20 @@ func TestDoIndex_DirtyOverlayToBaseline_FailureDoesNotBlockWorktreeIndex(t *test
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".git"), 0o755))
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
 
-	// set a baseline dir that doesn't exist — the dirty overlay redirect should
+	// set a ledger index dir that doesn't exist — the dirty overlay redirect should
 	// silently fail without affecting the main index
 	mgr.mu.Lock()
-	mgr.baselineDataDir = filepath.Join(dir, "nonexistent-baseline")
+	mgr.ledgerDataDir = filepath.Join(dir, "nonexistent-ledger")
 	mgr.mu.Unlock()
 
 	// Index will fail because there's no valid git repo, but the important thing is
-	// it fails at the git step, NOT at the baseline dirty overlay step
+	// it fails at the git step, NOT at the ledger dirty overlay step
 	ctx := context.Background()
 	_, err := mgr.Index(ctx, CodeIndexPayload{}, nil)
 
-	// should fail because no valid git repo — NOT because of baseline dir issues
+	// should fail because no valid git repo — NOT because of ledger dir issues
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "index local", "error should be from git indexing, not baseline dirty overlay")
+	assert.Contains(t, err.Error(), "index local", "error should be from git indexing, not ledger dirty overlay")
 
 	// indexing flag must be released
 	mgr.mu.Lock()
@@ -454,18 +454,18 @@ func TestDoIndex_DirtyOverlayToBaseline_FailureDoesNotBlockWorktreeIndex(t *test
 	assert.False(t, flag, "indexing flag must be released")
 }
 
-// TestStats_BaselineOverridesEvenWhenWorktreeIndexMissing verifies that Stats()
-// reports baseline availability even when no worktree index exists.
-// Failure prevented: fresh install shows "no index" when baseline is actually ready.
-func TestStats_BaselineOverridesEvenWhenWorktreeIndexMissing(t *testing.T) {
+// TestStats_LedgerOverridesEvenWhenWorktreeIndexMissing verifies that Stats()
+// reports ledger index availability even when no worktree index exists.
+// Failure prevented: fresh install shows "no index" when ledger index is actually ready.
+func TestStats_LedgerOverridesEvenWhenWorktreeIndexMissing(t *testing.T) {
 	t.Parallel()
 
 	// non-existent project root — no worktree index
 	mgr := NewCodeDBManager("/does/not/exist", codedbTestLogger(), nil)
 
-	// simulate successful baseline
+	// simulate successful ledger index
 	mgr.mu.Lock()
-	mgr.baselineStats = CodeDBStats{
+	mgr.ledgerStats = CodeDBStats{
 		IndexExists: true,
 		Commits:     25,
 		Symbols:     300,
@@ -473,8 +473,8 @@ func TestStats_BaselineOverridesEvenWhenWorktreeIndexMissing(t *testing.T) {
 	mgr.mu.Unlock()
 
 	stats := mgr.Stats()
-	assert.True(t, stats.BaselineExists, "baseline must be reported even without worktree index")
-	assert.Equal(t, 25, stats.BaselineCommits)
+	assert.True(t, stats.LedgerExists, "ledger index must be reported even without worktree index")
+	assert.Equal(t, 25, stats.LedgerCommits)
 	// worktree index fields should be empty/false
 	assert.False(t, stats.IndexExists, "worktree index should not exist")
 }

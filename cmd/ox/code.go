@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/search"
+	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/paths"
@@ -33,12 +35,12 @@ func resolveCodeDBDir(root string) string {
 	return paths.CodeDBDataDir(root)
 }
 
-// resolveBaselineCodeDBDir returns the baseline CodeDB directory if it exists on disk.
-// Returns empty string if baseline is not available (graceful fallback to legacy).
-func resolveBaselineCodeDBDir(root string) string {
+// resolveLedgerCodeDBDir returns the ledger CodeDB directory if it exists on disk.
+// Returns empty string if the ledger index is not available (graceful fallback to legacy).
+func resolveLedgerCodeDBDir(root string) string {
 	ctx, err := config.LoadProjectContext(root)
 	if err == nil {
-		if dir := paths.CodeDBBaselineDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
+		if dir := paths.CodeDBLedgerDir(ctx.RepoID(), ctx.Endpoint()); dir != "" {
 			if _, statErr := os.Stat(dir); statErr == nil {
 				return dir
 			}
@@ -47,20 +49,35 @@ func resolveBaselineCodeDBDir(root string) string {
 	return ""
 }
 
+// resolvePreferredCodeDBDir returns the best available CodeDB directory and whether
+// it's the ledger index. Prefers the shared CodeDB (project code); falls back to the
+// ledger index only if the shared index hasn't been built yet.
+func resolvePreferredCodeDBDir(root string) (dataDir string, useLedger bool) {
+	dataDir = resolveCodeDBDir(root)
+	// check for metadata.db — the shared dir may exist as a parent of the ledger
+	// index dir without actually containing an index
+	if _, err := os.Stat(filepath.Join(dataDir, store.MetadataDBFile)); err != nil {
+		if ledgerDir := resolveLedgerCodeDBDir(root); ledgerDir != "" {
+			return ledgerDir, true
+		}
+	}
+	return dataDir, false
+}
+
 // isCodeDBIndexing checks whether the daemon is actively indexing the selected backend.
 // Bleve's BoltDB backend holds an exclusive file lock during writes,
 // so codedb.Open from the CLI would block until indexing finishes.
-// useBaseline selects which flag to check: baseline vs worktree.
+// useLedger selects which flag to check: ledger index vs worktree.
 //
 // Exposed as a variable so tests can override it.
-var isCodeDBIndexing = func(useBaseline bool) bool {
+var isCodeDBIndexing = func(useLedger bool) bool {
 	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
 	cs, err := client.CodeStatus()
 	if err != nil {
 		return false
 	}
-	if useBaseline {
-		return cs.BaselineIndexingNow
+	if useLedger {
+		return cs.LedgerIndexingNow
 	}
 	return cs.IndexingNow
 }
@@ -90,14 +107,9 @@ var codeSearchCmd = &cobra.Command{
 		}
 
 		query := strings.Join(args, " ")
-		dataDir := resolveCodeDBDir(root)
-		useBaseline := false
-		if baselineDir := resolveBaselineCodeDBDir(root); baselineDir != "" {
-			dataDir = baselineDir
-			useBaseline = true
-		}
+		dataDir, useLedger := resolvePreferredCodeDBDir(root)
 
-		if isCodeDBIndexing(useBaseline) {
+		if isCodeDBIndexing(useLedger) {
 			return fmt.Errorf("code index is currently being built — search is unavailable until indexing completes. Run 'ox code status' to check progress")
 		}
 
@@ -286,14 +298,9 @@ var codeSQLCmd = &cobra.Command{
 			return fmt.Errorf("not in a git repository")
 		}
 
-		dataDir := resolveCodeDBDir(root)
-		useBaseline := false
-		if baselineDir := resolveBaselineCodeDBDir(root); baselineDir != "" {
-			dataDir = baselineDir
-			useBaseline = true
-		}
+		dataDir, useLedger := resolvePreferredCodeDBDir(root)
 
-		if isCodeDBIndexing(useBaseline) {
+		if isCodeDBIndexing(useLedger) {
 			return fmt.Errorf("code index is currently being built — SQL queries unavailable until indexing completes")
 		}
 
@@ -326,12 +333,7 @@ var codeStatusCmd = &cobra.Command{
 			return fmt.Errorf("not in a git repository")
 		}
 
-		dataDir := resolveCodeDBDir(root)
-		useBaseline := false
-		if baselineDir := resolveBaselineCodeDBDir(root); baselineDir != "" {
-			dataDir = baselineDir
-			useBaseline = true
-		}
+		dataDir, useLedger := resolvePreferredCodeDBDir(root)
 		indexExists := false
 		if _, err := os.Stat(dataDir); err == nil {
 			indexExists = true
@@ -362,7 +364,7 @@ var codeStatusCmd = &cobra.Command{
 		}
 		var repos []repoRow
 
-		daemonIndexing := codeStats != nil && ((useBaseline && codeStats.BaselineIndexingNow) || (!useBaseline && codeStats.IndexingNow))
+		daemonIndexing := codeStats != nil && ((useLedger && codeStats.LedgerIndexingNow) || (!useLedger && codeStats.IndexingNow))
 		if indexExists && !daemonIndexing {
 			db, err := codedb.Open(dataDir)
 			if err == nil {

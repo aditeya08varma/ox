@@ -19,6 +19,9 @@ import (
 // ErrCorrupt indicates the index is corrupted and needs re-indexing.
 var ErrCorrupt = fmt.Errorf("codedb index is corrupt")
 
+// MetadataDBFile is the filename of the SQLite database inside a CodeDB directory.
+const MetadataDBFile = "metadata.db"
+
 // Store wraps a SQLite database and Bleve full-text search indexes.
 // All SQL access goes through the convenience methods below.
 //
@@ -59,7 +62,7 @@ func Open(root string) (*Store, error) {
 		}
 	}
 
-	dbPath := filepath.Join(root, "metadata.db")
+	dbPath := filepath.Join(root, MetadataDBFile)
 	// WAL: concurrent readers + one writer. busy_timeout: wait up to 5s for
 	// write locks instead of failing immediately. This matters when multiple
 	// daemons (one per worktree) share the same index. Long-term fix is

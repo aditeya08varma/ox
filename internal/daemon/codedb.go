@@ -48,12 +48,12 @@ type CodeDBManager struct {
 
 	issues *IssueTracker // emits structured issues for ox status / ox doctor
 
-	// baseline index state (separate lifecycle from worktree indexing)
-	baselineIndexing bool
-	baselineStats    CodeDBStats
-	baselineDataDir  string // cached baseline dir; resolved once on first use
-	// baselineTestHook is called at the start of BuildBaseline; nil in production.
-	baselineTestHook func()
+	// ledger index state (separate lifecycle from worktree indexing)
+	ledgerIndexing bool
+	ledgerStats    CodeDBStats
+	ledgerDataDir  string // cached ledger index dir; resolved once on first use
+	// ledgerTestHook is called at the start of BuildLedgerIndex; nil in production.
+	ledgerTestHook func()
 
 	// lastIndexedHead caches the HEAD ref + commit hash after successful doIndex.
 	// Used by CheckFreshness to skip the expensive doIndex pipeline when nothing changed.
@@ -82,10 +82,10 @@ type CodeDBStats struct {
 	DataDir     string      `json:"data_dir"`
 	IndexExists bool        `json:"index_exists"`
 
-	// baseline index fields (ledger main branch, worktree-independent)
-	BaselineExists      bool `json:"baseline_exists"`
-	BaselineCommits     int  `json:"baseline_commits"`
-	BaselineIndexingNow bool `json:"baseline_indexing_now"`
+	// ledger index fields (ledger main branch, worktree-independent)
+	LedgerExists      bool `json:"ledger_exists"`
+	LedgerCommits     int  `json:"ledger_commits"`
+	LedgerIndexingNow bool `json:"ledger_indexing_now"`
 }
 
 // RepoStats tracks per-repo statistics within the index.
@@ -196,13 +196,13 @@ func (m *CodeDBManager) SetIssueTracker(tracker *IssueTracker) {
 	m.issues = tracker
 }
 
-// resolveBaselineDataDir returns the baseline CodeDB directory from project config.
+// resolveLedgerDataDir returns the ledger CodeDB directory from project config.
 // Returns empty string if project config is unavailable.
 // Result is cached after first resolution.
-func (m *CodeDBManager) resolveBaselineDataDir() string {
+func (m *CodeDBManager) resolveLedgerDataDir() string {
 	m.mu.Lock()
-	if m.baselineDataDir != "" {
-		dir := m.baselineDataDir
+	if m.ledgerDataDir != "" {
+		dir := m.ledgerDataDir
 		m.mu.Unlock()
 		return dir
 	}
@@ -213,68 +213,78 @@ func (m *CodeDBManager) resolveBaselineDataDir() string {
 	if err != nil {
 		return ""
 	}
-	dir := paths.CodeDBBaselineDir(ctx.RepoID(), ctx.Endpoint())
+	dir := paths.CodeDBLedgerDir(ctx.RepoID(), ctx.Endpoint())
 	if dir == "" {
 		return ""
 	}
 	m.mu.Lock()
-	m.baselineDataDir = dir
+	m.ledgerDataDir = dir
 	m.mu.Unlock()
 	return dir
 }
 
-// BuildBaseline builds or refreshes the baseline index from the ledger's main branch.
-// This is independent of the worktree index — baseline provides committed content search
+// BuildLedgerIndex builds or refreshes the ledger index from the ledger's main branch.
+// This is independent of the worktree index — the ledger index provides committed content search
 // even when no worktree is active.
-// Non-blocking: if a baseline build is already in progress, returns immediately.
-func (m *CodeDBManager) BuildBaseline(ctx context.Context, ledgerPath string) {
+// Non-blocking: if a ledger index build is already in progress, returns immediately.
+func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string) {
 	if ledgerPath == "" {
 		return
 	}
 
 	m.mu.Lock()
-	if m.baselineIndexing {
+	if m.ledgerIndexing {
 		m.mu.Unlock()
 		return
 	}
-	m.baselineIndexing = true
+	m.ledgerIndexing = true
 	m.mu.Unlock()
 
 	defer func() {
 		m.mu.Lock()
-		m.baselineIndexing = false
+		m.ledgerIndexing = false
 		m.mu.Unlock()
 	}()
 
-	if m.baselineTestHook != nil {
-		m.baselineTestHook()
+	if m.ledgerTestHook != nil {
+		m.ledgerTestHook()
 	}
 
-	baselineDir := m.resolveBaselineDataDir()
-	if baselineDir == "" {
-		m.logger.Debug("codedb baseline: no baseline dir available")
+	ledgerDir := m.resolveLedgerDataDir()
+	if ledgerDir == "" {
+		m.logger.Debug("codedb ledger: no ledger index dir available")
 		return
 	}
 
 	if _, err := os.Stat(ledgerPath); os.IsNotExist(err) {
-		m.logger.Debug("codedb baseline: ledger path gone", "path", ledgerPath)
+		m.logger.Debug("codedb ledger: ledger path gone", "path", ledgerPath)
 		return
 	}
 
-	if err := os.MkdirAll(baselineDir, 0o755); err != nil {
-		m.logger.Warn("codedb baseline: create dir failed", "error", err)
+	if err := os.MkdirAll(ledgerDir, 0o755); err != nil {
+		m.logger.Warn("codedb ledger: create dir failed", "error", err)
 		return
+	}
+
+	// one-time cleanup: remove legacy "baseline" sibling dir (renamed to "ledger")
+	if legacyDir := filepath.Join(filepath.Dir(ledgerDir), "baseline"); legacyDir != ledgerDir {
+		if _, statErr := os.Stat(legacyDir); statErr == nil {
+			m.logger.Info("removing legacy baseline codedb dir", "old", legacyDir, "new", ledgerDir)
+			if rmErr := os.RemoveAll(legacyDir); rmErr != nil {
+				m.logger.Warn("failed to remove legacy baseline dir", "path", legacyDir, "error", rmErr)
+			}
+		}
 	}
 
 	indexCtx, cancel := context.WithTimeout(ctx, maxIndexDuration)
 	defer cancel()
 
 	start := time.Now()
-	m.logger.Info("codedb baseline build started", "ledger", ledgerPath, "dir", baselineDir)
+	m.logger.Info("codedb ledger index build started", "ledger", ledgerPath, "dir", ledgerDir)
 
-	db, err := codedb.Open(baselineDir)
+	db, err := codedb.Open(ledgerDir)
 	if err != nil {
-		m.logger.Warn("codedb baseline: open failed", "error", err)
+		m.logger.Warn("codedb ledger: open failed", "error", err)
 		return
 	}
 	defer db.Close()
@@ -282,26 +292,26 @@ func (m *CodeDBManager) BuildBaseline(ctx context.Context, ledgerPath string) {
 	opts := index.IndexOptions{}
 
 	if err := db.IndexLocalRepo(indexCtx, ledgerPath, opts); err != nil {
-		m.logger.Warn("codedb baseline: index failed", "error", err)
+		m.logger.Warn("codedb ledger: index failed", "error", err)
 		return
 	}
 
 	if _, err := db.ParseSymbols(indexCtx, nil); err != nil {
-		m.logger.Warn("codedb baseline: parse symbols failed", "error", err)
+		m.logger.Warn("codedb ledger: parse symbols failed", "error", err)
 		// non-fatal: committed content is already indexed
 	}
 
 	if _, err := db.ParseComments(indexCtx, nil); err != nil {
-		m.logger.Warn("codedb baseline: parse comments failed", "error", err)
+		m.logger.Warn("codedb ledger: parse comments failed", "error", err)
 		// non-fatal
 	}
 
-	cached := queryStatsFromDB(db, baselineDir)
+	cached := queryStatsFromDB(db, ledgerDir)
 	m.mu.Lock()
-	m.baselineStats = cached
+	m.ledgerStats = cached
 	m.mu.Unlock()
 
-	m.logger.Info("codedb baseline build complete", "duration", time.Since(start).Round(time.Millisecond), "commits", cached.Commits, "symbols", cached.Symbols)
+	m.logger.Info("codedb ledger index build complete", "duration", time.Since(start).Round(time.Millisecond), "commits", cached.Commits, "symbols", cached.Symbols)
 }
 
 // maxIndexDuration caps how long a single indexing run may take before being
@@ -499,8 +509,8 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 			}
 			dirtyDuration = time.Since(dirtyStart)
 
-			// also write dirty overlay to baseline dir so CLI search finds it
-			if baseDir := m.resolveBaselineDataDir(); baseDir != "" && baseDir != dataDir {
+			// also write dirty overlay to ledger index dir so CLI search finds it
+			if baseDir := m.resolveLedgerDataDir(); baseDir != "" && baseDir != dataDir {
 				baseDB, bErr := codedb.Open(baseDir)
 				if bErr == nil {
 					baseDB.BuildDirtyIndex(ctx, projectRoot, opts)
@@ -702,7 +712,7 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 	m.indexing = true
 	m.mu.Unlock()
 
-	// guard: skip when worktree is gone (baseline is unaffected)
+	// guard: skip when worktree is gone (ledger index is unaffected)
 	if _, err := os.Stat(projectRoot); os.IsNotExist(err) {
 		m.logger.Debug("codedb skipping freshness check, worktree gone", "path", projectRoot)
 		m.mu.Lock()
@@ -883,8 +893,8 @@ func (m *CodeDBManager) RefreshDirtyOverlay(ctx context.Context) {
 			tracker.ClearIssue(IssueTypeDirtyOverlayFailed, "")
 		}
 
-		// also write dirty overlay to baseline dir so CLI search finds it
-		if baseDir := m.resolveBaselineDataDir(); baseDir != "" && baseDir != dataDir {
+		// also write dirty overlay to ledger index dir so CLI search finds it
+		if baseDir := m.resolveLedgerDataDir(); baseDir != "" && baseDir != dataDir {
 			baseDB, bErr := codedb.Open(baseDir)
 			if bErr == nil {
 				baseDB.BuildDirtyIndex(ctx, projectRoot, opts)
@@ -912,17 +922,17 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 	lastIndex := m.lastIndex
 	lastErr := m.lastErr
 	cached := m.stats
-	baselineIndexing := m.baselineIndexing
-	baselineStats := m.baselineStats
+	ledgerIndexing := m.ledgerIndexing
+	ledgerStats := m.ledgerStats
 	m.mu.Unlock()
 
 	dataDir := m.resolveSharedDataDir()
 
-	// merge baseline fields into result
-	mergeBaseline := func(s *CodeDBStats) {
-		s.BaselineIndexingNow = baselineIndexing
-		s.BaselineExists = baselineStats.IndexExists
-		s.BaselineCommits = baselineStats.Commits
+	// merge ledger index fields into result
+	mergeLedger := func(s *CodeDBStats) {
+		s.LedgerIndexingNow = ledgerIndexing
+		s.LedgerExists = ledgerStats.IndexExists
+		s.LedgerCommits = ledgerStats.Commits
 	}
 
 	// if we have cached stats, return them with live metadata
@@ -934,7 +944,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 		if lastErr != nil {
 			cached.LastError = lastErr.Error()
 		}
-		mergeBaseline(&cached)
+		mergeLedger(&cached)
 		return cached
 	}
 
@@ -953,7 +963,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 		if _, err := os.Stat(dataDir); err == nil {
 			result.IndexExists = true
 		}
-		mergeBaseline(&result)
+		mergeLedger(&result)
 		return result
 	}
 
@@ -978,7 +988,7 @@ func (m *CodeDBManager) Stats() CodeDBStats {
 		}
 	}
 
-	mergeBaseline(&result)
+	mergeLedger(&result)
 	return result
 }
 
