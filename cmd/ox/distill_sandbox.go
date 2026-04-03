@@ -190,7 +190,17 @@ func localCloneWithBareRemote(ctx context.Context, srcRepo, cloneDir, bareDir st
 	}
 
 	// step 6: create bare repo as the sandbox push target.
-	initCmd := exec.CommandContext(ctx, "git", "init", "--bare", bareDir)
+	// Detect the clone's current branch so we can set HEAD in the bare repo
+	// to match — otherwise git init --bare defaults HEAD to "master" which
+	// may not match the clone's branch (e.g., "main").
+	branchCmd := exec.CommandContext(ctx, "git", "-C", cloneDir, "rev-parse", "--abbrev-ref", "HEAD")
+	branchOut, _ := branchCmd.Output()
+	branch := strings.TrimSpace(string(branchOut))
+	if branch == "" || branch == "HEAD" {
+		branch = "main"
+	}
+
+	initCmd := exec.CommandContext(ctx, "git", "init", "--bare", "-b", branch, bareDir)
 	if out, err := initCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git init --bare: %s: %w", string(out), err)
 	}

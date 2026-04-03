@@ -47,9 +47,9 @@ func TestLocalCloneWithBareRemote(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(out), "remote.git")
 
-	// push should work (to bare)
+	// push should work (to bare) — use explicit refspec for portability
 	writeAndCommit(t, cloneDir, "memory/daily/2026-03-11.md", "observation two\n", "add day 2")
-	cmd = exec.Command("git", "-C", cloneDir, "push")
+	cmd = exec.Command("git", "-C", cloneDir, "push", "origin", "HEAD")
 	out, err = cmd.CombinedOutput()
 	require.NoError(t, err, "push to bare remote should succeed: %s", string(out))
 
