@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/sageox/ox/internal/session/adapters"
 )
 
 // TestMergeGitignoreEntries_NoChanges verifies that when all required entries are present
@@ -91,6 +93,13 @@ func TestCheckOpenCodeHooks_FixInstalls(t *testing.T) {
 		t.Fatalf("failed to create .opencode: %v", err)
 	}
 
+	// set up fake adapter binary so discovery finds it
+	adapterDir := t.TempDir()
+	createFakeAdapterWithHooks(t, adapterDir, "opencode", "0.1.0", "session", ".opencode")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	adapters.Unregister("opencode") // clear stale entry so discovery re-registers from fake
+	t.Cleanup(func() { adapters.Unregister("opencode") })
+
 	originalWd, _ := os.Getwd()
 	defer os.Chdir(originalWd)
 	os.Chdir(gitRoot)
@@ -112,6 +121,13 @@ func TestCheckGeminiHooks_FixInstalls(t *testing.T) {
 	if err := os.MkdirAll(geminiDir, 0755); err != nil {
 		t.Fatalf("failed to create .gemini: %v", err)
 	}
+
+	// set up fake adapter binary so discovery finds it
+	adapterDir := t.TempDir()
+	createFakeAdapterWithHooks(t, adapterDir, "gemini", "0.1.0", "session", ".gemini")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	adapters.Unregister("gemini") // clear stale entry so discovery re-registers from fake
+	t.Cleanup(func() { adapters.Unregister("gemini") })
 
 	originalWd, _ := os.Getwd()
 	defer os.Chdir(originalWd)

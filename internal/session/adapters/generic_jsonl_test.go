@@ -269,7 +269,12 @@ func TestGenericJSONLAdapter_AliasResolution(t *testing.T) {
 	// register all adapters needed for alias resolution
 	Register(&GenericJSONLAdapter{})
 	Register(&mockAdapter{name: "claude-code", detect: true})
-	Register(&CodexAdapter{})
+	Register(&mockAdapter{name: "codex"})
+	Register(&mockAdapter{name: "amp"})
+	Register(&mockAdapter{name: "opencode"})
+	Register(&mockAdapter{name: "pi"})
+	Register(&mockAdapter{name: "aider"})
+	Register(&mockAdapter{name: "droid"})
 
 	tests := []struct {
 		name     string
@@ -279,19 +284,19 @@ func TestGenericJSONLAdapter_AliasResolution(t *testing.T) {
 	}{
 		{"codex resolves to codex", "codex", "codex", false},
 		{"Codex case-insensitive", "Codex", "codex", false},
-		{"amp resolves to generic", "amp", "generic", false},
-		{"Amp case-insensitive", "AMP", "generic", false},
+		{"amp resolves to amp", "amp", "amp", false},
+		{"Amp case-insensitive", "AMP", "amp", false},
 		{"cursor resolves to generic", "cursor", "generic", false},
 		{"windsurf resolves to generic", "windsurf", "generic", false},
 		{"copilot resolves to generic", "copilot", "generic", false},
-		{"aider resolves to generic", "aider", "generic", false},
+		{"aider resolves to aider", "aider", "aider", false},
 		{"cody resolves to generic", "cody", "generic", false},
 		{"continue resolves to generic", "continue", "generic", false},
 		{"cline resolves to generic", "cline", "generic", false},
 		{"goose resolves to generic", "goose", "generic", false},
 		{"kiro resolves to generic", "kiro", "generic", false},
-		{"opencode resolves to generic", "opencode", "generic", false},
-		{"droid resolves to generic", "droid", "generic", false},
+		{"opencode resolves to opencode", "opencode", "opencode", false},
+		{"droid resolves to droid", "droid", "droid", false},
 		{"claude resolves to claude-code", "claude", "claude-code", false},
 		{"exact generic match", "generic", "generic", false},
 		{"unknown returns error", "unknown-agent", "", true},

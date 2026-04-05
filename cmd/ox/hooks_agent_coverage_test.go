@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -26,8 +24,6 @@ func TestGetAgent_CaseInsensitive(t *testing.T) {
 		{"gemini", "Gemini", false},
 		{"Codex", "Codex", false},
 		{"codex", "Codex", false},
-		{"CodePuppy", "CodePuppy", false},
-		{"codepuppy", "CodePuppy", false},
 		{"Pi", "Pi", false},
 		{"pi", "Pi", false},
 		{"nonexistent", "", true},
@@ -51,7 +47,7 @@ func TestGetAgent_CaseInsensitive(t *testing.T) {
 func TestAgentRegistry_AllRegistered(t *testing.T) {
 	t.Parallel()
 
-	expectedNames := []string{"Claude", "OpenCode", "Gemini", "Codex", "CodePuppy", "Amp", "Pi"}
+	expectedNames := []string{"Claude", "OpenCode", "Gemini", "Codex", "Amp", "Pi"}
 	assert.Len(t, AgentRegistry, len(expectedNames))
 
 	for _, name := range expectedNames {
@@ -70,32 +66,7 @@ func TestCodexAgent_SupportsHooksTrue(t *testing.T) {
 	t.Parallel()
 
 	codex := &CodexAgent{}
-	assert.True(t, codex.SupportsHooks(), "Codex supports hooks via .codex/hooks.json")
-}
-
-func TestCodexAgent_InstallUninstall(t *testing.T) {
-	tmpDir := t.TempDir()
-	codexDir := filepath.Join(tmpDir, ".codex")
-	require.NoError(t, os.MkdirAll(codexDir, 0755))
-
-	restoreCwd := changeToDir(t, tmpDir)
-	defer restoreCwd()
-
-	codex := &CodexAgent{}
-	assert.NoError(t, codex.Install(false))
-	assert.True(t, codex.HasHooks(false))
-	assert.NoError(t, codex.Uninstall(false))
-}
-
-func TestCodexAgent_ListReturnsProjectUser(t *testing.T) {
-	t.Parallel()
-
-	codex := &CodexAgent{}
-	status := codex.List()
-	_, hasProject := status["Project"]
-	_, hasUser := status["User"]
-	assert.True(t, hasProject, "Codex list should report Project status")
-	assert.True(t, hasUser, "Codex list should report User status")
+	assert.True(t, codex.SupportsHooks(), "Codex supports hooks via external adapter")
 }
 
 func TestAgentNames(t *testing.T) {
@@ -109,7 +80,6 @@ func TestAgentNames(t *testing.T) {
 		{&OpenCodeAgent{}, "OpenCode"},
 		{&GeminiAgent{}, "Gemini"},
 		{&CodexAgent{}, "Codex"},
-		{&CodePuppyAgent{}, "CodePuppy"},
 	}
 
 	for _, tt := range tests {
@@ -132,7 +102,6 @@ func TestAgentSupportsHooks(t *testing.T) {
 		{"OpenCode", &OpenCodeAgent{}, true},
 		{"Gemini", &GeminiAgent{}, true},
 		{"Codex", &CodexAgent{}, true},
-		{"CodePuppy", &CodePuppyAgent{}, true},
 	}
 
 	for _, tt := range tests {
