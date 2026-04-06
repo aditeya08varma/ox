@@ -257,6 +257,12 @@ func handleStart(ctx *HookContext) error {
 		agentID = ctx.Marker.AgentID
 	}
 
+	// on /clear or /compact: stop the current session so it gets finalized,
+	// then prime will start a fresh recording for the new context window
+	if forceReprime && agentID != "" {
+		stopSessionForClear(ctx, agentID)
+	}
+
 	// prime auto-starts recording internally; call again as safety net
 	if err := runPrimeForHook(agentID, ctx); err != nil {
 		return err
@@ -272,6 +278,48 @@ func handleStart(ctx *HookContext) error {
 
 	startSessionRecordingIfConfigured(ctx)
 	return nil
+}
+
+// stopSessionForClear stops the current session recording during /clear or /compact.
+// This finalizes the old session so it gets uploaded, then prime starts a fresh one.
+// Sets StoppedAt, sends fire-and-forget IPC finalization to the daemon, and clears
+// recording state so prime can start a fresh session.
+func stopSessionForClear(ctx *HookContext, agentID string) {
+	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
+	if err != nil || state == nil {
+		return // not recording, nothing to stop
+	}
+
+	// set StoppedAt to signal this session is complete
+	now := time.Now()
+	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.StoppedAt = &now
+	}); updateErr != nil {
+		slog.Debug("hook: clear could not set StoppedAt", "agent_id", agentID, "error", updateErr)
+	}
+
+	// fire-and-forget IPC to daemon to finalize the stopped session
+	if state.SessionPath != "" {
+		if ledgerPath := deriveLedgerPath(state.SessionPath); ledgerPath != "" {
+			client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
+			sessionName := filepath.Base(state.SessionPath)
+			if ipcErr := client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
+				SessionName: sessionName,
+				LedgerPath:  ledgerPath,
+				CachePath:   state.SessionPath,
+				ProjectRoot: ctx.ProjectRoot,
+			}); ipcErr != nil {
+				slog.Debug("hook: clear finalize IPC failed", "error", ipcErr)
+			}
+		}
+	}
+
+	// clear recording state so prime starts a fresh session
+	if clearErr := session.ClearRecordingStateForAgent(ctx.ProjectRoot, agentID); clearErr != nil {
+		slog.Debug("hook: clear could not remove recording state", "agent_id", agentID, "error", clearErr)
+	}
+
+	slog.Debug("hook: stopped session for clear", "agent_id", agentID)
 }
 
 // handlePrompt handles the user prompt submission phase.
@@ -482,62 +530,17 @@ func handleAfterTool(ctx *HookContext) error {
 }
 
 // handleStop handles the session stop phase.
-// Drains remaining entries (same as afterTool), then sets StoppedAt in recording
-// state and sends a fire-and-forget IPC message to the daemon to finalize.
+// Drain-only: flushes remaining entries to raw.jsonl (same as afterTool).
+//
+// IMPORTANT: This hook fires on EVERY response turn (PhaseStop = "agent finished
+// responding"), NOT only at session end. Setting StoppedAt or sending SessionFinalize
+// IPC here would mark active sessions as stopped after every turn and trigger
+// premature finalization. Those operations belong in the explicit CLI command
+// `ox agent <id> session stop` only.
 func handleStop(ctx *HookContext) error {
-	// drain entries first (same logic as afterTool)
 	if err := handleAfterTool(ctx); err != nil {
 		slog.Debug("hook: stop drain failed", "error", err)
-		// continue to set StoppedAt even if drain fails
 	}
-
-	agentID := ""
-	if ctx.Marker != nil {
-		agentID = ctx.Marker.AgentID
-	}
-	if agentID == "" {
-		return nil
-	}
-
-	// set StoppedAt in .recording.json to signal daemon
-	now := time.Now()
-	updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
-		s.StoppedAt = &now
-	})
-	if updateErr != nil {
-		// graceful no-op if no recording exists
-		slog.Debug("hook: stop could not set StoppedAt", "agent_id", agentID, "error", updateErr)
-	}
-
-	// fire-and-forget IPC to daemon: finalize this agent's session
-	state, loadErr := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
-	if loadErr != nil || state == nil {
-		return nil // no recording to finalize
-	}
-
-	client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
-	ledgerPath := ""
-	if state.SessionPath != "" {
-		// derive ledger path from session path: it's the root of the ledger repo
-		// session paths are like <ledger>/.sageox/cache/sessions/<name> or <ledger>/sessions/<name>
-		ledgerPath = deriveLedgerPath(state.SessionPath)
-	}
-	if ledgerPath == "" {
-		return nil
-	}
-
-	sessionName := filepath.Base(state.SessionPath)
-	ipcErr := client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
-		SessionName: sessionName,
-		LedgerPath:  ledgerPath,
-		CachePath:   state.SessionPath,
-		ProjectRoot: ctx.ProjectRoot,
-	})
-	if ipcErr != nil {
-		slog.Debug("hook: stop finalize IPC failed (daemon may be unreachable)", "error", ipcErr)
-		// not an error — anti-entropy handles it as fallback
-	}
-
 	return nil
 }
 
@@ -609,12 +612,8 @@ func runPrimeForHook(agentID string, ctx *HookContext) error {
 	slog.Debug("hook: running prime", "agent_id", agentID, "phase", ctx.Phase)
 
 	cmd := exec.Command(oxPath, args...)
-	cmd.Env = append(os.Environ(),
-		// Pass the long-lived agent PID (e.g., claude) to prime for session recording.
-		// Hooks run inside a transient bash shell, so os.Getppid() returns the shell PID
-		// which dies immediately. FindAgentAncestorPID walks the tree to find the agent.
-		fmt.Sprintf("OX_PARENT_PID=%d", proc.FindAgentAncestorPID()),
-	)
+	env := buildPrimeEnv(agentID)
+	cmd.Env = env
 	// pass original raw bytes to preserve unknown fields (not re-serialized)
 	if ctx.Input != nil && len(ctx.Input.RawBytes) > 0 {
 		cmd.Stdin = strings.NewReader(string(ctx.Input.RawBytes))
@@ -626,6 +625,22 @@ func runPrimeForHook(agentID string, ctx *HookContext) error {
 		return fmt.Errorf("hook: prime failed: %w", err)
 	}
 	return nil
+}
+
+// buildPrimeEnv constructs the environment for the prime subprocess.
+// Passes OX_PARENT_PID for stable PID tracking and SAGEOX_AGENT_ID for
+// agent ID reuse (critical for /clear where marker lookup may fail).
+func buildPrimeEnv(agentID string) []string {
+	env := append(os.Environ(),
+		// Pass the long-lived agent PID (e.g., claude) to prime for session recording.
+		// Hooks run inside a transient bash shell, so os.Getppid() returns the shell PID
+		// which dies immediately. FindAgentAncestorPID walks the tree to find the agent.
+		fmt.Sprintf("OX_PARENT_PID=%d", proc.FindAgentAncestorPID()),
+	)
+	if agentID != "" {
+		env = append(env, fmt.Sprintf("SAGEOX_AGENT_ID=%s", agentID))
+	}
+	return env
 }
 
 // startSessionRecordingIfConfigured attempts to start session recording

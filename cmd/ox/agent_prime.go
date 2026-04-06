@@ -267,6 +267,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// fallback: check SAGEOX_AGENT_ID env and sole-active-recording.
+	// Covers: (a) prime called from CLAUDE.md BLOCKING instruction after /clear
+	// (CLAUDE_ENV_FILE persists the var), (b) prime subprocess called from hook
+	// with the env var passed explicitly by runPrimeForHook.
+	if agentID == "" {
+		if states, loadErr := session.LoadAllRecordingStates(projectRoot); loadErr == nil {
+			envID := os.Getenv("SAGEOX_AGENT_ID")
+			agentID = resolveAgentIDFromStates(states, envID)
+		}
+	}
+
 	if agentID == "" {
 		// collect existing IDs to avoid collision during generation
 		existingInstances, err := store.List()
@@ -699,6 +710,33 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	}
 
 	return err
+}
+
+// resolveAgentIDFromStates attempts to find a reusable agent ID from active recordings.
+// Checks envID first (from SAGEOX_AGENT_ID), then falls back to sole-active-recording.
+// Returns empty string if no match found.
+func resolveAgentIDFromStates(states []*session.RecordingState, envID string) string {
+	// try env-provided ID first
+	if envID != "" {
+		for _, s := range states {
+			if s.AgentID == envID && s.IsAgentAlive() {
+				slog.Debug("prime: reusing agent ID from SAGEOX_AGENT_ID env", "agent_id", envID)
+				return envID
+			}
+		}
+	}
+	// last resort: if exactly one active recording exists, reuse it
+	var alive []*session.RecordingState
+	for _, s := range states {
+		if s.IsAgentAlive() {
+			alive = append(alive, s)
+		}
+	}
+	if len(alive) == 1 {
+		slog.Debug("prime: reusing sole active recording agent ID", "agent_id", alive[0].AgentID)
+		return alive[0].AgentID
+	}
+	return ""
 }
 
 // loadResolvedAttribution loads and merges attribution from user and project configs.
