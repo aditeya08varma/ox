@@ -33,7 +33,7 @@ func (EnvProvider) Patch(_ context.Context) (*Patch, Source, error) {
 // envBoolPtr returns a *bool if the named env var is explicitly set, nil if unset.
 // Recognizes "true", "1", "yes" as true; anything else as false.
 func envBoolPtr(name string) *bool {
-	v := strings.TrimSpace(os.Getenv(name))
+	v := strings.ToLower(strings.TrimSpace(os.Getenv(name)))
 	if v == "" {
 		return nil
 	}

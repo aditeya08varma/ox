@@ -24,13 +24,15 @@ type CLISettingsResponse struct {
 }
 
 // CLIFeatures contains server-evaluated feature gate values.
-// All fields default to true (features on) when the endpoint is unavailable.
+// Fields are *bool so omitted JSON fields remain nil ("no opinion") rather than
+// being zero-valued to false, which would incorrectly override default-on flags
+// during rolling upgrades when the server hasn't added a new flag yet.
 type CLIFeatures struct {
-	CodeDB      bool `json:"codedb"`
-	Whisper     bool `json:"whisper"`
-	Distill     bool `json:"distill"`
-	AutoDistill bool `json:"auto_distill"`
-	TUI         bool `json:"tui"`
+	CodeDB      *bool `json:"codedb,omitempty"`
+	Whisper     *bool `json:"whisper,omitempty"`
+	Distill     *bool `json:"distill,omitempty"`
+	AutoDistill *bool `json:"auto_distill,omitempty"`
+	TUI         *bool `json:"tui,omitempty"`
 }
 
 // CLIKillswitches contains server-evaluated kill switch values.
@@ -56,11 +58,11 @@ func RemoteSettingsToPatch(r *CLISettingsResponse) *Patch {
 		return nil
 	}
 	return &Patch{
-		CodeDBEnabled:          boolPtr(r.Features.CodeDB),
-		WhisperEnabled:         boolPtr(r.Features.Whisper),
-		DistillEnabled:         boolPtr(r.Features.Distill),
-		AutoDistill:            boolPtr(r.Features.AutoDistill),
-		TUIEnabled:             boolPtr(r.Features.TUI),
+		CodeDBEnabled:          r.Features.CodeDB,
+		WhisperEnabled:         r.Features.Whisper,
+		DistillEnabled:         r.Features.Distill,
+		AutoDistill:            r.Features.AutoDistill,
+		TUIEnabled:             r.Features.TUI,
 		DisableFileDeleteTools: boolPtr(r.Killswitches.DisableFileDeleteTools),
 		DisableShellExecTools:  boolPtr(r.Killswitches.DisableShellExecTools),
 		PrimeAppend:            strPtr(r.PrimeAppend),

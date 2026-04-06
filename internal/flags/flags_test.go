@@ -2,12 +2,18 @@ package flags_test
 
 import (
 	"context"
+	"encoding/json"
 	"os"
+	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
 	"github.com/sageox/ox/internal/flags"
 )
+
+// bp returns a pointer to a bool value (test helper for CLIFeatures *bool fields).
+func bp(b bool) *bool { return &b }
 
 func TestDefaults(t *testing.T) {
 	d := flags.Defaults()
@@ -87,6 +93,18 @@ func TestEnvProviderRecognisesVariants(t *testing.T) {
 	}
 }
 
+// TestEnvProviderCaseInsensitive verifies env vars are parsed case-insensitively,
+// consistent with internal/auth/feature.go.
+func TestEnvProviderCaseInsensitive(t *testing.T) {
+	for _, val := range []string{"TRUE", "True", "YES", "Yes"} {
+		t.Setenv("FEATURE_TUI", val)
+		f := flags.Resolve(context.Background(), flags.EnvProvider{})
+		if !f.TUIEnabled {
+			t.Errorf("TUIEnabled should be true for FEATURE_TUI=%q", val)
+		}
+	}
+}
+
 func TestDaemonProviderNilSettings(t *testing.T) {
 	p := flags.DaemonProvider{CachedSettings: nil}
 	f := flags.Resolve(context.Background(), p)
@@ -98,9 +116,9 @@ func TestDaemonProviderNilSettings(t *testing.T) {
 func TestDaemonProviderStaleCache(t *testing.T) {
 	stale := &flags.CLISettingsResponse{
 		Features: flags.CLIFeatures{
-			CodeDB:  false, // server wanted codedb off
-			Whisper: true,
-			Distill: true,
+			CodeDB:  bp(false), // server wanted codedb off
+			Whisper: bp(true),
+			Distill: bp(true),
 		},
 		FetchedAt: time.Now().Add(-3 * time.Hour), // older than 2× max age
 	}
@@ -115,9 +133,9 @@ func TestDaemonProviderStaleCache(t *testing.T) {
 func TestDaemonProviderFreshCache(t *testing.T) {
 	fresh := &flags.CLISettingsResponse{
 		Features: flags.CLIFeatures{
-			CodeDB:  false, // server disabled codedb
-			Whisper: true,
-			Distill: true,
+			CodeDB:  bp(false), // server disabled codedb
+			Whisper: bp(true),
+			Distill: bp(true),
 		},
 		Killswitches: flags.CLIKillswitches{
 			DisableFileDeleteTools: true,
@@ -135,6 +153,51 @@ func TestDaemonProviderFreshCache(t *testing.T) {
 	}
 	if f.PrimeAppend != "Always use snake_case." {
 		t.Errorf("PrimeAppend = %q, want %q", f.PrimeAppend, "Always use snake_case.")
+	}
+}
+
+// TestRemoteSettingsOmittedFieldsPreserveDefaults verifies that omitted JSON
+// fields in CLIFeatures remain nil (no opinion), preventing accidental override
+// of default-on flags during rolling upgrades.
+func TestRemoteSettingsOmittedFieldsPreserveDefaults(t *testing.T) {
+	// simulate a server response that only includes "codedb" — other fields are absent
+	raw := `{"features":{"codedb":false},"killswitches":{},"fetched_at":"` +
+		time.Now().Format(time.RFC3339) + `"}`
+	var resp flags.CLISettingsResponse
+	if err := json.Unmarshal([]byte(raw), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	patch := flags.RemoteSettingsToPatch(&resp)
+	if patch.CodeDBEnabled == nil || *patch.CodeDBEnabled != false {
+		t.Error("CodeDBEnabled should be explicitly false")
+	}
+	// omitted fields must be nil so they don't override defaults
+	if patch.WhisperEnabled != nil {
+		t.Error("WhisperEnabled should be nil for omitted field")
+	}
+	if patch.DistillEnabled != nil {
+		t.Error("DistillEnabled should be nil for omitted field")
+	}
+	if patch.AutoDistill != nil {
+		t.Error("AutoDistill should be nil for omitted field")
+	}
+	if patch.TUIEnabled != nil {
+		t.Error("TUIEnabled should be nil for omitted field")
+	}
+
+	// resolve should preserve defaults for omitted fields
+	f := flags.Resolve(context.Background(), flags.DaemonProvider{
+		CachedSettings: &resp,
+	})
+	if f.CodeDBEnabled {
+		t.Error("CodeDBEnabled should be false (explicitly set)")
+	}
+	if !f.WhisperEnabled {
+		t.Error("WhisperEnabled should remain default true (omitted)")
+	}
+	if !f.DistillEnabled {
+		t.Error("DistillEnabled should remain default true (omitted)")
 	}
 }
 
@@ -160,10 +223,10 @@ func TestSaveThenLoadCachedSettings(t *testing.T) {
 	ep := "https://sageox.ai"
 	want := &flags.CLISettingsResponse{
 		Features: flags.CLIFeatures{
-			CodeDB:  false,
-			Whisper: true,
-			Distill: true,
-			TUI:     true,
+			CodeDB:  bp(false),
+			Whisper: bp(true),
+			Distill: bp(true),
+			TUI:     bp(true),
 		},
 		Killswitches: flags.CLIKillswitches{
 			DisableFileDeleteTools: true,
@@ -182,7 +245,7 @@ func TestSaveThenLoadCachedSettings(t *testing.T) {
 	if got == nil {
 		t.Fatal("LoadCachedSettings returned nil, want non-nil")
 	}
-	if got.Features != want.Features {
+	if !reflect.DeepEqual(got.Features, want.Features) {
 		t.Errorf("Features = %+v, want %+v", got.Features, want.Features)
 	}
 	if got.Killswitches != want.Killswitches {
@@ -205,6 +268,45 @@ func TestLoadCachedSettingsMissingFile(t *testing.T) {
 	}
 }
 
+// TestLoadCachedSettingsCorruptJSON verifies that corrupt JSON in the cache file
+// is treated as empty (returns nil, nil) rather than causing a hard error.
+func TestLoadCachedSettingsCorruptJSON(t *testing.T) {
+	tmp := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", tmp)
+
+	ep := "https://sageox.ai"
+
+	// save valid settings first to create the directory structure
+	valid := &flags.CLISettingsResponse{
+		Features: flags.CLIFeatures{CodeDB: bp(true)},
+	}
+	if err := flags.SaveCachedSettings(ep, valid); err != nil {
+		t.Fatalf("SaveCachedSettings: %v", err)
+	}
+
+	// now overwrite with corrupt data
+	cacheDir := filepath.Join(tmp, "sageox", "cli-settings")
+	entries, err := os.ReadDir(cacheDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) == 0 {
+		t.Fatal("expected cache file to exist")
+	}
+	corruptPath := filepath.Join(cacheDir, entries[0].Name())
+	if err := os.WriteFile(corruptPath, []byte("{not valid json!!!"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	got, gotErr := flags.LoadCachedSettings(ep)
+	if gotErr != nil {
+		t.Errorf("expected nil error for corrupt cache, got: %v", gotErr)
+	}
+	if got != nil {
+		t.Errorf("expected nil settings for corrupt cache, got: %+v", got)
+	}
+}
+
 func TestLoadCachedSettingsWrongEndpoint(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 
@@ -212,7 +314,7 @@ func TestLoadCachedSettingsWrongEndpoint(t *testing.T) {
 	epB := "https://staging.sageox.ai"
 
 	r := &flags.CLISettingsResponse{
-		Features: flags.CLIFeatures{CodeDB: false},
+		Features: flags.CLIFeatures{CodeDB: bp(false)},
 	}
 	if err := flags.SaveCachedSettings(epA, r); err != nil {
 		t.Fatalf("SaveCachedSettings: %v", err)
@@ -234,15 +336,15 @@ func TestSaveCachedSettingsIdempotent(t *testing.T) {
 	epB := "https://staging.sageox.ai"
 
 	rA1 := &flags.CLISettingsResponse{
-		Features:    flags.CLIFeatures{CodeDB: true},
+		Features:    flags.CLIFeatures{CodeDB: bp(true)},
 		PrimeAppend: "first write",
 	}
 	rA2 := &flags.CLISettingsResponse{
-		Features:    flags.CLIFeatures{CodeDB: false},
+		Features:    flags.CLIFeatures{CodeDB: bp(false)},
 		PrimeAppend: "second write wins",
 	}
 	rB := &flags.CLISettingsResponse{
-		Features: flags.CLIFeatures{Whisper: false},
+		Features: flags.CLIFeatures{Whisper: bp(false)},
 	}
 
 	// save both endpoints so we can confirm epB survives epA's second write
@@ -263,16 +365,80 @@ func TestSaveCachedSettingsIdempotent(t *testing.T) {
 	if gotA.PrimeAppend != "second write wins" {
 		t.Errorf("epA PrimeAppend = %q, want %q", gotA.PrimeAppend, "second write wins")
 	}
-	if gotA.Features.CodeDB {
+	if gotA.Features.CodeDB == nil || *gotA.Features.CodeDB {
 		t.Error("epA CodeDB should be false after second write")
 	}
 
-	// epB must be unaffected by epA's second write
+	// epB must be unaffected by epA's second write (per-endpoint files make this trivial)
 	gotB, err := flags.LoadCachedSettings(epB)
 	if err != nil || gotB == nil {
 		t.Fatalf("LoadCachedSettings epB: err=%v, got=%v", err, gotB)
 	}
-	if gotB.Features.Whisper {
+	if gotB.Features.Whisper == nil || *gotB.Features.Whisper {
 		t.Error("epB Whisper should be false as originally saved")
 	}
+}
+
+// TestAllNilCoversAllPatchFields uses reflection to verify that allNil checks
+// every field in the Patch struct, catching drift when new fields are added.
+func TestAllNilCoversAllPatchFields(t *testing.T) {
+	patchType := reflect.TypeFor[flags.Patch]()
+	flagsType := reflect.TypeFor[flags.Flags]()
+	defaults := flags.Defaults()
+	defaultsVal := reflect.ValueOf(defaults)
+
+	// set each pointer field to non-nil one at a time and verify the patch
+	// is detected as non-nil by the resolver (which uses allNil internally)
+	for i := range patchType.NumField() {
+		field := patchType.Field(i)
+		p := flags.Patch{}
+		v := reflect.ValueOf(&p).Elem()
+		fv := v.Field(i)
+
+		switch fv.Kind() {
+		case reflect.Pointer:
+			switch fv.Type().Elem().Kind() {
+			case reflect.Bool:
+				// find the corresponding Flags field and invert its default
+				flagsField, ok := flagsType.FieldByName(field.Name)
+				if !ok {
+					// Patch and Flags field names may differ — just toggle to true
+					b := true
+					fv.Set(reflect.ValueOf(&b))
+				} else {
+					def := defaultsVal.FieldByIndex(flagsField.Index).Bool()
+					flipped := !def
+					fv.Set(reflect.ValueOf(&flipped))
+				}
+			case reflect.String:
+				s := "test"
+				fv.Set(reflect.ValueOf(&s))
+			default:
+				t.Errorf("unexpected pointer type for field %s: %v", field.Name, fv.Type())
+				continue
+			}
+		default:
+			t.Errorf("Patch field %s is not a pointer type — all Patch fields should be pointers", field.Name)
+			continue
+		}
+
+		// resolve with a provider that returns this single-field patch —
+		// if allNil incorrectly returns true, the field won't be applied
+		ctx := context.Background()
+		provider := &testPatchProvider{patch: &p}
+		result := flags.Resolve(ctx, provider)
+
+		if result == defaults {
+			t.Errorf("Patch with only %s set was not applied — allNil may be missing this field", field.Name)
+		}
+	}
+}
+
+// testPatchProvider is a test helper that returns a fixed Patch.
+type testPatchProvider struct {
+	patch *flags.Patch
+}
+
+func (p *testPatchProvider) Patch(_ context.Context) (*flags.Patch, flags.Source, error) {
+	return p.patch, flags.SourceEnv, nil
 }

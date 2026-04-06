@@ -11,7 +11,7 @@
 // Usage:
 //
 //	// At CLI startup (zero network calls):
-//	flags.Init(ctx, flags.EnvProvider{}, flags.DaemonProvider{CachedSettings: s})
+//	flags.Init(ctx, flags.DaemonProvider{CachedSettings: s}, flags.EnvProvider{})
 //
 //	// Anywhere in the process:
 //	if flags.Get().DistillEnabled { ... }
@@ -46,6 +46,7 @@ type Flags struct {
 
 // Patch is a partial flag override from a single source.
 // Nil fields mean "no opinion" — they are skipped during merge.
+// NOTE: When adding fields, also update allNil() in env.go and applyPatch() in resolve.go.
 type Patch struct {
 	CodeDBEnabled  *bool
 	WhisperEnabled *bool
