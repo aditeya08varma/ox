@@ -9,7 +9,6 @@ type DoctorContextResponse struct {
 	Repositories    []RepoInfo `json:"repositories"`
 	Teams           []TeamInfo `json:"teams"`
 	Endpoints       Endpoints  `json:"endpoints"`
-	Features        Features   `json:"features"`
 	ExpectedEnvVars []EnvVar   `json:"expected_env_vars"`
 	Server          ServerInfo `json:"server"`
 }
@@ -55,22 +54,6 @@ type Endpoints struct {
 	Auth      string `json:"auth"`
 	GitLab    string `json:"gitlab,omitempty"`
 	WebSocket string `json:"websocket,omitempty"`
-}
-
-// Features contains feature flags.
-type Features struct {
-	Waitlist      bool               `json:"waitlist"`
-	Stealth       bool               `json:"stealth"`
-	Temporal      bool               `json:"temporal"`
-	OCR           bool               `json:"ocr"`
-	Notifications NotificationConfig `json:"notifications"`
-}
-
-// NotificationConfig contains notification channel config.
-type NotificationConfig struct {
-	InApp bool `json:"in_app"`
-	Email bool `json:"email"`
-	Push  bool `json:"push"`
 }
 
 // EnvVar describes an expected environment variable.
