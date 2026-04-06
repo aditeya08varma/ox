@@ -2,7 +2,7 @@
 //
 // Flags are resolved from multiple sources in ascending priority order:
 //
-//	defaults → doctor API → daemon (remote settings) → env vars
+//	defaults → daemon (remote settings) → env vars
 //
 // Each source returns a [Patch] — only the fields it has an explicit opinion
 // on. Nil fields in a Patch mean "no opinion" and won't override prior values.
@@ -11,7 +11,7 @@
 // Usage:
 //
 //	// At CLI startup (zero network calls):
-//	flags.Init(ctx, flags.EnvProvider{}, flags.DoctorProvider{Features: f})
+//	flags.Init(ctx, flags.EnvProvider{}, flags.DaemonProvider{CachedSettings: s})
 //
 //	// Anywhere in the process:
 //	if flags.Get().DistillEnabled { ... }
@@ -42,13 +42,6 @@ type Flags struct {
 	// Set by the remote settings endpoint to push org-wide prime additions
 	// without requiring a CLI release or changes to CLAUDE.md.
 	PrimeAppend string
-
-	// Fields absorbed from doctorapi.Features. These reflect server-side
-	// account/team state, not toggleable kill switches.
-	Waitlist bool
-	Stealth  bool
-	Temporal bool
-	OCR      bool
 }
 
 // Patch is a partial flag override from a single source.
@@ -64,11 +57,6 @@ type Patch struct {
 	DisableShellExecTools  *bool
 
 	PrimeAppend *string
-
-	Waitlist *bool
-	Stealth  *bool
-	Temporal *bool
-	OCR      *bool
 }
 
 // Source identifies where a Patch came from, used by ox status display.
@@ -76,7 +64,6 @@ type Source int
 
 const (
 	SourceDefault Source = iota // hardcoded safe defaults
-	SourceDoctor                // doctorapi.Features from /api/v1/cli/doctor/context
 	SourceDaemon                // daemon IPC cache of /api/v1/cli/settings
 	SourceEnv                   // FEATURE_* environment variable overrides
 )
@@ -85,8 +72,6 @@ func (s Source) String() string {
 	switch s {
 	case SourceDefault:
 		return "default"
-	case SourceDoctor:
-		return "doctor"
 	case SourceDaemon:
 		return "daemon"
 	case SourceEnv:

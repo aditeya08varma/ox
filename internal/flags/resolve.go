@@ -43,18 +43,6 @@ func applyPatch(f *Flags, p *Patch) {
 	if p.PrimeAppend != nil {
 		f.PrimeAppend = *p.PrimeAppend
 	}
-	if p.Waitlist != nil {
-		f.Waitlist = *p.Waitlist
-	}
-	if p.Stealth != nil {
-		f.Stealth = *p.Stealth
-	}
-	if p.Temporal != nil {
-		f.Temporal = *p.Temporal
-	}
-	if p.OCR != nil {
-		f.OCR = *p.OCR
-	}
 }
 
 // boolPtr is a convenience helper for creating *bool literals in Patch structs.

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sageox/ox/internal/doctorapi"
 	"github.com/sageox/ox/internal/flags"
 )
 
@@ -85,57 +84,6 @@ func TestEnvProviderRecognisesVariants(t *testing.T) {
 		if !f.DistillEnabled {
 			t.Errorf("DistillEnabled should be true for FEATURE_MEMORY=%q", val)
 		}
-	}
-}
-
-func TestDoctorProviderNilFeatures(t *testing.T) {
-	f := flags.Resolve(context.Background(), flags.DoctorProvider{Features: nil})
-	// nil provider should not change defaults
-	want := flags.Defaults()
-	if f != want {
-		t.Errorf("DoctorProvider(nil) changed defaults: got %+v", f)
-	}
-}
-
-func TestDoctorProviderSetsFields(t *testing.T) {
-	feat := &doctorapi.Features{
-		Waitlist: true,
-		Stealth:  false,
-		Temporal: true,
-		OCR:      true,
-	}
-	f := flags.Resolve(context.Background(), flags.DoctorProvider{Features: feat})
-	if !f.Waitlist {
-		t.Error("Waitlist should be true")
-	}
-	if f.Stealth {
-		t.Error("Stealth should be false")
-	}
-	if !f.Temporal {
-		t.Error("Temporal should be true")
-	}
-	if !f.OCR {
-		t.Error("OCR should be true")
-	}
-	// feature gates from defaults should be untouched
-	if !f.DistillEnabled {
-		t.Error("DistillEnabled should still be default true")
-	}
-}
-
-func TestEnvOverridesDoctor(t *testing.T) {
-	// doctor says distill enabled, env says disabled — env wins (higher priority)
-	t.Setenv("FEATURE_MEMORY", "false")
-
-	feat := &doctorapi.Features{} // doctor has no opinion on DistillEnabled
-
-	// provider order: doctor (lower) then env (higher)
-	f := flags.Resolve(context.Background(),
-		flags.DoctorProvider{Features: feat},
-		flags.EnvProvider{},
-	)
-	if f.DistillEnabled {
-		t.Error("env FEATURE_MEMORY=false should override default true")
 	}
 }
 
