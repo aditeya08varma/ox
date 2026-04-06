@@ -64,3 +64,4 @@ func IsMemoryEnabled() bool {
 	value := strings.ToLower(os.Getenv("FEATURE_MEMORY"))
 	return value == "true" || value == "1" || value == "yes"
 }
+
