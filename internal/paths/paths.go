@@ -248,6 +248,15 @@ func SessionCacheDir(repoID string) string {
 	return filepath.Join(base, repoID)
 }
 
+// CLISettingsFile returns the path to the cached remote CLI settings file.
+// Written by the daemon after each successful GET /api/v1/cli/settings fetch.
+// Read directly by CLI processes as a fallback when daemon IPC is unavailable.
+// Contains a map of normalized endpoint → CLISettingsResponse.
+// Uses 0600 permissions (consistent with auth.json).
+func CLISettingsFile() string {
+	return filepath.Join(CacheDir(), "cli-settings.json")
+}
+
 // AlternateSessionCacheDirs returns session cache directories that differ from
 // the current process's resolved SessionCacheDir. Different processes may resolve
 // CacheDir differently depending on their environment (e.g., GUI apps don't
