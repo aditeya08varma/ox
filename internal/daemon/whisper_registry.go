@@ -57,12 +57,16 @@ func (r *WhisperRegistry) Add(scope string, entries ...whisperstore.WhisperEntry
 		return nil
 	}
 
+	r.mu.RLock()
+	ledger := r.ledgerStore
+	r.mu.RUnlock()
+
 	switch scope {
 	case "ledger":
-		if r.ledgerStore == nil {
+		if ledger == nil {
 			return fmt.Errorf("no ledger store configured")
 		}
-		return r.ledgerStore.Add(entries...)
+		return ledger.Add(entries...)
 	case "team":
 		// team entries go to all team stores (each daemon manages its own view)
 		r.mu.RLock()
@@ -80,25 +84,26 @@ func (r *WhisperRegistry) Add(scope string, entries ...whisperstore.WhisperEntry
 
 // GetWhispers queries ALL stores and merges results, sorted by importance then time.
 func (r *WhisperRegistry) GetWhispers(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error) {
+	// snapshot both stores under one RLock — ReopenLedgerStore holds a write lock
+	// while replacing r.ledgerStore, so it must be read under the mutex too.
+	r.mu.RLock()
+	ledger := r.ledgerStore
+	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
+	for k, v := range r.teamStores {
+		stores[k] = v
+	}
+	r.mu.RUnlock()
+
 	var all []whisperstore.WhisperEntry
 
-	// query ledger store
-	if r.ledgerStore != nil {
-		entries, err := r.ledgerStore.GetWhispers(agentID, attention, topics)
+	if ledger != nil {
+		entries, err := ledger.GetWhispers(agentID, attention, topics)
 		if err != nil {
 			r.logger.Warn("ledger whisper query failed", "err", err)
 		} else {
 			all = append(all, entries...)
 		}
 	}
-
-	// query all team stores
-	r.mu.RLock()
-	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
-	for k, v := range r.teamStores {
-		stores[k] = v
-	}
-	r.mu.RUnlock()
 
 	for teamID, store := range stores {
 		entries, err := store.GetWhispers(agentID, attention, topics)
@@ -137,24 +142,25 @@ func (r *WhisperRegistry) GetWhispersPage(agentID string, before time.Time, limi
 		limit = maxLimit
 	}
 
+	r.mu.RLock()
+	ledger := r.ledgerStore
+	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
+	for k, v := range r.teamStores {
+		stores[k] = v
+	}
+	r.mu.RUnlock()
+
 	var all []whisperstore.WhisperEntry
 
-	if r.ledgerStore != nil {
+	if ledger != nil {
 		// fetch limit+1 per store so we can detect hasMore after merge
-		entries, _, err := r.ledgerStore.GetWhispersPage(agentID, before, limit+1)
+		entries, _, err := ledger.GetWhispersPage(agentID, before, limit+1)
 		if err != nil {
 			r.logger.Warn("ledger whisper history query failed", "err", err)
 		} else {
 			all = append(all, entries...)
 		}
 	}
-
-	r.mu.RLock()
-	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
-	for k, v := range r.teamStores {
-		stores[k] = v
-	}
-	r.mu.RUnlock()
 
 	for teamID, store := range stores {
 		entries, _, err := store.GetWhispersPage(agentID, before, limit+1)
@@ -188,15 +194,22 @@ func (r *WhisperRegistry) GetWhispersPage(agentID string, before time.Time, limi
 
 // GetCursor returns the agent's cursor from the ledger store (earliest cursor wins for display).
 func (r *WhisperRegistry) GetCursor(agentID string) (time.Time, error) {
-	if r.ledgerStore == nil {
+	r.mu.RLock()
+	ledger := r.ledgerStore
+	r.mu.RUnlock()
+
+	if ledger == nil {
 		return time.Time{}, nil
 	}
-	return r.ledgerStore.GetCursor(agentID)
+	return ledger.GetCursor(agentID)
 }
 
 // IsRelayed checks if a murmur has been relayed in the appropriate store.
 func (r *WhisperRegistry) IsRelayed(murmurID, scope string) (bool, error) {
-	store := r.storeForScope(scope)
+	r.mu.RLock()
+	store := r.storeForScopeLocked(scope)
+	r.mu.RUnlock()
+
 	if store == nil {
 		return false, nil
 	}
@@ -205,7 +218,10 @@ func (r *WhisperRegistry) IsRelayed(murmurID, scope string) (bool, error) {
 
 // MarkRelayed records that a murmur has been relayed.
 func (r *WhisperRegistry) MarkRelayed(murmurID, scope string) error {
-	store := r.storeForScope(scope)
+	r.mu.RLock()
+	store := r.storeForScopeLocked(scope)
+	r.mu.RUnlock()
+
 	if store == nil {
 		return nil
 	}
@@ -214,20 +230,34 @@ func (r *WhisperRegistry) MarkRelayed(murmurID, scope string) error {
 
 // RemoveCursor removes an agent's cursor from all stores.
 func (r *WhisperRegistry) RemoveCursor(agentID string) {
-	if r.ledgerStore != nil {
-		r.ledgerStore.RemoveCursor(agentID)
-	}
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for _, store := range r.teamStores {
+	ledger := r.ledgerStore
+	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
+	for k, v := range r.teamStores {
+		stores[k] = v
+	}
+	r.mu.RUnlock()
+
+	if ledger != nil {
+		ledger.RemoveCursor(agentID)
+	}
+	for _, store := range stores {
 		store.RemoveCursor(agentID)
 	}
 }
 
 // Prune runs cleanup on all stores.
 func (r *WhisperRegistry) Prune(retention time.Duration) {
-	if r.ledgerStore != nil {
-		result, err := r.ledgerStore.Prune(retention)
+	r.mu.RLock()
+	ledger := r.ledgerStore
+	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
+	for k, v := range r.teamStores {
+		stores[k] = v
+	}
+	r.mu.RUnlock()
+
+	if ledger != nil {
+		result, err := ledger.Prune(retention)
 		if err != nil {
 			r.logger.Warn("ledger whisper prune failed", "err", err)
 		} else if result.WhispersDeleted > 0 {
@@ -235,9 +265,7 @@ func (r *WhisperRegistry) Prune(retention time.Duration) {
 		}
 	}
 
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for teamID, store := range r.teamStores {
+	for teamID, store := range stores {
 		result, err := store.Prune(retention)
 		if err != nil {
 			r.logger.Warn("team whisper prune failed", "team_id", teamID, "err", err)
@@ -249,14 +277,20 @@ func (r *WhisperRegistry) Prune(retention time.Duration) {
 
 // EnforceMaxSize runs size enforcement on all stores.
 func (r *WhisperRegistry) EnforceMaxSize(maxBytes int64) {
-	if r.ledgerStore != nil {
-		if err := r.ledgerStore.EnforceMaxSize(maxBytes); err != nil {
+	r.mu.RLock()
+	ledger := r.ledgerStore
+	stores := make(map[string]*whisperstore.Store, len(r.teamStores))
+	for k, v := range r.teamStores {
+		stores[k] = v
+	}
+	r.mu.RUnlock()
+
+	if ledger != nil {
+		if err := ledger.EnforceMaxSize(maxBytes); err != nil {
 			r.logger.Warn("ledger whisper size enforcement failed", "err", err)
 		}
 	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for teamID, store := range r.teamStores {
+	for teamID, store := range stores {
 		if err := store.EnforceMaxSize(maxBytes); err != nil {
 			r.logger.Warn("team whisper size enforcement failed", "team_id", teamID, "err", err)
 		}
@@ -296,14 +330,15 @@ func (r *WhisperRegistry) ReopenLedgerStore(dbPath string) error {
 
 // Close closes all stores.
 func (r *WhisperRegistry) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	var firstErr error
 	if r.ledgerStore != nil {
 		if err := r.ledgerStore.Close(); err != nil {
 			firstErr = err
 		}
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
 	for _, store := range r.teamStores {
 		if err := store.Close(); err != nil && firstErr == nil {
 			firstErr = err
@@ -312,14 +347,13 @@ func (r *WhisperRegistry) Close() error {
 	return firstErr
 }
 
-// storeForScope returns the store that handles the given scope.
+// storeForScopeLocked returns the store that handles the given scope.
 // For "team", returns the ledger store (relayed records are co-located).
 // Returns nil for unknown scopes — callers handle nil gracefully.
-func (r *WhisperRegistry) storeForScope(scope string) *whisperstore.Store {
+// Caller must hold r.mu (at least RLock).
+func (r *WhisperRegistry) storeForScopeLocked(scope string) *whisperstore.Store {
 	switch scope {
-	case "ledger":
-		return r.ledgerStore
-	case "team":
+	case "ledger", "team":
 		// team relay tracking goes to ledger store (single writer)
 		return r.ledgerStore
 	default:

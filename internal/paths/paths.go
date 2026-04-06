@@ -248,6 +248,19 @@ func SessionCacheDir(repoID string) string {
 	return filepath.Join(base, repoID)
 }
 
+// CLISettingsDir returns the directory containing per-endpoint CLI settings cache files.
+func CLISettingsDir() string {
+	return filepath.Join(CacheDir(), "cli-settings")
+}
+
+// CLISettingsFileForEndpoint returns the cache file path for a specific endpoint.
+// Each endpoint gets its own file, eliminating cross-process race conditions
+// when multiple daemons write concurrently for different endpoints.
+// Uses endpoint.NormalizeSlug to derive a filesystem-safe filename.
+func CLISettingsFileForEndpoint(endpointSlug string) string {
+	return filepath.Join(CLISettingsDir(), endpointSlug+".json")
+}
+
 // AlternateSessionCacheDirs returns session cache directories that differ from
 // the current process's resolved SessionCacheDir. Different processes may resolve
 // CacheDir differently depending on their environment (e.g., GUI apps don't
