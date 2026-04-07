@@ -184,7 +184,7 @@ func TestReadGitHubPR_HashPreferredOverLegacy(t *testing.T) {
 
 // TestRebuildSyncState_DeduplicatesByNumber verifies that when multiple hash-variant
 // files exist for the same PR number, rebuildSyncStateFromDisk keeps only the latest.
-// Failure prevented: inflated KnownStates count or stale state used for skip decisions.
+// Failure prevented: inflated KnownItems count or stale state used for skip decisions.
 func TestRebuildSyncState_DeduplicatesByNumber(t *testing.T) {
 	tmp := t.TempDir()
 	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
@@ -213,7 +213,8 @@ func TestRebuildSyncState_DeduplicatesByNumber(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, state.Count, "should deduplicate to 1 unique PR")
-	assert.Equal(t, "merged", state.KnownStates[42], "should keep latest state")
+	assert.Equal(t, "merged", state.KnownItems[42].State, "should keep latest state")
+	assert.Equal(t, later, state.KnownItems[42].UpdatedAt, "should keep latest updated_at")
 }
 
 // --- F. Content hash helper ---

@@ -118,14 +118,14 @@ func TestSyncPRs_NewPRs(t *testing.T) {
 	if state.Count != 2 {
 		t.Errorf("expected count 2, got %d", state.Count)
 	}
-	if len(state.KnownStates) != 2 {
-		t.Errorf("expected 2 known states, got %d", len(state.KnownStates))
+	if len(state.KnownItems) != 2 {
+		t.Errorf("expected 2 known items, got %d", len(state.KnownItems))
 	}
-	if state.KnownStates[100] != "open" {
-		t.Errorf("expected PR 100 state 'open', got %q", state.KnownStates[100])
+	if state.KnownItems[100].State != "open" {
+		t.Errorf("expected PR 100 state 'open', got %q", state.KnownItems[100].State)
 	}
-	if state.KnownStates[101] != "merged" {
-		t.Errorf("expected PR 101 state 'merged', got %q", state.KnownStates[101])
+	if state.KnownItems[101].State != "merged" {
+		t.Errorf("expected PR 101 state 'merged', got %q", state.KnownItems[101].State)
 	}
 }
 
@@ -190,8 +190,8 @@ func TestSyncPRs_IncrementalUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read state: %v", err)
 	}
-	if state.KnownStates[100] != "merged" {
-		t.Errorf("expected state 'merged', got %q", state.KnownStates[100])
+	if state.KnownItems[100].State != "merged" {
+		t.Errorf("expected state 'merged', got %q", state.KnownItems[100].State)
 	}
 }
 
@@ -764,14 +764,14 @@ func TestSyncPRs_RebuildStateFromDisk_SkipsCommentFetch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadGitHubTypeSyncState: %v", err)
 	}
-	if len(state.KnownStates) != 2 {
-		t.Errorf("expected 2 known states, got %d", len(state.KnownStates))
+	if len(state.KnownItems) != 2 {
+		t.Errorf("expected 2 known items, got %d", len(state.KnownItems))
 	}
-	if state.KnownStates[10] != "open" {
-		t.Errorf("expected PR 10 state 'open', got %q", state.KnownStates[10])
+	if state.KnownItems[10].State != "open" {
+		t.Errorf("expected PR 10 state 'open', got %q", state.KnownItems[10].State)
 	}
-	if state.KnownStates[11] != "merged" {
-		t.Errorf("expected PR 11 state 'merged', got %q", state.KnownStates[11])
+	if state.KnownItems[11].State != "merged" {
+		t.Errorf("expected PR 11 state 'merged', got %q", state.KnownItems[11].State)
 	}
 	if state.LastSyncAt.IsZero() {
 		t.Error("expected non-zero LastSyncAt after rebuild")
@@ -827,11 +827,11 @@ func TestSyncIssues_RebuildStateFromDisk_SkipsCommentFetch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadGitHubTypeSyncState: %v", err)
 	}
-	if len(state.KnownStates) != 1 {
-		t.Errorf("expected 1 known state, got %d", len(state.KnownStates))
+	if len(state.KnownItems) != 1 {
+		t.Errorf("expected 1 known item, got %d", len(state.KnownItems))
 	}
-	if state.KnownStates[20] != "open" {
-		t.Errorf("expected issue 20 state 'open', got %q", state.KnownStates[20])
+	if state.KnownItems[20].State != "open" {
+		t.Errorf("expected issue 20 state 'open', got %q", state.KnownItems[20].State)
 	}
 	if state.LastSyncAt.IsZero() {
 		t.Error("expected non-zero LastSyncAt after rebuild")
@@ -956,6 +956,134 @@ func TestSyncIssues_KnownUnchangedDoesNotOverwriteComments(t *testing.T) {
 	}
 	if issueFile2.Comments[0].Body != "reproduced" {
 		t.Errorf("expected comment body 'reproduced', got %q", issueFile2.Comments[0].Body)
+	}
+}
+
+func TestSyncPRs_ResyncsWhenUpdatedAtChanges(t *testing.T) {
+	// Regression: a PR with same state but different updated_at (e.g., new comment
+	// added) must trigger a re-sync so comments are re-fetched.
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// first sync: PR 900 open
+	fetcher1 := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 900, Title: "Feature", State: "open", Author: "alice",
+			CreatedAt: now, UpdatedAt: now,
+		}},
+		comments: map[int][]FetchedComment{
+			900: {{Author: "bob", Body: "first comment", CreatedAt: now}},
+		},
+	}
+	_, err := SyncPRs(context.Background(), fetcher1, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	// second sync: same state (open) but updated_at changed (new comment)
+	later := now.Add(time.Hour)
+	commentCalls := 0
+	fetcher2 := &countingFetcher{
+		inner: &mockFetcher{
+			prs: []FetchedPR{{
+				Number: 900, Title: "Feature", State: "open", Author: "alice",
+				CreatedAt: now, UpdatedAt: later, // updated_at changed
+			}},
+			comments: map[int][]FetchedComment{
+				900: {
+					{Author: "bob", Body: "first comment", CreatedAt: now},
+					{Author: "carol", Body: "new comment", CreatedAt: later},
+				},
+			},
+		},
+		onCommentCall: func() { commentCalls++ },
+	}
+
+	result, err := SyncPRs(context.Background(), fetcher2, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	// PR should be updated (not skipped) because updated_at changed
+	if result.PRUpdated != 1 {
+		t.Errorf("expected 1 updated, got %d", result.PRUpdated)
+	}
+	if commentCalls == 0 {
+		t.Error("expected comment API calls for updated_at change, got 0")
+	}
+
+	// verify the new comments are on disk
+	pr, err := ReadGitHubPR(ledgerPath, 900, now)
+	if err != nil {
+		t.Fatalf("read PR 900: %v", err)
+	}
+	if len(pr.Comments) < 2 {
+		t.Errorf("expected at least 2 comments after re-sync, got %d", len(pr.Comments))
+	}
+
+	// verify KnownItems updated_at was updated
+	state, err := ReadGitHubTypeSyncState(ledgerPath, "pr")
+	if err != nil {
+		t.Fatalf("read state: %v", err)
+	}
+	if !state.KnownItems[900].UpdatedAt.Equal(later) {
+		t.Errorf("expected KnownItems updated_at to be %v, got %v", later, state.KnownItems[900].UpdatedAt)
+	}
+}
+
+func TestSyncIssues_ResyncsWhenUpdatedAtChanges(t *testing.T) {
+	// Same as PR test: issue with same state but different updated_at gets re-synced.
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// first sync
+	fetcher1 := &mockFetcher{
+		issues: []FetchedIssue{{
+			Number: 950, Title: "Bug", State: "open", Author: "alice",
+			CreatedAt: now, UpdatedAt: now,
+		}},
+		comments: map[int][]FetchedComment{
+			950: {{Author: "bob", Body: "confirmed", CreatedAt: now}},
+		},
+	}
+	_, err := SyncIssues(context.Background(), fetcher1, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	// second sync: updated_at changed
+	later := now.Add(time.Hour)
+	commentCalls := 0
+	fetcher2 := &countingFetcher{
+		inner: &mockFetcher{
+			issues: []FetchedIssue{{
+				Number: 950, Title: "Bug", State: "open", Author: "alice",
+				CreatedAt: now, UpdatedAt: later,
+			}},
+			comments: map[int][]FetchedComment{
+				950: {
+					{Author: "bob", Body: "confirmed", CreatedAt: now},
+					{Author: "carol", Body: "fix incoming", CreatedAt: later},
+				},
+			},
+		},
+		onCommentCall: func() { commentCalls++ },
+	}
+
+	result, err := SyncIssues(context.Background(), fetcher2, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	if result.IssueUpdated != 1 {
+		t.Errorf("expected 1 updated, got %d", result.IssueUpdated)
+	}
+	if commentCalls == 0 {
+		t.Error("expected comment API calls for updated_at change, got 0")
 	}
 }
 

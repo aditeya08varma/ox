@@ -84,10 +84,20 @@ type IssueComment struct {
 type GitHubTypeSyncState struct {
 	LastSyncAt time.Time `json:"last_sync_at"`
 	Count      int       `json:"count"`
-	// KnownStates tracks the last-seen state of each item by number.
-	// Used to detect state transitions (open→closed/merged) which trigger
-	// a full re-extract of all comments.
+	// KnownItems tracks the last-seen state and updated_at of each item by number.
+	// Used to detect state transitions (open→closed/merged) and content updates
+	// (new comments, edits) which trigger a re-extract.
+	KnownItems map[int]KnownItem `json:"known_items,omitempty"`
+
+	// KnownStates is the legacy format (state-only). Preserved for backward
+	// compatibility when reading old cache files. On write, only KnownItems is used.
 	KnownStates map[int]string `json:"known_states,omitempty"`
+}
+
+// KnownItem tracks the last-seen state and updated_at for a PR or issue.
+type KnownItem struct {
+	State     string    `json:"state"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 const (
@@ -223,7 +233,7 @@ func ReadGitHubTypeSyncState(ledgerPath, dataType string) (*GitHubTypeSyncState,
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &GitHubTypeSyncState{
-				KnownStates: make(map[int]string),
+				KnownItems: make(map[int]KnownItem),
 			}, nil
 		}
 		return nil, fmt.Errorf("read %s sync state: %w", dataType, err)
@@ -233,8 +243,16 @@ func ReadGitHubTypeSyncState(ledgerPath, dataType string) (*GitHubTypeSyncState,
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("unmarshal %s sync state: %w", dataType, err)
 	}
-	if state.KnownStates == nil {
-		state.KnownStates = make(map[int]string)
+
+	// Migrate legacy KnownStates → KnownItems on read
+	if state.KnownItems == nil && len(state.KnownStates) > 0 {
+		state.KnownItems = make(map[int]KnownItem, len(state.KnownStates))
+		for num, st := range state.KnownStates {
+			state.KnownItems[num] = KnownItem{State: st}
+		}
+	}
+	if state.KnownItems == nil {
+		state.KnownItems = make(map[int]KnownItem)
 	}
 
 	return &state, nil
@@ -329,11 +347,11 @@ func rebuildSyncStateFromDisk(ledgerPath, dataType string, logger *slog.Logger) 
 		return nil, fmt.Errorf("list %s files: %w", dataType, err)
 	}
 	if len(files) == 0 {
-		return &GitHubTypeSyncState{KnownStates: make(map[int]string)}, nil
+		return &GitHubTypeSyncState{KnownItems: make(map[int]KnownItem)}, nil
 	}
 
 	state := &GitHubTypeSyncState{
-		KnownStates: make(map[int]string, len(files)),
+		KnownItems: make(map[int]KnownItem, len(files)),
 	}
 	var latestUpdate time.Time
 
@@ -374,10 +392,10 @@ func rebuildSyncStateFromDisk(ledgerPath, dataType string, logger *slog.Logger) 
 	}
 
 	for num, info := range bestByNumber {
-		state.KnownStates[num] = info.state
+		state.KnownItems[num] = KnownItem{State: info.state, UpdatedAt: info.updatedAt}
 	}
 
-	state.Count = len(state.KnownStates)
+	state.Count = len(state.KnownItems)
 	state.LastSyncAt = latestUpdate
 
 	return state, nil
