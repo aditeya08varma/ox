@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"golang.org/x/sync/errgroup"
 
 	"github.com/sageox/ox/internal/agentcli"
@@ -141,27 +143,41 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 			bucket := byDay[day]
 			// count items that already have fact files (skippable)
 			var skippedPRs, skippedIssues, skippedCommits int
+			factsDir := filepath.Join(tc.Path, "memory", ".github-facts")
 			for _, pr := range bucket.PRClusters {
 				data, _ := json.Marshal(pr)
 				hash := contentHash(string(data))
-				factPath := filepath.Join(tc.Path, "memory", ".github-facts", fmt.Sprintf("%s-pr-%d.jsonl", day, pr.Number))
-				if readFactFileSourceHash(factPath) == hash {
+				globPattern := fmt.Sprintf("%s-*-pr-%d.jsonl", day, pr.Number)
+				found := findLatestFactFileSourceHash(factsDir, globPattern)
+				if found == "" {
+					// check legacy deterministic filename
+					found = readFactFileSourceHash(filepath.Join(factsDir, fmt.Sprintf("%s-pr-%d.jsonl", day, pr.Number)))
+				}
+				if found == hash {
 					skippedPRs++
 				}
 			}
 			for _, issue := range bucket.StandaloneIssues {
 				data, _ := json.Marshal(issue)
 				hash := contentHash(string(data))
-				factPath := filepath.Join(tc.Path, "memory", ".github-facts", fmt.Sprintf("%s-issue-%d.jsonl", day, issue.Number))
-				if readFactFileSourceHash(factPath) == hash {
+				globPattern := fmt.Sprintf("%s-*-issue-%d.jsonl", day, issue.Number)
+				found := findLatestFactFileSourceHash(factsDir, globPattern)
+				if found == "" {
+					found = readFactFileSourceHash(filepath.Join(factsDir, fmt.Sprintf("%s-issue-%d.jsonl", day, issue.Number)))
+				}
+				if found == hash {
 					skippedIssues++
 				}
 			}
 			if len(bucket.StandaloneCommits) > 0 {
 				data, _ := json.Marshal(bucket.StandaloneCommits)
 				hash := contentHash(string(data))
-				commitsPath := filepath.Join(tc.Path, "memory", ".github-facts", day+"-commits.jsonl")
-				if readFactFileSourceHash(commitsPath) == hash {
+				globPattern := fmt.Sprintf("%s-*-commits.jsonl", day)
+				found := findLatestFactFileSourceHash(factsDir, globPattern)
+				if found == "" {
+					found = readFactFileSourceHash(filepath.Join(factsDir, day+"-commits.jsonl"))
+				}
+				if found == hash {
 					skippedCommits = len(bucket.StandaloneCommits)
 				}
 			}
@@ -186,7 +202,7 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 	}
 
 	// collect work items, then fan out with bounded concurrency.
-	// each item writes to its own deterministic file — no shared state.
+	// each item writes to its own UUID7-named file — no shared state.
 	type workItem struct {
 		day      string
 		itemType string // "pr", "issue", "commits"
@@ -200,8 +216,12 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 		for _, pr := range bucket.PRClusters {
 			data, _ := json.Marshal(pr)
 			hash := contentHash(string(data))
-			factPath := filepath.Join(tc.Path, "memory", ".github-facts", fmt.Sprintf("%s-pr-%d.jsonl", day, pr.Number))
-			if readFactFileSourceHash(factPath) == hash {
+			globPattern := fmt.Sprintf("%s-*-pr-%d.jsonl", day, pr.Number)
+			found := findLatestFactFileSourceHash(factsDir, globPattern)
+			if found == "" {
+				found = readFactFileSourceHash(filepath.Join(factsDir, fmt.Sprintf("%s-pr-%d.jsonl", day, pr.Number)))
+			}
+			if found == hash {
 				continue
 			}
 			items = append(items, workItem{day, "pr", pr.Number, pr})
@@ -209,8 +229,12 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 		for _, issue := range bucket.StandaloneIssues {
 			data, _ := json.Marshal(issue)
 			hash := contentHash(string(data))
-			factPath := filepath.Join(tc.Path, "memory", ".github-facts", fmt.Sprintf("%s-issue-%d.jsonl", day, issue.Number))
-			if readFactFileSourceHash(factPath) == hash {
+			globPattern := fmt.Sprintf("%s-*-issue-%d.jsonl", day, issue.Number)
+			found := findLatestFactFileSourceHash(factsDir, globPattern)
+			if found == "" {
+				found = readFactFileSourceHash(filepath.Join(factsDir, fmt.Sprintf("%s-issue-%d.jsonl", day, issue.Number)))
+			}
+			if found == hash {
 				continue
 			}
 			items = append(items, workItem{day, "issue", issue.Number, issue})
@@ -218,8 +242,12 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 		if len(bucket.StandaloneCommits) > 0 {
 			data, _ := json.Marshal(bucket.StandaloneCommits)
 			hash := contentHash(string(data))
-			commitsPath := filepath.Join(tc.Path, "memory", ".github-facts", day+"-commits.jsonl")
-			if readFactFileSourceHash(commitsPath) == hash {
+			globPattern := fmt.Sprintf("%s-*-commits.jsonl", day)
+			found := findLatestFactFileSourceHash(factsDir, globPattern)
+			if found == "" {
+				found = readFactFileSourceHash(filepath.Join(factsDir, day+"-commits.jsonl"))
+			}
+			if found == hash {
 				continue
 			}
 			items = append(items, workItem{day, "commits", 0, bucket.StandaloneCommits})
@@ -270,10 +298,10 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 }
 
 // extractSingleGitHubItem extracts facts from a single PR or issue.
-// Uses a deterministic filename based on day + item type + number for dedup.
+// Uses a UUID7 filename for collision avoidance: {day}-{uuid7}-{type}-{number}.jsonl
 func extractSingleGitHubItem(ctx context.Context, cmd *cobra.Command, mu *sync.Mutex, backend agentcli.Backend, tcPath, day, itemType string, number int, item any, since time.Time, guidelines string) error {
-	// deterministic filename: 2026-03-28-pr-152.jsonl
-	factFile := filepath.Join("memory", ".github-facts", fmt.Sprintf("%s-%s-%d.jsonl", day, itemType, number))
+	uid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
+	factFile := filepath.Join("memory", ".github-facts", fmt.Sprintf("%s-%s-%s-%d.jsonl", day, uid.String(), itemType, number))
 	fullPath := filepath.Join(tcPath, factFile)
 
 	data, err := json.Marshal(item)
@@ -365,7 +393,8 @@ func extractSingleGitHubItem(ctx context.Context, cmd *cobra.Command, mu *sync.M
 
 // extractGitHubCommitBatch extracts facts from a batch of standalone commits for a day.
 func extractGitHubCommitBatch(ctx context.Context, cmd *cobra.Command, mu *sync.Mutex, backend agentcli.Backend, tcPath, day string, commits []query.StandaloneCommit, since time.Time, guidelines string) error {
-	factFile := filepath.Join("memory", ".github-facts", day+"-commits.jsonl")
+	uid, _ := uuid.NewV7() // error only if crypto/rand fails — zero UUID collision is acceptable
+	factFile := filepath.Join("memory", ".github-facts", fmt.Sprintf("%s-%s-commits.jsonl", day, uid.String()))
 	fullPath := filepath.Join(tcPath, factFile)
 
 	data, err := json.Marshal(commits)
@@ -436,6 +465,18 @@ func extractGitHubCommitBatch(ctx context.Context, cmd *cobra.Command, mu *sync.
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Wrote %s (%d facts)\n", factFile, len(parsedFacts))
 	return nil
+}
+
+// findLatestFactFileSourceHash globs factsDir for files matching pattern, picks the
+// lexicographically last match (UUID7 sorts chronologically), and returns its source_hash.
+// Returns "" if no matches or the matched file has no source_hash.
+func findLatestFactFileSourceHash(factsDir, globPattern string) string {
+	matches, err := filepath.Glob(filepath.Join(factsDir, globPattern))
+	if err != nil || len(matches) == 0 {
+		return ""
+	}
+	sort.Strings(matches)
+	return readFactFileSourceHash(matches[len(matches)-1])
 }
 
 // inferGitHubFactsHighWater scans memory/.github-facts/ for the latest YYYY-MM-DD

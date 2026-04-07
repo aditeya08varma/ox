@@ -381,11 +381,11 @@ func TestSyncPRs_StateTransitionToMergedGetsCommits(t *testing.T) {
 		t.Fatalf("second sync: %v", err)
 	}
 
-	// verify commits were fetched on state transition
-	files, _ := ListGitHubDataFiles(ledgerPath, "pr")
-	data, _ := os.ReadFile(files[0])
-	var pr PRFile
-	json.Unmarshal(data, &pr)
+	// verify commits were fetched on state transition (use ReadGitHubPR for latest version)
+	pr, readErr := ReadGitHubPR(ledgerPath, 400, now)
+	if readErr != nil {
+		t.Fatalf("read PR 400: %v", readErr)
+	}
 
 	if len(pr.Commits) != 1 {
 		t.Errorf("expected 1 commit after merge transition, got %d", len(pr.Commits))
@@ -537,25 +537,25 @@ func TestBackfillPRCommits(t *testing.T) {
 		t.Errorf("expected 1 backfilled, got %d", backfilled)
 	}
 
-	// verify the PR file now has commits
-	files, _ := ListGitHubDataFiles(ledgerPath, "pr")
-	for _, f := range files {
-		data, _ := os.ReadFile(f)
-		var p PRFile
-		json.Unmarshal(data, &p)
-		if p.Number == 500 {
-			if len(p.Commits) != 1 {
-				t.Errorf("expected 1 commit for PR 500, got %d", len(p.Commits))
-			}
-			if p.Commits[0].SHA != "eee555" {
-				t.Errorf("expected commit SHA 'eee555', got %q", p.Commits[0].SHA)
-			}
-		}
-		if p.Number == 501 {
-			if len(p.Commits) != 0 {
-				t.Errorf("open PR should not have commits, got %d", len(p.Commits))
-			}
-		}
+	// verify the PR file now has commits (use ReadGitHubPR to get latest version)
+	got500, err := ReadGitHubPR(ledgerPath, 500, now)
+	if err != nil {
+		t.Fatalf("read PR 500: %v", err)
+	}
+	if len(got500.Commits) != 1 {
+		t.Errorf("expected 1 commit for PR 500, got %d", len(got500.Commits))
+	}
+	if got500.Commits[0].SHA != "eee555" {
+		t.Errorf("expected commit SHA 'eee555', got %q", got500.Commits[0].SHA)
+	}
+
+	// verify open PR was not backfilled
+	got501, err := ReadGitHubPR(ledgerPath, 501, now)
+	if err != nil {
+		t.Fatalf("read PR 501: %v", err)
+	}
+	if len(got501.Commits) != 0 {
+		t.Errorf("open PR should not have commits, got %d", len(got501.Commits))
 	}
 }
 
@@ -744,15 +744,19 @@ func TestSyncPRs_RebuildStateFromDisk_SkipsCommentFetch(t *testing.T) {
 		t.Fatalf("SyncPRs: %v", err)
 	}
 
-	// both PRs should be treated as "known" (rebuilt from disk) — no comment fetches
+	// both PRs should be treated as "known" (rebuilt from disk) — no comment fetches,
+	// no writes, no counts (known + unchanged = skipped entirely)
 	if commentCalls > 0 {
 		t.Errorf("expected 0 comment API calls (state rebuilt from disk), got %d", commentCalls)
 	}
 	if result.PRCreated != 0 {
 		t.Errorf("expected 0 created (all known from disk), got %d", result.PRCreated)
 	}
-	if result.PRTotal != 2 {
-		t.Errorf("expected 2 total, got %d", result.PRTotal)
+	if result.PRUpdated != 0 {
+		t.Errorf("expected 0 updated (state unchanged = skipped), got %d", result.PRUpdated)
+	}
+	if result.PRTotal != 0 {
+		t.Errorf("expected 0 total (all skipped), got %d", result.PRTotal)
 	}
 
 	// verify the persisted sync state was rebuilt correctly
@@ -811,6 +815,12 @@ func TestSyncIssues_RebuildStateFromDisk_SkipsCommentFetch(t *testing.T) {
 	if result.IssueCreated != 0 {
 		t.Errorf("expected 0 created (known from disk), got %d", result.IssueCreated)
 	}
+	if result.IssueUpdated != 0 {
+		t.Errorf("expected 0 updated (state unchanged = skipped), got %d", result.IssueUpdated)
+	}
+	if result.IssueTotal != 0 {
+		t.Errorf("expected 0 total (all skipped), got %d", result.IssueTotal)
+	}
 
 	// verify the persisted sync state was rebuilt correctly
 	state, err := ReadGitHubTypeSyncState(ledgerPath, "issue")
@@ -825,6 +835,127 @@ func TestSyncIssues_RebuildStateFromDisk_SkipsCommentFetch(t *testing.T) {
 	}
 	if state.LastSyncAt.IsZero() {
 		t.Error("expected non-zero LastSyncAt after rebuild")
+	}
+}
+
+func TestSyncPRs_KnownUnchangedDoesNotOverwriteComments(t *testing.T) {
+	// Regression: when a PR is known and state hasn't changed, re-sync must
+	// NOT overwrite the existing file (which would drop comments).
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// first sync: new PR with comments
+	fetcher1 := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 700, Title: "Feature", State: "open", Author: "alice",
+			CreatedAt: now, UpdatedAt: now,
+		}},
+		comments: map[int][]FetchedComment{
+			700: {{Author: "bob", Body: "nice work", CreatedAt: now}},
+		},
+	}
+	_, err := SyncPRs(context.Background(), fetcher1, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	// verify comments were stored (fetchPRComments calls both ListPRComments
+	// and ListIssueComments, so the same mock comment appears twice)
+	pr1, err := ReadGitHubPR(ledgerPath, 700, now)
+	if err != nil {
+		t.Fatalf("read PR after first sync: %v", err)
+	}
+	if len(pr1.Comments) != 2 {
+		t.Fatalf("expected 2 comments after first sync, got %d", len(pr1.Comments))
+	}
+
+	// second sync: same PR, same state — must NOT overwrite
+	fetcher2 := &mockFetcher{
+		prs: []FetchedPR{{
+			Number: 700, Title: "Feature", State: "open", Author: "alice",
+			CreatedAt: now, UpdatedAt: now,
+		}},
+		comments: map[int][]FetchedComment{}, // empty — shouldn't matter since PR is skipped
+	}
+	result, err := SyncPRs(context.Background(), fetcher2, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	// PR was skipped — counters must be zero
+	if result.PRTotal != 0 {
+		t.Errorf("expected 0 total (skipped), got %d", result.PRTotal)
+	}
+
+	// comments must still be present on disk
+	pr2, err := ReadGitHubPR(ledgerPath, 700, now)
+	if err != nil {
+		t.Fatalf("read PR after second sync: %v", err)
+	}
+	if len(pr2.Comments) != 2 {
+		t.Errorf("expected 2 comments preserved after re-sync, got %d", len(pr2.Comments))
+	}
+	if pr2.Comments[0].Body != "nice work" {
+		t.Errorf("expected comment body 'nice work', got %q", pr2.Comments[0].Body)
+	}
+}
+
+func TestSyncIssues_KnownUnchangedDoesNotOverwriteComments(t *testing.T) {
+	// Regression: when an issue is known and state hasn't changed, re-sync must
+	// NOT overwrite the existing file (which would drop comments).
+	ledgerPath := t.TempDir()
+	logger := slog.Default()
+
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// first sync: new issue with comments
+	fetcher1 := &mockFetcher{
+		issues: []FetchedIssue{{
+			Number: 800, Title: "Bug", State: "open", Author: "alice",
+			CreatedAt: now, UpdatedAt: now,
+		}},
+		comments: map[int][]FetchedComment{
+			800: {{Author: "carol", Body: "reproduced", CreatedAt: now}},
+		},
+	}
+	_, err := SyncIssues(context.Background(), fetcher1, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("first sync: %v", err)
+	}
+
+	// verify comments were stored
+	issueFile1 := readIssueFile(t, ledgerPath, 800, now)
+	if len(issueFile1.Comments) != 1 {
+		t.Fatalf("expected 1 comment after first sync, got %d", len(issueFile1.Comments))
+	}
+
+	// second sync: same issue, same state — must NOT overwrite
+	fetcher2 := &mockFetcher{
+		issues: []FetchedIssue{{
+			Number: 800, Title: "Bug", State: "open", Author: "alice",
+			CreatedAt: now, UpdatedAt: now,
+		}},
+		comments: map[int][]FetchedComment{}, // empty — shouldn't matter since issue is skipped
+	}
+	result, err := SyncIssues(context.Background(), fetcher2, ledgerPath, "org", "repo", 30, logger)
+	if err != nil {
+		t.Fatalf("second sync: %v", err)
+	}
+
+	// issue was skipped — counters must be zero
+	if result.IssueTotal != 0 {
+		t.Errorf("expected 0 total (skipped), got %d", result.IssueTotal)
+	}
+
+	// comments must still be present on disk
+	issueFile2 := readIssueFile(t, ledgerPath, 800, now)
+	if len(issueFile2.Comments) != 1 {
+		t.Errorf("expected 1 comment preserved after re-sync, got %d", len(issueFile2.Comments))
+	}
+	if issueFile2.Comments[0].Body != "reproduced" {
+		t.Errorf("expected comment body 'reproduced', got %q", issueFile2.Comments[0].Body)
 	}
 }
 
@@ -885,4 +1016,23 @@ func runCmd(name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
+}
+
+// readIssueFile reads an issue JSON file from the ledger by number and creation date.
+func readIssueFile(t *testing.T, ledgerPath string, number int, createdAt time.Time) *IssueFile {
+	t.Helper()
+	dir := DateDir(ledgerPath, createdAt, "issue")
+	path, err := findLatestFile(dir, number)
+	if err != nil {
+		t.Fatalf("read issue %d: %v", number, err)
+	}
+	data, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatalf("read issue %d: %v", number, readErr)
+	}
+	var issue IssueFile
+	if err := json.Unmarshal(data, &issue); err != nil {
+		t.Fatalf("unmarshal issue %d: %v", number, err)
+	}
+	return &issue
 }

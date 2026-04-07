@@ -805,3 +805,73 @@ func TestInferGitHubQueryHighWater_NoFiles_DefaultsTo7DaysAgo(t *testing.T) {
 	assert.InDelta(t, expected.Unix(), hw.Unix(), 2,
 		"should default to ~7 days ago when no fact files exist")
 }
+
+// --- findLatestFactFileSourceHash ---
+// Failure prevented: freshness checks fail to find UUID7-named fact files,
+// causing redundant LLM re-extraction of already-processed items.
+
+func TestFindLatestFactFileSourceHash_MatchesUUID7File(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// write a UUID7-style fact file
+	content := `{"_meta":{"schema_version":"2","source_hash":"abc123"}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "2026-04-01-01961234-5678-7000-8000-abcdef012345-pr-42.jsonl"), []byte(content), 0o644))
+
+	got := findLatestFactFileSourceHash(dir, "2026-04-01-*-pr-42.jsonl")
+	assert.Equal(t, "abc123", got)
+}
+
+func TestFindLatestFactFileSourceHash_PicksLatestBySort(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// older file
+	old := `{"_meta":{"schema_version":"2","source_hash":"old_hash"}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "2026-04-01-01961234-0000-7000-8000-000000000000-pr-10.jsonl"), []byte(old), 0o644))
+
+	// newer file (UUID7 sorts later)
+	newer := `{"_meta":{"schema_version":"2","source_hash":"new_hash"}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "2026-04-01-01961234-ffff-7000-8000-ffffffffffff-pr-10.jsonl"), []byte(newer), 0o644))
+
+	got := findLatestFactFileSourceHash(dir, "2026-04-01-*-pr-10.jsonl")
+	assert.Equal(t, "new_hash", got, "should return source_hash from lexicographically last file")
+}
+
+func TestFindLatestFactFileSourceHash_NoMatches(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	got := findLatestFactFileSourceHash(dir, "2026-04-01-*-pr-99.jsonl")
+	assert.Equal(t, "", got, "should return empty string when no files match")
+}
+
+func TestFindLatestFactFileSourceHash_DoesNotMatchLegacy(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// legacy deterministic filename has no UUID7 segment: "2026-04-01-pr-42.jsonl"
+	// The glob "2026-04-01-*-pr-42.jsonl" does NOT match because the pattern
+	// requires "-" after the wildcard before "pr", but legacy has no UUID7 segment.
+	// This is why call sites fall back to readFactFileSourceHash on the legacy path.
+	content := `{"_meta":{"schema_version":"2","source_hash":"legacy_hash"}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "2026-04-01-pr-42.jsonl"), []byte(content), 0o644))
+
+	got := findLatestFactFileSourceHash(dir, "2026-04-01-*-pr-42.jsonl")
+	assert.Equal(t, "", got, "glob should NOT match legacy filenames without UUID7 segment")
+
+	// but readFactFileSourceHash on the exact legacy path works
+	legacyHash := readFactFileSourceHash(filepath.Join(dir, "2026-04-01-pr-42.jsonl"))
+	assert.Equal(t, "legacy_hash", legacyHash, "direct read of legacy path should work")
+}
+
+func TestFindLatestFactFileSourceHash_CommitsPattern(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	content := `{"_meta":{"schema_version":"2","source_hash":"commits_hash"}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "2026-04-01-01961234-5678-7000-8000-abcdef012345-commits.jsonl"), []byte(content), 0o644))
+
+	got := findLatestFactFileSourceHash(dir, "2026-04-01-*-commits.jsonl")
+	assert.Equal(t, "commits_hash", got)
+}

@@ -157,9 +157,12 @@ func TestWriteAndReadGitHubIssue_RoundTrip(t *testing.T) {
 	err := WriteGitHubIssue(tmp, issue)
 	require.NoError(t, err)
 
-	// verify file exists at expected path
+	// verify file exists via findLatestFile (content-hash filename)
 	dir := DateDir(tmp, now, "issue")
-	path := filepath.Join(dir, "77.json")
+	path, err := findLatestFile(dir, 77)
+	require.NoError(t, err)
+	assert.Contains(t, filepath.Base(path), "77-") // hash-based filename
+
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 

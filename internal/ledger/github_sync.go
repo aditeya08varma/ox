@@ -150,24 +150,20 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 		prevState, known := state.KnownStates[pr.Number]
 		stateChanged := known && prevState != prState
 
-		// fetch comments when new or state changed
-		var comments []PRComment
-		if !known || stateChanged {
-			comments = fetchPRComments(ctx, fetcher, owner, repo, pr.Number, logger)
+		// skip writing when PR is known and state hasn't changed —
+		// there's no new data, and writing would drop previously-fetched comments
+		if known && !stateChanged {
+			continue
 		}
+
+		// fetch comments for new PRs or state transitions
+		comments := fetchPRComments(ctx, fetcher, owner, repo, pr.Number, logger)
 
 		// fetch commits for merged PRs — only when first seen as merged
 		// (commit list is immutable once merged, no need to re-fetch)
 		var commits []PRCommit
 		if prState == "merged" {
-			if !known || stateChanged {
-				commits = fetchPRCommits(ctx, fetcher, owner, repo, pr.Number, logger)
-			} else {
-				// carry forward existing commits to avoid omitempty dropping them on re-write
-				if existing, err := ReadGitHubPR(ledgerPath, pr.Number, pr.CreatedAt); err == nil {
-					commits = existing.Commits
-				}
-			}
+			commits = fetchPRCommits(ctx, fetcher, owner, repo, pr.Number, logger)
 		}
 
 		prFile := &PRFile{
@@ -262,19 +258,23 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 		prevState, known := state.KnownStates[issue.Number]
 		stateChanged := known && prevState != issue.State
 
+		// skip writing when issue is known and state hasn't changed —
+		// there's no new data, and writing would drop previously-fetched comments
+		if known && !stateChanged {
+			continue
+		}
+
 		var comments []IssueComment
-		if !known || stateChanged {
-			fetched, cErr := fetcher.ListIssueComments(ctx, owner, repo, issue.Number)
-			if cErr != nil {
-				logger.Warn("fetch issue comments failed", "issue", issue.Number, "error", cErr)
-			} else {
-				for _, c := range fetched {
-					comments = append(comments, IssueComment{
-						Author:    c.Author,
-						Body:      c.Body,
-						CreatedAt: c.CreatedAt,
-					})
-				}
+		fetched, cErr := fetcher.ListIssueComments(ctx, owner, repo, issue.Number)
+		if cErr != nil {
+			logger.Warn("fetch issue comments failed", "issue", issue.Number, "error", cErr)
+		} else {
+			for _, c := range fetched {
+				comments = append(comments, IssueComment{
+					Author:    c.Author,
+					Body:      c.Body,
+					CreatedAt: c.CreatedAt,
+				})
 			}
 		}
 
@@ -324,21 +324,51 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 		return 0, fmt.Errorf("list PR files: %w", err)
 	}
 
-	var backfilled int
-	for _, path := range prFiles {
-		if err := ctx.Err(); err != nil {
-			return backfilled, err
-		}
+	// Deduplicate: when multiple hash-variant files exist for the same PR,
+	// keep only the path with the latest updated_at.
+	type prPathInfo struct {
+		path      string
+		updatedAt time.Time
+	}
+	bestByNumber := make(map[int]prPathInfo)
 
+	for _, path := range prFiles {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			logger.Warn("read PR file for backfill failed", "path", path, "error", err)
 			continue
 		}
 
+		var stub struct {
+			Number    int       `json:"number"`
+			UpdatedAt time.Time `json:"updated_at"`
+		}
+		if err := json.Unmarshal(data, &stub); err != nil {
+			logger.Warn("unmarshal PR file for backfill failed", "path", path, "error", err)
+			continue
+		}
+
+		prev, exists := bestByNumber[stub.Number]
+		if !exists || stub.UpdatedAt.After(prev.updatedAt) {
+			bestByNumber[stub.Number] = prPathInfo{path: path, updatedAt: stub.UpdatedAt}
+		}
+	}
+
+	var backfilled int
+	for _, info := range bestByNumber {
+		if err := ctx.Err(); err != nil {
+			return backfilled, err
+		}
+
+		data, err := os.ReadFile(info.path)
+		if err != nil {
+			logger.Warn("read PR file for backfill failed", "path", info.path, "error", err)
+			continue
+		}
+
 		var pr PRFile
 		if err := json.Unmarshal(data, &pr); err != nil {
-			logger.Warn("unmarshal PR file for backfill failed", "path", path, "error", err)
+			logger.Warn("unmarshal PR file for backfill failed", "path", info.path, "error", err)
 			continue
 		}
 
