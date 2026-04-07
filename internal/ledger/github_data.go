@@ -1,11 +1,15 @@
 package ledger
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -80,10 +84,20 @@ type IssueComment struct {
 type GitHubTypeSyncState struct {
 	LastSyncAt time.Time `json:"last_sync_at"`
 	Count      int       `json:"count"`
-	// KnownStates tracks the last-seen state of each item by number.
-	// Used to detect state transitions (open→closed/merged) which trigger
-	// a full re-extract of all comments.
+	// KnownItems tracks the last-seen state and updated_at of each item by number.
+	// Used to detect state transitions (open→closed/merged) and content updates
+	// (new comments, edits) which trigger a re-extract.
+	KnownItems map[int]KnownItem `json:"known_items,omitempty"`
+
+	// KnownStates is the legacy format (state-only). Preserved for backward
+	// compatibility when reading old cache files. On write, only KnownItems is used.
 	KnownStates map[int]string `json:"known_states,omitempty"`
+}
+
+// KnownItem tracks the last-seen state and updated_at for a PR or issue.
+type KnownItem struct {
+	State     string    `json:"state"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 const (
@@ -133,7 +147,15 @@ func WriteGitHubPR(ledgerPath string, pr *PRFile) error {
 		return fmt.Errorf("marshal PR %d: %w", pr.Number, err)
 	}
 
-	path := filepath.Join(dir, fmt.Sprintf("%d.json", pr.Number))
+	hash := contentHash(data)
+	filename := fmt.Sprintf("%d-%s.json", pr.Number, hash)
+	path := filepath.Join(dir, filename)
+
+	// idempotent: skip if a file with this exact hash already exists
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("write PR %d: %w", pr.Number, err)
 	}
@@ -157,7 +179,15 @@ func WriteGitHubIssue(ledgerPath string, issue *IssueFile) error {
 		return fmt.Errorf("marshal issue %d: %w", issue.Number, err)
 	}
 
-	path := filepath.Join(dir, fmt.Sprintf("%d.json", issue.Number))
+	hash := contentHash(data)
+	filename := fmt.Sprintf("%d-%s.json", issue.Number, hash)
+	path := filepath.Join(dir, filename)
+
+	// idempotent: skip if a file with this exact hash already exists
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("write issue %d: %w", issue.Number, err)
 	}
@@ -166,10 +196,15 @@ func WriteGitHubIssue(ledgerPath string, issue *IssueFile) error {
 }
 
 // ReadGitHubPR reads an existing PR JSON file from the ledger by number and creation date.
-// Returns os.ErrNotExist if the file does not exist.
+// When multiple content-hash versions exist ({number}-{hash}.json), returns the one
+// with the latest updated_at field. Falls back to legacy {number}.json for backward
+// compatibility. Returns os.ErrNotExist if no file exists.
 func ReadGitHubPR(ledgerPath string, number int, createdAt time.Time) (*PRFile, error) {
 	dir := DateDir(ledgerPath, createdAt, "pr")
-	path := filepath.Join(dir, fmt.Sprintf("%d.json", number))
+	path, err := findLatestFile(dir, number)
+	if err != nil {
+		return nil, fmt.Errorf("read PR %d: %w", number, err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read PR %d: %w", number, err)
@@ -198,7 +233,7 @@ func ReadGitHubTypeSyncState(ledgerPath, dataType string) (*GitHubTypeSyncState,
 	if err != nil {
 		if os.IsNotExist(err) {
 			return &GitHubTypeSyncState{
-				KnownStates: make(map[int]string),
+				KnownItems: make(map[int]KnownItem),
 			}, nil
 		}
 		return nil, fmt.Errorf("read %s sync state: %w", dataType, err)
@@ -208,8 +243,16 @@ func ReadGitHubTypeSyncState(ledgerPath, dataType string) (*GitHubTypeSyncState,
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("unmarshal %s sync state: %w", dataType, err)
 	}
-	if state.KnownStates == nil {
-		state.KnownStates = make(map[int]string)
+
+	// Migrate legacy KnownStates → KnownItems on read
+	if state.KnownItems == nil && len(state.KnownStates) > 0 {
+		state.KnownItems = make(map[int]KnownItem, len(state.KnownStates))
+		for num, st := range state.KnownStates {
+			state.KnownItems[num] = KnownItem{State: st}
+		}
+	}
+	if state.KnownItems == nil {
+		state.KnownItems = make(map[int]KnownItem)
 	}
 
 	return &state, nil
@@ -258,7 +301,9 @@ func syncStateFile(dataType string) string {
 }
 
 // ListGitHubDataFiles returns all JSON file paths under data/github/ matching the given type.
-// dataType should be "pr" or "issue". Returns paths like data/github/2026/03/11/pr/178.json.
+// dataType should be "pr" or "issue". Returns paths including both legacy ({number}.json)
+// and content-hash ({number}-{hash}.json) formats. Multiple files for the same number
+// may be returned — callers should deduplicate if needed.
 // Returns an empty slice (not an error) if no files exist.
 func ListGitHubDataFiles(ledgerPath string, dataType string) ([]string, error) {
 	baseDir := GitHubDataDir(ledgerPath)
@@ -302,13 +347,20 @@ func rebuildSyncStateFromDisk(ledgerPath, dataType string, logger *slog.Logger) 
 		return nil, fmt.Errorf("list %s files: %w", dataType, err)
 	}
 	if len(files) == 0 {
-		return &GitHubTypeSyncState{KnownStates: make(map[int]string)}, nil
+		return &GitHubTypeSyncState{KnownItems: make(map[int]KnownItem)}, nil
 	}
 
 	state := &GitHubTypeSyncState{
-		KnownStates: make(map[int]string, len(files)),
+		KnownItems: make(map[int]KnownItem, len(files)),
 	}
 	var latestUpdate time.Time
+
+	// Track per-number latest updated_at for deduplication across hash variants
+	type itemInfo struct {
+		state     string
+		updatedAt time.Time
+	}
+	bestByNumber := make(map[int]itemInfo, len(files))
 
 	for _, path := range files {
 		data, readErr := os.ReadFile(path)
@@ -328,16 +380,124 @@ func rebuildSyncStateFromDisk(ledgerPath, dataType string, logger *slog.Logger) 
 			continue
 		}
 
-		state.KnownStates[stub.Number] = stub.State
+		// deduplicate: keep only the version with the latest updated_at per number
+		prev, exists := bestByNumber[stub.Number]
+		if !exists || stub.UpdatedAt.After(prev.updatedAt) {
+			bestByNumber[stub.Number] = itemInfo{state: stub.State, updatedAt: stub.UpdatedAt}
+		}
+
 		if stub.UpdatedAt.After(latestUpdate) {
 			latestUpdate = stub.UpdatedAt
 		}
 	}
 
-	state.Count = len(state.KnownStates)
+	for num, info := range bestByNumber {
+		state.KnownItems[num] = KnownItem{State: info.state, UpdatedAt: info.updatedAt}
+	}
+
+	state.Count = len(state.KnownItems)
 	state.LastSyncAt = latestUpdate
 
 	return state, nil
+}
+
+// contentHash returns the first 8 hex characters of the SHA256 hash of data.
+func contentHash(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])[:8]
+}
+
+// hashFilePattern matches content-hash filenames: {number}-{8hexchars}.json
+var hashFilePattern = regexp.MustCompile(`^(\d+)-([0-9a-f]{8})\.json$`)
+
+// parseHashFilename extracts the number from a content-hash filename.
+// Returns -1 if the filename doesn't match the pattern.
+func parseHashFilename(name string) int {
+	m := hashFilePattern.FindStringSubmatch(name)
+	if m == nil {
+		return -1
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return -1
+	}
+	return n
+}
+
+// findLatestFile finds the most recent version of a numbered file in dir.
+// Looks for {number}-{hash}.json files and picks the one with the latest
+// updated_at. Falls back to legacy {number}.json for backward compatibility.
+// Returns os.ErrNotExist if no matching file is found.
+func findLatestFile(dir string, number int) (string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", os.ErrNotExist
+		}
+		return "", err
+	}
+
+	prefix := fmt.Sprintf("%d-", number)
+	var bestPath string
+	var bestUpdated time.Time
+	var bestMtime time.Time
+	found := false
+
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		// match {number}-{hash}.json
+		if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		if parseHashFilename(name) != number {
+			continue
+		}
+
+		path := filepath.Join(dir, name)
+		info, statErr := e.Info()
+		if statErr != nil {
+			continue
+		}
+		mtime := info.ModTime()
+
+		data, readErr := os.ReadFile(path)
+		if readErr != nil {
+			continue
+		}
+
+		var stub struct {
+			UpdatedAt time.Time `json:"updated_at"`
+		}
+		if jsonErr := json.Unmarshal(data, &stub); jsonErr != nil {
+			continue
+		}
+
+		// prefer latest updated_at; break ties with filesystem mtime
+		better := !found ||
+			stub.UpdatedAt.After(bestUpdated) ||
+			(stub.UpdatedAt.Equal(bestUpdated) && mtime.After(bestMtime))
+		if better {
+			bestPath = path
+			bestUpdated = stub.UpdatedAt
+			bestMtime = mtime
+			found = true
+		}
+	}
+
+	if found {
+		return bestPath, nil
+	}
+
+	// backward compatibility: try legacy {number}.json
+	legacyPath := filepath.Join(dir, fmt.Sprintf("%d.json", number))
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath, nil
+	}
+
+	return "", os.ErrNotExist
 }
 
 // ComputeGitHubDataPaths returns sparse checkout patterns for the last N days

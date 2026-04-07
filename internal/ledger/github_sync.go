@@ -104,17 +104,17 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 		return nil, fmt.Errorf("read pr sync state: %w", err)
 	}
 
-	// rebuild KnownStates from disk when sync state is cold (first run,
+	// rebuild KnownItems from disk when sync state is cold (first run,
 	// cache lost, daemon reclone). Without this, every PR is treated as
 	// "unknown" and triggers per-PR API calls for comments and commits —
 	// ~3 requests × N PRs — which hangs for minutes on large repos.
-	if len(state.KnownStates) == 0 {
+	if len(state.KnownItems) == 0 {
 		rebuilt, rebuildErr := rebuildSyncStateFromDisk(ledgerPath, "pr", logger)
 		if rebuildErr != nil {
 			logger.Warn("rebuild pr sync state from disk failed", "error", rebuildErr)
-		} else if len(rebuilt.KnownStates) > 0 {
+		} else if len(rebuilt.KnownItems) > 0 {
 			state = rebuilt
-			logger.Info("rebuilt pr sync state from disk", "known", len(state.KnownStates))
+			logger.Info("rebuilt pr sync state from disk", "known", len(state.KnownItems))
 		}
 	}
 
@@ -146,28 +146,25 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 			prState = "merged"
 		}
 
-		// detect state transitions to trigger full comment re-extract
-		prevState, known := state.KnownStates[pr.Number]
-		stateChanged := known && prevState != prState
+		// detect state transitions and content updates to trigger re-extract
+		prev, known := state.KnownItems[pr.Number]
+		stateChanged := known && prev.State != prState
+		updatedAtChanged := known && !prev.UpdatedAt.Equal(pr.UpdatedAt)
 
-		// fetch comments when new or state changed
-		var comments []PRComment
-		if !known || stateChanged {
-			comments = fetchPRComments(ctx, fetcher, owner, repo, pr.Number, logger)
+		// skip only if both state AND updated_at are unchanged —
+		// a same-state update (new comments, edits) changes updated_at
+		if known && !stateChanged && !updatedAtChanged {
+			continue
 		}
+
+		// fetch comments for new PRs or state transitions
+		comments := fetchPRComments(ctx, fetcher, owner, repo, pr.Number, logger)
 
 		// fetch commits for merged PRs — only when first seen as merged
 		// (commit list is immutable once merged, no need to re-fetch)
 		var commits []PRCommit
 		if prState == "merged" {
-			if !known || stateChanged {
-				commits = fetchPRCommits(ctx, fetcher, owner, repo, pr.Number, logger)
-			} else {
-				// carry forward existing commits to avoid omitempty dropping them on re-write
-				if existing, err := ReadGitHubPR(ledgerPath, pr.Number, pr.CreatedAt); err == nil {
-					commits = existing.Commits
-				}
-			}
+			commits = fetchPRCommits(ctx, fetcher, owner, repo, pr.Number, logger)
 		}
 
 		prFile := &PRFile{
@@ -196,7 +193,7 @@ func SyncPRs(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, repo
 			return result, fmt.Errorf("write PR %d: %w", pr.Number, err)
 		}
 
-		state.KnownStates[pr.Number] = prState
+		state.KnownItems[pr.Number] = KnownItem{State: prState, UpdatedAt: pr.UpdatedAt}
 		result.PRTotal++
 	}
 
@@ -226,14 +223,14 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 		return nil, fmt.Errorf("read issue sync state: %w", err)
 	}
 
-	// rebuild KnownStates from disk when sync state is cold
-	if len(state.KnownStates) == 0 {
+	// rebuild KnownItems from disk when sync state is cold
+	if len(state.KnownItems) == 0 {
 		rebuilt, rebuildErr := rebuildSyncStateFromDisk(ledgerPath, "issue", logger)
 		if rebuildErr != nil {
 			logger.Warn("rebuild issue sync state from disk failed", "error", rebuildErr)
-		} else if len(rebuilt.KnownStates) > 0 {
+		} else if len(rebuilt.KnownItems) > 0 {
 			state = rebuilt
-			logger.Info("rebuilt issue sync state from disk", "known", len(state.KnownStates))
+			logger.Info("rebuilt issue sync state from disk", "known", len(state.KnownItems))
 		}
 	}
 
@@ -259,22 +256,26 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 			return result, err
 		}
 
-		prevState, known := state.KnownStates[issue.Number]
-		stateChanged := known && prevState != issue.State
+		prev, known := state.KnownItems[issue.Number]
+		stateChanged := known && prev.State != issue.State
+		updatedAtChanged := known && !prev.UpdatedAt.Equal(issue.UpdatedAt)
+
+		// skip only if both state AND updated_at are unchanged
+		if known && !stateChanged && !updatedAtChanged {
+			continue
+		}
 
 		var comments []IssueComment
-		if !known || stateChanged {
-			fetched, cErr := fetcher.ListIssueComments(ctx, owner, repo, issue.Number)
-			if cErr != nil {
-				logger.Warn("fetch issue comments failed", "issue", issue.Number, "error", cErr)
-			} else {
-				for _, c := range fetched {
-					comments = append(comments, IssueComment{
-						Author:    c.Author,
-						Body:      c.Body,
-						CreatedAt: c.CreatedAt,
-					})
-				}
+		fetched, cErr := fetcher.ListIssueComments(ctx, owner, repo, issue.Number)
+		if cErr != nil {
+			logger.Warn("fetch issue comments failed", "issue", issue.Number, "error", cErr)
+		} else {
+			for _, c := range fetched {
+				comments = append(comments, IssueComment{
+					Author:    c.Author,
+					Body:      c.Body,
+					CreatedAt: c.CreatedAt,
+				})
 			}
 		}
 
@@ -302,7 +303,7 @@ func SyncIssues(ctx context.Context, fetcher GitHubFetcher, ledgerPath, owner, r
 			return result, fmt.Errorf("write issue %d: %w", issue.Number, err)
 		}
 
-		state.KnownStates[issue.Number] = issue.State
+		state.KnownItems[issue.Number] = KnownItem{State: issue.State, UpdatedAt: issue.UpdatedAt}
 		result.IssueTotal++
 	}
 
@@ -324,21 +325,51 @@ func BackfillPRCommits(ctx context.Context, fetcher GitHubFetcher, ledgerPath, o
 		return 0, fmt.Errorf("list PR files: %w", err)
 	}
 
-	var backfilled int
-	for _, path := range prFiles {
-		if err := ctx.Err(); err != nil {
-			return backfilled, err
-		}
+	// Deduplicate: when multiple hash-variant files exist for the same PR,
+	// keep only the path with the latest updated_at.
+	type prPathInfo struct {
+		path      string
+		updatedAt time.Time
+	}
+	bestByNumber := make(map[int]prPathInfo)
 
+	for _, path := range prFiles {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			logger.Warn("read PR file for backfill failed", "path", path, "error", err)
 			continue
 		}
 
+		var stub struct {
+			Number    int       `json:"number"`
+			UpdatedAt time.Time `json:"updated_at"`
+		}
+		if err := json.Unmarshal(data, &stub); err != nil {
+			logger.Warn("unmarshal PR file for backfill failed", "path", path, "error", err)
+			continue
+		}
+
+		prev, exists := bestByNumber[stub.Number]
+		if !exists || stub.UpdatedAt.After(prev.updatedAt) {
+			bestByNumber[stub.Number] = prPathInfo{path: path, updatedAt: stub.UpdatedAt}
+		}
+	}
+
+	var backfilled int
+	for _, info := range bestByNumber {
+		if err := ctx.Err(); err != nil {
+			return backfilled, err
+		}
+
+		data, err := os.ReadFile(info.path)
+		if err != nil {
+			logger.Warn("read PR file for backfill failed", "path", info.path, "error", err)
+			continue
+		}
+
 		var pr PRFile
 		if err := json.Unmarshal(data, &pr); err != nil {
-			logger.Warn("unmarshal PR file for backfill failed", "path", path, "error", err)
+			logger.Warn("unmarshal PR file for backfill failed", "path", info.path, "error", err)
 			continue
 		}
 

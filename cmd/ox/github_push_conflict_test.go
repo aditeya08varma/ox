@@ -24,20 +24,27 @@ func mustParseTime(s string) time.Time {
 }
 
 // writeGitHubPRFile writes a PR JSON file to the ledger's data/github/ directory.
-// Returns the file path relative to ledgerPath.
+// Returns the actual file path written (content-hash filename).
 func writeGitHubPRFile(t *testing.T, ledgerPath string, pr *ledger.PRFile) string {
 	t.Helper()
 	require.NoError(t, ledger.WriteGitHubPR(ledgerPath, pr))
 	dir := ledger.DateDir(ledgerPath, pr.CreatedAt, "pr")
-	return filepath.Join(dir, fmt.Sprintf("%d.json", pr.Number))
+	matches, err := filepath.Glob(filepath.Join(dir, fmt.Sprintf("%d-*.json", pr.Number)))
+	require.NoError(t, err)
+	require.NotEmpty(t, matches, "expected hash-named PR file for #%d", pr.Number)
+	return matches[len(matches)-1]
 }
 
 // writeGitHubIssueFile writes an issue JSON file to the ledger's data/github/ directory.
+// Returns the actual file path written (content-hash filename).
 func writeGitHubIssueFile(t *testing.T, ledgerPath string, issue *ledger.IssueFile) string {
 	t.Helper()
 	require.NoError(t, ledger.WriteGitHubIssue(ledgerPath, issue))
 	dir := ledger.DateDir(ledgerPath, issue.CreatedAt, "issue")
-	return filepath.Join(dir, fmt.Sprintf("%d.json", issue.Number))
+	matches, err := filepath.Glob(filepath.Join(dir, fmt.Sprintf("%d-*.json", issue.Number)))
+	require.NoError(t, err)
+	require.NotEmpty(t, matches, "expected hash-named issue file for #%d", issue.Number)
+	return matches[len(matches)-1]
 }
 
 // commitGitHubData stages and commits GitHub data files in the ledger clone.
@@ -106,7 +113,7 @@ func TestMultiMachine_DifferentPRFiles(t *testing.T) {
 	// verify both PRs exist on remote
 	verifyClone := cloneBare(t, barePath)
 	for _, num := range []int{100, 101} {
-		pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", fmt.Sprintf("%d.json", num))
+		pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", fmt.Sprintf("%d-*.json", num))
 		matches, _ := filepath.Glob(pattern)
 		assert.Len(t, matches, 1, "PR #%d should exist on remote", num)
 	}
@@ -144,7 +151,7 @@ func TestMultiMachine_SamePRSameContent(t *testing.T) {
 
 	// verify only one copy of PR #200 exists
 	verifyClone := cloneBare(t, barePath)
-	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "200.json")
+	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "200-*.json")
 	matches, _ := filepath.Glob(pattern)
 	assert.Len(t, matches, 1, "exactly one copy of PR #200 should exist")
 
@@ -159,8 +166,9 @@ func TestMultiMachine_SamePRSameContent(t *testing.T) {
 
 // TestMultiMachine_SamePRDifferentContent tests two machines syncing the same PR
 // but with different content (e.g., different comment sets due to timing).
-// The rebase conflict is auto-resolved with accept-theirs (last-write-wins)
-// because data/github/ files are derived from the API and re-fetched on next sync.
+// With content-hash filenames, each version gets a unique filename so there is
+// no merge conflict — both versions coexist on remote. The next sync will
+// re-fetch from the API and produce the authoritative version.
 func TestMultiMachine_SamePRDifferentContent(t *testing.T) {
 	barePath, machineA := createBareAndClone(t)
 	machineB := cloneBare(t, barePath)
@@ -185,31 +193,26 @@ func TestMultiMachine_SamePRDifferentContent(t *testing.T) {
 	err := pushLedger(context.Background(), machineA)
 	require.NoError(t, err)
 
-	// machine B pushes — conflict auto-resolved with accept-theirs
+	// machine B pushes — no conflict because content-hash filenames are unique
 	oldWd, _ := os.Getwd()
 	require.NoError(t, os.Chdir(machineB))
 	defer func() { _ = os.Chdir(oldWd) }()
 	t.Setenv("SAGEOX_ENDPOINT", "https://test-only-no-creds.invalid")
 
 	err = pushLedger(context.Background(), machineB)
-	require.NoError(t, err, "conflict in data/github/ should be auto-resolved with accept-theirs")
+	require.NoError(t, err, "different content produces different hash filenames — no conflict")
 
 	// verify machine B's repo is clean
 	assert.False(t, isRebaseInProgressCheck(t, machineB),
 		"no rebase should be in progress")
 
-	// during rebase, "ours" = the branch being rebased onto (remote/machine A),
-	// "theirs" = the commit being replayed (local/machine B).
-	// accept-theirs means machine B's version wins (the later writer).
-	// this is fine: both fetched from the same API, next sync re-fetches anyway.
+	// With content-hash filenames, both versions coexist on remote.
+	// ReadGitHubPR picks the one with the latest updated_at (same here,
+	// so either is fine — both are valid API snapshots).
 	verifyClone := cloneBare(t, barePath)
-	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "300.json")
+	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "300-*.json")
 	matches, _ := filepath.Glob(pattern)
-	require.Len(t, matches, 1)
-	data, readErr := os.ReadFile(matches[0])
-	require.NoError(t, readErr)
-	assert.Contains(t, string(data), "body from machine B",
-		"remote should have machine B's version (accept-theirs keeps the replayed commit)")
+	assert.Len(t, matches, 2, "both content-hash variants should exist on remote")
 }
 
 // TestMultiMachine_NonGitHubConflictStillFails verifies that conflicts in files
@@ -276,8 +279,8 @@ func TestMultiMachine_MixedPRsAndIssues(t *testing.T) {
 
 	// verify both exist on remote
 	verifyClone := cloneBare(t, barePath)
-	prPattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "400.json")
-	issuePattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "issue", "50.json")
+	prPattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "400-*.json")
+	issuePattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "issue", "50-*.json")
 	prMatches, _ := filepath.Glob(prPattern)
 	issueMatches, _ := filepath.Glob(issuePattern)
 	assert.Len(t, prMatches, 1, "PR #400 should exist on remote")
@@ -316,7 +319,7 @@ func TestMultiMachine_ThreeMachinesSequentialPush(t *testing.T) {
 	// verify all three PRs on remote
 	verifyClone := cloneBare(t, barePath)
 	for _, num := range []int{500, 501, 502} {
-		pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", fmt.Sprintf("%d.json", num))
+		pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", fmt.Sprintf("%d-*.json", num))
 		matches, _ := filepath.Glob(pattern)
 		assert.Len(t, matches, 1, "PR #%d should exist on remote", num)
 	}
@@ -363,7 +366,7 @@ func TestMultiMachine_ConcurrentPushRace(t *testing.T) {
 	// verify all PRs exist on remote
 	verifyClone := cloneBare(t, barePath)
 	for i := 0; i < numMachines; i++ {
-		pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", fmt.Sprintf("%d.json", 600+i))
+		pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", fmt.Sprintf("%d-*.json", 600+i))
 		matches, _ := filepath.Glob(pattern)
 		assert.Len(t, matches, 1, "PR #%d should exist on remote", 600+i)
 	}
@@ -395,7 +398,7 @@ func TestMultiMachine_CommitAndPushGitHubData_Integration(t *testing.T) {
 	// verify both PRs on remote
 	verifyClone := cloneBare(t, barePath)
 	for _, num := range []int{700, 701} {
-		pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", fmt.Sprintf("%d.json", num))
+		pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", fmt.Sprintf("%d-*.json", num))
 		matches, _ := filepath.Glob(pattern)
 		assert.Len(t, matches, 1, "PR #%d should exist on remote", num)
 	}

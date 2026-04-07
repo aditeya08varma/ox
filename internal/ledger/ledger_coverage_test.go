@@ -20,7 +20,7 @@ func TestResetGitHubTypeSyncState_RemovesExistingFile(t *testing.T) {
 	state := &GitHubTypeSyncState{
 		LastSyncAt:  time.Now(),
 		Count:       5,
-		KnownStates: map[int]string{1: "open"},
+		KnownItems: map[int]KnownItem{1: {State: "open"}},
 	}
 	require.NoError(t, WriteGitHubTypeSyncState(tmp, "pr", state))
 
@@ -37,7 +37,7 @@ func TestResetGitHubTypeSyncState_RemovesExistingFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, got.LastSyncAt.IsZero())
 	assert.Equal(t, 0, got.Count)
-	assert.Empty(t, got.KnownStates)
+	assert.Empty(t, got.KnownItems)
 }
 
 func TestResetGitHubTypeSyncState_NonexistentFile(t *testing.T) {
@@ -54,7 +54,7 @@ func TestResetGitHubTypeSyncState_Issue(t *testing.T) {
 	state := &GitHubTypeSyncState{
 		LastSyncAt:  time.Now(),
 		Count:       3,
-		KnownStates: map[int]string{10: "closed"},
+		KnownItems: map[int]KnownItem{10: {State: "closed"}},
 	}
 	require.NoError(t, WriteGitHubTypeSyncState(tmp, "issue", state))
 
@@ -157,9 +157,12 @@ func TestWriteAndReadGitHubIssue_RoundTrip(t *testing.T) {
 	err := WriteGitHubIssue(tmp, issue)
 	require.NoError(t, err)
 
-	// verify file exists at expected path
+	// verify file exists via findLatestFile (content-hash filename)
 	dir := DateDir(tmp, now, "issue")
-	path := filepath.Join(dir, "77.json")
+	path, err := findLatestFile(dir, 77)
+	require.NoError(t, err)
+	assert.Contains(t, filepath.Base(path), "77-") // hash-based filename
+
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 
@@ -321,20 +324,39 @@ func TestSyncStateFile_UnknownType(t *testing.T) {
 	assert.Equal(t, "release_sync_state.json", syncStateFile("release"))
 }
 
-func TestReadGitHubTypeSyncState_NilKnownStates(t *testing.T) {
+func TestReadGitHubTypeSyncState_NilKnownItems(t *testing.T) {
 	tmp := t.TempDir()
 	cacheDir := GitHubSyncCacheDir(tmp)
 	require.NoError(t, os.MkdirAll(cacheDir, 0755))
 
-	// write a state file without KnownStates field
+	// write a state file without KnownItems field
 	data := `{"last_sync_at":"2026-01-01T00:00:00Z","count":3}`
 	path := filepath.Join(cacheDir, syncStateFile("pr"))
 	require.NoError(t, os.WriteFile(path, []byte(data), 0644))
 
 	got, err := ReadGitHubTypeSyncState(tmp, "pr")
 	require.NoError(t, err)
-	assert.NotNil(t, got.KnownStates, "should initialize nil KnownStates to empty map")
+	assert.NotNil(t, got.KnownItems, "should initialize nil KnownItems to empty map")
 	assert.Equal(t, 3, got.Count)
+}
+
+func TestReadGitHubTypeSyncState_MigratesLegacyKnownStates(t *testing.T) {
+	tmp := t.TempDir()
+	cacheDir := GitHubSyncCacheDir(tmp)
+	require.NoError(t, os.MkdirAll(cacheDir, 0755))
+
+	// write a legacy state file with known_states (old format)
+	data := `{"last_sync_at":"2026-01-01T00:00:00Z","count":2,"known_states":{"1":"open","2":"closed"}}`
+	path := filepath.Join(cacheDir, syncStateFile("pr"))
+	require.NoError(t, os.WriteFile(path, []byte(data), 0644))
+
+	got, err := ReadGitHubTypeSyncState(tmp, "pr")
+	require.NoError(t, err)
+	assert.NotNil(t, got.KnownItems, "should migrate KnownStates to KnownItems")
+	assert.Equal(t, 2, len(got.KnownItems))
+	assert.Equal(t, "open", got.KnownItems[1].State)
+	assert.Equal(t, "closed", got.KnownItems[2].State)
+	assert.True(t, got.KnownItems[1].UpdatedAt.IsZero(), "migrated items should have zero UpdatedAt")
 }
 
 func TestWriteGitHubTypeSyncState_CreatesDir(t *testing.T) {
@@ -342,7 +364,7 @@ func TestWriteGitHubTypeSyncState_CreatesDir(t *testing.T) {
 	state := &GitHubTypeSyncState{
 		LastSyncAt:  time.Now(),
 		Count:       1,
-		KnownStates: map[int]string{1: "open"},
+		KnownItems: map[int]KnownItem{1: {State: "open"}},
 	}
 
 	// cache dir doesn't exist yet; WriteGitHubTypeSyncState should create it

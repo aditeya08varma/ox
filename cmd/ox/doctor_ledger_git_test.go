@@ -57,9 +57,9 @@ func TestFixLedgerBranchDiverged_GitHubConflictAutoResolved(t *testing.T) {
 
 	// verify push succeeded — PR on remote
 	verifyClone := cloneBare(t, barePath)
-	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "800.json")
+	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "800-*.json")
 	matches, _ := filepath.Glob(pattern)
-	require.Len(t, matches, 1, "PR #800 should exist on remote")
+	require.NotEmpty(t, matches, "PR #800 should exist on remote")
 }
 
 // TestFixLedgerBranchDiverged_NonGitHubConflictFails verifies that doctor
@@ -95,7 +95,9 @@ func TestFixLedgerBranchDiverged_NonGitHubConflictFails(t *testing.T) {
 }
 
 // TestFixLedgerBranchBehind_GitHubConflictAutoResolved verifies the behind
-// path (pull only, no push) also handles GitHub data conflicts.
+// path (pull only, no push) handles GitHub data from different machines.
+// With content-hash filenames, different content produces different filenames,
+// so the rebase completes cleanly without conflict.
 func TestFixLedgerBranchBehind_GitHubConflictAutoResolved(t *testing.T) {
 	barePath, machineA := createBareAndClone(t)
 	machineB := cloneBare(t, barePath)
@@ -106,7 +108,7 @@ func TestFixLedgerBranchBehind_GitHubConflictAutoResolved(t *testing.T) {
 	writeGitHubPRFile(t, machineB, prB)
 	commitGitHubData(t, machineB, "github: sync from B")
 
-	// machine A: commit conflicting PR #900 and push
+	// machine A: commit PR #900 with different content and push
 	prA := makePR(900, "PR from A", "bob", "open")
 	prA.Body = "body A"
 	writeGitHubPRFile(t, machineA, prA)
@@ -119,9 +121,7 @@ func TestFixLedgerBranchBehind_GitHubConflictAutoResolved(t *testing.T) {
 	result := fixLedgerBranchBehind(machineB, 1)
 
 	assert.True(t, result.passed,
-		"doctor should auto-resolve github data conflict during pull: %s — %s", result.message, result.detail)
-	assert.Contains(t, result.message, "auto-resolved",
-		"success message should mention auto-resolution")
+		"doctor should succeed during pull: %s — %s", result.message, result.detail)
 }
 
 // TestFixLedgerBranchAhead_FallsThroughToDivergedFix verifies the ahead path
@@ -153,9 +153,9 @@ func TestFixLedgerBranchAhead_FallsThroughToDivergedFix(t *testing.T) {
 
 	// verify PR #950 on remote
 	verifyClone := cloneBare(t, barePath)
-	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "950.json")
+	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "950-*.json")
 	matches, _ := filepath.Glob(pattern)
-	assert.Len(t, matches, 1, "PR #950 should exist on remote")
+	assert.NotEmpty(t, matches, "PR #950 should exist on remote")
 }
 
 // TestFixLedgerBranchAhead_UsesPushLedger verifies that fixLedgerBranchAhead
@@ -182,7 +182,7 @@ func TestFixLedgerBranchAhead_UsesPushLedger(t *testing.T) {
 		"success message must indicate push completed")
 
 	verifyClone := cloneBare(t, barePath)
-	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "1001.json")
+	pattern := filepath.Join(verifyClone, "data", "github", "*", "*", "*", "pr", "1001-*.json")
 	matches, _ := filepath.Glob(pattern)
 	assert.Len(t, matches, 1, "PR #1001 must be visible on remote after push")
 }
