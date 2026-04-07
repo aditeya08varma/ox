@@ -162,6 +162,7 @@ const (
 	CheckSlugSessionOrphaned    = "session-orphaned"
 
 	// Authentication checks (credential health)
+	CheckSlugGitHubAuth          = "github-auth"
 	CheckSlugGitCredsFreshness   = "git-creds-freshness"
 	CheckSlugCredentialIntegrity = "credential-integrity"
 	CheckSlugGitPATLiveness      = "git-pat-liveness"

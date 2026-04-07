@@ -27,6 +27,7 @@ func TestAllDaemonCheckCategories(t *testing.T) {
 		{"DaemonSyncStatusCheck", NewDaemonSyncStatusCheck()},
 		{"DaemonUptimeCheck", NewDaemonUptimeCheck()},
 		{"DaemonSyncErrorsCheck", NewDaemonSyncErrorsCheck()},
+		{"DaemonGitHubAuthCheck", NewDaemonGitHubAuthCheck()},
 		{"DaemonDirtyTeamContextCheck", NewDaemonDirtyTeamContextCheck()},
 		{"DaemonHeartbeatCheck", NewDaemonHeartbeatCheck("workspace", "repo_ws", "test", "ep")},
 	}
