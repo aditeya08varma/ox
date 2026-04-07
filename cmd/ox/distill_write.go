@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -128,6 +129,15 @@ func migrateDistillGuidelines(tcPath string) (bool, error) {
 			strings.Contains(string(out), "nothing to commit") {
 			return true, nil
 		}
+
+		// unstage both paths (old location + new location) so a failed commit
+		// doesn't leave dirty index state or affect unrelated staged files
+		resetCmd := exec.Command("git", "reset", "HEAD", "--", "DISTILL.md", filepath.Join("memory", "guidance", "DISTILL.md"))
+		resetCmd.Dir = tcPath
+		if resetOut, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
+			slog.Warn("failed to unstage after migration commit failure", "error", fmt.Sprintf("%s: %v", string(resetOut), resetErr))
+		}
+
 		return false, fmt.Errorf("git commit: %s: %w", string(out), err)
 	}
 
@@ -201,12 +211,21 @@ func removeMemoryFile(tcPath, relPath, commitMsg string) error {
 			strings.Contains(string(out), "nothing to commit") {
 			return nil
 		}
+
+		// unstage so a failed commit doesn't leave dirty index state
+		resetCmd := exec.Command("git", "reset", "HEAD", "--", relPath)
+		resetCmd.Dir = tcPath
+		if resetOut, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
+			slog.Warn("failed to unstage after commit failure", "path", relPath, "error", fmt.Sprintf("%s: %v", string(resetOut), resetErr))
+		}
+
 		return fmt.Errorf("git commit: %s: %w", string(out), err)
 	}
 	return nil
 }
 
 // commitMemoryFile stages and commits a memory file in the team context git repo.
+// On commit failure, the file is unstaged to prevent dirty index accumulation.
 func commitMemoryFile(tcPath, relPath, commitMsg string) error {
 	// git add --sparse (required for sparse checkout repos)
 	addCmd := exec.Command("git", "add", "--sparse", relPath)
@@ -226,6 +245,15 @@ func commitMemoryFile(tcPath, relPath, commitMsg string) error {
 			strings.Contains(string(out), "nothing to commit") {
 			return nil
 		}
+
+		// unstage the file so a failed commit doesn't leave dirty index state
+		// that persists across daemon --autostash sync cycles
+		resetCmd := exec.Command("git", "reset", "HEAD", "--", relPath)
+		resetCmd.Dir = tcPath
+		if resetOut, resetErr := resetCmd.CombinedOutput(); resetErr != nil {
+			slog.Warn("failed to unstage after commit failure", "path", relPath, "error", fmt.Sprintf("%s: %v", string(resetOut), resetErr))
+		}
+
 		return fmt.Errorf("git commit: %s: %w", string(out), err)
 	}
 
