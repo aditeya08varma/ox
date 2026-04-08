@@ -253,6 +253,48 @@ func TestScanPendingSessions(t *testing.T) {
 			t.Errorf("got %v, want nil", pending)
 		}
 	})
+
+	t.Run("since filters out older sessions", func(t *testing.T) {
+		ledgerPath, tcPath := setup(t, false)
+		// since = March 11 00:00 UTC → ryan (March 10) excluded, alice (March 11) included
+		since := time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("expected 1 pending (alice only), got %d", len(pending))
+		}
+		if pending[0].DirName != "2026-03-11T09-00-alice-OxABCD" {
+			t.Errorf("expected alice session, got %s", pending[0].DirName)
+		}
+	})
+
+	t.Run("since excludes all when all are older", func(t *testing.T) {
+		ledgerPath, tcPath := setup(t, false)
+		since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 0 {
+			t.Errorf("expected 0 pending, got %d", len(pending))
+		}
+	})
+
+	t.Run("since at midday still includes same-day sessions", func(t *testing.T) {
+		ledgerPath, tcPath := setup(t, false)
+		// since = March 10 at 3pm UTC — should still include March 10 session
+		// because we truncate to start-of-day
+		since := time.Date(2026, 3, 10, 15, 0, 0, 0, time.UTC)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 2 {
+			t.Errorf("expected 2 pending (both on or after March 10), got %d", len(pending))
+		}
+	})
 }
 
 func TestSessionSummaryToFacts(t *testing.T) {

@@ -103,6 +103,34 @@ func TestScanPendingDiscussions(t *testing.T) {
 			t.Errorf("got %d pending, want 2", len(pending))
 		}
 	})
+
+	t.Run("since filters out older discussions", func(t *testing.T) {
+		tcPath, _ := setup(t, false)
+		// since = March 11 00:00 UTC → ryan (March 10) excluded, alice (March 11) included
+		since := time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC)
+		pending, err := scanPendingDiscussions(tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("expected 1 pending (alice only), got %d", len(pending))
+		}
+		if pending[0].Title != "Sprint Planning" {
+			t.Errorf("expected Sprint Planning, got %s", pending[0].Title)
+		}
+	})
+
+	t.Run("since excludes all when all are older", func(t *testing.T) {
+		tcPath, _ := setup(t, false)
+		since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+		pending, err := scanPendingDiscussions(tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 0 {
+			t.Errorf("expected 0 pending, got %d", len(pending))
+		}
+	})
 }
 
 // writeFactFileWithHash writes a minimal JSONL fact file with the given source_hash.

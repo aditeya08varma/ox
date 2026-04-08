@@ -121,12 +121,12 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 	// compute time window from fact file metadata (stateless)
 	now := time.Now().UTC()
 	since := inferGitHubQueryHighWater(tc.Path)
-	if !extractSince.IsZero() && extractSince.After(since) {
-		// respect the caller's lookback window if it's more recent
-		since = extractSince
-	} else if distillAll && extractSince.IsZero() {
+	if distillAll {
 		// --all: scan full CodeDB history (zero since = no lower bound)
 		since = time.Time{}
+	} else if !extractSince.IsZero() && extractSince.After(since) {
+		// respect the caller's lookback window if it's more recent
+		since = extractSince
 	}
 
 	result, err := query.AssembleActivity(ctx, db.Store(), since, now)

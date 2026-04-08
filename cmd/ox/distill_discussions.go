@@ -73,6 +73,15 @@ func scanPendingDiscussions(tcPath string, since time.Time) ([]discussionInput, 
 			continue
 		}
 
+		// skip discussions older than the lookback window (before expensive hash/IO)
+		createdAt, err := time.Parse(time.RFC3339, meta.CreatedAt)
+		if err != nil {
+			slog.Debug("malformed discussion timestamp, using zero time", "dir", dirName, "raw", meta.CreatedAt, "error", err)
+		}
+		if !since.IsZero() && !createdAt.IsZero() && createdAt.Before(since) {
+			continue
+		}
+
 		// compute content hash for change detection
 		currentHash := discussionContentHash(dirPath)
 
@@ -86,16 +95,6 @@ func scanPendingDiscussions(tcPath string, since time.Time) ([]discussionInput, 
 		// skip if fact file exists with matching source_hash;
 		// all other cases (missing, legacy .md, stale hash) need extraction
 		if existingHash == currentHash && currentHash != "" {
-			continue
-		}
-
-		createdAt, err := time.Parse(time.RFC3339, meta.CreatedAt)
-		if err != nil {
-			slog.Debug("malformed discussion timestamp, using zero time", "dir", dirName, "raw", meta.CreatedAt, "error", err)
-		}
-
-		// skip discussions older than the lookback window
-		if !since.IsZero() && !createdAt.IsZero() && createdAt.Before(since) {
 			continue
 		}
 

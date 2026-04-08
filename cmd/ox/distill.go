@@ -683,7 +683,10 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	extractSince := inferDailyHighWater(tc.Path)
 	if extractSince.IsZero() && !distillAll {
 		extractSince = now.AddDate(0, 0, -7)
-		slog.Info("no prior daily distill found, defaulting extraction to last 7 days (use --all for full history)")
+		slog.Info("default extraction lookback",
+			"reason", "no_prior_daily_distill",
+			"lookback_days", 7,
+			"hint", "use --all for full history")
 	}
 	if distillAll {
 		extractSince = time.Time{} // zero = no filter
