@@ -15,7 +15,7 @@ func init() {
 		Name:        "GitHub data migration",
 		Category:    "Ledger Git Health",
 		FixLevel:    FixLevelConfirm,
-		Description: "Renames legacy GitHub data filenames to content-hash format and repairs corrupted files",
+		Description: "Renames legacy GitHub data filenames to content-hash format and deletes corrupted files with conflict markers",
 		Run:         func(fix bool) checkResult { return checkGitHubDataMigration(fix) },
 	})
 }
@@ -42,7 +42,7 @@ func checkGitHubDataMigration(fix bool) checkResult {
 
 	if !fix {
 		msg := fmt.Sprintf("%d legacy, %d corrupted", len(legacyFiles), len(corruptedFiles))
-		return WarningCheck(name, msg, "run `ox doctor --fix` to migrate")
+		return WarningCheck(name, msg, "run `ox doctor --fix` to migrate legacy files and delete corrupted ones")
 	}
 
 	logger := slog.Default()
