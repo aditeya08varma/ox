@@ -368,6 +368,60 @@ func (c *DaemonDirtyTeamContextCheck) Run(_ context.Context, _ bool) CheckResult
 	}
 }
 
+// DaemonGitHubAuthCheck detects GitHub authentication failures reported by the daemon.
+type DaemonGitHubAuthCheck struct{}
+
+// NewDaemonGitHubAuthCheck creates a GitHub auth check.
+func NewDaemonGitHubAuthCheck() *DaemonGitHubAuthCheck {
+	return &DaemonGitHubAuthCheck{}
+}
+
+// Name returns the check name.
+func (c *DaemonGitHubAuthCheck) Name() string {
+	return "GitHub auth"
+}
+
+// Category returns the check category.
+func (c *DaemonGitHubAuthCheck) Category() string {
+	return "Daemon"
+}
+
+// Run checks daemon issues for GitHub authentication failures.
+func (c *DaemonGitHubAuthCheck) Run(_ context.Context, _ bool) CheckResult {
+	if !daemon.IsRunning() {
+		return CheckResult{
+			Name:   c.Name(),
+			Status: StatusSkip,
+		}
+	}
+
+	client := daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
+	status, err := client.Status()
+	if err != nil {
+		return CheckResult{
+			Name:   c.Name(),
+			Status: StatusSkip,
+		}
+	}
+
+	for _, issue := range status.Issues {
+		if issue.Type == daemon.IssueTypeGitHubAuth {
+			return CheckResult{
+				Name:    c.Name(),
+				Status:  StatusWarn,
+				Message: issue.Summary,
+				Fix:     "Check GITHUB_TOKEN or run `gh auth login`. The token may lack the required scopes (e.g. repo or pull_request:read).",
+			}
+		}
+	}
+
+	return CheckResult{
+		Name:    c.Name(),
+		Status:  StatusPass,
+		Message: "ok",
+	}
+}
+
 // DaemonHeartbeatCheck verifies heartbeats are being written to repos.
 type DaemonHeartbeatCheck struct {
 	Type        string // "workspace", "ledger", "team"

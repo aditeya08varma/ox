@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -197,6 +199,11 @@ func (m *GitHubSyncManager) doSync(ctx context.Context, ledgerPath string) {
 	m.failCount = 0
 	m.mu.Unlock()
 
+	// Clear any prior GitHub auth issue now that sync succeeded.
+	if m.issues != nil {
+		m.issues.ClearIssue(IssueTypeGitHubAuth, "")
+	}
+
 	m.logger.Info("github sync completed",
 		"prs", combined.PRTotal, "issues", combined.IssueTotal,
 		"duration", duration.Round(time.Millisecond))
@@ -250,10 +257,16 @@ func (m *GitHubSyncManager) handleError(err error) {
 		m.backoffUntil = time.Now().Add(1 * time.Hour)
 		m.logger.Warn("github auth failed, backing off 1h", "error", err)
 		if m.issues != nil {
+			// Surface the specific API error (e.g. "Resource not accessible by
+			// personal access token") instead of a generic message.
+			summary := "GitHub authentication failed — check GITHUB_TOKEN or gh auth login"
+			if detail := extractGitHubDetail(err); detail != "" {
+				summary = fmt.Sprintf("GitHub authentication failed — %s", detail)
+			}
 			m.issues.SetIssue(DaemonIssue{
-				Type:     IssueTypeSyncBackoff,
+				Type:     IssueTypeGitHubAuth,
 				Severity: SeverityWarning,
-				Summary:  "GitHub authentication failed — check GITHUB_TOKEN or gh auth login",
+				Summary:  summary,
 			})
 		}
 		return
@@ -266,6 +279,38 @@ func (m *GitHubSyncManager) handleError(err error) {
 	}
 
 	m.logger.Warn("github sync failed", "error", err, "fail_count", m.failCount)
+}
+
+// extractGitHubDetail extracts the human-readable message from a GitHub API
+// error. The error chain from the client looks like:
+//
+//	"sync PRs: list PRs: github authentication failed: status 403: {\"message\":\"...\",…}"
+//
+// We try to parse the JSON body first; if that fails we fall back to the raw
+// text after the status code prefix.
+func extractGitHubDetail(err error) string {
+	s := err.Error()
+
+	// Find the JSON body embedded in the error string.
+	idx := strings.Index(s, "{\"")
+	if idx >= 0 {
+		var body struct {
+			Message string `json:"message"`
+		}
+		if json.Unmarshal([]byte(s[idx:]), &body) == nil && body.Message != "" {
+			return body.Message
+		}
+	}
+
+	// Fallback: grab text after "status NNN: "
+	if i := strings.Index(s, ": status "); i >= 0 {
+		rest := s[i+2:] // "status NNN: …"
+		if j := strings.Index(rest, ": "); j >= 0 {
+			return rest[j+2:]
+		}
+	}
+
+	return ""
 }
 
 // pushLedger pushes the ledger with retry and conflict resolution.

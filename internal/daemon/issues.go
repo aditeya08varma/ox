@@ -112,6 +112,7 @@ const (
 	IssueTypeGitLock            = "git_lock"
 	IssueTypeCloneFailed        = "clone_failed"
 	IssueTypeSyncBackoff        = "sync_backoff"
+	IssueTypeGitHubAuth         = "github_auth"
 	IssueTypeDirtyWorkspace     = "dirty_workspace"
 	IssueTypeCodeDBCacheWiped     = "codedb_cache_wiped"
 	IssueTypeDirtyOverlayFailed   = "dirty_overlay_failed"

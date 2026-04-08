@@ -52,6 +52,7 @@ func checkDaemonHealth(opts doctorOptions) []checkResult {
 		doctor.NewDaemonUptimeCheck(),
 		doctor.NewDaemonSyncStatusCheck(),
 		doctor.NewDaemonSyncErrorsCheck(),
+		doctor.NewDaemonGitHubAuthCheck(),
 		doctor.NewDaemonDirtyTeamContextCheck(),
 	}
 
