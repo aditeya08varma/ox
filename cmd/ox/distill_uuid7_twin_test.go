@@ -69,7 +69,7 @@ func TestExtractSessionFacts_WritesUUID7Filename(t *testing.T) {
 	require.NoError(t, os.MkdirAll(sessionFactsDir, 0o755))
 
 	// --- Step 1: scanPendingSessions finds the session ---
-	pending, err := scanPendingSessions(ledgerPath, tcPath)
+	pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, pending, 1, "must find exactly one pending session")
 	assert.Equal(t, sessionDirName, pending[0].DirName)
@@ -130,7 +130,7 @@ func TestExtractSessionFacts_WritesUUID7Filename(t *testing.T) {
 	assert.Len(t, readFacts, len(extractedFacts), "written facts count must match extracted")
 
 	// --- Step 5: Freshness check — rescan finds 0 pending ---
-	pendingAfter, err := scanPendingSessions(ledgerPath, tcPath)
+	pendingAfter, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 	require.NoError(t, err)
 	assert.Empty(t, pendingAfter, "after writing facts with matching hash, session must not be pending")
 }
@@ -189,7 +189,7 @@ func TestExtractDiscussionFacts_WritesUUID7Filename(t *testing.T) {
 	require.NoError(t, os.MkdirAll(factsDir, 0o755))
 
 	// --- Step 1: scanPendingDiscussions finds the discussion ---
-	pending, err := scanPendingDiscussions(tcPath)
+	pending, err := scanPendingDiscussions(tcPath, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, pending, 1, "must find exactly one pending discussion")
 	assert.Equal(t, discussionDirName, pending[0].DirName)
@@ -234,7 +234,7 @@ func TestExtractDiscussionFacts_WritesUUID7Filename(t *testing.T) {
 	require.NotEmpty(t, matches, "glob %s must find UUID7-named file", uuidPattern)
 
 	// --- Step 4: Freshness check — rescan finds 0 pending ---
-	pendingAfter, err := scanPendingDiscussions(tcPath)
+	pendingAfter, err := scanPendingDiscussions(tcPath, time.Time{})
 	require.NoError(t, err)
 	assert.Empty(t, pendingAfter, "after writing facts with matching hash, discussion must not be pending")
 }
@@ -296,7 +296,7 @@ func TestExtractDiscussionFacts_LLMPath_WritesUUID7Filename(t *testing.T) {
 	}
 
 	// Scan for pending discussions
-	pending, err := scanPendingDiscussions(tcPath)
+	pending, err := scanPendingDiscussions(tcPath, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
 	assert.Empty(t, pending[0].SummaryJSONDir, "no server summary.json should be detected")
@@ -325,7 +325,7 @@ func TestExtractDiscussionFacts_LLMPath_WritesUUID7Filename(t *testing.T) {
 	assert.NotEmpty(t, readFacts, "must have extracted facts")
 
 	// Freshness check
-	pendingAfter, err := scanPendingDiscussions(tcPath)
+	pendingAfter, err := scanPendingDiscussions(tcPath, time.Time{})
 	require.NoError(t, err)
 	assert.Empty(t, pendingAfter, "after writing facts, discussion must not be pending")
 }
@@ -423,7 +423,7 @@ func TestFreshnessCheck_GlobFindsUUID7SessionFacts(t *testing.T) {
 	writeSimpleFactFileHelper(t, factFile, expectedHash, "Fixed auth bug")
 
 	// scanPendingSessions should find 0 pending (hash matches)
-	pending, err := scanPendingSessions(ledgerPath, tcPath)
+	pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 	require.NoError(t, err)
 	assert.Empty(t, pending, "session with matching UUID7 fact file must not be pending")
 
@@ -433,7 +433,7 @@ func TestFreshnessCheck_GlobFindsUUID7SessionFacts(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), modifiedData, 0o644))
 
 	// Now scanPendingSessions should find 1 pending (hash mismatch)
-	pendingAfterChange, err := scanPendingSessions(ledgerPath, tcPath)
+	pendingAfterChange, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 	require.NoError(t, err)
 	assert.Len(t, pendingAfterChange, 1, "modified session must be pending for re-extraction")
 }
@@ -561,7 +561,7 @@ func TestScanPendingSessions_QualityGate(t *testing.T) {
 	// Create facts dir
 	require.NoError(t, os.MkdirAll(filepath.Join(tcPath, "memory", ".session-facts", "2026-04-01"), 0o755))
 
-	pending, err := scanPendingSessions(ledgerPath, tcPath)
+	pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 	require.NoError(t, err)
 	assert.Len(t, pending, 1, "only high-quality session should be pending")
 	assert.Equal(t, "Important work", pending[0].Summary.Title)
@@ -609,7 +609,7 @@ func TestSessionFacts_UUID7_RealCodePath_NoGitConflict(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.json"), summaryData, 0o644))
 
 	// --- Node A: scan, transform, write, commit, push ---
-	pendingA, err := scanPendingSessions(ledgerPath, nodeAPath)
+	pendingA, err := scanPendingSessions(ledgerPath, nodeAPath, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, pendingA, 1, "node A must find the pending session")
 
@@ -634,7 +634,7 @@ func TestSessionFacts_UUID7_RealCodePath_NoGitConflict(t *testing.T) {
 	runTwinGit(t, nodeAPath, "push", "origin", "main")
 
 	// --- Node B: scan, transform, write, commit (independent UUID7) ---
-	pendingB, err := scanPendingSessions(ledgerPath, nodeBPath)
+	pendingB, err := scanPendingSessions(ledgerPath, nodeBPath, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, pendingB, 1, "node B must find the pending session")
 
@@ -741,7 +741,7 @@ func TestDiscussionFacts_UUID7_RealCodePath_NoGitConflict(t *testing.T) {
 	runTwinGit(t, nodeBPath, "pull", "--rebase", "origin", "main")
 
 	// --- Node A: scan, extract, write, commit, push ---
-	pendingA, err := scanPendingDiscussions(nodeAPath)
+	pendingA, err := scanPendingDiscussions(nodeAPath, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, pendingA, 1, "node A must find the pending discussion")
 
@@ -763,7 +763,7 @@ func TestDiscussionFacts_UUID7_RealCodePath_NoGitConflict(t *testing.T) {
 	runTwinGit(t, nodeAPath, "push", "origin", "main")
 
 	// --- Node B: scan, extract, write, commit (independent UUID7) ---
-	pendingB, err := scanPendingDiscussions(nodeBPath)
+	pendingB, err := scanPendingDiscussions(nodeBPath, time.Time{})
 	require.NoError(t, err)
 	require.Len(t, pendingB, 1, "node B must find the pending discussion")
 

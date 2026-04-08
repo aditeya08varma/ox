@@ -115,7 +115,7 @@ func TestScanPendingSessions(t *testing.T) {
 
 	t.Run("no fact files — finds all", func(t *testing.T) {
 		ledgerPath, tcPath := setup(t, false)
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -136,7 +136,7 @@ func TestScanPendingSessions(t *testing.T) {
 			hash := sessionContentHash(ledgerPath, item.dirName)
 			writeSessionFactFileWithHash(t, tcPath, item.date, item.dirName, hash)
 		}
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -153,7 +153,7 @@ func TestScanPendingSessions(t *testing.T) {
 		aliceHash := sessionContentHash(ledgerPath, "2026-03-11T09-00-alice-OxABCD")
 		writeSessionFactFileWithHash(t, tcPath, "2026-03-11", "2026-03-11T09-00-alice-OxABCD", aliceHash)
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -167,7 +167,7 @@ func TestScanPendingSessions(t *testing.T) {
 
 	t.Run("legacy fact file without source_hash — re-extracts", func(t *testing.T) {
 		ledgerPath, tcPath := setup(t, true) // writes fact files without source_hash
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -188,7 +188,7 @@ func TestScanPendingSessions(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -203,7 +203,7 @@ func TestScanPendingSessions(t *testing.T) {
 		sessionsDir := filepath.Join(ledgerPath, "sessions")
 		createSessionDir(t, sessionsDir, "2026-03-10T14-23-ryan-Ox7f3a", testSummary("Low quality", 0.1))
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -218,7 +218,7 @@ func TestScanPendingSessions(t *testing.T) {
 		sessionsDir := filepath.Join(ledgerPath, "sessions")
 		createSessionDir(t, sessionsDir, "2026-03-10T14-23-ryan-Ox7f3a", testSummary("No score", 0))
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -233,7 +233,7 @@ func TestScanPendingSessions(t *testing.T) {
 		// create session dir without summary.json
 		os.MkdirAll(filepath.Join(ledgerPath, "sessions", "2026-03-10T14-23-ryan-Ox7f3a"), 0o755)
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -245,12 +245,54 @@ func TestScanPendingSessions(t *testing.T) {
 	t.Run("nonexistent sessions dir — returns nil", func(t *testing.T) {
 		ledgerPath := t.TempDir()
 		tcPath := t.TempDir()
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if pending != nil {
 			t.Errorf("got %v, want nil", pending)
+		}
+	})
+
+	t.Run("since filters out older sessions", func(t *testing.T) {
+		ledgerPath, tcPath := setup(t, false)
+		// since = March 11 00:00 UTC → ryan (March 10) excluded, alice (March 11) included
+		since := time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("expected 1 pending (alice only), got %d", len(pending))
+		}
+		if pending[0].DirName != "2026-03-11T09-00-alice-OxABCD" {
+			t.Errorf("expected alice session, got %s", pending[0].DirName)
+		}
+	})
+
+	t.Run("since excludes all when all are older", func(t *testing.T) {
+		ledgerPath, tcPath := setup(t, false)
+		since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 0 {
+			t.Errorf("expected 0 pending, got %d", len(pending))
+		}
+	})
+
+	t.Run("since at midday still includes same-day sessions", func(t *testing.T) {
+		ledgerPath, tcPath := setup(t, false)
+		// since = March 10 at 3pm UTC — should still include March 10 session
+		// because we truncate to start-of-day
+		since := time.Date(2026, 3, 10, 15, 0, 0, 0, time.UTC)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 2 {
+			t.Errorf("expected 2 pending (both on or after March 10), got %d", len(pending))
 		}
 	})
 }
@@ -711,7 +753,7 @@ func TestScanPendingSessionsStartedAt(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -735,7 +777,7 @@ func TestScanPendingSessionsStartedAt(t *testing.T) {
 		dirName := "2026-03-10T14-23-ryan-Ox7f3a"
 		createSessionDir(t, sessionsDir, dirName, testSummary("No raw", 0.8))
 
-		pending, err := scanPendingSessions(ledgerPath, tcPath)
+		pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -839,7 +881,7 @@ func TestScanPendingSessionsPopulatesHash(t *testing.T) {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	createSessionDir(t, sessionsDir, "2026-03-10T14-23-ryan-Ox7f3a", testSummary("Test", 0.8))
 
-	pending, err := scanPendingSessions(ledgerPath, tcPath)
+	pending, err := scanPendingSessions(ledgerPath, tcPath, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

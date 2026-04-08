@@ -46,7 +46,8 @@ type discussionMetadata struct {
 // scanPendingDiscussions reads the discussions/ directory in the team context
 // and returns discussions that need (re-)extraction based on source_hash in fact files.
 // Each discussion dir is expected to contain metadata.json, summary.md, and optionally transcript.vtt.
-func scanPendingDiscussions(tcPath string) ([]discussionInput, error) {
+// When since is non-zero, discussions created before that time are skipped.
+func scanPendingDiscussions(tcPath string, since time.Time) ([]discussionInput, error) {
 	discussionsDir := filepath.Join(tcPath, "discussions")
 	entries, err := os.ReadDir(discussionsDir)
 	if err != nil {
@@ -72,6 +73,17 @@ func scanPendingDiscussions(tcPath string) ([]discussionInput, error) {
 			continue
 		}
 
+		// skip discussions older than the lookback window (before expensive hash/IO)
+		createdAt, err := time.Parse(time.RFC3339, meta.CreatedAt)
+		if err != nil {
+			slog.Debug("malformed discussion timestamp, using zero time", "dir", dirName, "raw", meta.CreatedAt, "error", err)
+		}
+		if !since.IsZero() {
+			if createdAt.IsZero() || createdAt.Before(since) {
+				continue
+			}
+		}
+
 		// compute content hash for change detection
 		currentHash := discussionContentHash(dirPath)
 
@@ -86,11 +98,6 @@ func scanPendingDiscussions(tcPath string) ([]discussionInput, error) {
 		// all other cases (missing, legacy .md, stale hash) need extraction
 		if existingHash == currentHash && currentHash != "" {
 			continue
-		}
-
-		createdAt, err := time.Parse(time.RFC3339, meta.CreatedAt)
-		if err != nil {
-			slog.Debug("malformed discussion timestamp, using zero time", "dir", dirName, "raw", meta.CreatedAt, "error", err)
 		}
 
 		di := discussionInput{

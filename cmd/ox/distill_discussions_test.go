@@ -33,7 +33,7 @@ func TestScanPendingDiscussions(t *testing.T) {
 
 	t.Run("no fact files — finds all", func(t *testing.T) {
 		tcPath, _ := setup(t, false)
-		pending, err := scanPendingDiscussions(tcPath)
+		pending, err := scanPendingDiscussions(tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -44,7 +44,7 @@ func TestScanPendingDiscussions(t *testing.T) {
 
 	t.Run("fact files with matching source_hash — finds none", func(t *testing.T) {
 		tcPath, _ := setup(t, true)
-		pending, err := scanPendingDiscussions(tcPath)
+		pending, err := scanPendingDiscussions(tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -58,7 +58,7 @@ func TestScanPendingDiscussions(t *testing.T) {
 		// overwrite ryan's fact file with stale hash
 		factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
 		writeFactFileWithHash(t, factsDir, "2026-03-10-1423-ryan.jsonl", "stale-hash")
-		pending, err := scanPendingDiscussions(tcPath)
+		pending, err := scanPendingDiscussions(tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -78,7 +78,7 @@ func TestScanPendingDiscussions(t *testing.T) {
 		// write JSONL without source_hash
 		os.WriteFile(filepath.Join(factsDir, "2026-03-10-1423-ryan.jsonl"),
 			[]byte(`{"_meta":{"schema_version":"2","source_type":"discussion"}}`), 0o644)
-		pending, err := scanPendingDiscussions(tcPath)
+		pending, err := scanPendingDiscussions(tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -94,13 +94,41 @@ func TestScanPendingDiscussions(t *testing.T) {
 		os.MkdirAll(factsDir, 0o755)
 		os.WriteFile(filepath.Join(factsDir, "2026-03-10-1423-ryan.md"),
 			[]byte("# Facts\nold markdown"), 0o644)
-		pending, err := scanPendingDiscussions(tcPath)
+		pending, err := scanPendingDiscussions(tcPath, time.Time{})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		// ryan has legacy .md → re-process; alice has no fact file → process
 		if len(pending) != 2 {
 			t.Errorf("got %d pending, want 2", len(pending))
+		}
+	})
+
+	t.Run("since filters out older discussions", func(t *testing.T) {
+		tcPath, _ := setup(t, false)
+		// since = March 11 00:00 UTC → ryan (March 10) excluded, alice (March 11) included
+		since := time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC)
+		pending, err := scanPendingDiscussions(tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 1 {
+			t.Fatalf("expected 1 pending (alice only), got %d", len(pending))
+		}
+		if pending[0].Title != "Sprint Planning" {
+			t.Errorf("expected Sprint Planning, got %s", pending[0].Title)
+		}
+	})
+
+	t.Run("since excludes all when all are older", func(t *testing.T) {
+		tcPath, _ := setup(t, false)
+		since := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+		pending, err := scanPendingDiscussions(tcPath, since)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(pending) != 0 {
+			t.Errorf("expected 0 pending, got %d", len(pending))
 		}
 	})
 }
@@ -125,7 +153,7 @@ func TestScanPendingDiscussionsSorted(t *testing.T) {
 	createDiscussionDir(t, discussionsDir, "2026-03-11-0900-alice", "Later", "2026-03-11T09:00:00Z")
 	createDiscussionDir(t, discussionsDir, "2026-03-10-1423-ryan", "Earlier", "2026-03-10T14:23:00Z")
 
-	pending, err := scanPendingDiscussions(tcPath)
+	pending, err := scanPendingDiscussions(tcPath, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -150,7 +178,7 @@ func TestScanPendingDiscussionsMissingMetadata(t *testing.T) {
 	// create a valid dir
 	createDiscussionDir(t, discussionsDir, "2026-03-10-1423-ryan", "Valid", "2026-03-10T14:23:00Z")
 
-	pending, err := scanPendingDiscussions(tcPath)
+	pending, err := scanPendingDiscussions(tcPath, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -162,7 +190,7 @@ func TestScanPendingDiscussionsMissingMetadata(t *testing.T) {
 func TestScanPendingDiscussionsNoDir(t *testing.T) {
 	tcPath := t.TempDir() // no discussions/ subdir
 
-	pending, err := scanPendingDiscussions(tcPath)
+	pending, err := scanPendingDiscussions(tcPath, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -192,7 +220,7 @@ func TestScanPendingDiscussionsParsesContent(t *testing.T) {
 `
 	os.WriteFile(filepath.Join(discussionsDir, dirName, "transcript.vtt"), []byte(vttContent), 0o644)
 
-	pending, err := scanPendingDiscussions(tcPath)
+	pending, err := scanPendingDiscussions(tcPath, time.Time{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

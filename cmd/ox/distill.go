@@ -679,10 +679,23 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 
 	// (per-repo state migration removed — extraction is now stateless via file metadata)
 
+	// compute extraction lookback window (same logic as daily summarization)
+	extractSince := inferDailyHighWater(tc.Path)
+	if extractSince.IsZero() && !distillAll {
+		extractSince = now.AddDate(0, 0, -7)
+		slog.Info("default extraction lookback",
+			"reason", "no_prior_daily_distill",
+			"lookback_days", 7,
+			"hint", "use --all for full history")
+	}
+	if distillAll {
+		extractSince = time.Time{} // zero = no filter
+	}
+
 	// extract facts from unprocessed discussions before daily distill
 	// (discussions live in team context, not per-ledger — no multi-repo loop needed)
 	if plan.Daily {
-		if err := extractDiscussionFacts(ctx, cmd, backend, tc, extractGuidelines); err != nil {
+		if err := extractDiscussionFacts(ctx, cmd, backend, tc, extractGuidelines, extractSince); err != nil {
 			slog.Warn("discussion fact extraction failed", "error", err)
 		}
 	}
@@ -695,11 +708,11 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 				fmt.Fprintf(cmd.OutOrStdout(), "Processing repo %s (%s)...\n", repo.RepoID, repo.ProjectRoot)
 			}
 
-			if err := extractSessionFacts(cmd, tc, repo.RepoID, repo.LedgerPath); err != nil {
+			if err := extractSessionFacts(cmd, tc, repo.RepoID, repo.LedgerPath, extractSince); err != nil {
 				slog.Warn("session fact extraction failed", "repo", repoLabel, "error", err)
 			}
 
-			if err := extractGitHubFacts(ctx, cmd, backend, tc, repo.RepoID, repo.CodeDBDir, extractGuidelines); err != nil {
+			if err := extractGitHubFacts(ctx, cmd, backend, tc, repo.RepoID, repo.CodeDBDir, extractGuidelines, extractSince); err != nil {
 				slog.Warn("github fact extraction failed", "repo", repoLabel, "error", err)
 			}
 
@@ -848,8 +861,8 @@ func enumerateMonths(lastTime, now time.Time, tz *time.Location) []string {
 // extractDiscussionFacts scans for unprocessed discussions and writes fact files.
 // Each discussion gets a fact file in memory/.discussion-facts/{dirName}.md.
 // Uses LLM to extract structured facts, or writes stub if in dry-run mode.
-func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, guidelines string) error {
-	pending, err := scanPendingDiscussions(tc.Path)
+func extractDiscussionFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, guidelines string, since time.Time) error {
+	pending, err := scanPendingDiscussions(tc.Path, since)
 	if err != nil {
 		return fmt.Errorf("scan discussions: %w", err)
 	}

@@ -196,7 +196,7 @@ func TestExtractGitHubFacts_Integration(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "", time.Time{})
 	require.NoError(t, err)
 
 	// Verify prompt was sent to backend
@@ -256,7 +256,7 @@ func TestExtractGitHubFacts_DryRun(t *testing.T) {
 	distillDryRun = true
 	defer func() { distillDryRun = oldDryRun }()
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "", time.Time{})
 	require.NoError(t, err)
 
 	// Backend should NOT have been called
@@ -279,7 +279,7 @@ func TestExtractGitHubFacts_EmptySkip(t *testing.T) {
 	var buf bytes.Buffer
 	cmd.SetOut(&buf)
 
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "", time.Time{})
 	require.NoError(t, err)
 
 	// Backend should NOT have been called (no activity)
@@ -321,7 +321,7 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 
 	// First run: processes PRs #1-3
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "", time.Time{})
 	require.NoError(t, err)
 	assert.Contains(t, backend.promptReceived, "<batch>")
 
@@ -341,7 +341,7 @@ func TestExtractGitHubFacts_TwoRunStateTracking(t *testing.T) {
 	backend.output = `{"headline":"second run","source_type":"github","timestamp":"2026-03-23T00:00:00Z"}`
 	cmd.SetOut(&bytes.Buffer{})
 
-	err = extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
+	err = extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "", time.Time{})
 	require.NoError(t, err)
 
 	// The second run should have processed PR #4 (high-water from fact files works)
@@ -371,7 +371,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 
 	// First run
-	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "", time.Time{})
 	require.NoError(t, err)
 
 	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
@@ -388,7 +388,7 @@ func TestExtractGitHubFacts_IntraDayRerun(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 
 	// Second run same day — uses source_hash/date prefix from first run's fact files
-	err = extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "")
+	err = extractGitHubFacts(context.Background(), cmd, backend, tc, "test-repo", codeDBDir, "", time.Time{})
 	require.NoError(t, err)
 
 	entries2, err := os.ReadDir(factsDir)
@@ -437,7 +437,7 @@ func TestExtractGitHubFacts_MultiDayCatchup(t *testing.T) {
 
 	// No existing fact files — inferGitHubQueryHighWater falls back to 7 days ago,
 	// which covers all 3 days of inserted data
-	err := extractGitHubFacts(context.Background(), cmd, tracker, tc, "test-repo", codeDBDir, "")
+	err := extractGitHubFacts(context.Background(), cmd, tracker, tc, "test-repo", codeDBDir, "", time.Time{})
 	require.NoError(t, err)
 
 	// Verify fact files were created for each day

@@ -309,7 +309,7 @@ func TestGroupObservationsByDay_EdgeCases(t *testing.T) {
 
 func TestScanPendingDiscussions_Pure(t *testing.T) {
 	t.Run("missing directory returns nil", func(t *testing.T) {
-		result, err := scanPendingDiscussions("/nonexistent/path")
+		result, err := scanPendingDiscussions("/nonexistent/path", time.Time{})
 		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
@@ -319,7 +319,7 @@ func TestScanPendingDiscussions_Pure(t *testing.T) {
 		discussionsDir := filepath.Join(tmp, "discussions")
 		require.NoError(t, os.MkdirAll(discussionsDir, 0755))
 
-		result, err := scanPendingDiscussions(tmp)
+		result, err := scanPendingDiscussions(tmp, time.Time{})
 		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
@@ -331,7 +331,7 @@ func TestScanPendingDiscussions_Pure(t *testing.T) {
 		// create a file (not dir) in discussions
 		require.NoError(t, os.WriteFile(filepath.Join(discussionsDir, "notes.txt"), []byte("hi"), 0644))
 
-		result, err := scanPendingDiscussions(tmp)
+		result, err := scanPendingDiscussions(tmp, time.Time{})
 		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
