@@ -47,7 +47,7 @@ type sessionInput struct {
 // ledgerPath is the path to the ledger directory containing sessions/.
 //
 // No LLM calls — pure data transformation from structured summary.json.
-func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, ledgerPath string) error {
+func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, ledgerPath string, since time.Time) error {
 	if ledgerPath == "" {
 		slog.Debug("no ledger path, skipping session fact extraction", "repo", repoID)
 		return nil
@@ -57,7 +57,7 @@ func extractSessionFacts(cmd *cobra.Command, tc *config.TeamContext, repoID, led
 		return nil
 	}
 
-	pending, err := scanPendingSessions(ledgerPath, tc.Path)
+	pending, err := scanPendingSessions(ledgerPath, tc.Path, since)
 	if err != nil {
 		return fmt.Errorf("scan sessions: %w", err)
 	}
@@ -176,7 +176,7 @@ func readSessionStartedAt(sessionDir string) time.Time {
 // sessions that need fact extraction. A session is skipped if its fact file
 // already exists and the embedded source_hash matches the current summary hash.
 // Legacy fact files without source_hash are re-extracted.
-func scanPendingSessions(ledgerPath, tcPath string) ([]sessionInput, error) {
+func scanPendingSessions(ledgerPath, tcPath string, since time.Time) ([]sessionInput, error) {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	entries, err := os.ReadDir(sessionsDir)
 	if err != nil {
@@ -213,6 +213,16 @@ func scanPendingSessions(ledgerPath, tcPath string) ([]sessionInput, error) {
 		sessionDate := date
 		if !startedAt.IsZero() {
 			sessionDate = startedAt.UTC().Format("2006-01-02")
+		}
+
+		// skip sessions older than the lookback window
+		// truncate since to start-of-day so date-only comparison is fair
+		if !since.IsZero() {
+			sinceDate := since.Truncate(24 * time.Hour)
+			sessionTime, parseErr := time.Parse("2006-01-02", sessionDate)
+			if parseErr == nil && sessionTime.Before(sinceDate) {
+				continue
+			}
 		}
 
 		// compute content hash for change detection

@@ -102,7 +102,7 @@ If you are uncertain whether something is meaningful, include it with a note in 
 //
 // repoID identifies the repo for per-repo state tracking.
 // dataDir is the path to the CodeDB data directory.
-func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, repoID, dataDir, guidelines string) error {
+func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcli.Backend, tc *config.TeamContext, repoID, dataDir, guidelines string, extractSince time.Time) error {
 	if dataDir == "" {
 		slog.Debug("no CodeDB dir, skipping github fact extraction", "repo", repoID)
 		return nil
@@ -121,6 +121,13 @@ func extractGitHubFacts(ctx context.Context, cmd *cobra.Command, backend agentcl
 	// compute time window from fact file metadata (stateless)
 	now := time.Now().UTC()
 	since := inferGitHubQueryHighWater(tc.Path)
+	if !extractSince.IsZero() && extractSince.After(since) {
+		// respect the caller's lookback window if it's more recent
+		since = extractSince
+	} else if distillAll && extractSince.IsZero() {
+		// --all: scan full CodeDB history (zero since = no lower bound)
+		since = time.Time{}
+	}
 
 	result, err := query.AssembleActivity(ctx, db.Store(), since, now)
 	if err != nil {
