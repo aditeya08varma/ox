@@ -13,7 +13,9 @@ import (
 // --- IndexLocalRepo ---
 
 func TestIndexLocalRepo_Idempotent(t *testing.T) {
-	t.Parallel()
+	// Not parallel: FD leak detection uses process-wide FD counting which is
+	// incompatible with t.Parallel() — other tests' Bleve/SQLite/git FDs
+	// pollute the measurement.
 	if testing.Short() {
 		t.Skip("short: git indexing")
 	}
@@ -184,10 +186,13 @@ func TestIndexLocalRepo_RefsRecorded(t *testing.T) {
 // for performance — without repo.Close(), each call leaks those FDs.
 // Failure prevented: daemon exhausts FD limit after many indexing cycles.
 func TestIndexLocalRepo_NoFDLeak(t *testing.T) {
-	t.Parallel()
+	// Not parallel: FD leak detection uses process-wide FD counting which is
+	// incompatible with t.Parallel() — other tests' Bleve/SQLite/git FDs
+	// pollute the measurement.
 	if testing.Short() {
 		t.Skip("short: git indexing")
 	}
+
 	testguard.RequireNoFDLeak(t)
 
 	dir, _ := initGitRepo(t, 20)
