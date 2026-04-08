@@ -78,8 +78,10 @@ func scanPendingDiscussions(tcPath string, since time.Time) ([]discussionInput, 
 		if err != nil {
 			slog.Debug("malformed discussion timestamp, using zero time", "dir", dirName, "raw", meta.CreatedAt, "error", err)
 		}
-		if !since.IsZero() && !createdAt.IsZero() && createdAt.Before(since) {
-			continue
+		if !since.IsZero() {
+			if createdAt.IsZero() || createdAt.Before(since) {
+				continue
+			}
 		}
 
 		// compute content hash for change detection
