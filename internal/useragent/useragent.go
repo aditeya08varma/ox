@@ -6,12 +6,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"runtime"
 	"strings"
 	"sync"
 
+	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -141,10 +143,10 @@ func NewRequest(ctx context.Context, method, url string, body io.Reader) (*http.
 	return req, nil
 }
 
-// traceparent generates a W3C Trace Context traceparent header value.
-// Format: "00-{32 hex trace ID}-{16 hex span ID}-01"
-// See: https://www.w3.org/TR/trace-context/#traceparent-header
-func traceparent() string {
+// randomTraceparent generates a random W3C traceparent as a fallback when
+// OTel tracing is not initialized. Prefer observability.TraceParent() which
+// shares the trace ID across all requests in a command.
+func randomTraceparent() string {
 	var buf [24]byte // 16 (trace ID) + 8 (span ID)
 	_, _ = rand.Read(buf[:])
 	return "00-" + hex.EncodeToString(buf[:16]) + "-" + hex.EncodeToString(buf[16:]) + "-01"
@@ -152,13 +154,22 @@ func traceparent() string {
 
 // SetHeaders sets User-Agent, X-Orchestrator, and traceparent headers on the request.
 // Use this for SageOx API requests to include full telemetry context.
+//
+// If OTel tracing is active, the traceparent comes from the current command's
+// root span so all requests within one command share the same trace ID.
+// Falls back to a random traceparent when tracing is not initialized.
 func SetHeaders(h http.Header) {
 	h.Set("User-Agent", String())
 	if ot := OrchestratorType(); ot != "" {
 		h.Set("X-Orchestrator", ot)
 	}
 	if h.Get("traceparent") == "" {
-		h.Set("traceparent", traceparent())
+		tp := observability.TraceParent()
+		if tp == "" {
+			tp = randomTraceparent()
+		}
+		h.Set("traceparent", tp)
+		slog.Info("http request", "traceparent", tp, "user-agent", h.Get("User-Agent"))
 	}
 }
 
