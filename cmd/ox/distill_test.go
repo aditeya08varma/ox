@@ -719,7 +719,7 @@ func TestReadDailyFilesForDateRange_MultiplePerDay(t *testing.T) {
 	dailyDir := filepath.Join(tmp, "memory", "daily")
 	os.MkdirAll(dailyDir, 0o755)
 
-	// 3 UUID7 files for same day
+	// 3 UUID7 files for same day — all returned (distill may run multiple times per day)
 	os.WriteFile(filepath.Join(dailyDir, "2026-03-10-aaaa.md"), []byte("a"), 0o644)
 	os.WriteFile(filepath.Join(dailyDir, "2026-03-10-bbbb.md"), []byte("b"), 0o644)
 	os.WriteFile(filepath.Join(dailyDir, "2026-03-10-cccc.md"), []byte("c"), 0o644)
