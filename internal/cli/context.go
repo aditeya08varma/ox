@@ -9,7 +9,9 @@ import (
 
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/logger"
+	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/signature"
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/spf13/cobra"
@@ -95,6 +97,27 @@ func NewContext(cmd *cobra.Command, args []string) (*Context, error) {
 	SetJSONMode(cfg.JSON)
 	SetNoInteractive(cfg.NoInteractive)
 
+	// initialize OTel tracing — one trace per command invocation
+	// uses project endpoint if available, falls back to global endpoint
+	apiEndpoint := ""
+	if projectRoot != "" {
+		apiEndpoint = endpoint.GetForProject(projectRoot)
+	} else {
+		// Non-project commands (login, init) use global endpoint.
+		// See endpoint.Get() docs for why this is safe here.
+		apiEndpoint = endpoint.Get()
+	}
+	if err := observability.Init(cliCtx.Ctx, "ox-cli", apiEndpoint); err != nil {
+		slog.Debug("otel init failed, continuing without tracing", "error", err)
+	}
+
+	// create root span for this command
+	cmdPath := cmd.Name()
+	if cmd.Parent() != nil && cmd.Parent().Name() != "ox" {
+		cmdPath = cmd.Parent().Name() + " " + cmdPath
+	}
+	cliCtx.Ctx, _ = observability.StartCommand(cliCtx.Ctx, observability.CommandName(cmdPath))
+
 	return cliCtx, nil
 }
 
@@ -179,6 +202,7 @@ func (c *Context) Shutdown() {
 	if c.TelemetryClient != nil {
 		c.TelemetryClient.Stop() // flush and shutdown (non-blocking, short timeout)
 	}
+	observability.Shutdown(c.Ctx)
 }
 
 // LogInfo logs an info-level message

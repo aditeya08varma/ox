@@ -301,8 +301,8 @@ func TestTraceparent(t *testing.T) {
 		{
 			name: "unique per call",
 			fn: func(t *testing.T) {
-				a := traceparent()
-				b := traceparent()
+				a := randomTraceparent()
+				b := randomTraceparent()
 				assert.NotEqual(t, a, b)
 			},
 		},
