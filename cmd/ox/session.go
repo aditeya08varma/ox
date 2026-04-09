@@ -16,7 +16,8 @@ collective team knowledge.
 Commands:
   ox session list      List all sessions
   ox session view      View a session (html, text, or json)
-  ox session status    Check recording status`,
+  ox session status    Check recording status
+  ox session score     Report SageOx contribution score`,
 }
 
 func init() {
@@ -28,6 +29,7 @@ func init() {
 	sessionCmd.AddCommand(sessionUploadCmd)
 	sessionCmd.AddCommand(sessionPushSummaryCmd)
 	sessionCmd.AddCommand(sessionRegenerateCmd)
+	sessionCmd.AddCommand(sessionScoreCmd)
 
 	// TODO(post-MVP): commit, download, and upload should be automated.
 	// Users should only need start/stop — the rest is implementation detail.

@@ -27,7 +27,10 @@ type SessionMeta struct {
 	Summary     string             `json:"summary,omitempty"`
 	StopReason  string             `json:"stop_reason,omitempty"` // how session ended: "stopped", "aborted", "recovered", ""
 	RepoID      string             `json:"repo_id,omitempty"`
-	Files       map[string]FileRef `json:"files"` // OID manifest: filename -> ref
+	SageoxScore         *float64           `json:"sageox_score,omitempty"`          // agent's self-reported contribution score (0.0-1.0)
+	SageoxScoreCategory string             `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
+	SageoxScoreReason   string             `json:"sageox_score_reason,omitempty"`   // detailed explanation of SageOx influence
+	Files             map[string]FileRef `json:"files"`                         // OID manifest: filename -> ref
 }
 
 // FileRef identifies a content file by its LFS OID and size.
@@ -105,6 +108,13 @@ func (b *SessionMetaBuilder) StopReason(reason string) *SessionMetaBuilder {
 
 func (b *SessionMetaBuilder) WithFiles(f map[string]FileRef) *SessionMetaBuilder {
 	b.meta.Files = f
+	return b
+}
+
+func (b *SessionMetaBuilder) SageoxScore(score float64, category, reason string) *SessionMetaBuilder {
+	b.meta.SageoxScore = &score
+	b.meta.SageoxScoreCategory = category
+	b.meta.SageoxScoreReason = reason
 	return b
 }
 

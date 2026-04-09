@@ -121,6 +121,15 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		}
 	}
 
+	// inject sageox contribution score for the session's recorded agent
+	if meta, err := lfs.ReadSessionMeta(sessionDir); err == nil && meta.AgentID != "" {
+		if scoreFile, _ := session.ReadSageoxScore(meta.AgentID); scoreFile != nil {
+			summaryParsed.SageoxScore = &scoreFile.Score
+			summaryParsed.SageoxScoreCategory = string(scoreFile.Category)
+			summaryParsed.SageoxScoreReason = scoreFile.Reason
+		}
+	}
+
 	// load quality thresholds from user config
 	userCfg, _ := config.LoadUserConfig()
 	awCfg := userCfg.GetAgentWorkerConfig()

@@ -785,12 +785,22 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		}
 	}
 
-	meta := lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
+	metaBuilder := lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
 		Title(summaryResp.Title).
 		Summary(summaryResp.Summary).
 		EntryCount(len(stored.Entries)).
-		StopReason(session.StopReasonRecovered).
-		Build()
+		StopReason(session.StopReasonRecovered)
+
+	// inject sageox contribution score from cache file (matches synchronous path),
+	// then clean up to prevent stale scores leaking into future sessions
+	if agentID != "" {
+		if scoreFile, _ := session.ReadSageoxScore(agentID); scoreFile != nil {
+			metaBuilder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
+		}
+		_ = session.CleanupSageoxScore(agentID)
+	}
+
+	meta := metaBuilder.Build()
 
 	// write meta.json (without LFS refs initially)
 	if err := lfs.WriteSessionMetaOnly(payload.SessionDir, meta); err != nil {

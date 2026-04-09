@@ -1018,13 +1018,21 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// write meta.json first (before LFS upload) to preserve session metadata even if LFS fails
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 	displayName := identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName())
-	meta := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
+	metaBuilder := sessionMetaBase(sessionName, displayName, state.AgentID, state.AdapterName, state.StartedAt, projectRoot).
 		Model(result.Model).
 		Title(state.Title).
 		EntryCount(result.EntryCount).
 		Summary(result.Summary).
-		StopReason(session.StopReasonStopped).
-		Build()
+		StopReason(session.StopReasonStopped)
+
+	// inject sageox contribution score from cache file into meta.json,
+	// then clean up the score file to prevent stale scores leaking into future sessions
+	if scoreFile, _ := session.ReadSageoxScore(state.AgentID); scoreFile != nil {
+		metaBuilder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
+	}
+	_ = session.CleanupSageoxScore(state.AgentID)
+
+	meta := metaBuilder.Build()
 	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}
