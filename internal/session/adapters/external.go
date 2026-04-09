@@ -9,13 +9,13 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/sageox/ox/pkg/adapterruntime"
 	"github.com/sageox/ox/pkg/ndjson"
 )
 
@@ -473,7 +473,7 @@ func (ea *ExternalAdapter) callInfo() (*adapterprotocol.InfoResponse, error) {
 // with a clear error instead of letting the adapter silently produce garbage.
 func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byte, error) {
 	if subcommand == "find-session" {
-		if err := validateRepoRootArg(args); err != nil {
+		if err := validateRepoRootArg(args, true); err != nil {
 			return nil, fmt.Errorf("pre-flight check for %s %s: %w", ea.binaryPath, subcommand, err)
 		}
 	}
@@ -511,26 +511,26 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 }
 
 // validateRepoRootArg scans CLI args for --repo-root and validates the value
-// before spawning the subprocess. Catches bad paths at the CLI boundary
-// instead of letting adapters silently produce wrong results.
-func validateRepoRootArg(args []string) error {
+// before spawning the subprocess. Delegates path validation to
+// adapterruntime.ValidateRepoRoot (single implementation, includes 500ms stat
+// timeout for NFS resilience).
+// When requireRepoRoot is true (find-session), the absence of --repo-root is an error —
+// the adapter must not fall back to cwd for session discovery.
+func validateRepoRootArg(args []string, requireRepoRoot bool) error {
 	for i := 0; i < len(args)-1; i++ {
 		if args[i] != "--repo-root" {
 			continue
 		}
 		root := args[i+1]
-		if root == "" || root == "." {
-			return fmt.Errorf("--repo-root must be absolute, got %q", root)
-		}
-		if !filepath.IsAbs(root) {
-			return fmt.Errorf("--repo-root %q is not absolute", root)
-		}
-		if info, err := os.Stat(filepath.Join(root, ".sageox")); err != nil || !info.IsDir() {
-			return fmt.Errorf("--repo-root %q has no .sageox/ directory", root)
+		if err := adapterruntime.ValidateRepoRoot(root); err != nil {
+			return fmt.Errorf("--repo-root: %w", err)
 		}
 		return nil
 	}
-	return nil // no --repo-root arg present, nothing to validate
+	if requireRepoRoot {
+		return fmt.Errorf("--repo-root is required for find-session but was not provided")
+	}
+	return nil
 }
 
 // buildEnv constructs a sanitized environment for the adapter subprocess.

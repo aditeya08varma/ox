@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -469,8 +470,42 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 				state.SessionFile = sf
 			} else {
 				slog.Warn("session file not found at stop time", "agent_id", state.AgentID, "adapter", state.AdapterName, "started_at", state.StartedAt.Format(time.RFC3339), "error", findErr, "repo_root", repoRoot)
-				// recovery guidance: print exact import command so user can recover manually
+
+				// path variant retries: try alternate path forms that produce different project hashes
+				pathVariants := sessionPathVariants(repoRoot)
+				for _, variant := range pathVariants {
+					retryLookup := adapters.SessionLookup{
+						RepoRoot: variant,
+						AgentID:  state.AgentID,
+						Since:    state.StartedAt,
+					}
+					if sf, retryErr := adapter.FindSessionFile(retryLookup); retryErr == nil {
+						slog.Info("session file discovered via path variant", "file", sf, "original_root", repoRoot, "variant", variant)
+						state.SessionFile = sf
+						break
+					}
+				}
+
+				// last resort: time-window scan across all Claude project directories
+				if state.SessionFile == "" && state.AdapterName == "claude-code" {
+					if sf := scanClaudeProjectsForSession(state.AgentID, state.StartedAt); sf != "" {
+						slog.Info("session file discovered via time-window scan", "file", sf)
+						state.SessionFile = sf
+					}
+				}
+			}
+
+			// if still not found after all retries, set rich recovery marker
+			if state.SessionFile == "" {
 				fmt.Fprintf(os.Stderr, "\nSession data may still be recoverable. Try:\n  ox agent %s session import --file <path-to-session-jsonl>\n\n", state.AgentID)
+				_ = doctor.SetSessionRecoveryInfo(projectRoot, doctor.SessionRecoveryInfo{
+					AgentID:       state.AgentID,
+					AdapterName:   state.AdapterName,
+					StartedAt:     state.StartedAt,
+					WorkspacePath: repoRoot,
+					FailedAt:      time.Now(),
+					Error:         "session file not found at stop time",
+				})
 				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			}
 		}
@@ -505,10 +540,17 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// best-effort: record session-end observation to team memory
 	recordSessionObservation(projectRoot, processResult, duration)
 
-	// processing succeeded (or no source file to process) - clear active state.
-	if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
-		_ = doctor.SetNeedsDoctorAgent(projectRoot)
-		return fmt.Errorf("failed to finalize recording stop: %w", err)
+	// only clear recording state when processing succeeded or session was explicitly stopped
+	// with no data. Preserve state when session file discovery failed — it contains
+	// breadcrumbs (WorkspacePath, AdapterName, StartedAt) needed for recovery.
+	if processResult != nil || state.SessionFile == "" && state.AdapterName == "" {
+		if err := session.ClearRecordingStateForAgent(projectRoot, inst.AgentID); err != nil {
+			_ = doctor.SetNeedsDoctorAgent(projectRoot)
+			return fmt.Errorf("failed to finalize recording stop: %w", err)
+		}
+	} else if state.SessionFile == "" {
+		// session file not found — recording state preserved for recovery
+		slog.Info("recording state preserved for recovery", "agent_id", inst.AgentID, "adapter", state.AdapterName)
 	}
 	// finalize timing
 	timing["total_ms"] = time.Since(stopStart).Milliseconds()
@@ -550,6 +592,119 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 
 	// default: JSON output
 	return outputSessionStopJSON(inst, state, duration, processResult, timing)
+}
+
+// sessionPathVariants returns alternate path forms that may produce different
+// project hashes in Claude Code. Each variant is only included if it differs
+// from the original path. Covers: symlink resolution, trailing slash.
+func sessionPathVariants(repoRoot string) []string {
+	seen := map[string]bool{repoRoot: true}
+	var variants []string
+	add := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
+			variants = append(variants, p)
+		}
+	}
+
+	// symlink-resolved path (e.g., /var → /private/var on macOS)
+	if resolved, err := filepath.EvalSymlinks(repoRoot); err == nil {
+		add(resolved)
+	}
+
+	// trailing slash variant: Claude Code may have stored the path with or without
+	add(strings.TrimSuffix(repoRoot, "/"))
+	if !strings.HasSuffix(repoRoot, "/") {
+		add(repoRoot + "/")
+	}
+
+	return variants
+}
+
+// scanClaudeProjectsForSession is a last-resort recovery that scans all
+// ~/.claude/projects/ directories for JSONL files modified within the session's
+// time window. This catches cases where the project hash doesn't match due to
+// path normalization differences (trailing slash, case, mount points).
+func scanClaudeProjectsForSession(agentID string, startedAt time.Time) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	projectsDir := filepath.Join(home, ".claude", "projects")
+	projectDirs, err := os.ReadDir(projectsDir)
+	if err != nil {
+		return ""
+	}
+
+	// allow 30s buffer before session start for timing drift
+	searchStart := startedAt.Add(-30 * time.Second)
+
+	type candidate struct {
+		path    string
+		modTime time.Time
+	}
+	var candidates []candidate
+
+	for _, dir := range projectDirs {
+		if !dir.IsDir() {
+			continue
+		}
+		dirPath := filepath.Join(projectsDir, dir.Name())
+		files, err := os.ReadDir(dirPath)
+		if err != nil {
+			continue
+		}
+		for _, f := range files {
+			if f.IsDir() || !strings.HasSuffix(f.Name(), ".jsonl") {
+				continue
+			}
+			info, err := f.Info()
+			if err != nil {
+				continue
+			}
+			if info.ModTime().Before(searchStart) {
+				continue
+			}
+			candidates = append(candidates, candidate{
+				path:    filepath.Join(dirPath, f.Name()),
+				modTime: info.ModTime(),
+			})
+		}
+	}
+
+	if len(candidates) == 0 {
+		return ""
+	}
+
+	// sort most recently modified first
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].modTime.After(candidates[j].modTime)
+	})
+
+	// check up to 10 candidates for the agent ID (avoid scanning thousands of files)
+	limit := 10
+	if len(candidates) < limit {
+		limit = len(candidates)
+	}
+	for _, c := range candidates[:limit] {
+		if fileContainsString(c.path, agentID) {
+			return c.path
+		}
+	}
+	return ""
+}
+
+// fileContainsString checks if a file contains the given string, reading at most 64KB.
+func fileContainsString(path, needle string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	buf := make([]byte, 64*1024)
+	n, _ := f.Read(buf)
+	return strings.Contains(string(buf[:n]), needle)
 }
 
 // recordSessionObservation writes a session summary observation to team memory.

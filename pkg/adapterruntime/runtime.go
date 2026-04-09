@@ -19,14 +19,21 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"time"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/ndjson"
 )
 
+// statTimeout is the maximum time to wait for os.Stat on .sageox/ directories.
+// NFS-mounted repos can hang indefinitely on stat calls; 500ms is generous for
+// local and most network filesystems while preventing hook-path hangs.
+const statTimeout = 500 * time.Millisecond
+
 // ValidateRepoRoot checks that a repo root path is non-empty, absolute, and
 // contains a .sageox/ directory. All adapters using this SDK get this
 // validation for free when called via the find-session dispatch path.
+// The .sageox stat uses a 500ms timeout to prevent NFS hangs in hook paths.
 func ValidateRepoRoot(root string) error {
 	if root == "" || root == "." {
 		return fmt.Errorf("repo-root must be absolute, got %q", root)
@@ -34,11 +41,34 @@ func ValidateRepoRoot(root string) error {
 	if !filepath.IsAbs(root) {
 		return fmt.Errorf("repo-root %q is not absolute", root)
 	}
-	info, err := os.Stat(filepath.Join(root, ".sageox"))
-	if err != nil || !info.IsDir() {
+	info, err := statWithTimeout(filepath.Join(root, ".sageox"), statTimeout)
+	if err != nil {
+		return fmt.Errorf("repo-root %q has no .sageox/ directory: %w", root, err)
+	}
+	if !info.IsDir() {
 		return fmt.Errorf("repo-root %q has no .sageox/ directory", root)
 	}
 	return nil
+}
+
+// statWithTimeout runs os.Stat in a goroutine with a deadline.
+// Returns the FileInfo on success, or an error on timeout / stat failure.
+func statWithTimeout(path string, timeout time.Duration) (os.FileInfo, error) {
+	type result struct {
+		info os.FileInfo
+		err  error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		info, err := os.Stat(path)
+		ch <- result{info, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.info, r.err
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("stat %q timed out after %v (possible NFS hang)", path, timeout)
+	}
 }
 
 // Config holds the handler functions for each adapter subcommand.

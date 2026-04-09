@@ -6,11 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/sageox/ox/pkg/adapterruntime"
 )
 
 var (
@@ -39,15 +39,11 @@ type SessionLookup struct {
 
 // Validate checks that SessionLookup fields are well-formed.
 // RepoRoot must be absolute and contain a .sageox/ directory.
+// Delegates path validation to adapterruntime.ValidateRepoRoot (single implementation,
+// includes 500ms stat timeout for NFS resilience).
 func (sl SessionLookup) Validate() error {
-	if sl.RepoRoot == "" || sl.RepoRoot == "." {
-		return fmt.Errorf("repoRoot must be absolute, got %q", sl.RepoRoot)
-	}
-	if !filepath.IsAbs(sl.RepoRoot) {
-		return fmt.Errorf("repoRoot %q is not absolute", sl.RepoRoot)
-	}
-	if info, err := os.Stat(filepath.Join(sl.RepoRoot, ".sageox")); err != nil || !info.IsDir() {
-		return fmt.Errorf("repoRoot %q has no .sageox/ directory", sl.RepoRoot)
+	if err := adapterruntime.ValidateRepoRoot(sl.RepoRoot); err != nil {
+		return err
 	}
 	if sl.AgentID == "" {
 		return fmt.Errorf("agentID is required")

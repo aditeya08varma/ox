@@ -93,14 +93,14 @@ func TestSessionLookup_Validate_AcceptsValid(t *testing.T) {
 // TestValidateRepoRootArg_RejectsDot verifies "." is caught before subprocess spawn.
 // Failure prevented: adapter subprocess receives "." as --repo-root, silently fails.
 func TestValidateRepoRootArg_RejectsDot(t *testing.T) {
-	err := validateRepoRootArg([]string{"--repo-root", "."})
+	err := validateRepoRootArg([]string{"--repo-root", "."}, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "absolute")
 }
 
 // TestValidateRepoRootArg_RejectsEmpty verifies empty value is caught.
 func TestValidateRepoRootArg_RejectsEmpty(t *testing.T) {
-	err := validateRepoRootArg([]string{"--repo-root", ""})
+	err := validateRepoRootArg([]string{"--repo-root", ""}, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "absolute")
 }
@@ -110,7 +110,7 @@ func TestValidateRepoRootArg_RejectsNoSageox(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 
-	err := validateRepoRootArg([]string{"--repo-root", tmpDir})
+	err := validateRepoRootArg([]string{"--repo-root", tmpDir}, false)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), ".sageox/")
 }
@@ -121,13 +121,13 @@ func TestValidateRepoRootArg_AcceptsValid(t *testing.T) {
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
 
-	err := validateRepoRootArg([]string{"--repo-root", tmpDir})
+	err := validateRepoRootArg([]string{"--repo-root", tmpDir}, false)
 	require.NoError(t, err)
 }
 
-// TestValidateRepoRootArg_NoRepoRootArg verifies no --repo-root arg passes (noop).
+// TestValidateRepoRootArg_NoRepoRootArg verifies no --repo-root arg passes when not required.
 func TestValidateRepoRootArg_NoRepoRootArg(t *testing.T) {
-	err := validateRepoRootArg([]string{"--agent-id", "test"})
+	err := validateRepoRootArg([]string{"--agent-id", "test"}, false)
 	require.NoError(t, err)
 }
 
@@ -283,7 +283,7 @@ func TestCanonicalAdapterName(t *testing.T) {
 // passes through. The loop condition `i < len(args)-1` skips it intentionally —
 // the adapter subprocess will reject the missing value.
 func TestValidateRepoRootArg_LastArgNoValue(t *testing.T) {
-	err := validateRepoRootArg([]string{"--repo-root"})
+	err := validateRepoRootArg([]string{"--repo-root"}, false)
 	require.NoError(t, err, "trailing --repo-root without value should pass through to subprocess")
 }
 
@@ -295,11 +295,11 @@ func TestValidateRepoRootArg_FirstOfDuplicates(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
 
 	// first is valid, second is bad — should pass because first is checked and returned
-	err := validateRepoRootArg([]string{"--repo-root", tmpDir, "--repo-root", "."})
+	err := validateRepoRootArg([]string{"--repo-root", tmpDir, "--repo-root", "."}, false)
 	require.NoError(t, err)
 
 	// first is bad — should fail even though second is valid
-	err = validateRepoRootArg([]string{"--repo-root", ".", "--repo-root", tmpDir})
+	err = validateRepoRootArg([]string{"--repo-root", ".", "--repo-root", tmpDir}, false)
 	require.Error(t, err)
 }
 
@@ -307,7 +307,7 @@ func TestValidateRepoRootArg_FirstOfDuplicates(t *testing.T) {
 // This documents a known gap — the function only matches `--repo-root <value>` (space-separated).
 // The adapter subprocess handles --repo-root=value parsing itself.
 func TestValidateRepoRootArg_EqualsSyntaxPassthrough(t *testing.T) {
-	err := validateRepoRootArg([]string{"--repo-root=."})
+	err := validateRepoRootArg([]string{"--repo-root=."}, false)
 	require.NoError(t, err, "--repo-root=value syntax is not matched by pre-flight check")
 }
 
@@ -321,7 +321,7 @@ func TestValidateRepoRootArg_MixedArgs(t *testing.T) {
 		"--agent-id", "OxTest",
 		"--repo-root", tmpDir,
 		"--since", "2026-01-01T00:00:00Z",
-	})
+	}, false)
 	require.NoError(t, err)
 }
 
@@ -332,16 +332,45 @@ func TestValidateRepoRootArg_PathWithSpaces(t *testing.T) {
 	tmpDir = filepath.Join(tmpDir, "my project")
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
 
-	err := validateRepoRootArg([]string{"--repo-root", tmpDir})
+	err := validateRepoRootArg([]string{"--repo-root", tmpDir}, false)
 	require.NoError(t, err)
 }
 
 // TestValidateRepoRootArg_NilArgs verifies nil slice is safe.
 func TestValidateRepoRootArg_NilArgs(t *testing.T) {
-	require.NoError(t, validateRepoRootArg(nil))
+	require.NoError(t, validateRepoRootArg(nil, false))
 }
 
 // TestValidateRepoRootArg_EmptySlice verifies empty slice is safe.
 func TestValidateRepoRootArg_EmptySlice(t *testing.T) {
-	require.NoError(t, validateRepoRootArg([]string{}))
+	require.NoError(t, validateRepoRootArg([]string{}, false))
+}
+
+// --- F. validateRepoRootArg fail-closed for find-session ---
+
+// TestValidateRepoRootArg_RequireRepoRoot_MissingFails verifies that when
+// requireRepoRoot is true, missing --repo-root is an error (fail closed).
+// Failure prevented: find-session silently falls back to cwd when --repo-root omitted.
+func TestValidateRepoRootArg_RequireRepoRoot_MissingFails(t *testing.T) {
+	err := validateRepoRootArg([]string{"--agent-id", "test"}, true)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "required for find-session")
+}
+
+// TestValidateRepoRootArg_RequireRepoRoot_EmptyArgsFails verifies empty args
+// with requireRepoRoot is an error.
+func TestValidateRepoRootArg_RequireRepoRoot_EmptyArgsFails(t *testing.T) {
+	require.Error(t, validateRepoRootArg(nil, true))
+	require.Error(t, validateRepoRootArg([]string{}, true))
+}
+
+// TestValidateRepoRootArg_RequireRepoRoot_ValidPasses verifies that when
+// requireRepoRoot is true and --repo-root is valid, no error.
+func TestValidateRepoRootArg_RequireRepoRoot_ValidPasses(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+
+	err := validateRepoRootArg([]string{"--repo-root", tmpDir}, true)
+	require.NoError(t, err)
 }
