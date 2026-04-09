@@ -328,6 +328,7 @@ func resolveRepoName() string {
 
 // findProjectRootForDaemon returns the project root for setting daemon CWD.
 // Uses canonical config.FindProjectRoot; falls back to os.Getwd if no .sageox/ found.
+// NOTE: must be called BEFORE StabilizeCWD() which changes cwd to $HOME.
 func findProjectRootForDaemon() string {
 	if root := config.FindProjectRoot(); root != "" {
 		return root
@@ -336,6 +337,7 @@ func findProjectRootForDaemon() string {
 	if err != nil {
 		return ""
 	}
+	slog.Warn("findProjectRootForDaemon: no .sageox/ found, falling back to cwd", "cwd", cwd)
 	return cwd
 }
 

@@ -74,7 +74,7 @@ func handleImportSession(p adapterprotocol.ImportSessionParams) (*adapterprotoco
 
 	repoRoot := p.RepoRoot
 	if repoRoot == "" {
-		repoRoot, _ = os.Getwd()
+		return nil, fmt.Errorf("repo-root is required for aider import (was empty)")
 	}
 
 	historyFile := filepath.Join(repoRoot, aiderHistoryFile)

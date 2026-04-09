@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,9 +151,9 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 }
 
 func resolveConventionsPath(repoRoot string) string {
-	if repoRoot != "" {
-		return filepath.Join(repoRoot, "CONVENTIONS.md")
+	if repoRoot == "" {
+		log.Println("WARN: resolveConventionsPath called with empty repoRoot, falling back to cwd")
+		repoRoot, _ = os.Getwd()
 	}
-	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, "CONVENTIONS.md")
+	return filepath.Join(repoRoot, "CONVENTIONS.md")
 }

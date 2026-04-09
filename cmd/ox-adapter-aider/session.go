@@ -255,11 +255,7 @@ func parseAiderSessionByTimestamp(path, sessionTS string) ([]adapterprotocol.Raw
 func findAiderSession(repoRoot, _, since, _ string) (string, error) {
 	// aider always writes to .aider.chat.history.md in the project root
 	if repoRoot == "" {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return "", fmt.Errorf("cannot determine working directory: %w", err)
-		}
-		repoRoot = cwd
+		return "", fmt.Errorf("repo-root is required for aider session discovery (was empty)")
 	}
 
 	historyPath := filepath.Join(repoRoot, aiderHistoryFile)

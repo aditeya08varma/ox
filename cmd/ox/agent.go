@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log/slog"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -374,7 +375,9 @@ func findProjectRoot() (string, error) {
 
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			// reached filesystem root, use cwd
+			// no .sageox/ found — fall back to cwd but warn so silent failures
+			// are visible in logs (this is a common source of path divergence)
+			slog.Warn("findProjectRoot: no .sageox/ found, falling back to cwd", "cwd", cwd)
 			if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
 				return resolved, nil
 			}
