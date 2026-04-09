@@ -23,7 +23,7 @@ func TestGenericJSONLAdapter_Detect(t *testing.T) {
 
 func TestGenericJSONLAdapter_FindSessionFile(t *testing.T) {
 	adapter := &GenericJSONLAdapter{}
-	_, err := adapter.FindSessionFile("agent-123", time.Now())
+	_, err := adapter.FindSessionFile(SessionLookup{RepoRoot: "/tmp", AgentID: "agent-123", Since: time.Now()})
 	assert.ErrorIs(t, err, ErrSessionNotFound)
 }
 

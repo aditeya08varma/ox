@@ -31,9 +31,9 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 	repoID := getRepoIDOrDefault(projectRoot)
 
-	agentTypeForMeta := state.AgentType
+	agentTypeForMeta := adapters.CanonicalAdapterName(state.AgentType)
 	if agentTypeForMeta == "" {
-		agentTypeForMeta = state.AdapterName
+		agentTypeForMeta = adapters.CanonicalAdapterName(state.AdapterName)
 	}
 
 	meta := &session.StoreMeta{

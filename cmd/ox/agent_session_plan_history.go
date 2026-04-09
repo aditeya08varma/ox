@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/session"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/version"
 )
 
@@ -413,7 +414,7 @@ func writePlanHistoryRaw(path string, entries []planHistoryEntry, meta *planHist
 	}
 	if meta != nil {
 		if meta.AgentType != "" {
-			header["metadata"].(map[string]any)["agent_type"] = meta.AgentType
+			header["metadata"].(map[string]any)["agent_type"] = adapters.CanonicalAdapterName(meta.AgentType)
 		}
 		if meta.StartedAt != "" {
 			header["metadata"].(map[string]any)["started_at"] = meta.StartedAt

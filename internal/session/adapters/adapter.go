@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +26,44 @@ var (
 	// ErrWatchNotSupported is returned when an adapter does not support real-time watching
 	ErrWatchNotSupported = errors.New("watch not supported for this adapter")
 )
+
+// SessionLookup contains all parameters needed to locate an agent's session file.
+// Constructed from RecordingState at stop/hook time, or from command context at start time.
+// Replaces the old (agentID, since) signature that forced ambient repoRoot lookup.
+type SessionLookup struct {
+	RepoRoot       string    // absolute path to the project root (required, validated)
+	AgentID        string    // agent identifier (required)
+	Since          time.Time // filter to sessions created after this time (required)
+	AgentSessionID string    // adapter-native session UUID if known (optional)
+}
+
+// Validate checks that SessionLookup fields are well-formed.
+// RepoRoot must be absolute and contain a .sageox/ directory.
+func (sl SessionLookup) Validate() error {
+	if sl.RepoRoot == "" || sl.RepoRoot == "." {
+		return fmt.Errorf("repoRoot must be absolute, got %q", sl.RepoRoot)
+	}
+	if !filepath.IsAbs(sl.RepoRoot) {
+		return fmt.Errorf("repoRoot %q is not absolute", sl.RepoRoot)
+	}
+	if info, err := os.Stat(filepath.Join(sl.RepoRoot, ".sageox")); err != nil || !info.IsDir() {
+		return fmt.Errorf("repoRoot %q has no .sageox/ directory", sl.RepoRoot)
+	}
+	if sl.AgentID == "" {
+		return fmt.Errorf("agentID is required")
+	}
+	return nil
+}
+
+// CanonicalAdapterName returns the canonical adapter name for a given name or alias.
+// If the name is already canonical or unknown, it is returned as-is.
+func CanonicalAdapterName(name string) string {
+	lower := strings.ToLower(name)
+	if canonical, ok := adapterAliases[lower]; ok {
+		return canonical
+	}
+	return name
+}
 
 // RawEntry represents a conversation turn from any agent
 type RawEntry struct {
@@ -75,11 +115,11 @@ type Adapter interface {
 	// Returns true if the agent's session files are present and readable
 	Detect() bool
 
-	// FindSessionFile locates the session file for correlation
-	// Called after ox agent prime to find the matching agent session
-	// agentID is the unique identifier written during prime
-	// since filters to sessions created after this time
-	FindSessionFile(agentID string, since time.Time) (string, error)
+	// FindSessionFile locates the session file for correlation.
+	// Called after ox agent prime to find the matching agent session.
+	// The lookup struct carries all needed context (repoRoot, agentID, since)
+	// so the adapter never needs to derive repoRoot from ambient state.
+	FindSessionFile(lookup SessionLookup) (string, error)
 
 	// Read reads all entries from a session file
 	// Returns entries in chronological order

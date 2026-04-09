@@ -126,50 +126,22 @@ func (ea *ExternalAdapter) Detect() bool {
 	return resp.Detected
 }
 
-// resolveRepoRoot returns the symlink-resolved OX_REPO_ROOT, falling back to
-// cwd-based detection (walk up to find .sageox/) when the env var is unset.
-func resolveRepoRoot() string {
-	root := os.Getenv("OX_REPO_ROOT")
-	if root == "" {
-		root = detectRepoRootFromCwd()
-	}
-	if root == "" {
-		return ""
-	}
-	if resolved, err := filepath.EvalSymlinks(root); err == nil {
-		return resolved
-	}
-	return root
-}
-
-// detectRepoRootFromCwd walks up from cwd looking for a .sageox/ directory,
-// providing a fallback when OX_REPO_ROOT is not set in the environment.
-func detectRepoRootFromCwd() string {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return ""
-	}
-	dir := cwd
-	for {
-		if info, statErr := os.Stat(filepath.Join(dir, ".sageox")); statErr == nil && info.IsDir() {
-			return dir
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return cwd
-		}
-		dir = parent
-	}
-}
-
 // FindSessionFile calls find-session via one-shot mode.
-// In production, serve mode is preferred, but one-shot provides a fallback.
-func (ea *ExternalAdapter) FindSessionFile(agentID string, since time.Time) (string, error) {
-	out, err := ea.execOneShot("find-session",
-		"--agent-id", agentID,
-		"--repo-root", resolveRepoRoot(),
-		"--since", since.UTC().Format(time.RFC3339),
-	)
+// The lookup.RepoRoot is passed directly to the adapter subprocess;
+// no ambient state (env/cwd) is consulted.
+func (ea *ExternalAdapter) FindSessionFile(lookup SessionLookup) (string, error) {
+	if err := lookup.Validate(); err != nil {
+		return "", fmt.Errorf("invalid session lookup: %w", err)
+	}
+	args := []string{
+		"--agent-id", lookup.AgentID,
+		"--repo-root", lookup.RepoRoot,
+		"--since", lookup.Since.UTC().Format(time.RFC3339),
+	}
+	if lookup.AgentSessionID != "" {
+		args = append(args, "--agent-session-id", lookup.AgentSessionID)
+	}
+	out, err := ea.execOneShot("find-session", args...)
 	if err != nil {
 		return "", err
 	}
@@ -497,7 +469,15 @@ func (ea *ExternalAdapter) callInfo() (*adapterprotocol.InfoResponse, error) {
 }
 
 // execOneShot runs a one-shot subcommand and returns stdout bytes.
+// Pre-validates --repo-root before spawning the subprocess to fail fast
+// with a clear error instead of letting the adapter silently produce garbage.
 func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byte, error) {
+	if subcommand == "find-session" {
+		if err := validateRepoRootArg(args); err != nil {
+			return nil, fmt.Errorf("pre-flight check for %s %s: %w", ea.binaryPath, subcommand, err)
+		}
+	}
+
 	cmdArgs := append([]string{subcommand}, args...)
 	ctx, cancel := context.WithTimeout(context.Background(), ea.oneShotTimeout)
 	defer cancel()
@@ -528,6 +508,29 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 	}
 
 	return bytes.TrimSpace(stdout.Bytes()), nil
+}
+
+// validateRepoRootArg scans CLI args for --repo-root and validates the value
+// before spawning the subprocess. Catches bad paths at the CLI boundary
+// instead of letting adapters silently produce wrong results.
+func validateRepoRootArg(args []string) error {
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] != "--repo-root" {
+			continue
+		}
+		root := args[i+1]
+		if root == "" || root == "." {
+			return fmt.Errorf("--repo-root must be absolute, got %q", root)
+		}
+		if !filepath.IsAbs(root) {
+			return fmt.Errorf("--repo-root %q is not absolute", root)
+		}
+		if info, err := os.Stat(filepath.Join(root, ".sageox")); err != nil || !info.IsDir() {
+			return fmt.Errorf("--repo-root %q has no .sageox/ directory", root)
+		}
+		return nil
+	}
+	return nil // no --repo-root arg present, nothing to validate
 }
 
 // buildEnv constructs a sanitized environment for the adapter subprocess.

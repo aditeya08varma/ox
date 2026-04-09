@@ -132,7 +132,11 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 			return fmt.Errorf("codex adapter unavailable: %w", adapterErr)
 		}
 		since := time.Now().Add(-5 * time.Minute)
-		sf, findErr := codexAdapter.FindSessionFile(inst.AgentID, since)
+		sf, findErr := codexAdapter.FindSessionFile(adapters.SessionLookup{
+			RepoRoot: projectRoot,
+			AgentID:  inst.AgentID,
+			Since:    since,
+		})
 		if findErr != nil {
 			if errors.Is(findErr, adapters.ErrSessionNotFound) {
 				return fmt.Errorf("no active codex session found\nStart a Codex conversation in this repo, then run 'ox agent %s session start'", inst.AgentID)
@@ -149,8 +153,12 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 			if adapter, detectErr := adapters.DetectAdapter(); detectErr == nil {
 				adapterName = adapter.Name()
 				since := time.Now().Add(-5 * time.Minute)
-				sf, findErr := adapter.FindSessionFile(inst.AgentID, since)
-				if findErr != nil {
+				sf, findErr := adapter.FindSessionFile(adapters.SessionLookup{
+				RepoRoot: projectRoot,
+				AgentID:  inst.AgentID,
+				Since:    since,
+			})
+			if findErr != nil {
 					slog.Info("session file not found at start (will retry at stop)", "adapter", adapterName, "error", findErr)
 				} else {
 					sessionFile = sf
@@ -445,11 +453,25 @@ func runAgentSessionStop(inst *agentinstance.Instance) error {
 	// (Claude Code session JSONL may not have existed yet when recording started)
 	if state.SessionFile == "" && state.AdapterName != "" && state.AdapterName != "generic" {
 		if adapter, adapterErr := adapters.GetAdapter(state.AdapterName); adapterErr == nil {
-			if sf, findErr := adapter.FindSessionFile(state.AgentID, state.StartedAt); findErr == nil {
+			// use state.WorkspacePath (persisted at start) as the single source of truth
+			// for repoRoot -- never derive from ambient cwd/env at stop time
+			repoRoot := state.WorkspacePath
+			if repoRoot == "" {
+				repoRoot = projectRoot // fallback for legacy states without WorkspacePath
+			}
+			lookup := adapters.SessionLookup{
+				RepoRoot: repoRoot,
+				AgentID:  state.AgentID,
+				Since:    state.StartedAt,
+			}
+			if sf, findErr := adapter.FindSessionFile(lookup); findErr == nil {
 				slog.Info("session file discovered at stop time", "file", sf, "adapter", state.AdapterName)
 				state.SessionFile = sf
 			} else {
-				slog.Warn("session file not found at stop time", "agent_id", state.AgentID, "adapter", state.AdapterName, "started_at", state.StartedAt.Format(time.RFC3339), "error", findErr)
+				slog.Warn("session file not found at stop time", "agent_id", state.AgentID, "adapter", state.AdapterName, "started_at", state.StartedAt.Format(time.RFC3339), "error", findErr, "repo_root", repoRoot)
+				// recovery guidance: print exact import command so user can recover manually
+				fmt.Fprintf(os.Stderr, "\nSession data may still be recoverable. Try:\n  ox agent %s session import --file <path-to-session-jsonl>\n\n", state.AgentID)
+				_ = doctor.SetNeedsDoctorAgent(projectRoot)
 			}
 		}
 	}
@@ -801,9 +823,10 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	}
 
 	// use AgentType from recording state if set, fall back to AdapterName
-	agentTypeForMeta := state.AgentType
+	// canonicalize to prevent drift ("claude" vs "claude-code")
+	agentTypeForMeta := adapters.CanonicalAdapterName(state.AgentType)
 	if agentTypeForMeta == "" {
-		agentTypeForMeta = state.AdapterName
+		agentTypeForMeta = adapters.CanonicalAdapterName(state.AdapterName)
 	}
 
 	// fall back to recording state model for generic adapters

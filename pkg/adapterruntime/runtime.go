@@ -16,12 +16,30 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/ndjson"
 )
+
+// ValidateRepoRoot checks that a repo root path is non-empty, absolute, and
+// contains a .sageox/ directory. All adapters using this SDK get this
+// validation for free when called via the find-session dispatch path.
+func ValidateRepoRoot(root string) error {
+	if root == "" || root == "." {
+		return fmt.Errorf("repo-root must be absolute, got %q", root)
+	}
+	if !filepath.IsAbs(root) {
+		return fmt.Errorf("repo-root %q is not absolute", root)
+	}
+	info, err := os.Stat(filepath.Join(root, ".sageox"))
+	if err != nil || !info.IsDir() {
+		return fmt.Errorf("repo-root %q has no .sageox/ directory", root)
+	}
+	return nil
+}
 
 // Config holds the handler functions for each adapter subcommand.
 // Nil handlers cause the subcommand to return an error.
@@ -140,6 +158,11 @@ func RunWithArgs(cfg Config, args []string, stdin io.Reader, stdout io.Writer) e
 
 	case "find-session":
 		p := parseFindSessionParams(args[1:])
+		if err := ValidateRepoRoot(p.RepoRoot); err != nil {
+			return runOneShot(enc, func() (any, error) {
+				return nil, fmt.Errorf("invalid repo-root: %w", err)
+			})
+		}
 		return runOneShot(enc, func() (any, error) {
 			if cfg.FindSession == nil {
 				return nil, fmt.Errorf("find-session not implemented")
@@ -518,6 +541,17 @@ func (s *Server) Serve() {
 func (s *Server) dispatch(req adapterprotocol.Request) {
 	switch req.Method {
 	case adapterprotocol.MethodFindSession:
+		// pre-validate repoRoot before dispatching to handler
+		var fp adapterprotocol.FindSessionParams
+		if err := json.Unmarshal(req.Params, &fp); err == nil {
+			if err := ValidateRepoRoot(fp.RepoRoot); err != nil {
+				s.writer.WriteResponse(adapterprotocol.Response{
+					ID:    req.ID,
+					Error: &adapterprotocol.RPCError{Code: adapterprotocol.ErrCodeInvalidParams, Message: fmt.Sprintf("invalid repo-root: %v", err)},
+				})
+				return
+			}
+		}
 		dispatchMethod(s, req, s.findSession)
 	case adapterprotocol.MethodReadFromOffset:
 		dispatchMethod(s, req, s.readFromOffset)

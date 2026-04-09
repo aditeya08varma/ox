@@ -31,7 +31,7 @@ func (a *GenericJSONLAdapter) Detect() bool {
 
 // FindSessionFile is not supported by the generic adapter. The session file
 // path is created by session start and passed through recording state.
-func (a *GenericJSONLAdapter) FindSessionFile(_ string, _ time.Time) (string, error) {
+func (a *GenericJSONLAdapter) FindSessionFile(_ SessionLookup) (string, error) {
 	return "", ErrSessionNotFound
 }
 

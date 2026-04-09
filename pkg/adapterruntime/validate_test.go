@@ -1,6 +1,142 @@
 package adapterruntime
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+// --- A. ValidateRepoRoot ---
+
+// TestValidateRepoRoot_RejectsEmpty verifies empty string is rejected.
+// Failure prevented: adapter receives "" as repo-root, hashes to garbage path.
+func TestValidateRepoRoot_RejectsEmpty(t *testing.T) {
+	err := ValidateRepoRoot("")
+	if err == nil {
+		t.Fatal("expected error for empty root")
+	}
+}
+
+// TestValidateRepoRoot_RejectsDot verifies "." is rejected.
+// Failure prevented: adapter receives "." as repo-root, resolves to wrong directory.
+func TestValidateRepoRoot_RejectsDot(t *testing.T) {
+	err := ValidateRepoRoot(".")
+	if err == nil {
+		t.Fatal("expected error for dot root")
+	}
+}
+
+// TestValidateRepoRoot_RejectsRelative verifies relative paths are rejected.
+// Failure prevented: adapter receives "some/relative/path" which depends on cwd.
+func TestValidateRepoRoot_RejectsRelative(t *testing.T) {
+	err := ValidateRepoRoot("some/relative/path")
+	if err == nil {
+		t.Fatal("expected error for relative path")
+	}
+}
+
+// TestValidateRepoRoot_RejectsNoSageox verifies absolute path without .sageox/ is rejected.
+// Failure prevented: adapter runs against a directory that isn't an ox project.
+func TestValidateRepoRoot_RejectsNoSageox(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	err := ValidateRepoRoot(tmpDir)
+	if err == nil {
+		t.Fatal("expected error for directory without .sageox/")
+	}
+}
+
+// TestValidateRepoRoot_AcceptsValid verifies a proper ox project root passes.
+func TestValidateRepoRoot_AcceptsValid(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := ValidateRepoRoot(tmpDir)
+	if err != nil {
+		t.Fatalf("expected no error for valid root, got: %v", err)
+	}
+}
+
+// --- A2. ValidateRepoRoot edge cases ---
+
+// TestValidateRepoRoot_PathWithSpaces verifies paths containing spaces pass.
+// Failure prevented: projects in directories with spaces silently fail session lookup.
+func TestValidateRepoRoot_PathWithSpaces(t *testing.T) {
+	tmpDir := filepath.Join(t.TempDir(), "my project")
+	tmpDir, _ = filepath.EvalSymlinks(filepath.Dir(tmpDir))
+	tmpDir = filepath.Join(tmpDir, "my project")
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRepoRoot(tmpDir); err != nil {
+		t.Fatalf("path with spaces should pass: %v", err)
+	}
+}
+
+// TestValidateRepoRoot_TrailingSlash verifies trailing slash is accepted.
+func TestValidateRepoRoot_TrailingSlash(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRepoRoot(tmpDir + "/"); err != nil {
+		t.Fatalf("trailing slash should pass: %v", err)
+	}
+}
+
+// TestValidateRepoRoot_SageoxIsFile verifies .sageox as a regular file is rejected.
+// Failure prevented: interrupted `ox init` leaves a .sageox file; adapter treats it as valid.
+func TestValidateRepoRoot_SageoxIsFile(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+	if err := os.WriteFile(filepath.Join(tmpDir, ".sageox"), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := ValidateRepoRoot(tmpDir)
+	if err == nil {
+		t.Fatal("expected error when .sageox is a file, not directory")
+	}
+}
+
+// TestValidateRepoRoot_SymlinkedSageox verifies .sageox as a symlink to a real dir passes.
+func TestValidateRepoRoot_SymlinkedSageox(t *testing.T) {
+	tmpDir := t.TempDir()
+	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
+
+	realDir := filepath.Join(tmpDir, "real-sageox")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(tmpDir, ".sageox")); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRepoRoot(tmpDir); err != nil {
+		t.Fatalf("symlinked .sageox should pass: %v", err)
+	}
+}
+
+// TestValidateRepoRoot_NonexistentPath verifies totally nonexistent path is rejected.
+func TestValidateRepoRoot_NonexistentPath(t *testing.T) {
+	err := ValidateRepoRoot("/nonexistent/path/that/does/not/exist")
+	if err == nil {
+		t.Fatal("expected error for nonexistent path")
+	}
+}
+
+// TestValidateRepoRoot_TildePath verifies ~ is not treated as absolute.
+func TestValidateRepoRoot_TildePath(t *testing.T) {
+	err := ValidateRepoRoot("~/repo")
+	if err == nil {
+		t.Fatal("expected error for tilde path")
+	}
+}
+
+// --- B. ValidateSessionID ---
 
 func TestValidateSessionID(t *testing.T) {
 	tests := []struct {
