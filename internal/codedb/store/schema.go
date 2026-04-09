@@ -173,7 +173,12 @@ CREATE INDEX IF NOT EXISTS idx_issues_created_at ON issues(created_at);
 CREATE INDEX IF NOT EXISTS idx_commits_timestamp ON commits(timestamp);
 `
 
-// CreateSchema initializes the SQLite tables and indexes.
+// CreateSchema initializes the SQLite tables and indexes, and runs all
+// pending migrations. "Migrations" here include both schema migrations
+// (idempotent ALTER/CREATE) and one-shot data repairs that recover from
+// historical bugs (see migrateInvalidateGitHubMtimesForIssue474). New
+// migrations should be appended at the end and gated by their own
+// idempotency check (column existence, sentinel row, etc.).
 func CreateSchema(db *sql.DB) error {
 	_, err := db.Exec(schemaDDL)
 	if err != nil {
@@ -188,7 +193,10 @@ func CreateSchema(db *sql.DB) error {
 	if err := migrateAddGitHubTables(db); err != nil {
 		return err
 	}
-	return migrateAddPRCommits(db)
+	if err := migrateAddPRCommits(db); err != nil {
+		return err
+	}
+	return migrateInvalidateGitHubMtimesForIssue474(db)
 }
 
 // migrateAddTypeInfo adds signature, return_type, and params columns to the
@@ -351,6 +359,59 @@ func migrateAddGitHubTables(db *sql.DB) error {
 		}
 	}
 	return nil
+}
+
+// migrateInvalidateGitHubMtimesForIssue474 forces a one-time full reindex of
+// the GitHub data tables after the indexer's snapshot-selection logic was fixed
+// in issue #474. The previous indexer iterated content-hashed PR/issue snapshots
+// in lex order and let the last upsert win, which silently picked stale
+// snapshots when their hash lex-sorted after the chronologically-latest one.
+//
+// The new indexer groups snapshots by object number and picks the latest by
+// updated_at — but it skips groups whose file mtimes haven't changed. Existing
+// caches have all mtimes recorded, so without this migration the corrupted
+// rows would persist until a new snapshot lands. Clearing github_file_mtimes
+// once forces the next IndexGitHubData call to re-pick every group.
+//
+// The migration marks itself done with a sentinel row so it runs exactly once
+// per database. The sentinel uses an invalid filesystem path so it can't
+// collide with a real source_path.
+//
+// The DELETE and sentinel INSERT run inside a transaction so a crash between
+// them can't strand the cache in a "deleted but not marked done" state, which
+// would otherwise wipe the freshly-rebuilt cache on every subsequent Open().
+func migrateInvalidateGitHubMtimesForIssue474(db *sql.DB) error {
+	const sentinelPath = "__migration_474_indexer_lex_order__"
+
+	// idempotent: skip if sentinel already present
+	var done bool
+	err := db.QueryRow(
+		`SELECT COUNT(*) > 0 FROM github_file_mtimes WHERE source_path = ?`,
+		sentinelPath,
+	).Scan(&done)
+	if err != nil {
+		return err
+	}
+	if done {
+		return nil
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck // rollback after successful commit is a no-op
+
+	if _, err := tx.Exec(`DELETE FROM github_file_mtimes`); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO github_file_mtimes (source_path, mtime_unix) VALUES (?, 0)`,
+		sentinelPath,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // migrateAddPRCommits creates the pr_commits table for databases created

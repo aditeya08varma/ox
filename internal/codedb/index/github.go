@@ -8,6 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
 	"time"
 
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
@@ -24,18 +28,20 @@ type GitHubIndexStats struct {
 // IndexGitHubData reads PR and issue JSON files from the ledger and upserts
 // them into CodeDB's pull_requests/issues tables with their comments.
 //
-// The ledger stores data in time-partitioned directories:
+// The ledger stores append-only snapshots in time-partitioned directories:
 //
-//	data/github/YYYY/MM/DD/pr/NNN.json
-//	data/github/YYYY/MM/DD/issue/NNN.json
+//	data/github/YYYY/MM/DD/pr/{number}-{hash}.json
+//	data/github/YYYY/MM/DD/issue/{number}-{hash}.json
 //
-// Each file is a self-contained JSON blob that we upsert by number.
-// Existing records are replaced (delete + insert) to pick up state changes,
-// new comments, etc.
+// A single PR may have many snapshot files representing different points in
+// time as its state evolves (open → reviewed → merged). Lex order of the
+// content-hash filenames has no relationship to chronological order, so we
+// group snapshots by object number and explicitly pick the one with the
+// latest updated_at as the winner — only the winner is written to the DB.
 //
-// Incremental: files are skipped if their mtime hasn't changed since the
-// last successful index. This reduces steady-state cost from O(all files)
-// to O(changed files) per run.
+// Incremental: a group is skipped if every file in it has its current mtime
+// already recorded. Adding a new snapshot to a group invalidates the group
+// and triggers a re-pick.
 func IndexGitHubData(ctx context.Context, s *store.Store, ledgerPath string, progress ProgressFunc) (*GitHubIndexStats, error) {
 	if ledgerPath == "" {
 		return &GitHubIndexStats{}, nil
@@ -56,26 +62,25 @@ func IndexGitHubData(ctx context.Context, s *store.Store, ledgerPath string, pro
 		return stats, fmt.Errorf("list PR files: %w", err)
 	}
 
+	prGroups := groupSnapshotsByNumber(prFiles)
+
 	var changedPR int
-	for _, path := range prFiles {
+	for _, group := range prGroups {
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
-		if fileUnchanged(path, knownMtimes) {
+		if groupUnchanged(group, knownMtimes) {
 			continue
 		}
 		changedPR++
 		if changedPR == 1 && progress != nil {
 			progress("Indexing changed PR files from ledger...")
 		}
-		mtime, indexErr := indexPRFile(ctx, s, path)
-		if indexErr != nil {
-			slog.Warn("index PR file failed, skipping", "path", path, "error", indexErr)
+		if _, indexErr := indexPRFile(ctx, s, group.winner); indexErr != nil {
+			slog.Warn("index PR file failed, skipping", "path", group.winner, "error", indexErr)
 			continue
 		}
-		if err := saveFileMtime(ctx, s, path, mtime); err != nil {
-			slog.Warn("save PR file mtime failed", "path", path, "error", err)
-		}
+		recordGroupMtimes(ctx, s, group)
 		stats.PRsIndexed++
 	}
 
@@ -85,26 +90,25 @@ func IndexGitHubData(ctx context.Context, s *store.Store, ledgerPath string, pro
 		return stats, fmt.Errorf("list issue files: %w", err)
 	}
 
+	issueGroups := groupSnapshotsByNumber(issueFiles)
+
 	var changedIssue int
-	for _, path := range issueFiles {
+	for _, group := range issueGroups {
 		if err := ctx.Err(); err != nil {
 			return stats, err
 		}
-		if fileUnchanged(path, knownMtimes) {
+		if groupUnchanged(group, knownMtimes) {
 			continue
 		}
 		changedIssue++
 		if changedIssue == 1 && progress != nil {
 			progress("Indexing changed issue files from ledger...")
 		}
-		mtime, indexErr := indexIssueFile(ctx, s, path)
-		if indexErr != nil {
-			slog.Warn("index issue file failed, skipping", "path", path, "error", indexErr)
+		if _, indexErr := indexIssueFile(ctx, s, group.winner); indexErr != nil {
+			slog.Warn("index issue file failed, skipping", "path", group.winner, "error", indexErr)
 			continue
 		}
-		if err := saveFileMtime(ctx, s, path, mtime); err != nil {
-			slog.Warn("save issue file mtime failed", "path", path, "error", err)
-		}
+		recordGroupMtimes(ctx, s, group)
 		stats.IssuesIndexed++
 	}
 
@@ -113,6 +117,202 @@ func IndexGitHubData(ctx context.Context, s *store.Store, ledgerPath string, pro
 	}
 
 	return stats, nil
+}
+
+// snapshotGroup represents N append-only snapshots of the same PR/issue.
+// One file is chosen as the winner (latest updated_at); the rest are tracked
+// so the indexer can record mtimes for siblings — preventing the unchanged
+// skip from being defeated when only one snapshot in a group has been touched.
+type snapshotGroup struct {
+	winner   string   // path to the snapshot with latest updated_at
+	allPaths []string // every snapshot path sharing the same PR/issue number
+}
+
+// snapshotCandidate is one parsed snapshot file under consideration as the
+// winner of its group. parsed=false means JSON unmarshal failed (or the file
+// couldn't be read), in which case updatedAt is the zero value.
+type snapshotCandidate struct {
+	path      string
+	updatedAt time.Time
+	mtime     time.Time
+	parsed    bool
+}
+
+// candidateBeats reports whether `cur` should replace `best` as the winner of
+// its group. The comparison is total and deterministic: every pair of distinct
+// candidates produces a definite winner, regardless of map iteration order or
+// filesystem walk order.
+//
+// Order of precedence:
+//  1. parsed JSON beats unparsed
+//  2. later updated_at wins
+//  3. later filesystem mtime breaks ties
+//  4. lex-greater path is the final fallback
+//
+// Step 4 is reached only when every other field is identical and ensures the
+// outcome doesn't depend on goroutine scheduling, walker implementation, or
+// map ordering — properties that are easy to silently break in a refactor.
+//
+// Identical inputs (same struct value, including same path) return false in
+// both directions — neither beats the other. This is unreachable from the
+// selection loop in groupSnapshotsByNumber (which never compares an element
+// against itself) but matters for direct callers.
+func candidateBeats(cur, best snapshotCandidate) bool {
+	if cur.parsed != best.parsed {
+		return cur.parsed
+	}
+	if !cur.updatedAt.Equal(best.updatedAt) {
+		return cur.updatedAt.After(best.updatedAt)
+	}
+	if !cur.mtime.Equal(best.mtime) {
+		return cur.mtime.After(best.mtime)
+	}
+	return cur.path > best.path
+}
+
+// groupSnapshotsByNumber groups ledger PR/issue files by parsed object number,
+// picking the file with the latest updated_at as the winner per group.
+//
+// Why this exists: the ledger stores append-only snapshots ({number}-{hash}.json),
+// so a single PR may have many files representing different points in time.
+// Lex order of content-hash filenames has no relationship to chronological order,
+// so the indexer must explicitly choose the latest by reading each file's
+// updated_at — otherwise whichever file happens to lex-sort last wins, which
+// can be a chronologically-earlier (and stale) snapshot. See issue #474.
+//
+// Grouping key is (parent directory, parsed number). Files for the same PR
+// always live in the same created_at date directory (see WriteGitHubPR in
+// internal/ledger/github_data.go), so dir+number is a stable identity. If the
+// ledger ever starts writing the same PR number across multiple date dirs,
+// each dir will become its own group and the later dir's index pass will
+// upsert second — correct by accident, but a comment in WriteGitHubPR would
+// be safer than relying on this.
+//
+// Files with unparseable filenames or unparseable JSON each form their own
+// single-file group so they're still indexed (defensive — preserves prior
+// behavior for malformed inputs).
+//
+// Winner selection within a group:
+//  1. parsed JSON beats unparsed
+//  2. later updated_at wins
+//  3. later filesystem mtime breaks ties
+//  4. lex-greater path is the final deterministic fallback
+//
+// Steps 1–3 are the substantive selection rule. Step 4 only matters when
+// every other signal is identical (e.g., all candidates failed to parse JSON
+// and were created with the same mtime), but it removes any dependence on
+// map iteration order or filesystem walk order — guaranteeing the chosen
+// winner is reproducible across runs.
+func groupSnapshotsByNumber(paths []string) []snapshotGroup {
+	// group by (parent_dir, number) — files for the same PR live in the
+	// same created_at date directory, so dir+number is a stable identifier
+	byKey := make(map[string][]snapshotCandidate)
+	var unparseable []string
+
+	for _, path := range paths {
+		num := parseSnapshotNumber(filepath.Base(path))
+		if num < 0 {
+			unparseable = append(unparseable, path)
+			continue
+		}
+		key := filepath.Dir(path) + "\x00" + strconv.Itoa(num)
+
+		c := snapshotCandidate{path: path}
+		if info, err := os.Stat(path); err == nil {
+			c.mtime = info.ModTime()
+		}
+		if data, err := os.ReadFile(path); err == nil {
+			var stub struct {
+				UpdatedAt time.Time `json:"updated_at"`
+			}
+			if json.Unmarshal(data, &stub) == nil {
+				c.updatedAt = stub.UpdatedAt
+				c.parsed = true
+			}
+		}
+		byKey[key] = append(byKey[key], c)
+	}
+
+	groups := make([]snapshotGroup, 0, len(byKey)+len(unparseable))
+	for _, candidates := range byKey {
+		winnerIdx := 0
+		for i := 1; i < len(candidates); i++ {
+			if candidateBeats(candidates[i], candidates[winnerIdx]) {
+				winnerIdx = i
+			}
+		}
+		all := make([]string, len(candidates))
+		for i, c := range candidates {
+			all[i] = c.path
+		}
+		groups = append(groups, snapshotGroup{
+			winner:   candidates[winnerIdx].path,
+			allPaths: all,
+		})
+	}
+	for _, p := range unparseable {
+		groups = append(groups, snapshotGroup{winner: p, allPaths: []string{p}})
+	}
+
+	// deterministic ordering simplifies test assertions and debugging
+	sort.Slice(groups, func(i, j int) bool {
+		return groups[i].winner < groups[j].winner
+	})
+
+	return groups
+}
+
+// parseSnapshotNumber extracts the PR/issue number from a snapshot filename.
+// Accepts both content-hashed ({number}-{hash}.json) and legacy ({number}.json)
+// formats. Returns -1 if the filename doesn't match either, or if the parsed
+// number is non-positive (PR/issue numbers are always >= 1).
+func parseSnapshotNumber(name string) int {
+	if !strings.HasSuffix(name, ".json") {
+		return -1
+	}
+	base := strings.TrimSuffix(name, ".json")
+	candidate := base
+	if i := strings.IndexByte(base, '-'); i > 0 {
+		candidate = base[:i]
+	}
+	// strconv.Atoi accepts a leading "-"; reject anything that isn't a pure
+	// positive integer literal.
+	for _, r := range candidate {
+		if r < '0' || r > '9' {
+			return -1
+		}
+	}
+	n, err := strconv.Atoi(candidate)
+	if err != nil || n <= 0 {
+		return -1
+	}
+	return n
+}
+
+// groupUnchanged returns true if every file in the group has its current
+// mtime recorded — meaning nothing in the group has been added or modified
+// since the last successful index.
+func groupUnchanged(g snapshotGroup, knownMtimes map[string]int64) bool {
+	for _, p := range g.allPaths {
+		if !fileUnchanged(p, knownMtimes) {
+			return false
+		}
+	}
+	return true
+}
+
+// recordGroupMtimes records the current mtime for every file in the group so
+// future runs can skip the group when nothing has changed.
+func recordGroupMtimes(ctx context.Context, s *store.Store, g snapshotGroup) {
+	for _, p := range g.allPaths {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if err := saveFileMtime(ctx, s, p, info.ModTime().UTC().UnixNano()); err != nil {
+			slog.Warn("save github file mtime failed", "path", p, "error", err)
+		}
+	}
 }
 
 // fileUnchanged returns true if the file's current mtime matches the stored mtime.

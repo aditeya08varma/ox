@@ -371,6 +371,86 @@ func TestMigrateAddPRCommits_Idempotent(t *testing.T) {
 	}
 }
 
+// TestMigrateInvalidateGitHubMtimesForIssue474 verifies the one-shot cache
+// reset that recovers existing CodeDB rows from the indexer's lex-order bug.
+// After the fix, mtimes recorded by the buggy indexer would normally make the
+// new indexer skip groups (the cache says "nothing changed"). Clearing the
+// table once forces a full re-pick on the next IndexGitHubData call.
+func TestMigrateInvalidateGitHubMtimesForIssue474(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
+	db, _ := createOldSchemaDB(t)
+	defer db.Close()
+
+	if err := migrateAddGitHubTables(db); err != nil {
+		t.Fatalf("migrateAddGitHubTables: %v", err)
+	}
+
+	// pretend the buggy indexer ran and populated mtimes
+	rows := [][2]any{
+		{"/some/path/461-aaaaaaaa.json", int64(1700000001)},
+		{"/some/path/461-bbbbbbbb.json", int64(1700000002)},
+		{"/some/path/472-cccccccc.json", int64(1700000003)},
+	}
+	for _, r := range rows {
+		if _, err := db.Exec(
+			`INSERT INTO github_file_mtimes (source_path, mtime_unix) VALUES (?, ?)`,
+			r[0], r[1],
+		); err != nil {
+			t.Fatalf("seed mtime row: %v", err)
+		}
+	}
+
+	// run migration
+	if err := migrateInvalidateGitHubMtimesForIssue474(db); err != nil {
+		t.Fatalf("first migration: %v", err)
+	}
+
+	// all real mtime rows should be gone, sentinel should remain
+	var realCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM github_file_mtimes WHERE source_path NOT LIKE '__migration%'`,
+	).Scan(&realCount); err != nil {
+		t.Fatalf("count real rows: %v", err)
+	}
+	if realCount != 0 {
+		t.Errorf("expected all real mtime rows cleared, got %d remaining", realCount)
+	}
+
+	var sentinelCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM github_file_mtimes WHERE source_path = '__migration_474_indexer_lex_order__'`,
+	).Scan(&sentinelCount); err != nil {
+		t.Fatalf("count sentinel: %v", err)
+	}
+	if sentinelCount != 1 {
+		t.Errorf("expected sentinel row, got %d", sentinelCount)
+	}
+
+	// seed real rows again — these would be added by a subsequent indexer run
+	if _, err := db.Exec(
+		`INSERT INTO github_file_mtimes (source_path, mtime_unix) VALUES ('/new/path/100-aaa.json', 1700000010)`,
+	); err != nil {
+		t.Fatalf("re-seed: %v", err)
+	}
+
+	// second run must be a no-op (idempotent) — must NOT clear the new rows
+	if err := migrateInvalidateGitHubMtimesForIssue474(db); err != nil {
+		t.Fatalf("second migration: %v", err)
+	}
+
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM github_file_mtimes WHERE source_path NOT LIKE '__migration%'`,
+	).Scan(&realCount); err != nil {
+		t.Fatalf("count after second migration: %v", err)
+	}
+	if realCount != 1 {
+		t.Errorf("idempotent migration must preserve post-migration rows, got %d", realCount)
+	}
+}
+
 func TestCreateSchema_AllMigrations(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
