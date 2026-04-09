@@ -137,6 +137,35 @@ next section.
 
 After install, the user runs `gh auth login` once.
 
+#### Path validation rules
+
+Several steps below ask the user for a path (repo path, clone path) or
+read a path from a JSON state file. Before interpolating any such value
+into a shell command, the agent **must** validate it against these rules:
+
+1. **Absolute path required.** Must start with `/` or `~`. Reject relative
+   paths and bare names.
+2. **No `..` segments.** Reject anything containing `..`.
+3. **No shell metacharacters.** Reject anything containing any of these
+   characters: `;` `$` `` ` `` `|` `&` `<` `>` `(` `)` `{` `}` `*` `?`
+   `[` `]` `!` `\` newline.
+4. **For clone paths used by the auto-update flow** (see Option 2 below),
+   apply two additional checks:
+   - Must be **under `$HOME`**. Reject `/tmp`, `/var/tmp`, `/dev/shm`,
+     `/private/tmp`, network mounts, and any other location not owned by
+     the current user.
+   - The path must already exist as a directory and contain a `.git`
+     subdirectory before any `git pull` / `make install` runs.
+
+On any validation failure: print a clear error to the user explaining
+which rule failed and ask them to provide a different path. **Do not
+attempt to "fix up" or sanitize the input** — reject and re-prompt.
+
+Treat values read from `~/.openclaw/memory/*.json` files as untrusted
+even though this skill writes them: the user (or a process running as
+the user) may have edited the file by hand or by another tool between
+runs. Re-validate every read.
+
 #### Installing `ox` — interactive setup
 
 The `ox` CLI install method is a one-time choice stored in
@@ -171,7 +200,8 @@ so the user can sanity-check what is about to run:
 ```bash
 # Download to a temp file. -f makes curl fail on HTTP errors instead of
 # executing an HTML error page; --max-time bounds a stalled connection.
-INSTALL_SCRIPT="$(mktemp -t ox-install.XXXXXX.sh)"
+# Use the template form for mktemp — portable across GNU (Linux) and BSD (macOS).
+INSTALL_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/ox-install.XXXXXXXX")"
 curl -fsSL --max-time 60 \
   https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh \
   -o "$INSTALL_SCRIPT"
@@ -226,6 +256,18 @@ check their shell PATH.
    - **Linux (Arch):** `sudo pacman -S --noconfirm go`
 
 2. Ask the user for a clone path. Default: `$HOME/src/sageox/ox`.
+   **Validate** the input against the Path validation rules above,
+   including the additional rule that the path must be under `$HOME`.
+   Re-prompt on failure.
+
+   ⚠️ **The clone path becomes a privileged location.** If auto-update is
+   enabled, this skill will run `make build && make install` from it on
+   every invocation. Anyone with write access to the clone path can run
+   arbitrary code in the user's environment. Strongly recommend a
+   personal directory under `$HOME` (the default `$HOME/src/sageox/ox`
+   is a good choice). Refuse anything in `/tmp`, `/var/tmp`, `/dev/shm`,
+   shared filesystems, or world-writable directories — these checks are
+   already part of the validation rules; do not bypass them.
 
 3. Ask the user whether to auto-update from git on every run (yes/no).
    Default: yes.
@@ -287,18 +329,27 @@ check their shell PATH.
 ##### Updating `ox` from git (auto-update flow)
 
 On every subsequent run, if the memory file says
-`install_method == "git"` and `auto_update == true`, pull and rebuild
-before running the rest of the skill:
+`install_method == "git"` and `auto_update == true`:
 
-```bash
-CLONE_PATH="$(jq -r .clone_path ~/.openclaw/memory/sageox-ox-install.json)"
-(cd "$CLONE_PATH" && git pull --ff-only && make build && make install) || {
-  echo "ox auto-update failed; continuing with existing binary" >&2
-}
-```
+1. Read `clone_path` from `~/.openclaw/memory/sageox-ox-install.json`.
+2. **Re-validate** it against the Path validation rules in Prerequisites
+   § 4, including the additional clone-path checks (must be under
+   `$HOME`, must exist, must contain a `.git` subdirectory). The memory
+   file is user-writable and may have been edited externally between
+   runs — never trust persisted values without re-validation.
+3. **If validation fails**, log a clear error naming the failing rule,
+   skip the auto-update entirely, and fall back to the existing `ox`
+   binary on PATH. Do not proceed with `cd` / `git pull` / `make install`.
+4. If validation passes, run:
 
-Auto-update failures are non-fatal — fall back to the existing binary and
-surface the error to the user.
+   ```bash
+   (cd "$CLONE_PATH" && git pull --ff-only && make build && make install) || {
+     echo "ox auto-update failed; continuing with existing binary" >&2
+   }
+   ```
+
+Auto-update failures (validation or build) are non-fatal — fall back to
+the existing binary and surface the error to the user.
 
 The user can say **"switch ox install method"** or **"update ox now"** at
 any time to re-run the interactive flow.
@@ -333,11 +384,21 @@ The manifest format is:
   before proceeding.
 - If the manifest does not exist, ask the user which repos to include. For
   each repo path provided:
-  1. Verify the directory exists
-  2. Verify `.sageox/config.json` exists (confirms `ox init` was run)
-  3. Read `team_id` from `.sageox/config.json`
-  4. If `.sageox/config.json` is missing, ask if the user wants to run
-     `ox init` in that repo
+  1. **Validate the path against the Path validation rules in
+     Prerequisites § 4.** Reject and re-prompt on failure.
+  2. Verify the directory exists.
+  3. Verify `.sageox/config.json` exists (confirms `ox init` was run).
+  4. Read `team_id` from `.sageox/config.json`. **Treat the value as
+     untrusted** — do not interpolate it into shell commands. If you
+     need to use it as an argument, pass it as a separate argv element
+     (not via string concatenation) and refuse values containing shell
+     metacharacters.
+  5. If `.sageox/config.json` is missing, ask if the user wants to run
+     `ox init` in that repo.
+
+- When loading an existing manifest, **re-validate every repo path** in
+  it against the Path validation rules. The manifest file is
+  user-writable and may have been edited externally between runs.
 - Write the manifest after collecting all repos.
 - The user can say "add repo", "remove repo", or "show repos" at any
   time to manage the manifest.
