@@ -59,10 +59,15 @@ func supFindRepoRoot(t *testing.T) string {
 	}
 }
 
-func supFindSessionParams(agentID string) adapterprotocol.FindSessionParams {
+func supFindSessionParams(t *testing.T, agentID string) adapterprotocol.FindSessionParams {
+	t.Helper()
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	return adapterprotocol.FindSessionParams{
 		AgentID:  agentID,
-		RepoRoot: "/tmp/test-repo",
+		RepoRoot: tmpDir,
 		RepoID:   "repo-1",
 		Since:    time.Now().UTC().Format(time.RFC3339),
 	}
@@ -90,7 +95,7 @@ func TestSupervisor_LazySpawnOnFirstRequest(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	resp, err := sup.SendRequest(ctx, "test", "agent-1", adapterprotocol.MethodFindSession, supFindSessionParams("agent-1"))
+	resp, err := sup.SendRequest(ctx, "test", "agent-1", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-1"))
 	if err != nil {
 		t.Fatalf("first request failed: %v", err)
 	}
@@ -115,7 +120,7 @@ func TestSupervisor_SessionTracking(t *testing.T) {
 	ctx := context.Background()
 
 	for _, agentID := range []string{"agent-a", "agent-b"} {
-		_, err := sup.SendRequest(ctx, "test", agentID, adapterprotocol.MethodFindSession, supFindSessionParams(agentID))
+		_, err := sup.SendRequest(ctx, "test", agentID, adapterprotocol.MethodFindSession, supFindSessionParams(t, agentID))
 		if err != nil {
 			t.Fatalf("request for %s failed: %v", agentID, err)
 		}
@@ -145,7 +150,7 @@ func TestSupervisor_EndSessionRemovesState(t *testing.T) {
 	defer sup.Shutdown(context.Background())
 
 	ctx := context.Background()
-	_, err := sup.SendRequest(ctx, "test", "agent-x", adapterprotocol.MethodFindSession, supFindSessionParams("agent-x"))
+	_, err := sup.SendRequest(ctx, "test", "agent-x", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-x"))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -170,7 +175,7 @@ func TestSupervisor_IdleShutdown(t *testing.T) {
 	defer sup.Shutdown(context.Background())
 
 	ctx := context.Background()
-	_, err := sup.SendRequest(ctx, "test", "agent-idle", adapterprotocol.MethodFindSession, supFindSessionParams("agent-idle"))
+	_, err := sup.SendRequest(ctx, "test", "agent-idle", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-idle"))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -203,7 +208,7 @@ func TestSupervisor_IdleTimerCancelledByNewSession(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err := sup.SendRequest(ctx, "test", "agent-1", adapterprotocol.MethodFindSession, supFindSessionParams("agent-1"))
+	_, err := sup.SendRequest(ctx, "test", "agent-1", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -214,7 +219,7 @@ func TestSupervisor_IdleTimerCancelledByNewSession(t *testing.T) {
 
 	// before idle fires, send a new request
 	time.Sleep(50 * time.Millisecond)
-	_, err = sup.SendRequest(ctx, "test", "agent-2", adapterprotocol.MethodFindSession, supFindSessionParams("agent-2"))
+	_, err = sup.SendRequest(ctx, "test", "agent-2", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-2"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,7 +242,7 @@ func TestSupervisor_ShutdownAll(t *testing.T) {
 	sup := NewAdapterSupervisor(testLogger(), []string{adapterDir})
 
 	ctx := context.Background()
-	_, err := sup.SendRequest(ctx, "test", "agent-s", adapterprotocol.MethodFindSession, supFindSessionParams("agent-s"))
+	_, err := sup.SendRequest(ctx, "test", "agent-s", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-s"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -311,7 +316,7 @@ func TestSupervisor_MultipleAdapterTypes(t *testing.T) {
 
 	ctx := context.Background()
 	for _, adapterType := range []string{"test", "test2"} {
-		_, err := sup.SendRequest(ctx, adapterType, "agent-1", adapterprotocol.MethodFindSession, supFindSessionParams("agent-1"))
+		_, err := sup.SendRequest(ctx, adapterType, "agent-1", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-1"))
 		if err != nil {
 			t.Fatalf("request to %s failed: %v", adapterType, err)
 		}
@@ -337,7 +342,7 @@ func TestSupervisor_CrashAndRespawn(t *testing.T) {
 	t.Setenv("OX_TEST_CRASH_AFTER", "1")
 
 	// find-session succeeds before crash
-	_, err := sup.SendRequest(ctx, "test", "agent-crash", adapterprotocol.MethodFindSession, supFindSessionParams("agent-crash"))
+	_, err := sup.SendRequest(ctx, "test", "agent-crash", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-crash"))
 	if err != nil {
 		t.Fatalf("find-session failed: %v", err)
 	}
@@ -356,7 +361,7 @@ func TestSupervisor_CrashAndRespawn(t *testing.T) {
 	t.Setenv("OX_TEST_CRASH_AFTER", "")
 
 	// next request triggers respawn
-	resp, err := sup.SendRequest(ctx, "test", "agent-crash", adapterprotocol.MethodFindSession, supFindSessionParams("agent-crash"))
+	resp, err := sup.SendRequest(ctx, "test", "agent-crash", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-crash"))
 	if err != nil {
 		t.Fatalf("request after respawn failed: %v", err)
 	}
@@ -410,7 +415,7 @@ func TestSupervisor_ConcurrentRequests(t *testing.T) {
 		go func(n int) {
 			defer wg.Done()
 			agentID := fmt.Sprintf("agent-%d", n)
-			_, err := sup.SendRequest(ctx, "test", agentID, adapterprotocol.MethodFindSession, supFindSessionParams(agentID))
+			_, err := sup.SendRequest(ctx, "test", agentID, adapterprotocol.MethodFindSession, supFindSessionParams(t, agentID))
 			if err != nil {
 				errs <- fmt.Errorf("agent-%d: %w", n, err)
 			}
@@ -455,7 +460,7 @@ func TestSupervisor_LifecycleEventsSessionStartEnd(t *testing.T) {
 	ctx := context.Background()
 
 	// session start triggers lifecycle log
-	_, err := sup.SendRequest(ctx, "test", "agent-lifecycle", adapterprotocol.MethodFindSession, supFindSessionParams("agent-lifecycle"))
+	_, err := sup.SendRequest(ctx, "test", "agent-lifecycle", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-lifecycle"))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -470,7 +475,7 @@ func TestSupervisor_LifecycleEventsSessionStartEnd(t *testing.T) {
 
 	// duplicate request for same agent should NOT emit a second "session started"
 	beforeLen := buf.Len()
-	_, err = sup.SendRequest(ctx, "test", "agent-lifecycle", adapterprotocol.MethodFindSession, supFindSessionParams("agent-lifecycle"))
+	_, err = sup.SendRequest(ctx, "test", "agent-lifecycle", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-lifecycle"))
 	if err != nil {
 		t.Fatalf("second request failed: %v", err)
 	}
@@ -500,7 +505,7 @@ func TestSupervisor_LifecycleEventsSpawnAndShutdown(t *testing.T) {
 	sup := NewAdapterSupervisor(logger, []string{adapterDir})
 
 	ctx := context.Background()
-	_, err := sup.SendRequest(ctx, "test", "agent-spawn", adapterprotocol.MethodFindSession, supFindSessionParams("agent-spawn"))
+	_, err := sup.SendRequest(ctx, "test", "agent-spawn", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-spawn"))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -650,7 +655,7 @@ func TestSupervisor_StatusRunning(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	_, err := sup.SendRequest(ctx, "test", "agent-status", adapterprotocol.MethodFindSession, supFindSessionParams("agent-status"))
+	_, err := sup.SendRequest(ctx, "test", "agent-status", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-status"))
 	if err != nil {
 		t.Fatalf("request failed: %v", err)
 	}
@@ -806,7 +811,7 @@ func TestSupervisor_LifecycleEventsRespawn(t *testing.T) {
 	// make the adapter crash after first read-from-offset
 	t.Setenv("OX_TEST_CRASH_AFTER", "1")
 
-	_, err := sup.SendRequest(ctx, "test", "agent-respawn", adapterprotocol.MethodFindSession, supFindSessionParams("agent-respawn"))
+	_, err := sup.SendRequest(ctx, "test", "agent-respawn", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-respawn"))
 	if err != nil {
 		t.Fatalf("find-session failed: %v", err)
 	}
@@ -822,7 +827,7 @@ func TestSupervisor_LifecycleEventsRespawn(t *testing.T) {
 	t.Setenv("OX_TEST_CRASH_AFTER", "")
 
 	// trigger respawn
-	_, _ = sup.SendRequest(ctx, "test", "agent-respawn", adapterprotocol.MethodFindSession, supFindSessionParams("agent-respawn"))
+	_, _ = sup.SendRequest(ctx, "test", "agent-respawn", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-respawn"))
 
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "adapter respawning") {
