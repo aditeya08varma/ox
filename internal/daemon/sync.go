@@ -36,6 +36,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/flags"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
@@ -180,6 +181,9 @@ type SyncScheduler struct {
 
 	// settings fetcher for CLI feature flag polling
 	settingsFetcher *SettingsFetcher
+
+	// OTel tracer for per-task trace contexts (nil = tracing disabled)
+	tracer *observability.DaemonTracer
 }
 
 // syncError tracks a sync error with timestamp.
@@ -319,6 +323,11 @@ func (s *SyncScheduler) SetSettingsFetcher(f *SettingsFetcher) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.settingsFetcher = f
+}
+
+// SetTracer sets the OTel daemon tracer for per-task trace contexts.
+func (s *SyncScheduler) SetTracer(t *observability.DaemonTracer) {
+	s.tracer = t
 }
 
 // captureHEAD returns the current HEAD SHA for a git repo.
@@ -688,53 +697,74 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 			return
 
 		case <-readTicker.C:
+			// not traced: high-frequency sync dominates span volume with little diagnostic value
 			s.pullChanges(ctx)
 			readTicker.Reset(jitteredDuration(s.config.SyncIntervalRead, 0.10))
 
 		case <-teamContextChan:
+			// not traced: high-frequency sync dominates span volume with little diagnostic value
 			s.pullTeamContexts(ctx)
 			if teamContextTicker != nil {
 				teamContextTicker.Reset(jitteredDuration(s.config.TeamContextSyncInterval, 0.10))
 			}
 
 		case <-heartbeatTicker.C:
+			// not traced: lightweight liveness ping, not useful in telemetry
 			s.writeHeartbeats()
 
 		case <-versionCheckChan:
-			s.checkLatestVersion(ctx)
+			taskCtx, span := s.tracer.StartTask(ctx, "daemon:version_check")
+			s.checkLatestVersion(taskCtx)
+			span.End()
 
 		case <-gcChan:
-			s.checkAndRunGC(ctx)
+			taskCtx, span := s.tracer.StartTask(ctx, "daemon:gc_check")
+			s.checkAndRunGC(taskCtx)
+			span.End()
 
 		case <-distillChan:
-			s.triggerDistill(ctx)
+			taskCtx, span := s.tracer.StartTask(ctx, "daemon:distill")
+			s.triggerDistill(taskCtx)
+			span.End()
 
 		case <-githubSyncChan:
 			if s.githubSync != nil {
 				if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
-					s.githubSync.CheckAndSync(ctx, l.Path)
+					taskCtx, span := s.tracer.StartTask(ctx, "daemon:github_sync")
+					s.githubSync.CheckAndSync(taskCtx, l.Path)
+					span.End()
 				}
 			}
 
 		case <-codedbCheckChan:
-			s.checkCodeDBFreshness(ctx)
+			taskCtx, span := s.tracer.StartTask(ctx, "daemon:codedb_freshness")
+			s.checkCodeDBFreshness(taskCtx)
+			span.End()
 			if codedbCheckTicker != nil {
 				codedbCheckTicker.Reset(jitteredDuration(s.config.CodeDBCheckInterval, 0.10))
 			}
 
 		case <-ledgerIndexChan:
-			s.triggerLedgerIndexRebuild(ctx)
+			taskCtx, span := s.tracer.StartTask(ctx, "daemon:ledger_index")
+			s.triggerLedgerIndexRebuild(taskCtx)
+			span.End()
 
 		case <-settingsChan:
 			if s.settingsFetcher != nil {
-				go s.settingsFetcher.Fetch(ctx)
+				go func() {
+					taskCtx, span := s.tracer.StartTask(ctx, "daemon:settings_fetch")
+					s.settingsFetcher.Fetch(taskCtx)
+					span.End()
+				}()
 			}
 
 		case <-s.triggerChan:
 			// watcher-triggered sync: skip sparse-checkout refresh to avoid
 			// feedback loop where .sageox/cache/ writes trigger sync which
 			// runs ConfigureSparseCheckout which could wipe cache
-			s.syncFromWatcher(ctx)
+			taskCtx, span := s.tracer.StartTask(ctx, "daemon:watcher_sync")
+			s.syncFromWatcher(taskCtx)
+			span.End()
 		}
 	}
 }
