@@ -182,10 +182,30 @@ Ask the user to pick 1 or 2. Save the choice to the memory file.
 
 ##### Option 1: curl install
 
-Run the ox install script:
+Download and run the ox install script. The agent should print the source
+URL and a head/tail preview of the downloaded script before executing it,
+so the user can sanity-check what is about to run:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash
+# Download to a temp file. -f makes curl fail on HTTP errors instead of
+# executing an HTML error page; --max-time bounds a stalled connection.
+INSTALL_SCRIPT="$(mktemp -t ox-install.XXXXXX.sh)"
+curl -fsSL --max-time 60 \
+  https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh \
+  -o "$INSTALL_SCRIPT"
+
+# Surface what is about to run.
+echo "Downloaded ox install script:"
+echo "  Source: https://github.com/sageox/ox/blob/main/scripts/install.sh"
+ls -lh "$INSTALL_SCRIPT"
+echo "--- first 5 lines ---"
+head -5 "$INSTALL_SCRIPT"
+echo "--- last 5 lines ---"
+tail -5 "$INSTALL_SCRIPT"
+
+# Execute and clean up.
+bash "$INSTALL_SCRIPT"
+rm -f "$INSTALL_SCRIPT"
 ```
 
 After it completes, verify `command -v ox` succeeds. Then persist:
