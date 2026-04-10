@@ -62,7 +62,14 @@ CODE_EXT_RE = re.compile(r"\.(js|ts|mjs|cjs|mts|cts|jsx|tsx|py|sh|bash|zsh|rb|go
 MANIFEST_EXT_RE = re.compile(r"\.(json|yaml|yml|toml)$", re.I)
 
 RAW_IP_URL_RE = re.compile(r"https?://\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?(?:/|[\"'])", re.I)
-INSTALL_PACKAGE_RE = re.compile(r"installer-package\s*:\s*https?://[^\s\"'`]+", re.I)
+# Match both quoted and unquoted YAML/JSON forms:
+#   installer-package: https://example.com/x
+#   installer-package: "https://example.com/x"
+#   installer-package: 'https://example.com/x'
+INSTALL_PACKAGE_RE = re.compile(
+    r"installer-package\s*:\s*[\"']?https?://[^\s\"'`]+[\"']?",
+    re.I,
+)
 URL_SHORTENER_RE = re.compile(
     r"https?://(bit\.ly|tinyurl\.com|t\.co|goo\.gl|is\.gd)/", re.I
 )
@@ -315,8 +322,16 @@ def read_clawhubignore(skill_dir: Path) -> set[str]:
     return {ln.strip() for ln in f.read_text().splitlines() if ln.strip() and not ln.startswith("#")}
 
 
+SKILL_MD_NAMES = {"SKILL.md", "skill.md"}
+
+
 def iter_skill_files(skill_dir: Path) -> Iterable[Path]:
-    """Yield every file in the skill folder that would be included in the bundle."""
+    """Yield every file in the skill folder that would be included in the bundle.
+
+    SKILL.md is always yielded — even if a maintainer adds it to .clawhubignore
+    by mistake — because the publish would fail server-side without it. The
+    linter separately reports the bad ignore pattern via check_clawhubignore().
+    """
     ignore = read_clawhubignore(skill_dir)
     for p in skill_dir.rglob("*"):
         if not p.is_file():
@@ -324,9 +339,34 @@ def iter_skill_files(skill_dir: Path) -> Iterable[Path]:
         rel = p.relative_to(skill_dir)
         if any(part.startswith(".") and part not in (".clawhubignore", ".gitignore") for part in rel.parts):
             continue
+        # SKILL.md at the root is always included regardless of .clawhubignore.
+        if str(rel) in SKILL_MD_NAMES:
+            yield p
+            continue
         if rel.name in ignore:
             continue
         yield p
+
+
+def check_clawhubignore(report: SkillReport, skill_dir: Path) -> None:
+    """Report if .clawhubignore tries to exclude SKILL.md (which the publisher
+    would silently override but is still a maintenance bug worth flagging)."""
+    f = skill_dir / ".clawhubignore"
+    if not f.is_file():
+        return
+    for ln_no, raw in enumerate(f.read_text().splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line in SKILL_MD_NAMES:
+            report.add(Finding(
+                "bundle.skill_md_in_ignore", "critical",
+                ".clawhubignore", ln_no,
+                f"`.clawhubignore` lists `{line}`, which would exclude the required "
+                "SKILL.md from the published bundle. Remove this entry — SKILL.md "
+                "must always ship.",
+                evidence=raw,
+            ))
 
 
 # ============================================================================
@@ -398,8 +438,32 @@ def check_frontmatter(report: SkillReport, skill_dir: Path) -> dict | None:
             f"`{folder_slug}`. The folder name is used as the slug by default.",
         ))
 
-    # metadata.openclaw checks
-    oc = (fm.get("metadata") or {}).get("openclaw") or {}
+    # metadata.openclaw checks. Validate the shape of every nested level
+    # before calling .get() — a malformed manifest should produce a finding,
+    # not an AttributeError that aborts the linter.
+    metadata = fm.get("metadata")
+    if metadata is None:
+        oc: dict = {}
+    elif not isinstance(metadata, dict):
+        report.add(Finding(
+            "frontmatter.invalid_metadata", "critical",
+            "SKILL.md", 1,
+            f"`metadata` must be a mapping, got {type(metadata).__name__}.",
+        ))
+        oc = {}
+    else:
+        openclaw = metadata.get("openclaw")
+        if openclaw is None:
+            oc = {}
+        elif not isinstance(openclaw, dict):
+            report.add(Finding(
+                "frontmatter.invalid_openclaw", "critical",
+                "SKILL.md", 1,
+                f"`metadata.openclaw` must be a mapping, got {type(openclaw).__name__}.",
+            ))
+            oc = {}
+        else:
+            oc = openclaw
 
     # os
     os_field = oc.get("os")
@@ -420,22 +484,51 @@ def check_frontmatter(report: SkillReport, skill_dir: Path) -> dict | None:
                     ))
 
     # install kinds
-    install = oc.get("install") or []
-    if isinstance(install, list):
-        for entry in install:
-            if isinstance(entry, dict) and "kind" in entry:
-                if entry["kind"] not in ALLOWED_INSTALL_KINDS:
-                    report.add(Finding(
-                        "frontmatter.invalid_install_kind", "critical",
-                        "SKILL.md", 1,
-                        f"install kind `{entry['kind']}` is not in the allowed set "
-                        f"{sorted(ALLOWED_INSTALL_KINDS)}. The skill format spec only "
-                        f"supports these kinds; everything else is ignored.",
-                    ))
+    install = oc.get("install")
+    if install is not None:
+        if not isinstance(install, list):
+            report.add(Finding(
+                "frontmatter.invalid_install", "critical",
+                "SKILL.md", 1,
+                f"`metadata.openclaw.install` must be a list, got {type(install).__name__}.",
+            ))
+        else:
+            for entry in install:
+                if isinstance(entry, dict) and "kind" in entry:
+                    if entry["kind"] not in ALLOWED_INSTALL_KINDS:
+                        report.add(Finding(
+                            "frontmatter.invalid_install_kind", "critical",
+                            "SKILL.md", 1,
+                            f"install kind `{entry['kind']}` is not in the allowed set "
+                            f"{sorted(ALLOWED_INSTALL_KINDS)}. The skill format spec only "
+                            f"supports these kinds; everything else is ignored.",
+                        ))
 
     # primaryEnv must be in requires.env if both are set
     primary = oc.get("primaryEnv")
-    requires_env = (oc.get("requires") or {}).get("env") or []
+    requires = oc.get("requires")
+    if requires is not None and not isinstance(requires, dict):
+        report.add(Finding(
+            "frontmatter.invalid_requires", "critical",
+            "SKILL.md", 1,
+            f"`metadata.openclaw.requires` must be a mapping, got {type(requires).__name__}.",
+        ))
+        requires_env: list = []
+    elif requires is None:
+        requires_env = []
+    else:
+        re_env = requires.get("env")
+        if re_env is None:
+            requires_env = []
+        elif not isinstance(re_env, list):
+            report.add(Finding(
+                "frontmatter.invalid_requires_env", "critical",
+                "SKILL.md", 1,
+                f"`metadata.openclaw.requires.env` must be a list, got {type(re_env).__name__}.",
+            ))
+            requires_env = []
+        else:
+            requires_env = re_env
     if primary and requires_env and primary not in requires_env:
         report.add(Finding(
             "frontmatter.primary_env_not_in_requires", "warn",
@@ -653,6 +746,7 @@ def lint_skill(skill_dir: Path) -> SkillReport:
     report = SkillReport(slug=skill_dir.name, path=str(skill_dir))
     fm = check_frontmatter(report, skill_dir)
     check_bundle(report, skill_dir)
+    check_clawhubignore(report, skill_dir)
 
     for p in iter_skill_files(skill_dir):
         rel = str(p.relative_to(skill_dir))

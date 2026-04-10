@@ -501,8 +501,10 @@ claude -p \
   --model claude-sonnet-4-6 <<< "$PROMPT"
 ```
 
-Timeout the command at 2 minutes. If it fails, surface the error to the
-user.
+Timeout the command at 10 minutes. This matches the timeout used by
+`pkg/sessionsummary/claude.go` in the `ox` repo for comparable Claude
+synthesis work and gives the model enough headroom for cross-team summaries
+that pull in many daily files. If it fails, surface the error to the user.
 
 ### Step 5: Return the Summary
 

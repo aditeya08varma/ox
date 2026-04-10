@@ -102,8 +102,12 @@ Only text-based files. Server-side limits:
   TOML, JS, TS, SVG, plus anything with a `text/*` MIME type)
 
 Each skill folder's `.clawhubignore` excludes `README.md` and any other
-repo-facing files that shouldn't ship to consumers. The `SKILL.md` itself
-is always included.
+repo-facing files that shouldn't ship to consumers.
+
+**Do not add `SKILL.md` to `.clawhubignore`.** The publish would fail
+server-side without it. The local linter (`clawhub-skill-lint`) will
+flag any `.clawhubignore` entry that lists `SKILL.md` as a critical
+finding before the bad bundle ever leaves your machine.
 
 ## Troubleshooting
 
