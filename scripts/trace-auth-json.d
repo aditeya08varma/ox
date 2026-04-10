@@ -33,6 +33,12 @@
  *
  *   tail -f /tmp/auth-json-trace.log
  *
+ * On every event the script also emits a terminal bell + OSC 9 system-
+ * notification escape sequence to STDERR of the dtrace(1) process. Keep
+ * the dtrace window visible (or just focused enough to receive bells) and
+ * you'll get an audible + system notification the moment auth.json is
+ * touched. See NOTIFY_CMD below to customize or disable.
+ *
  * Override the log path:
  *
  *   sudo dtrace -s scripts/trace-auth-json.d \
@@ -100,6 +106,30 @@
 #define LOG_FILE "/tmp/auth-json-trace.log"
 #endif
 
+/*
+ * Terminal-notification command run on every detected event.
+ *
+ * system() shells out and runs this on each hit. The arguments below are
+ * (label, pid), interpolated via printf conversions. The command itself
+ * emits to STDERR (>&2) so notifications stay out of the log file. Bytes
+ * emitted:
+ *
+ *   \a          BEL  — audible bell + triggers most terminals' notification
+ *   \033]9;…\a  OSC 9 — iTerm2 / WezTerm / Ghostty system notification
+ *
+ * If your terminal doesn't understand OSC 9 it will be silently ignored;
+ * you'll still get the BEL. To disable notifications entirely, override:
+ *
+ *   -D NOTIFY_CMD='"true"'
+ *
+ * To use something else (say, macOS osascript), override with:
+ *
+ *   -D NOTIFY_CMD='"osascript -e '\''display notification \"auth.json %s pid=%d\"'\'' >&2"'
+ */
+#ifndef NOTIFY_CMD
+#define NOTIFY_CMD "printf '\\a\\033]9;trace-auth-json: %s pid=%d\\a' >&2"
+#endif
+
 dtrace:::BEGIN
 {
 	printf("trace-auth-json: watching for writes to files matching \"%s\"\n", TARGET);
@@ -145,6 +175,7 @@ syscall::openat_nocancel:return
 	printf("  argv : %S\n", curpsinfo->pr_psargs);
 	ustack();
 	printf("\n");
+	system(NOTIFY_CMD, "OPEN", pid);
 
 	/* Remember this (pid,fd) so subsequent writes on it get traced. */
 	tracked_fd[pid, (int)arg0] = 1;
@@ -178,6 +209,7 @@ syscall::pwritev:entry
 	printf("  argv : %S\n", curpsinfo->pr_psargs);
 	ustack();
 	printf("\n");
+	system(NOTIFY_CMD, "WRITE", pid);
 }
 
 syscall::ftruncate:entry
@@ -188,6 +220,7 @@ syscall::ftruncate:entry
 	printf("  argv : %S\n", curpsinfo->pr_psargs);
 	ustack();
 	printf("\n");
+	system(NOTIFY_CMD, "FTRUNC", pid);
 }
 
 /* Release the fd slot on close so long-lived processes don't leak it. */
@@ -233,6 +266,7 @@ syscall::renameatx_np:entry
 	printf("  argv : %S\n", curpsinfo->pr_psargs);
 	ustack();
 	printf("\n");
+	system(NOTIFY_CMD, "RENAME", pid);
 }
 
 syscall::rename:entry,
@@ -262,6 +296,7 @@ syscall::unlink:entry
 	printf("  argv : %S\n", curpsinfo->pr_psargs);
 	ustack();
 	printf("\n");
+	system(NOTIFY_CMD, "UNLINK", pid);
 }
 
 syscall::unlink:entry
@@ -284,6 +319,7 @@ syscall::unlinkat:entry
 	printf("  argv : %S\n", curpsinfo->pr_psargs);
 	ustack();
 	printf("\n");
+	system(NOTIFY_CMD, "UNLINKAT", pid);
 }
 
 syscall::unlinkat:entry
@@ -311,6 +347,7 @@ syscall::truncate:entry
 	printf("  argv : %S\n", curpsinfo->pr_psargs);
 	ustack();
 	printf("\n");
+	system(NOTIFY_CMD, "TRUNC", pid);
 }
 
 syscall::truncate:entry
