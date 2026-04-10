@@ -197,18 +197,25 @@ Download and run the ox install script. The agent should print the source
 URL and a head/tail preview of the downloaded script before executing it,
 so the user can sanity-check what is about to run:
 
+The URL is **pinned to a specific release tag** (not `main`) so the install
+path is reproducible and can't be silently changed by an upstream commit. Bump
+`OX_INSTALL_REF` when a newer release of `sageox/ox` is available.
+
 ```bash
+# Pinned release tag. Bump this when a newer sageox/ox release is published.
+OX_INSTALL_REF="v0.6.1"
+
 # Download to a temp file. -f makes curl fail on HTTP errors instead of
 # executing an HTML error page; --max-time bounds a stalled connection.
 # Use the template form for mktemp — portable across GNU (Linux) and BSD (macOS).
 INSTALL_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/ox-install.XXXXXXXX")"
 curl -fsSL --max-time 60 \
-  https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh \
+  "https://raw.githubusercontent.com/sageox/ox/${OX_INSTALL_REF}/scripts/install.sh" \
   -o "$INSTALL_SCRIPT"
 
 # Surface what is about to run.
 echo "Downloaded ox install script:"
-echo "  Source: https://github.com/sageox/ox/blob/main/scripts/install.sh"
+echo "  Source: https://github.com/sageox/ox/blob/${OX_INSTALL_REF}/scripts/install.sh"
 ls -lh "$INSTALL_SCRIPT"
 echo "--- first 5 lines ---"
 head -5 "$INSTALL_SCRIPT"
