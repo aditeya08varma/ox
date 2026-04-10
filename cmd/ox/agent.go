@@ -8,7 +8,9 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +19,7 @@ import (
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/contexttrace"
@@ -168,10 +171,18 @@ func init() {
 	rootCmd.AddCommand(agentCmd)
 }
 
-// runAgentDispatcher handles the ox agent <agent_id> <cmd> pattern
+// runAgentDispatcher handles the ox agent <agent_id> <cmd> pattern.
+//
+// Tracing note: cobra's PreRunE created the root span before this function
+// runs, with the bland name "ox agent" because cobra only sees agentCmd
+// when dispatching here. We rename the span as soon as we resolve what
+// was actually invoked — and we do it BEFORE any early-return paths
+// (help, hook fast-path, validation errors) so even fast failures get
+// the right span name in the trace backend.
 func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 	// no args = show help
 	if len(args) == 0 {
+		renameDispatcherSpan("help")
 		return cmd.Help()
 	}
 
@@ -180,7 +191,10 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 	// check if first arg is a known subcommand
 	for _, subcmd := range cmd.Commands() {
 		if subcmd.Name() == firstArg {
-			// let cobra handle it
+			// let cobra handle it — cobra will route to the leaf
+			// command and cli.NewContext already set a meaningful
+			// span name there ("ox agent prime", etc.), so no
+			// rename is needed here.
 			return nil
 		}
 	}
@@ -188,11 +202,29 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 	// "hook" dispatched directly — no agent_id required.
 	// hooks fire before prime, so no agent ID exists yet.
 	if firstArg == "hook" {
+		// Hook phase is the second arg (e.g. "PostToolUse",
+		// "SessionStart"). Only include it in the span name when it
+		// matches the known event-name shape — otherwise an attacker
+		// or buggy hook could pass arbitrary tokens and inflate
+		// span-name cardinality, defeating the very grouping this
+		// rename is trying to add. Unknown phases collapse to just
+		// "ox agent hook".
+		if len(args) > 1 && isKnownHookEventName(args[1]) {
+			renameDispatcherSpan("hook", args[1])
+		} else {
+			renameDispatcherSpan("hook")
+		}
 		return runAgentHook(args[1:])
 	}
 
 	// check if first arg looks like an agent_id (Ox<4-char>)
 	if agentinstance.IsValidAgentID(firstArg) {
+		// Rename based on the subcommand path AFTER the agent_id.
+		// We deliberately do not include the agent_id in the span
+		// name — it is high-cardinality and would defeat grouping.
+		// dispatchedCommandPath handles "session" specially to
+		// include its sub-subcommand (start/stop/capture-prior/...).
+		renameDispatcherSpan(dispatchedCommandPath(args[1:])...)
 		return runWithAgentID(cmd, firstArg, args[1:])
 	}
 
@@ -200,6 +232,10 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 	// a known agent subcommand (e.g. "session", "doctor") being called
 	// without an explicit agent ID: `ox agent session start`
 	if isAgentSubcommand(firstArg) {
+		// Same path-based naming as the agent-id case. Done before
+		// the env-var lookup so even the "missing agent id" error
+		// path gets the correct span name.
+		renameDispatcherSpan(dispatchedCommandPath(args)...)
 		envID := os.Getenv("SAGEOX_AGENT_ID")
 		if agentinstance.IsValidAgentID(envID) {
 			return runWithAgentID(cmd, envID, args)
@@ -207,11 +243,131 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("no agent ID: %q requires an agent ID (run 'ox agent prime' first)", firstArg)
 	}
 
-	// unknown argument — check for common wrong-format patterns
+	// unknown argument — check for common wrong-format patterns.
+	// We deliberately do NOT rename the span here: the invocation is
+	// invalid and no meaningful subcommand was resolved. Leaving the
+	// span as "ox agent" surfaces these as a distinct bucket of
+	// "could not parse" failures in the trace backend.
 	if msg := agentinstance.ClassifyBadID(firstArg); msg != "" {
 		return fmt.Errorf("%s", msg)
 	}
 	return fmt.Errorf("unknown command or invalid agent_id: %s\nRun 'ox agent --help' for usage", firstArg)
+}
+
+// validSessionSubcommands enumerates the session sub-subcommands the
+// dispatcher knows how to route in runWithAgentID. Used by
+// dispatchedCommandPath to clamp span-name cardinality: only known
+// session sub-subcommands are appended to the span name; an unknown
+// token (typo, attacker input) collapses to just "session" instead of
+// minting a new span-name bucket.
+//
+// Keep in sync with the case statement in runWithAgentID's `case "session"`.
+var validSessionSubcommands = map[string]bool{
+	"start":             true,
+	"stop":              true,
+	"abort":             true,
+	"delete":            true,
+	"log":               true,
+	"remind":            true,
+	"summarize":         true,
+	"record":            true,
+	"plan":              true,
+	"context-trace":     true,
+	"import":            true,
+	"capture-prior":     true,
+	"subagent-complete": true,
+	"subagent-list":     true,
+	"recover":           true,
+}
+
+// hookEventNamePattern matches the canonical PascalCase shape of a
+// coding-agent hook event name (e.g. "SessionStart", "PostToolUse",
+// "BeforeAgent"). Adapter protocols use PascalCase ASCII identifiers
+// composed of 1..16 segments where each segment is one uppercase
+// letter followed by zero or more lowercase letters or digits.
+//
+// Strict PascalCase (uppercase initial, no lowercase-first names) is
+// what every real adapter uses. Allowing lowercase-first input like
+// `foo` or `abc123` would let arbitrary lowercase tokens through,
+// which is exactly the cardinality leak this guard is meant to close.
+var hookEventNamePattern = regexp.MustCompile(`^(?:[A-Z][a-z0-9]*){1,16}$`)
+
+// hookEventNameMaxLen caps total event-name length, layered on top of
+// the regex's segment count. The regex limits SEGMENTS to 16, but each
+// segment can be arbitrarily long, so a 10000-character single segment
+// would still match without a separate length check.
+const hookEventNameMaxLen = 64
+
+// isKnownHookEventName reports whether name matches the canonical
+// PascalCase identifier shape used by every adapter's hook event names.
+// Used by the dispatcher span-rename path to clamp cardinality.
+//
+// We deliberately validate by SHAPE rather than against a fixed
+// allowlist because the set of hook events is agent-specific and
+// extensible (each adapter can introduce new events). A regex covers
+// the whole space cheaply while still rejecting arbitrary user input
+// like paths, strings with spaces, or shell metacharacters.
+func isKnownHookEventName(name string) bool {
+	if len(name) == 0 || len(name) > hookEventNameMaxLen {
+		return false
+	}
+	return hookEventNamePattern.MatchString(name)
+}
+
+// dispatchedCommandPath returns the subcommand path tokens that uniquely
+// identify a dispatcher invocation, e.g. ["session", "start"] for
+// `session start` or ["doctor"] for `doctor`. Used to label the root
+// span with a meaningful, low-cardinality name.
+//
+// "session" is expanded to include its sub-subcommand because session
+// is itself a router (start, stop, capture-prior, recover, ...) and
+// collapsing them all into "ox agent session" would lose the same
+// dispatcher-bucketing problem we're trying to fix at the agent level.
+// The sub-subcommand is only appended when it appears in
+// validSessionSubcommands — unknown tokens collapse to just "session"
+// so a typo or attacker input cannot mint arbitrary span names.
+//
+// "whisper" is expanded for the special "whisper history" form because
+// runWithAgentID treats it as a distinct operation (separate RunE path).
+// Collapsing both into one bucket would merge two fixed, low-cardinality
+// operations and lose the observability split this PR is adding.
+//
+// Other subcommands (heartbeat, doctor, query, distill) are kept as a
+// single token — their next argument is either non-existent or
+// high-cardinality user input (e.g. a query string) that would defeat
+// span grouping if included.
+func dispatchedCommandPath(subargs []string) []string {
+	if len(subargs) == 0 {
+		return nil
+	}
+	subcmd := subargs[0]
+	if subcmd == "session" && len(subargs) > 1 && validSessionSubcommands[subargs[1]] {
+		return []string{subcmd, subargs[1]}
+	}
+	if subcmd == "whisper" && len(subargs) > 1 && subargs[1] == "history" {
+		return []string{subcmd, subargs[1]}
+	}
+	return []string{subcmd}
+}
+
+// renameDispatcherSpan rewrites the active root span name to
+// "ox agent <parts...>" and attaches an ox.command.subcommand attribute
+// with the joined parts. Empty parts are skipped — calling with no
+// parts is a no-op.
+func renameDispatcherSpan(parts ...string) {
+	// Filter empty tokens so a missing hook phase ("ox agent hook"
+	// with no second arg) doesn't produce "ox agent hook ".
+	clean := parts[:0]
+	for _, p := range parts {
+		if p != "" {
+			clean = append(clean, p)
+		}
+	}
+	if len(clean) == 0 {
+		return
+	}
+	sub := strings.Join(clean, " ")
+	observability.RenameRootSpan("ox agent "+sub, sub)
 }
 
 // agentSubcommands are commands valid inside `runWithAgentID`.

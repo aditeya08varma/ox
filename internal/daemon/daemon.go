@@ -924,13 +924,27 @@ func (d *Daemon) initComponents() time.Duration {
 	// Separate from the TelemetryCollector which handles product events.
 	if isTelemetryEnabled() && projectEndpoint != "" {
 		apiEndpoint := endpoint.GetForProject(d.config.ProjectRoot)
-		if err := observability.Init(d.ctx, "ox-daemon", apiEndpoint,
+		daemonAttrs := []attribute.KeyValue{
 			attribute.String("client.id", d.telemetry.clientID),
 			attribute.String("client.class", "daemon"),
 			attribute.String("service.version", version.Version),
 			attribute.String("os.type", runtime.GOOS),
 			attribute.String("host.arch", runtime.GOARCH),
-		); err != nil {
+			// Mirror the CLI attribute keys so dashboards can query
+			// "ox.version" and "host.os" uniformly across ox-cli and
+			// ox-daemon traces. The legacy service.version / os.type
+			// keys above are kept to avoid breaking existing queries.
+			attribute.String(observability.AttrOXVersion, version.Version),
+			attribute.String(observability.AttrHostOS, runtime.GOOS),
+		}
+		// AGENT_ENV is inherited from the parent process — typically the
+		// AI coworker that spawned the daemon via `ox agent prime`. Tag
+		// daemon traces with it so background work is attributable to
+		// the adapter that triggered it.
+		if env := os.Getenv("AGENT_ENV"); env != "" {
+			daemonAttrs = append(daemonAttrs, attribute.String(observability.AttrAgentEnv, env))
+		}
+		if err := observability.Init(d.ctx, "ox-daemon", apiEndpoint, daemonAttrs...); err != nil {
 			d.logger.Warn("otel tracing init failed", "error", err)
 		}
 		d.tracer = observability.NewDaemonTracer()

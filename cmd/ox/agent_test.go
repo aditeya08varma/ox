@@ -118,6 +118,182 @@ func TestReinjectSessionFlags(t *testing.T) {
 	})
 }
 
+// TestDispatchedCommandPath verifies that the dispatcher's span-naming
+// helper produces the right token sequence for each invocation shape.
+//
+// Why this matters: dispatchedCommandPath is what determines how a
+// dispatcher hit gets bucketed in trace backends. A regression that
+// silently returns the wrong tokens (or always returns the same single
+// token) re-creates the very "one giant ox agent bucket" problem the
+// dispatcher rename was added to fix.
+func TestDispatchedCommandPath(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		// what real-world bucketing failure does this prevent
+		prevents string
+		in       []string
+		want     []string
+	}{
+		{
+			name:     "empty",
+			prevents: "panic on no-args dispatcher invocation",
+			in:       nil,
+			want:     nil,
+		},
+		{
+			name:     "doctor_alone",
+			prevents: "doctor calls collapsing into a single bucket with other commands",
+			in:       []string{"doctor"},
+			want:     []string{"doctor"},
+		},
+		{
+			name:     "heartbeat_alone",
+			prevents: "heartbeats hiding in the generic bucket — they are the highest-volume call",
+			in:       []string{"heartbeat"},
+			want:     []string{"heartbeat"},
+		},
+		{
+			name:     "session_with_subsubcommand",
+			prevents: "session start / stop / capture-prior all collapsing into one `session` bucket",
+			in:       []string{"session", "start"},
+			want:     []string{"session", "start"},
+		},
+		{
+			name:     "session_capture_prior",
+			prevents: "capture-prior latency / errors hiding inside the `session` bucket",
+			in:       []string{"session", "capture-prior", "--adapter=claude"},
+			want:     []string{"session", "capture-prior"},
+		},
+		{
+			name:     "session_alone",
+			prevents: "panic on bare `session` with no sub-subcommand (validation error path)",
+			in:       []string{"session"},
+			want:     []string{"session"},
+		},
+		{
+			name:     "session_unknown_subsubcommand_collapses",
+			prevents: "an unknown / typo / attacker-controlled session sub-subcommand minting an arbitrary span name (CodeRabbit PR488). Without the allowlist, `ox agent <id> session <typo>` would create a per-typo bucket.",
+			in:       []string{"session", "totally-bogus-subcommand"},
+			want:     []string{"session"},
+		},
+		{
+			name:     "session_recover_in_allowlist",
+			prevents: "regression that drops `recover` from validSessionSubcommands when adding new entries — keep this case in lock-step with runWithAgentID's case statement",
+			in:       []string{"session", "recover"},
+			want:     []string{"session", "recover"},
+		},
+		{
+			name:     "session_subagent_complete_in_allowlist",
+			prevents: "subagent-complete (hyphenated) accidentally getting filtered by an over-eager allowlist",
+			in:       []string{"session", "subagent-complete"},
+			want:     []string{"session", "subagent-complete"},
+		},
+		{
+			name:     "query_does_not_include_query_text",
+			prevents: "high-cardinality query string blowing up span-name cardinality",
+			// query has its arg as the search text — must NOT be included
+			in:   []string{"query", "how do we handle auth"},
+			want: []string{"query"},
+		},
+		{
+			name:     "whisper_alone",
+			prevents: "bare whisper getting bucketed with whisper history despite being a different RunE path",
+			in:       []string{"whisper"},
+			want:     []string{"whisper"},
+		},
+		{
+			name:     "whisper_history_expanded",
+			prevents: "merging `whisper history` (its own RunE in runWithAgentID) into the bare `whisper` bucket and losing the observability split (CodeRabbit PR488)",
+			in:       []string{"whisper", "history"},
+			want:     []string{"whisper", "history"},
+		},
+		{
+			name:     "whisper_unknown_collapses",
+			prevents: "an unknown whisper sub-subcommand minting a per-typo span-name bucket — only `history` is a real branch",
+			in:       []string{"whisper", "totally-bogus"},
+			want:     []string{"whisper"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := dispatchedCommandPath(tt.in)
+			if len(got) != len(tt.want) {
+				t.Fatalf("dispatchedCommandPath(%q) = %q, want %q\n(prevents: %s)",
+					tt.in, got, tt.want, tt.prevents)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Errorf("dispatchedCommandPath(%q)[%d] = %q, want %q\n(prevents: %s)",
+						tt.in, i, got[i], tt.want[i], tt.prevents)
+				}
+			}
+		})
+	}
+}
+
+// TestIsKnownHookEventName covers the dispatcher's hook-phase clamping
+// rule. The dispatcher passes the second token of `ox agent hook <X>`
+// into the span name only when isKnownHookEventName(X) is true; an
+// invalid token collapses to just "ox agent hook".
+//
+// Failure prevented: a regression that loosens the regex (e.g.
+// removes the start anchor or allows whitespace) lets attacker-
+// controlled tokens flow into span names. Each test case names the
+// shape of input it defends against.
+func TestIsKnownHookEventName(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		prevents string
+		in       string
+		want     bool
+	}{
+		// happy paths — all real adapter event names follow strict PascalCase
+		{"PostToolUse", "Claude Code post-tool event", "PostToolUse", true},
+		{"PreToolUse", "Claude Code pre-tool event", "PreToolUse", true},
+		{"SessionStart", "common across adapters", "SessionStart", true},
+		{"SessionEnd", "common lifecycle event", "SessionEnd", true},
+		{"BeforeAgent", "gemini-style event name", "BeforeAgent", true},
+		{"UserPromptSubmit", "Claude Code prompt event", "UserPromptSubmit", true},
+		{"AfterTool", "compact event name", "AfterTool", true},
+		{"single_uppercase", "minimum valid PascalCase input", "A", true},
+		{"single_segment", "one PascalCase segment", "Session", true},
+		{"with_digits_in_segment", "digits allowed inside a segment (e.g. event versions)", "Tool2Use", true},
+
+		// rejection paths — each prevents a different cardinality leak
+		{"empty_string", "empty token must not be a valid name", "", false},
+		{"lowercase_start", "lowercase-first input lets arbitrary tokens through (CodeRabbit PR488 — strict PascalCase rejects this)", "postToolUse", false},
+		{"all_lowercase", "single lowercase word reaches the regex but not PascalCase shape", "foo", false},
+		{"lowercase_with_digits", "alphanumeric lowercase still rejected", "abc123", false},
+		{"with_space", "spaces let attacker-controlled strings into span names", "Post ToolUse", false},
+		{"with_slash", "path-like input must be rejected", "Post/Tool", false},
+		{"with_dash", "dashes are not PascalCase", "Post-Tool-Use", false},
+		{"with_underscore", "snake_case is not PascalCase", "Post_Tool_Use", false},
+		{"with_quote", "shell-quoted input must be rejected", "Post\"Tool", false},
+		{"with_semicolon", "shell metacharacters must be rejected", "Post;Tool", false},
+		{"with_newline", "newlines must be rejected", "Post\nTool", false},
+		{"starts_with_digit", "must start with uppercase letter", "1ToolUse", false},
+		{"too_long", "length cap prevents pathologically long span names", strings.Repeat("A", 65), false},
+		{"too_many_segments", "16-segment cap on the regex prevents 64-uppercase-letter pathological input", strings.Repeat("A", 17), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := isKnownHookEventName(tt.in)
+			if got != tt.want {
+				t.Errorf("isKnownHookEventName(%q) = %v, want %v\n(prevents: %s)",
+					tt.in, got, tt.want, tt.prevents)
+			}
+		})
+	}
+}
+
 func TestGenerateAgentID(t *testing.T) {
 	t.Run("generates valid agent ID with no existing IDs", func(t *testing.T) {
 		agentID, err := agentinstance.GenerateAgentID([]string{})
