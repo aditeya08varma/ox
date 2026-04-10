@@ -554,8 +554,16 @@ func TestRecordingState_WorkspacePath_EmptyForLegacy(t *testing.T) {
 	require.NoError(t, os.MkdirAll(sessionPath, 0o755))
 
 	// simulate old recording state JSON without workspace_path field
-	legacyJSON := `{"agent_id":"OxLgcy","started_at":"2026-01-01T10:00:00Z","adapter_name":"claude-code","session_path":"` + sessionPath + `"}`
-	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), []byte(legacyJSON), 0o600))
+	// use json.Marshal to properly escape backslashes on Windows
+	legacyState := map[string]any{
+		"agent_id":     "OxLgcy",
+		"started_at":   "2026-01-01T10:00:00Z",
+		"adapter_name": "claude-code",
+		"session_path": sessionPath,
+	}
+	legacyJSON, err := json.Marshal(legacyState)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), legacyJSON, 0o600))
 
 	loaded, err := LoadRecordingState(projectRoot)
 	require.NoError(t, err)

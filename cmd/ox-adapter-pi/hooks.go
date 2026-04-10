@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +33,10 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		}, fmt.Errorf("pi does not support user-level hooks (no user-level AGENTS.md)")
 	}
 
-	agentsPath := resolveAgentsMDPath(p.RepoRoot)
+	agentsPath, err := resolveAgentsMDPath(p.RepoRoot)
+	if err != nil {
+		return nil, err
+	}
 
 	existing, err := os.ReadFile(agentsPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -76,7 +78,10 @@ func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooks
 		}, nil
 	}
 
-	agentsPath := resolveAgentsMDPath(p.RepoRoot)
+	agentsPath, err := resolveAgentsMDPath(p.RepoRoot)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(agentsPath)
 	if err != nil {
 		return &adapterprotocol.CheckHooksResponse{
@@ -98,7 +103,10 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
 	}
 
-	agentsPath := resolveAgentsMDPath(p.RepoRoot)
+	agentsPath, err := resolveAgentsMDPath(p.RepoRoot)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(agentsPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -150,10 +158,9 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 	}, nil
 }
 
-func resolveAgentsMDPath(repoRoot string) string {
-	if repoRoot == "" {
-		log.Println("WARN: resolveAgentsMDPath called with empty repoRoot, falling back to cwd")
-		repoRoot, _ = os.Getwd()
+func resolveAgentsMDPath(repoRoot string) (string, error) {
+	if strings.TrimSpace(repoRoot) == "" {
+		return "", fmt.Errorf("repoRoot is required for project-scope AGENTS.md")
 	}
-	return filepath.Join(repoRoot, "AGENTS.md")
+	return filepath.Join(repoRoot, "AGENTS.md"), nil
 }

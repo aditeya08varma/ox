@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -34,7 +33,10 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		}, fmt.Errorf("aider does not support user-level hooks (no user-level CONVENTIONS.md)")
 	}
 
-	convPath := resolveConventionsPath(p.RepoRoot)
+	convPath, err := resolveConventionsPath(p.RepoRoot)
+	if err != nil {
+		return nil, err
+	}
 
 	existing, err := os.ReadFile(convPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -76,7 +78,10 @@ func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooks
 		}, nil
 	}
 
-	convPath := resolveConventionsPath(p.RepoRoot)
+	convPath, err := resolveConventionsPath(p.RepoRoot)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(convPath)
 	if err != nil {
 		return &adapterprotocol.CheckHooksResponse{
@@ -98,7 +103,10 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
 	}
 
-	convPath := resolveConventionsPath(p.RepoRoot)
+	convPath, err := resolveConventionsPath(p.RepoRoot)
+	if err != nil {
+		return nil, err
+	}
 	data, err := os.ReadFile(convPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -150,10 +158,9 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 	}, nil
 }
 
-func resolveConventionsPath(repoRoot string) string {
-	if repoRoot == "" {
-		log.Println("WARN: resolveConventionsPath called with empty repoRoot, falling back to cwd")
-		repoRoot, _ = os.Getwd()
+func resolveConventionsPath(repoRoot string) (string, error) {
+	if strings.TrimSpace(repoRoot) == "" {
+		return "", fmt.Errorf("repoRoot is required for project-scope CONVENTIONS.md")
 	}
-	return filepath.Join(repoRoot, "CONVENTIONS.md")
+	return filepath.Join(repoRoot, "CONVENTIONS.md"), nil
 }

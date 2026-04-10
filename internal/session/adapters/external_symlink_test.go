@@ -62,6 +62,7 @@ func TestSessionLookup_Validate_RejectsEmptyAgentID(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	lookup := SessionLookup{
 		RepoRoot: tmpDir,
@@ -78,6 +79,7 @@ func TestSessionLookup_Validate_AcceptsValid(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	lookup := SessionLookup{
 		RepoRoot: tmpDir,
@@ -120,6 +122,7 @@ func TestValidateRepoRootArg_AcceptsValid(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	err := validateRepoRootArg([]string{"--repo-root", tmpDir}, false)
 	require.NoError(t, err)
@@ -140,6 +143,7 @@ func TestSessionLookup_Validate_PathWithSpaces(t *testing.T) {
 	tmpDir, _ = filepath.EvalSymlinks(filepath.Dir(tmpDir))
 	tmpDir = filepath.Join(tmpDir, "my project repo")
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	lookup := SessionLookup{RepoRoot: tmpDir, AgentID: "OxTest", Since: time.Now()}
 	require.NoError(t, lookup.Validate())
@@ -150,6 +154,7 @@ func TestSessionLookup_Validate_TrailingSlash(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	lookup := SessionLookup{RepoRoot: tmpDir + "/", AgentID: "OxTest", Since: time.Now()}
 	require.NoError(t, lookup.Validate())
@@ -163,6 +168,7 @@ func TestSessionLookup_Validate_SymlinkedSageox(t *testing.T) {
 
 	realDir := filepath.Join(tmpDir, "real-sageox")
 	require.NoError(t, os.MkdirAll(realDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(realDir, "config.json"), []byte("{}"), 0o644))
 	require.NoError(t, os.Symlink(realDir, filepath.Join(tmpDir, ".sageox")))
 
 	lookup := SessionLookup{RepoRoot: tmpDir, AgentID: "OxTest", Since: time.Now()}
@@ -188,6 +194,7 @@ func TestSessionLookup_Validate_ZeroSinceAllowed(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	lookup := SessionLookup{RepoRoot: tmpDir, AgentID: "OxTest", Since: time.Time{}}
 	require.NoError(t, lookup.Validate())
@@ -198,6 +205,7 @@ func TestSessionLookup_Validate_AgentSessionIDOptional(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	lookup := SessionLookup{RepoRoot: tmpDir, AgentID: "OxTest", Since: time.Now(), AgentSessionID: ""}
 	require.NoError(t, lookup.Validate())
@@ -293,6 +301,7 @@ func TestValidateRepoRootArg_FirstOfDuplicates(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	// first is valid, second is bad — should pass because first is checked and returned
 	err := validateRepoRootArg([]string{"--repo-root", tmpDir, "--repo-root", "."}, false)
@@ -316,6 +325,7 @@ func TestValidateRepoRootArg_MixedArgs(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	err := validateRepoRootArg([]string{
 		"--agent-id", "OxTest",
@@ -331,6 +341,7 @@ func TestValidateRepoRootArg_PathWithSpaces(t *testing.T) {
 	tmpDir, _ = filepath.EvalSymlinks(filepath.Dir(tmpDir))
 	tmpDir = filepath.Join(tmpDir, "my project")
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	err := validateRepoRootArg([]string{"--repo-root", tmpDir}, false)
 	require.NoError(t, err)
@@ -370,6 +381,7 @@ func TestValidateRepoRootArg_RequireRepoRoot_ValidPasses(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
 	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644))
 
 	err := validateRepoRootArg([]string{"--repo-root", tmpDir}, true)
 	require.NoError(t, err)

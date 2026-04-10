@@ -23,7 +23,11 @@ func TestGenericJSONLAdapter_Detect(t *testing.T) {
 
 func TestGenericJSONLAdapter_FindSessionFile(t *testing.T) {
 	adapter := &GenericJSONLAdapter{}
-	_, err := adapter.FindSessionFile(SessionLookup{RepoRoot: "/tmp", AgentID: "agent-123", Since: time.Now()})
+	projectRoot := t.TempDir()
+	projectRoot, _ = filepath.EvalSymlinks(projectRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(projectRoot, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(projectRoot, ".sageox", "config.json"), []byte("{}"), 0o644))
+	_, err := adapter.FindSessionFile(SessionLookup{RepoRoot: projectRoot, AgentID: "agent-123", Since: time.Now()})
 	assert.ErrorIs(t, err, ErrSessionNotFound)
 }
 

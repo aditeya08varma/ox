@@ -2,9 +2,9 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -31,7 +31,10 @@ export const OxPrimePlugin: Plugin = async ({ $, directory }) => {
 `
 
 func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallHooksResponse, error) {
-	pluginPath := resolvePluginPath(p.RepoRoot, p.Scope)
+	pluginPath, err := resolvePluginPath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
 
 	// check if already installed with same content
 	if existing, err := os.ReadFile(pluginPath); err == nil {
@@ -59,10 +62,13 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 }
 
 func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooksResponse, error) {
-	pluginPath := resolvePluginPath(p.RepoRoot, p.Scope)
+	pluginPath, err := resolvePluginPath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
 
-	_, err := os.Stat(pluginPath)
-	installed := err == nil
+	_, statErr := os.Stat(pluginPath)
+	installed := statErr == nil
 
 	return &adapterprotocol.CheckHooksResponse{
 		Installed: installed,
@@ -72,7 +78,10 @@ func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooks
 }
 
 func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.UninstallHooksResponse, error) {
-	pluginPath := resolvePluginPath(p.RepoRoot, p.Scope)
+	pluginPath, err := resolvePluginPath(p.RepoRoot, p.Scope)
+	if err != nil {
+		return nil, err
+	}
 
 	if _, err := os.Stat(pluginPath); os.IsNotExist(err) {
 		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
@@ -88,14 +97,16 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 	}, nil
 }
 
-func resolvePluginPath(repoRoot, scope string) string {
+func resolvePluginPath(repoRoot, scope string) (string, error) {
 	if scope == "user" {
-		home, _ := os.UserHomeDir()
-		return filepath.Join(home, openCodeUserPath, openCodePluginFileName)
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", fmt.Errorf("cannot determine home directory: %w", err)
+		}
+		return filepath.Join(home, openCodeUserPath, openCodePluginFileName), nil
 	}
-	if repoRoot == "" {
-		log.Println("WARN: resolvePluginPath called with empty repoRoot, falling back to cwd")
-		repoRoot, _ = os.Getwd()
+	if strings.TrimSpace(repoRoot) == "" {
+		return "", fmt.Errorf("repoRoot is required for project-scope plugin")
 	}
-	return filepath.Join(repoRoot, openCodeProjectPath, openCodePluginFileName)
+	return filepath.Join(repoRoot, openCodeProjectPath, openCodePluginFileName), nil
 }

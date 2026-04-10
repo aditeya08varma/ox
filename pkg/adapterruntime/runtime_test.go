@@ -84,9 +84,12 @@ func TestServer_UnknownMethod(t *testing.T) {
 }
 
 func TestServer_FindSession(t *testing.T) {
-	// create real temp dir with .sageox/ so ValidateRepoRoot passes
+	// create real temp dir with .sageox/config.json so ValidateRepoRoot passes
 	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -748,6 +751,9 @@ func TestRunWithArgs_FindSession_RejectsNonexistent(t *testing.T) {
 func TestRunWithArgs_FindSession_AcceptsValid(t *testing.T) {
 	tmpDir := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, ".sageox", "config.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

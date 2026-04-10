@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+// initSageox creates .sageox/config.json in tmpDir for ValidateRepoRoot tests.
+func initSageox(t *testing.T, tmpDir string) {
+	t.Helper()
+	sageoxDir := filepath.Join(tmpDir, ".sageox")
+	if err := os.MkdirAll(sageoxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // --- A. ValidateRepoRoot ---
 
 // TestValidateRepoRoot_RejectsEmpty verifies empty string is rejected.
@@ -51,9 +63,7 @@ func TestValidateRepoRoot_RejectsNoSageox(t *testing.T) {
 func TestValidateRepoRoot_AcceptsValid(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	initSageox(t, tmpDir)
 
 	err := ValidateRepoRoot(tmpDir)
 	if err != nil {
@@ -69,9 +79,7 @@ func TestValidateRepoRoot_PathWithSpaces(t *testing.T) {
 	tmpDir := filepath.Join(t.TempDir(), "my project")
 	tmpDir, _ = filepath.EvalSymlinks(filepath.Dir(tmpDir))
 	tmpDir = filepath.Join(tmpDir, "my project")
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	initSageox(t, tmpDir)
 	if err := ValidateRepoRoot(tmpDir); err != nil {
 		t.Fatalf("path with spaces should pass: %v", err)
 	}
@@ -81,9 +89,7 @@ func TestValidateRepoRoot_PathWithSpaces(t *testing.T) {
 func TestValidateRepoRoot_TrailingSlash(t *testing.T) {
 	tmpDir := t.TempDir()
 	tmpDir, _ = filepath.EvalSymlinks(tmpDir)
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	initSageox(t, tmpDir)
 	if err := ValidateRepoRoot(tmpDir + "/"); err != nil {
 		t.Fatalf("trailing slash should pass: %v", err)
 	}
@@ -110,6 +116,9 @@ func TestValidateRepoRoot_SymlinkedSageox(t *testing.T) {
 
 	realDir := filepath.Join(tmpDir, "real-sageox")
 	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(realDir, "config.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Symlink(realDir, filepath.Join(tmpDir, ".sageox")); err != nil {

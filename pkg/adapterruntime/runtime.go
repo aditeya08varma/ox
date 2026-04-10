@@ -31,9 +31,9 @@ import (
 const statTimeout = 500 * time.Millisecond
 
 // ValidateRepoRoot checks that a repo root path is non-empty, absolute, and
-// contains a .sageox/ directory. All adapters using this SDK get this
-// validation for free when called via the find-session dispatch path.
-// The .sageox stat uses a 500ms timeout to prevent NFS hangs in hook paths.
+// is an initialized SageOx project (.sageox/config.json must exist).
+// All adapters using this SDK get this validation for free via the find-session
+// dispatch path. The stat uses a 500ms timeout to prevent NFS hangs in hook paths.
 func ValidateRepoRoot(root string) error {
 	if root == "" || root == "." {
 		return fmt.Errorf("repo-root must be absolute, got %q", root)
@@ -41,12 +41,15 @@ func ValidateRepoRoot(root string) error {
 	if !filepath.IsAbs(root) {
 		return fmt.Errorf("repo-root %q is not absolute", root)
 	}
-	info, err := statWithTimeout(filepath.Join(root, ".sageox"), statTimeout)
+	// check for .sageox/config.json (not just .sageox/ directory) to reject
+	// half-initialized or stale worktrees missing project config
+	cfgPath := filepath.Join(root, ".sageox", "config.json")
+	info, err := statWithTimeout(cfgPath, statTimeout)
 	if err != nil {
-		return fmt.Errorf("repo-root %q has no .sageox/ directory: %w", root, err)
+		return fmt.Errorf("repo-root %q is not initialized (.sageox/config.json missing)", root)
 	}
-	if !info.IsDir() {
-		return fmt.Errorf("repo-root %q has no .sageox/ directory", root)
+	if info.IsDir() {
+		return fmt.Errorf("repo-root %q is not initialized (.sageox/config.json is a directory)", root)
 	}
 	return nil
 }

@@ -142,23 +142,17 @@ func (s *Suite) TestFindSessionBadRepoRoot(t *testing.T) {
 		return
 	}
 
-	// non-zero exit — check for structured JSON error in stdout
-	if len(stdout) > 0 {
-		var resp struct {
-			Error string `json:"error"`
-		}
-		if json.Unmarshal(stdout, &resp) == nil && resp.Error != "" {
-			return // structured error, good
-		}
+	// non-zero exit MUST still provide structured JSON error on stdout or stderr
+	var resp struct {
+		Error string `json:"error"`
 	}
-
-	// non-zero exit with stderr is also acceptable
-	if len(stderr) > 0 {
-		return
+	if len(stdout) > 0 && json.Unmarshal(stdout, &resp) == nil && resp.Error != "" {
+		return // structured error on stdout
 	}
-
-	// non-zero exit with no output at all is still acceptable (it's an error)
-	_ = err
+	if len(stderr) > 0 && json.Unmarshal(stderr, &resp) == nil && resp.Error != "" {
+		return // structured error on stderr
+	}
+	t.Fatalf("find-session with bad repo-root returned unstructured failure\nstdout: %s\nstderr: %s\nerr: %v", stdout, stderr, err)
 }
 
 // --- Serve mode tests ---

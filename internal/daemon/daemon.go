@@ -327,8 +327,13 @@ func (d *Daemon) Start() error {
 	// NOTE: must happen BEFORE StabilizeCWD() which changes cwd to $HOME
 	workspacePath := d.config.ProjectRoot
 	if workspacePath == "" {
-		d.logger.Warn("daemon config missing ProjectRoot, falling back to cwd")
-		workspacePath, _ = os.Getwd()
+		var cwdErr error
+		workspacePath, cwdErr = os.Getwd()
+		if cwdErr != nil {
+			d.logger.Error("daemon config missing ProjectRoot and os.Getwd failed", "error", cwdErr)
+			return fmt.Errorf("cannot determine workspace path: %w", cwdErr)
+		}
+		d.logger.Warn("daemon config missing ProjectRoot, falling back to cwd", "cwd", workspacePath)
 	}
 	// cache for later use (after StabilizeCWD, os.Getwd returns $HOME)
 	d.cachedWorkspacePath = workspacePath

@@ -62,7 +62,11 @@ func supFindRepoRoot(t *testing.T) string {
 func supFindSessionParams(t *testing.T, agentID string) adapterprotocol.FindSessionParams {
 	t.Helper()
 	tmpDir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
+	sageoxDir := filepath.Join(tmpDir, ".sageox")
+	if err := os.MkdirAll(sageoxDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return adapterprotocol.FindSessionParams{
