@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -85,6 +86,7 @@ func GetHistoryStoragePath(agentID string, activeRecording bool) string {
 	// try to find active recording state
 	cwd, err := os.Getwd()
 	if err != nil {
+		slog.Warn("GetHistoryStoragePath: os.Getwd failed, using '.'", "error", err)
 		cwd = "."
 	}
 

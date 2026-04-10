@@ -1019,7 +1019,15 @@ func sendSessionWatchStart(state *session.RecordingState, projectRoot string) {
 		if err != nil {
 			return
 		}
-		sf, err := adapter.FindSessionFile(state.AgentID, state.StartedAt)
+		repoRoot := state.WorkspacePath
+		if repoRoot == "" {
+			repoRoot = projectRoot
+		}
+		sf, err := adapter.FindSessionFile(adapters.SessionLookup{
+			RepoRoot: repoRoot,
+			AgentID:  state.AgentID,
+			Since:    state.StartedAt,
+		})
 		if err != nil {
 			slog.Debug("tail-mode: session file not found yet, daemon will discover later",
 				"agent_id", state.AgentID, "adapter", state.AdapterName)

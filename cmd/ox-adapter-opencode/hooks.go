@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -92,9 +93,9 @@ func resolvePluginPath(repoRoot, scope string) string {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, openCodeUserPath, openCodePluginFileName)
 	}
-	if repoRoot != "" {
-		return filepath.Join(repoRoot, openCodeProjectPath, openCodePluginFileName)
+	if repoRoot == "" {
+		log.Println("WARN: resolvePluginPath called with empty repoRoot, falling back to cwd")
+		repoRoot, _ = os.Getwd()
 	}
-	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, openCodeProjectPath, openCodePluginFileName)
+	return filepath.Join(repoRoot, openCodeProjectPath, openCodePluginFileName)
 }

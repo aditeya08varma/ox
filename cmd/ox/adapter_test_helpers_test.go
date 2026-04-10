@@ -17,7 +17,7 @@ type testClaudeCodeAdapter struct{}
 
 func (a *testClaudeCodeAdapter) Name() string  { return "claude-code" }
 func (a *testClaudeCodeAdapter) Detect() bool  { return false }
-func (a *testClaudeCodeAdapter) FindSessionFile(_ string, _ time.Time) (string, error) {
+func (a *testClaudeCodeAdapter) FindSessionFile(_ adapters.SessionLookup) (string, error) {
 	return "", adapters.ErrSessionNotFound
 }
 func (a *testClaudeCodeAdapter) ReadMetadata(_ string) (*adapters.SessionMetadata, error) {
@@ -150,7 +150,7 @@ type testCodexAdapter struct{}
 
 func (a *testCodexAdapter) Name() string  { return "codex" }
 func (a *testCodexAdapter) Detect() bool  { return false }
-func (a *testCodexAdapter) FindSessionFile(_ string, since time.Time) (string, error) {
+func (a *testCodexAdapter) FindSessionFile(lookup adapters.SessionLookup) (string, error) {
 	// scan ~/.codex/sessions/ for recent session files (mirrors real CodexAdapter behavior)
 	home, err := os.UserHomeDir()
 	if err != nil {

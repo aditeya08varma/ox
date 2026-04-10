@@ -29,7 +29,7 @@ func (m *mockAdapter) Detect() bool {
 	return m.detect
 }
 
-func (m *mockAdapter) FindSessionFile(agentID string, since time.Time) (string, error) {
+func (m *mockAdapter) FindSessionFile(lookup SessionLookup) (string, error) {
 	if m.findErr != nil {
 		return "", m.findErr
 	}
@@ -226,7 +226,7 @@ func TestMockAdapter_FindSessionFile(t *testing.T) {
 		sessionID: "session-123",
 	}
 
-	path, err := adapter.FindSessionFile("agent-id", time.Now())
+	path, err := adapter.FindSessionFile(SessionLookup{RepoRoot: "/tmp", AgentID: "agent-id", Since: time.Now()})
 	require.NoError(t, err)
 	assert.Equal(t, "/path/to/session/session-123", path)
 }
@@ -238,7 +238,7 @@ func TestMockAdapter_FindSessionFile_Error(t *testing.T) {
 		findErr: expectedErr,
 	}
 
-	_, err := adapter.FindSessionFile("agent-id", time.Now())
+	_, err := adapter.FindSessionFile(SessionLookup{RepoRoot: "/tmp", AgentID: "agent-id", Since: time.Now()})
 	require.Error(t, err)
 	assert.Equal(t, expectedErr, err)
 }

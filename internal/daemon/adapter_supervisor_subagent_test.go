@@ -31,7 +31,7 @@ func TestSupervisor_SpawnSubagent(t *testing.T) {
 
 	// prime the adapter with a session first so the process is alive
 	ctx := context.Background()
-	_, err := sup.SendRequest(ctx, "test", "agent-parent", adapterprotocol.MethodFindSession, supFindSessionParams("agent-parent"))
+	_, err := sup.SendRequest(ctx, "test", "agent-parent", adapterprotocol.MethodFindSession, supFindSessionParams(t, "agent-parent"))
 	if err != nil {
 		t.Fatalf("prime request failed: %v", err)
 	}

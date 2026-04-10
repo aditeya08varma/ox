@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -180,11 +181,11 @@ func resolveHooksPath(repoRoot, scope string) string {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, codexUserPath, codexHooksFileName)
 	}
-	if repoRoot != "" {
-		return filepath.Join(repoRoot, codexProjectPath, codexHooksFileName)
+	if repoRoot == "" {
+		log.Println("WARN: resolveHooksPath called with empty repoRoot, falling back to cwd")
+		repoRoot, _ = os.Getwd()
 	}
-	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, codexProjectPath, codexHooksFileName)
+	return filepath.Join(repoRoot, codexProjectPath, codexHooksFileName)
 }
 
 func resolveConfigPath(repoRoot, scope string) string {
@@ -192,11 +193,11 @@ func resolveConfigPath(repoRoot, scope string) string {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, codexUserPath, codexConfigFile)
 	}
-	if repoRoot != "" {
-		return filepath.Join(repoRoot, codexProjectPath, codexConfigFile)
+	if repoRoot == "" {
+		log.Println("WARN: resolveConfigPath called with empty repoRoot, falling back to cwd")
+		repoRoot, _ = os.Getwd()
 	}
-	cwd, _ := os.Getwd()
-	return filepath.Join(cwd, codexProjectPath, codexConfigFile)
+	return filepath.Join(repoRoot, codexProjectPath, codexConfigFile)
 }
 
 func readHooksFile(path string) (map[string][]codexHookEntry, map[string]json.RawMessage, error) {

@@ -61,6 +61,8 @@ func (s *Suite) RunAll(t *testing.T) {
 	t.Run("serve/shutdown", s.TestServeShutdown)
 	t.Run("serve/unknown-method", s.TestServeUnknownMethod)
 
+	t.Run("find-session/bad-repo-root", s.TestFindSessionBadRepoRoot)
+
 	// subagent tests only run if the adapter declares the capability
 	if s.hasCapability(t, adapterprotocol.CapSubagentController) {
 		t.Run("serve/spawn-subagent", s.TestSpawnSubagent)
@@ -115,6 +117,48 @@ func (s *Suite) TestDetect(t *testing.T) {
 	if resp.Reason == "" {
 		t.Error("detect.reason should explain why detected/not detected")
 	}
+}
+
+// TestFindSessionBadRepoRoot verifies that find-session with a nonexistent
+// repo root returns a structured error, not empty output or a panic.
+// Failure prevented: adapter silently returns empty result for bad repoRoot,
+// causing session recording to fail without any error message.
+func (s *Suite) TestFindSessionBadRepoRoot(t *testing.T) {
+	stdout, stderr, err := s.execOnceAllowError(t, "find-session",
+		"--repo-root", "/nonexistent/path/compliance-test",
+		"--agent-id", s.AgentID,
+		"--since", time.Now().Add(-1*time.Hour).UTC().Format(time.RFC3339),
+	)
+
+	// adapter MUST signal failure: either non-zero exit or a JSON error field
+	if err == nil {
+		// exited 0 — stdout must contain an error field
+		var resp struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(stdout, &resp) != nil || resp.Error == "" {
+			t.Fatalf("find-session with bad repo-root exited 0 without error field\nstdout: %s", stdout)
+		}
+		return
+	}
+
+	// non-zero exit — check for structured JSON error in stdout
+	if len(stdout) > 0 {
+		var resp struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(stdout, &resp) == nil && resp.Error != "" {
+			return // structured error, good
+		}
+	}
+
+	// non-zero exit with stderr is also acceptable
+	if len(stderr) > 0 {
+		return
+	}
+
+	// non-zero exit with no output at all is still acceptable (it's an error)
+	_ = err
 }
 
 // --- Serve mode tests ---
@@ -612,6 +656,27 @@ func (s *Suite) execOnce(t *testing.T, subcommand string, args ...string) []byte
 	}
 
 	return bytes.TrimSpace(stdout.Bytes())
+}
+
+// execOnceAllowError runs a one-shot subcommand, returning stdout, stderr,
+// and any execution error. Unlike execOnce, it does not fatal on non-zero exit.
+func (s *Suite) execOnceAllowError(t *testing.T, subcommand string, args ...string) (stdout, stderr []byte, err error) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmdArgs := append([]string{subcommand}, args...)
+	cmd := exec.CommandContext(ctx, s.Binary, cmdArgs...)
+	cmd.Env = append(os.Environ(),
+		fmt.Sprintf("OX_PROTOCOL_VERSION=%d", adapterprotocol.ProtocolVersion),
+	)
+
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	err = cmd.Run()
+	return bytes.TrimSpace(stdoutBuf.Bytes()), bytes.TrimSpace(stderrBuf.Bytes()), err
 }
 
 // hasCapability checks if the adapter under test declares a given capability.

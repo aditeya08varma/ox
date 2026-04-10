@@ -516,6 +516,97 @@ func TestLoadAllRecordingStates_MixedValidAndCorrupt(t *testing.T) {
 	assert.Equal(t, "OxGood", states[0].AgentID)
 }
 
+// --- P0: WorkspacePath persistence (session-stop hardening) ---
+
+// TestRecordingState_WorkspacePath_RoundTrip verifies WorkspacePath survives JSON serialization.
+// Failure prevented: WorkspacePath lost during save/load cycle causes ambient cwd derivation
+// at stop time, which was the root cause of the 2h33m session loss.
+func TestRecordingState_WorkspacePath_RoundTrip(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-04-09T10-00-user-OxWksp")
+
+	originalState := &RecordingState{
+		AgentID:       "OxWksp",
+		StartedAt:     time.Now().Truncate(time.Second),
+		AdapterName:   "claude-code",
+		SessionPath:   sessionPath,
+		WorkspacePath: "/home/user/my-project",
+	}
+
+	err := SaveRecordingState(projectRoot, originalState)
+	require.NoError(t, err)
+
+	loaded, err := LoadRecordingState(projectRoot)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, "/home/user/my-project", loaded.WorkspacePath,
+		"WorkspacePath must survive save/load round-trip")
+}
+
+// TestRecordingState_WorkspacePath_EmptyForLegacy verifies legacy states without
+// WorkspacePath deserialize correctly with empty string (backward compatibility).
+// Failure prevented: legacy .recording.json without workspace_path causes nil panic.
+func TestRecordingState_WorkspacePath_EmptyForLegacy(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-01-01T10-00-user-OxLgcy")
+	require.NoError(t, os.MkdirAll(sessionPath, 0o755))
+
+	// simulate old recording state JSON without workspace_path field
+	legacyJSON := `{"agent_id":"OxLgcy","started_at":"2026-01-01T10:00:00Z","adapter_name":"claude-code","session_path":"` + sessionPath + `"}`
+	require.NoError(t, os.WriteFile(filepath.Join(sessionPath, recordingFile), []byte(legacyJSON), 0o600))
+
+	loaded, err := LoadRecordingState(projectRoot)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, "", loaded.WorkspacePath,
+		"legacy state without workspace_path should deserialize as empty string")
+	assert.Equal(t, "OxLgcy", loaded.AgentID)
+}
+
+// TestRecordingState_WorkspacePath_WithSpaces verifies paths with spaces survive round-trip.
+// Failure prevented: paths with spaces get truncated or corrupted in JSON serialization.
+func TestRecordingState_WorkspacePath_WithSpaces(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot, sessionsBase := setupRecordingTestWithSessionsBase(t, cacheDir)
+	sessionPath := filepath.Join(sessionsBase, "2026-04-09T10-00-user-OxSpc")
+
+	pathWithSpaces := "/home/alice smith/my cool project"
+	state := &RecordingState{
+		AgentID:       "OxSpc",
+		StartedAt:     time.Now().Truncate(time.Second),
+		AdapterName:   "claude-code",
+		SessionPath:   sessionPath,
+		WorkspacePath: pathWithSpaces,
+	}
+
+	require.NoError(t, SaveRecordingState(projectRoot, state))
+
+	loaded, err := LoadRecordingState(projectRoot)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, pathWithSpaces, loaded.WorkspacePath,
+		"WorkspacePath with spaces must survive round-trip")
+}
+
+// TestStartRecording_SetsWorkspacePath verifies StartRecording populates WorkspacePath.
+// Failure prevented: WorkspacePath not set at start means stop time has no repoRoot source.
+func TestStartRecording_SetsWorkspacePath(t *testing.T) {
+	cacheDir := t.TempDir()
+	projectRoot := setupRecordingTest(t, cacheDir)
+
+	state, err := StartRecording(projectRoot, StartRecordingOptions{
+		AgentID:       "OxWsSet",
+		AdapterName:   "claude-code",
+		Username:      "testuser",
+		WorkspacePath: "/home/user/my-project",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "/home/user/my-project", state.WorkspacePath,
+		"WorkspacePath should be set from StartRecordingOptions")
+}
+
 // --- P0: Recording state corruption resilience ---
 
 func TestLoadRecordingState_TruncatedJSON(t *testing.T) {

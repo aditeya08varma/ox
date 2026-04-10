@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -92,6 +93,57 @@ func touchMarker(gitRoot, markerName string) error {
 func clearMarker(gitRoot, markerName string) error {
 	markerPath := filepath.Join(gitRoot, sageoxDir, markerName)
 	err := os.Remove(markerPath)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
+// SessionRecoveryInfo contains metadata needed for automated session recovery.
+// Written to .sageox/.session-recovery.json when session file discovery fails at stop time.
+type SessionRecoveryInfo struct {
+	AgentID       string    `json:"agent_id"`
+	AdapterName   string    `json:"adapter_name"`
+	StartedAt     time.Time `json:"started_at"`
+	WorkspacePath string    `json:"workspace_path"`
+	FailedAt      time.Time `json:"failed_at"`
+	Error         string    `json:"error,omitempty"`
+}
+
+const sessionRecoveryFile = ".session-recovery.json"
+
+// SetSessionRecoveryInfo writes recovery metadata so ox doctor can drive automated recovery.
+func SetSessionRecoveryInfo(gitRoot string, info SessionRecoveryInfo) error {
+	sageoxPath := filepath.Join(gitRoot, sageoxDir)
+	if _, err := os.Stat(sageoxPath); os.IsNotExist(err) {
+		return errors.New(".sageox directory does not exist")
+	}
+
+	data, err := json.Marshal(info)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(sageoxPath, sessionRecoveryFile), data, 0o644)
+}
+
+// GetSessionRecoveryInfo reads recovery metadata if it exists.
+// Returns nil if no recovery is pending.
+func GetSessionRecoveryInfo(gitRoot string) *SessionRecoveryInfo {
+	data, err := os.ReadFile(filepath.Join(gitRoot, sageoxDir, sessionRecoveryFile))
+	if err != nil {
+		return nil
+	}
+	var info SessionRecoveryInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return nil
+	}
+	return &info
+}
+
+// ClearSessionRecoveryInfo removes the recovery metadata file.
+func ClearSessionRecoveryInfo(gitRoot string) error {
+	path := filepath.Join(gitRoot, sageoxDir, sessionRecoveryFile)
+	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}

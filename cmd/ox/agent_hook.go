@@ -411,7 +411,15 @@ func handleAfterTool(ctx *HookContext) error {
 
 	if state.SessionFile == "" {
 		// discover session file on first hook call (Claude Code JSONL may not exist at prime time)
-		sf, findErr := adapter.FindSessionFile(agentID, state.StartedAt)
+		repoRoot := state.WorkspacePath
+		if repoRoot == "" {
+			repoRoot = ctx.ProjectRoot
+		}
+		sf, findErr := adapter.FindSessionFile(adapters.SessionLookup{
+			RepoRoot: repoRoot,
+			AgentID:  agentID,
+			Since:    state.StartedAt,
+		})
 		if findErr != nil || sf == "" {
 			slog.Debug("hook: session file not found", "agentID", agentID, "err", findErr)
 			return nil // session file not available yet
@@ -431,7 +439,15 @@ func handleAfterTool(ctx *HookContext) error {
 		} else {
 			slog.Info("hook: session file shrank, attempting rediscovery", "file", state.SessionFile, "size", fi.Size(), "offset", state.SourceOffset)
 		}
-		sf, findErr := adapter.FindSessionFile(agentID, state.StartedAt)
+		repoRoot := state.WorkspacePath
+		if repoRoot == "" {
+			repoRoot = ctx.ProjectRoot
+		}
+		sf, findErr := adapter.FindSessionFile(adapters.SessionLookup{
+			RepoRoot: repoRoot,
+			AgentID:  agentID,
+			Since:    state.StartedAt,
+		})
 		if findErr == nil && sf != "" && sf != state.SessionFile {
 			slog.Info("hook: rediscovered session file", "old", state.SessionFile, "new", sf)
 			state.SessionFile = sf

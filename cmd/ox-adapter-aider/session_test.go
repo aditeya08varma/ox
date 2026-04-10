@@ -549,24 +549,24 @@ func TestFindAiderSession_InvalidSinceFormat(t *testing.T) {
 	}
 }
 
-// TestFindAiderSession_DefaultRepoRoot verifies current directory is used when repoRoot is empty.
-// Failure prevented: session lookup failing when no explicit repo root provided.
-func TestFindAiderSession_DefaultRepoRoot(t *testing.T) {
-	dir := t.TempDir()
+// TestFindAiderSession_EmptyRepoRoot_RejectsEmpty verifies that an empty repoRoot
+// is rejected instead of silently falling back to cwd.
+// Failure prevented: silent cwd derivation causing session discovery in wrong directory.
+func TestFindAiderSession_EmptyRepoRoot_RejectsEmpty(t *testing.T) {
+	_, err := findAiderSession("", "", "", "")
+	if err == nil {
+		t.Fatal("expected error for empty repoRoot, got nil")
+	}
+	if !strings.Contains(err.Error(), "repo-root is required") {
+		t.Errorf("expected 'repo-root is required' error, got: %v", err)
+	}
+}
 
-	// Change to temp directory
-	origWd, err := os.Getwd()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if err := os.Chdir(origWd); err != nil {
-			t.Fatal(err)
-		}
-	}()
-	if err := os.Chdir(dir); err != nil {
-		t.Fatal(err)
-	}
+// TestFindAiderSession_ExplicitRepoRoot verifies session discovery works
+// with an explicitly provided repoRoot.
+// Failure prevented: regression in explicit repoRoot path after removing cwd fallback.
+func TestFindAiderSession_ExplicitRepoRoot(t *testing.T) {
+	dir := t.TempDir()
 
 	path := filepath.Join(dir, aiderHistoryFile)
 	content := "# aider chat started at 2024-01-15 14:30:45\n"
@@ -574,20 +574,18 @@ func TestFindAiderSession_DefaultRepoRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Call with empty repoRoot - should use current directory
-	got, err := findAiderSession("", "", "", "")
+	got, err := findAiderSession(dir, "", "", "")
 	if err != nil {
-		t.Fatalf("findAiderSession with empty repoRoot: %v", err)
+		t.Fatalf("findAiderSession with explicit repoRoot: %v", err)
 	}
 
-	// Resolve symlinks to compare paths properly (macOS /var -> /private/var)
 	gotResolved, err := filepath.EvalSymlinks(got)
 	if err != nil {
-		gotResolved = got // fallback if symlink resolution fails
+		gotResolved = got
 	}
 	pathResolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
-		pathResolved = path // fallback if symlink resolution fails
+		pathResolved = path
 	}
 
 	if gotResolved != pathResolved {

@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -82,10 +84,16 @@ func TestServer_UnknownMethod(t *testing.T) {
 }
 
 func TestServer_FindSession(t *testing.T) {
+	// create real temp dir with .sageox/ so ValidateRepoRoot passes
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
 	params, _ := json.Marshal(adapterprotocol.FindSessionParams{
 		AgentID:  "OxA1b2",
 		RepoID:   "abc123",
-		RepoRoot: "/tmp/repo",
+		RepoRoot: tmpDir,
 		Since:    "2026-04-02T10:00:00Z",
 	})
 	req := adapterprotocol.Request{ID: 1, Method: "find-session", Params: params}
@@ -666,6 +674,127 @@ func TestRunWithArgs_InstallRules_NotImplemented(t *testing.T) {
 	}
 	if errResp["error"] == "" {
 		t.Error("expected non-empty error message in JSON response")
+	}
+}
+
+// --- FindSession RepoRoot validation (one-shot dispatch) ---
+// Failure prevented: adapter binary accepts bad repo-root and silently returns
+// garbage, causing session recording loss.
+
+func TestRunWithArgs_FindSession_RejectsDot(t *testing.T) {
+	var stdout bytes.Buffer
+	cfg := adapterruntime.Config{
+		FindSession: func(p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
+			t.Fatal("handler must not be called with bad repo-root")
+			return nil, nil
+		},
+	}
+	err := adapterruntime.RunWithArgs(cfg, []string{
+		"find-session", "--repo-root", ".", "--agent-id", "test", "--since", "2026-01-01T00:00:00Z",
+	}, nil, &stdout)
+	if err == nil {
+		t.Fatal("expected error for repo-root '.'")
+	}
+}
+
+func TestRunWithArgs_FindSession_RejectsEmpty(t *testing.T) {
+	var stdout bytes.Buffer
+	cfg := adapterruntime.Config{
+		FindSession: func(p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
+			t.Fatal("handler must not be called with empty repo-root")
+			return nil, nil
+		},
+	}
+	err := adapterruntime.RunWithArgs(cfg, []string{
+		"find-session", "--repo-root", "", "--agent-id", "test", "--since", "2026-01-01T00:00:00Z",
+	}, nil, &stdout)
+	if err == nil {
+		t.Fatal("expected error for empty repo-root")
+	}
+}
+
+func TestRunWithArgs_FindSession_RejectsRelative(t *testing.T) {
+	var stdout bytes.Buffer
+	cfg := adapterruntime.Config{
+		FindSession: func(p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
+			t.Fatal("handler must not be called with relative repo-root")
+			return nil, nil
+		},
+	}
+	err := adapterruntime.RunWithArgs(cfg, []string{
+		"find-session", "--repo-root", "some/relative/path", "--agent-id", "test", "--since", "2026-01-01T00:00:00Z",
+	}, nil, &stdout)
+	if err == nil {
+		t.Fatal("expected error for relative repo-root")
+	}
+}
+
+func TestRunWithArgs_FindSession_RejectsNonexistent(t *testing.T) {
+	var stdout bytes.Buffer
+	cfg := adapterruntime.Config{
+		FindSession: func(p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
+			t.Fatal("handler must not be called with nonexistent repo-root")
+			return nil, nil
+		},
+	}
+	err := adapterruntime.RunWithArgs(cfg, []string{
+		"find-session", "--repo-root", "/nonexistent/path/compliance", "--agent-id", "test", "--since", "2026-01-01T00:00:00Z",
+	}, nil, &stdout)
+	if err == nil {
+		t.Fatal("expected error for nonexistent repo-root")
+	}
+}
+
+func TestRunWithArgs_FindSession_AcceptsValid(t *testing.T) {
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	handlerCalled := false
+	var stdout bytes.Buffer
+	cfg := adapterruntime.Config{
+		FindSession: func(p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
+			handlerCalled = true
+			if p.RepoRoot != tmpDir {
+				t.Errorf("RepoRoot = %q, want %q", p.RepoRoot, tmpDir)
+			}
+			return &adapterprotocol.FindSessionResult{SessionFile: "/tmp/session.jsonl"}, nil
+		},
+	}
+	err := adapterruntime.RunWithArgs(cfg, []string{
+		"find-session", "--repo-root", tmpDir, "--agent-id", "test", "--since", "2026-01-01T00:00:00Z",
+	}, nil, &stdout)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !handlerCalled {
+		t.Fatal("handler should have been called with valid repo-root")
+	}
+}
+
+// TestServer_FindSession_BadRepoRoot verifies serve-mode rejects bad repoRoot.
+// Failure prevented: daemon sends find-session via serve mode with bad repoRoot.
+func TestServer_FindSession_BadRepoRoot(t *testing.T) {
+	params, _ := json.Marshal(adapterprotocol.FindSessionParams{
+		AgentID:  "OxTest",
+		RepoRoot: ".",
+		Since:    "2026-01-01T00:00:00Z",
+	})
+	req := adapterprotocol.Request{ID: 50, Method: "find-session", Params: params}
+
+	resp := sendRequestViaBuffer(t, req, func(srv *adapterruntime.Server) {
+		srv.OnFindSession(func(ctx context.Context, p adapterprotocol.FindSessionParams) (*adapterprotocol.FindSessionResult, error) {
+			t.Fatal("handler must not be called with bad repo-root")
+			return nil, nil
+		})
+	})
+
+	if resp.ID != 50 {
+		t.Errorf("ID = %d, want 50", resp.ID)
+	}
+	if resp.Error == nil {
+		t.Fatal("expected error for find-session with bad repo-root in serve mode")
 	}
 }
 

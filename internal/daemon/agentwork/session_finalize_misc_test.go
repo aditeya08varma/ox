@@ -42,7 +42,7 @@ type mockReadAdapter struct{}
 
 func (m *mockReadAdapter) Name() string  { return "test-mock" }
 func (m *mockReadAdapter) Detect() bool  { return false }
-func (m *mockReadAdapter) FindSessionFile(_ string, _ time.Time) (string, error) {
+func (m *mockReadAdapter) FindSessionFile(_ adapters.SessionLookup) (string, error) {
 	return "", adapters.ErrSessionNotFound
 }
 func (m *mockReadAdapter) ReadMetadata(_ string) (*adapters.SessionMetadata, error) {

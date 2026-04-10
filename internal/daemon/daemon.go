@@ -187,6 +187,10 @@ type Daemon struct {
 	lastActivity     time.Time // tracks last activity for inactivity timeout
 	pendingWorkSince time.Time // when pending work was first detected during inactivity (zero = no pending work)
 
+	// cachedWorkspacePath is set BEFORE StabilizeCWD() so that later code
+	// never falls back to os.Getwd() (which returns $HOME post-stabilize)
+	cachedWorkspacePath string
+
 	// startup timing (written once in Start(), read by IPC status handler)
 	startupDurationMs  atomic.Int64
 	throttleDurationMs atomic.Int64
@@ -326,10 +330,14 @@ func (d *Daemon) Start() error {
 
 	// register in daemon registry for multi-daemon support
 	// use ProjectRoot (the actual workspace), not LedgerPath
+	// NOTE: must happen BEFORE StabilizeCWD() which changes cwd to $HOME
 	workspacePath := d.config.ProjectRoot
 	if workspacePath == "" {
+		d.logger.Warn("daemon config missing ProjectRoot, falling back to cwd")
 		workspacePath, _ = os.Getwd()
 	}
+	// cache for later use (after StabilizeCWD, os.Getwd returns $HOME)
+	d.cachedWorkspacePath = workspacePath
 	if err := RegisterDaemon(workspacePath, Version()); err != nil {
 		d.logger.Warn("failed to register daemon", "error", err)
 	}
@@ -471,10 +479,10 @@ func (d *Daemon) getAgentSessions() []AgentSession {
 		return nil
 	}
 
-	// get workspace path for this daemon
-	workspacePath := d.config.ProjectRoot
+	// use cached workspace path (set before StabilizeCWD changed cwd to $HOME)
+	workspacePath := d.cachedWorkspacePath
 	if workspacePath == "" {
-		workspacePath, _ = os.Getwd()
+		workspacePath = d.config.ProjectRoot
 	}
 
 	tracker := d.heartbeat.GetAgentActivity()
@@ -547,10 +555,10 @@ func (d *Daemon) getAgentInstances() []InstanceInfo {
 		return nil
 	}
 
-	// get workspace path for this daemon
-	workspacePath := d.config.ProjectRoot
+	// use cached workspace path (set before StabilizeCWD changed cwd to $HOME)
+	workspacePath := d.cachedWorkspacePath
 	if workspacePath == "" {
-		workspacePath, _ = os.Getwd()
+		workspacePath = d.config.ProjectRoot
 	}
 
 	tracker := d.heartbeat.GetAgentActivity()
