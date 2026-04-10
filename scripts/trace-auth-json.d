@@ -27,14 +27,21 @@
  *   sudo dtrace -s scripts/trace-auth-json.d -c './ox-tmp login'
  *   sudo dtrace -s scripts/trace-auth-json.d -p <pid>
  *
+ * Events are written to a log file (default: /tmp/auth-json-trace.log).
+ * The file is TRUNCATED each run — move it aside if you want to keep the
+ * previous trace. Watch events live from another terminal with:
+ *
+ *   tail -f /tmp/auth-json-trace.log
+ *
+ * Override the log path:
+ *
+ *   sudo dtrace -s scripts/trace-auth-json.d \
+ *       -D LOG_FILE='"/Users/you/auth-trace.log"'
+ *
  * Narrow the match to one absolute path (recommended while repro'ing):
  *
  *   sudo dtrace -s scripts/trace-auth-json.d \
  *       -D TARGET='"/Users/you/.sageox/auth.json"'
- *
- * Tee to a file while you reproduce the bug:
- *
- *   sudo dtrace -s scripts/trace-auth-json.d 2>&1 | tee /tmp/auth-trace.log
  *
  * ---------------------------------------------------------------------------
  * macOS GOTCHAS
@@ -66,6 +73,7 @@
  */
 
 #pragma D option quiet
+#pragma D option destructive
 #pragma D option switchrate=10hz
 #pragma D option bufsize=16m
 #pragma D option dynvarsize=32m
@@ -80,10 +88,29 @@
 #define TARGET "auth.json"
 #endif
 
+/*
+ * File that all captured events are written to. DTrace's freopen() redirects
+ * subsequent printf output to this path (requires #pragma D option destructive
+ * above). Override on the command line with `-D LOG_FILE='"/abs/path.log"'`.
+ *
+ * Note: freopen() TRUNCATES the file on open — if you need to keep prior
+ * traces, move or rename the log before re-running the script.
+ */
+#ifndef LOG_FILE
+#define LOG_FILE "/tmp/auth-json-trace.log"
+#endif
+
 dtrace:::BEGIN
 {
 	printf("trace-auth-json: watching for writes to files matching \"%s\"\n", TARGET);
-	printf("press Ctrl-C to stop.\n\n");
+	printf("trace-auth-json: logging events to %s\n", LOG_FILE);
+	printf("trace-auth-json: `tail -f %s` in another terminal to watch live.\n", LOG_FILE);
+	printf("trace-auth-json: press Ctrl-C to stop.\n\n");
+
+	/* Redirect all subsequent printf/ustack output to the log file. */
+	freopen(LOG_FILE);
+	printf("==== trace-auth-json started %Y  TARGET=\"%s\" ====\n\n",
+	    walltimestamp, TARGET);
 }
 
 /* =========================================================================
@@ -294,5 +321,9 @@ syscall::truncate:entry
 
 dtrace:::END
 {
-	printf("trace-auth-json: done.\n");
+	printf("==== trace-auth-json ended %Y ====\n", walltimestamp);
+
+	/* Empty string restores stdout for the final status line. */
+	freopen("");
+	printf("trace-auth-json: done. events written to %s\n", LOG_FILE);
 }
