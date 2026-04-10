@@ -165,8 +165,12 @@ class SkillReport:
 
 
 def parse_frontmatter(text: str) -> dict | None:
-    """Extract and parse the YAML frontmatter from a SKILL.md file."""
-    m = re.match(r"^---\n(.*?)\n---\n", text, re.DOTALL)
+    """Extract and parse the YAML frontmatter from a SKILL.md file.
+
+    Accepts LF or CRLF line endings and tolerates a missing trailing
+    newline after the closing `---`.
+    """
+    m = re.match(r"^---\r?\n(.*?)\r?\n---(?:\r?\n|$)", text, re.DOTALL)
     if not m:
         return None
     return _parse_yaml_subset(m.group(1))
@@ -229,7 +233,7 @@ def _parse_yaml_subset(text: str) -> dict:
                 pos[0] += 1
                 continue
             key, _, val = stripped.partition(":")
-            key = key.strip()
+            key = _strip_quotes(key.strip())
             val = val.strip()
             pos[0] += 1
             if not val:
@@ -258,7 +262,7 @@ def _parse_yaml_subset(text: str) -> dict:
                 inner_indent = min_indent + 2
                 item: dict = {}
                 key, _, val = item_content.partition(":")
-                key = key.strip()
+                key = _strip_quotes(key.strip())
                 val = val.strip()
                 if not val:
                     item[key] = parse_value_after_key(inner_indent)
@@ -566,11 +570,12 @@ def check_bundle(report: SkillReport, skill_dir: Path) -> None:
         total += size
         count += 1
         ext = p.suffix.lower()
-        if ext and ext not in TEXT_FILE_EXTS and p.name not in TEXT_FILE_EXTS:
+        if ext not in TEXT_FILE_EXTS and p.name not in TEXT_FILE_EXTS:
+            label = ext if ext else "(none)"
             report.add(Finding(
                 "bundle.non_text_file", "warn",
                 str(p.relative_to(skill_dir)), 1,
-                f"File extension `{ext}` is not in the ClawHub text-file allowlist. "
+                f"File extension `{label}` is not in the ClawHub text-file allowlist. "
                 f"Server may reject the bundle.",
             ))
     report.bundle_bytes = total

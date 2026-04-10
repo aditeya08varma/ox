@@ -215,18 +215,25 @@ Download and run the ox install script. The agent should print the source
 URL and a head/tail preview of the downloaded script before executing it,
 so the user can sanity-check what is about to run:
 
+The URL is **pinned to a specific release tag** (not `main`) so the install
+path is reproducible and can't be silently changed by an upstream commit. Bump
+`OX_INSTALL_REF` when a newer release of `sageox/ox` is available.
+
 ```bash
+# Pinned release tag. Bump this when a newer sageox/ox release is published.
+OX_INSTALL_REF="v0.6.1"
+
 # Download to a temp file. -f makes curl fail on HTTP errors instead of
 # executing an HTML error page; --max-time bounds a stalled connection.
 # Use the template form for mktemp — portable across GNU (Linux) and BSD (macOS).
 INSTALL_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/ox-install.XXXXXXXX")"
 curl -fsSL --max-time 60 \
-  https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh \
+  "https://raw.githubusercontent.com/sageox/ox/${OX_INSTALL_REF}/scripts/install.sh" \
   -o "$INSTALL_SCRIPT"
 
 # Surface what is about to run.
 echo "Downloaded ox install script:"
-echo "  Source: https://github.com/sageox/ox/blob/main/scripts/install.sh"
+echo "  Source: https://github.com/sageox/ox/blob/${OX_INSTALL_REF}/scripts/install.sh"
 ls -lh "$INSTALL_SCRIPT"
 echo "--- first 5 lines ---"
 head -5 "$INSTALL_SCRIPT"
@@ -334,7 +341,7 @@ check their shell PATH.
    If it is **not** on PATH, print a copy-pasteable block tailored to the
    user's detected paths and tell them to add it to `~/.openclaw/.env`:
 
-   ```
+   ```text
    Add this to ~/.openclaw/.env:
 
    PATH=<GO_BIN_DIR>:/usr/local/bin:/usr/bin:/bin:<GO_INSTALL_DIR>
@@ -427,7 +434,7 @@ the following steps in order.
 
 For each unique `team_id`, compute the team context directory:
 
-```
+```text
 ~/.local/share/sageox/<slug>/teams/<team_id>/
 ```
 
@@ -447,7 +454,7 @@ Examples:
 
 The daily summary files live at:
 
-```
+```text
 ~/.local/share/sageox/<slug>/teams/<team_id>/memory/daily/
 ```
 
@@ -466,13 +473,13 @@ directory is missing, log it and continue with the remaining teams.
 2. Substitute template placeholders:
    - `{{DIR_LIST}}` — a list of entries, one per team, in this format:
 
-     ```
+     ```text
      - Team "<team_id>": <daily_dir>/
      ```
 
    - `{{MULTI_TEAM_RULES}}` — if there are 2+ teams, replace with:
 
-     ```
+     ```text
      - Organize the summary by team, using each team ID as a section header
      - Attribute insights to the correct team
      ```
