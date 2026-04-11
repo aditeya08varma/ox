@@ -34,6 +34,9 @@ When run by an AI coworker, it delegates to 'ox agent <id> distill'.`,
 	RunE: runMemoryDistill,
 }
 
+// runMemoryDistill is the RunE handler for `ox memory distill`. It prints a
+// short explainer when invoked by a human (no agent context detected) and
+// otherwise delegates to runAgentDistill to perform the real work.
 func runMemoryDistill(cmd *cobra.Command, _ []string) error {
 	if errMsg := agentx.RequireAgent("ox memory distill"); errMsg != "" {
 		if !distillQuiet() {
