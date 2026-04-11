@@ -34,22 +34,34 @@ When run by an AI coworker, it delegates to 'ox agent <id> distill'.`,
 	RunE: runMemoryDistill,
 }
 
+// runMemoryDistill is the RunE handler for `ox memory distill`. It prints a
+// short explainer when invoked by a human (no agent context detected) and
+// otherwise delegates to runAgentDistill to perform the real work.
 func runMemoryDistill(cmd *cobra.Command, _ []string) error {
 	if errMsg := agentx.RequireAgent("ox memory distill"); errMsg != "" {
-		fmt.Fprintln(cmd.OutOrStdout(), "Memory distillation is an automated process run by AI coworkers.")
-		fmt.Fprintln(cmd.OutOrStdout(), "")
-		fmt.Fprintln(cmd.OutOrStdout(), "How it works:")
-		fmt.Fprintln(cmd.OutOrStdout(), "  1. AI coworkers record observations via 'ox memory put'")
-		fmt.Fprintln(cmd.OutOrStdout(), "  2. Observations accumulate in the team context")
-		fmt.Fprintln(cmd.OutOrStdout(), "  3. Periodically, an AI coworker runs 'ox agent <id> distill'")
-		fmt.Fprintln(cmd.OutOrStdout(), "     to aggregate observations into team memory summaries")
-		fmt.Fprintln(cmd.OutOrStdout(), "")
-		fmt.Fprintln(cmd.OutOrStdout(), "This happens automatically — no human action needed.")
+		if !distillQuiet() {
+			fmt.Fprintln(cmd.OutOrStdout(), "Memory distillation is an automated process run by AI coworkers.")
+			fmt.Fprintln(cmd.OutOrStdout(), "")
+			fmt.Fprintln(cmd.OutOrStdout(), "How it works:")
+			fmt.Fprintln(cmd.OutOrStdout(), "  1. AI coworkers record observations via 'ox memory put'")
+			fmt.Fprintln(cmd.OutOrStdout(), "  2. Observations accumulate in the team context")
+			fmt.Fprintln(cmd.OutOrStdout(), "  3. Periodically, an AI coworker runs 'ox agent <id> distill'")
+			fmt.Fprintln(cmd.OutOrStdout(), "     to aggregate observations into team memory summaries")
+			fmt.Fprintln(cmd.OutOrStdout(), "")
+			fmt.Fprintln(cmd.OutOrStdout(), "This happens automatically — no human action needed.")
+		}
 		return nil
 	}
 
 	// running in agent context — delegate to the agent distill flow
 	return runAgentDistill(nil, cmd)
+}
+
+// distillQuiet reports whether --quiet is in effect for this invocation.
+// Under --quiet, distill emits no stdout — only error conditions reach stderr
+// via the RunE return path handled in main.printError.
+func distillQuiet() bool {
+	return cfg != nil && cfg.Quiet
 }
 
 // distillState tracks what has been distilled to avoid reprocessing.
@@ -97,7 +109,9 @@ func runAgentDistill(inst *agentinstance.Instance, cmd *cobra.Command) error {
 	}
 
 	if len(observations) == 0 {
-		fmt.Fprintln(cmd.OutOrStdout(), "Nothing to distill — no pending observations")
+		if !distillQuiet() {
+			fmt.Fprintln(cmd.OutOrStdout(), "Nothing to distill — no pending observations")
+		}
 		return nil
 	}
 
@@ -155,9 +169,11 @@ func runAgentDistill(inst *agentinstance.Instance, cmd *cobra.Command) error {
 		slog.Warn("failed to save distill state", "error", err)
 	}
 
-	fmt.Fprintf(cmd.OutOrStdout(), "Distilled %d observations\n", len(observations))
-	if resp.Summary != "" {
-		fmt.Fprintf(cmd.OutOrStdout(), "Summary: %s\n", resp.Summary)
+	if !distillQuiet() {
+		fmt.Fprintf(cmd.OutOrStdout(), "Distilled %d observations\n", len(observations))
+		if resp.Summary != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "Summary: %s\n", resp.Summary)
+		}
 	}
 	return nil
 }
