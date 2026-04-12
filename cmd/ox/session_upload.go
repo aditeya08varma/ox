@@ -230,7 +230,7 @@ var ledgerAutoResolvePrefixes = ledger.AutoResolvePrefixes
 
 // pushLedger pushes ledger changes to remote with conflict retry.
 // Delegates to gitutil.PushWithRetry with ledger-appropriate options:
-// LFS repair, rebase on conflict, auto-resolve for data/github/.
+// LFS reconciliation, rebase on conflict, auto-resolve for data/github/.
 func pushLedger(ctx context.Context, ledgerPath string) error {
 	// resolve endpoint once, before entering the push loop.
 	// only refresh credentials when we have a real project root —
@@ -246,7 +246,6 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 	}
 	return gitutil.PushWithRetry(ctx, ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledgerAutoResolvePrefixes,
-		RepairLFS:           true,
 		PrePush: func(repoPath string) error {
 			if ep != "" {
 				if err := gitserver.RefreshRemoteCredentials(repoPath, ep); err != nil {
@@ -255,5 +254,23 @@ func pushLedger(ctx context.Context, ledgerPath string) error {
 			}
 			return nil
 		},
+		ReconcileLFS: makeLFSReconciler(ep),
 	})
+}
+
+// makeLFSReconciler returns a ReconcileLFS callback that strips orphaned LFS
+// pointer stubs and squashes unpushed history so the push can succeed.
+// Returns nil (no reconciliation) if no endpoint is available.
+func makeLFSReconciler(ep string) func(string) (bool, error) {
+	if ep == "" {
+		return nil
+	}
+	return func(repoPath string) (bool, error) {
+		result, err := lfs.ReconcileUnpushedPointers(
+			context.Background(), repoPath, ep, slog.Default())
+		if err != nil {
+			return false, err
+		}
+		return result.Replaced > 0, nil
+	}
 }

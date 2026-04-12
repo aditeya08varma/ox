@@ -1001,10 +1001,21 @@ func (h *SessionFinalizeHandler) gitCommitAndPush(payload *SessionFinalizePayloa
 	}
 
 	// push with retry (best-effort — failures are non-fatal)
+	ep := endpoint.GetForProject(h.projectRoot)
 	if err := gitutil.PushWithRetry(context.Background(), ledgerPath, gitutil.PushOpts{
 		AutoResolvePrefixes: ledger.AutoResolvePrefixes,
-		RepairLFS:           true,
 		Logger:              h.logger,
+		ReconcileLFS: func(repoPath string) (bool, error) {
+			if ep == "" {
+				return false, nil
+			}
+			result, reconcileErr := lfs.ReconcileUnpushedPointers(
+				context.Background(), repoPath, ep, h.logger)
+			if reconcileErr != nil {
+				return false, reconcileErr
+			}
+			return result.Replaced > 0, nil
+		},
 	}); err != nil {
 		h.logger.Warn("git push failed (non-fatal)", "err", err)
 		return false

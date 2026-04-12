@@ -344,8 +344,9 @@ func TestPermanentPatterns(t *testing.T) {
 		{"http 403 generic", "remote: HTTP 403", true},
 		{"generic network error", "fatal: unable to access: connection refused", false},
 		{"empty output", "", false},
-		// GitLab pre-receive hook rejects pushes with missing LFS objects; retrying won't fix it
-		{"lfs objects missing", "remote: GitLab: LFS objects are missing. Ensure LFS is properly set up or try a manual \"git lfs push --all\".", true},
+		// LFS objects missing is now handled separately via ReconcileLFS callback,
+		// not as a permanent pattern — it's recoverable when the callback is set.
+		{"lfs objects missing", "remote: GitLab: LFS objects are missing. Ensure LFS is properly set up or try a manual \"git lfs push --all\".", false},
 	}
 
 	for _, tt := range tests {
@@ -389,32 +390,6 @@ func TestPushWithRetry_403FailsFastWithGuidance(t *testing.T) {
 			// verify the 403-specific branch produces actionable guidance
 			assert.True(t, strings.Contains(tt.stderr, "403"),
 				"stderr should contain 403 to trigger guidance branch")
-		})
-	}
-}
-
-func TestIsLFSPushError(t *testing.T) {
-	tests := []struct {
-		name   string
-		output string
-		want   bool
-	}{
-		{"LFS objects missing", "remote: LFS objects are missing", true},
-		{"missing or corrupt", "error: missing or corrupt local objects", true},
-		{"LFS failed to store", "LFS: error: failed to store blob", true},
-		{"LFS upload missing combo", "LFS upload failed: missing objects", true},
-		{"normal push error", "fatal: unable to access: connection refused", false},
-		{"non-fast-forward", "rejected: non-fast-forward", false},
-		{"empty string", "", false},
-		{"partial LFS no missing", "LFS upload completed", false},
-		{"macOS keychain error", "fatal: failed to store: -25300", false},
-		{"credential store error", "error: failed to store credentials", false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := IsLFSPushError(tt.output)
-			assert.Equal(t, tt.want, got)
 		})
 	}
 }
@@ -562,7 +537,6 @@ func TestPushWithRetry_LFSErrorRetriesWithoutForcePush(t *testing.T) {
 	err := PushWithRetry(ctx, repo, PushOpts{
 		MaxRetries: 2,
 		OpTimeout:  3 * time.Second,
-		RepairLFS:  true, // would have been paired with AllowForceOnLFS before
 	})
 
 	// should fail after retries, not with a force-push error
