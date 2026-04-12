@@ -122,7 +122,7 @@ Always confirm with human before doing a git commit or a git push in this repo.
 
 **Pull requests:** Clear summary, motivation, test plan. Mermaid diagrams for data flows/architecture. Write for humans who skim. Squash merges use PR body as permanent record.
 
-**CodeRabbit:** Reply "Fixed." to each comment, then resolve threads via GraphQL. Get thread IDs from `gh api graphql` query on `reviewThreads`.
+**PR review feedback:** Use the `/monitor-pr` skill to watch an open PR and drive it to green. It streams state via the `Monitor` tool, triages each unresolved thread (including CodeRabbit nitpicks and `isOutdated` threads, which must not be blanket-skipped), replies `"Fixed."`, and resolves via GraphQL on `reviewThreads`.
 
 ### Key Practices
 
