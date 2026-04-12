@@ -171,7 +171,7 @@ Generated from cobra definitions: `go build -o ox-tmp ./cmd/ox && ./ox-tmp docs 
 - Follow XDG config principles for user-level settings
 - Think heavily of DX, especially around cognitive overload in UX
 - Modern 2025 TUI best practices. Let Edward Tufte inspire data visualization
-- Agent behavioral guidance belongs in CLI JSON output (`guidance` field), not in skill files
+- **`ox-*` skill files** (shipped by `ox init` as wrappers for `ox` CLI commands) must be thin relays — agent behavioral guidance belongs in the command's JSON output (`guidance` field), not duplicated in the skill. Repo-local skills that don't wrap an `ox` command are not covered by this rule.
 - Do not use Terraform tools from HashiCorp; use OpenTofu (BSL licensing)
 - Don't do git push
 - CLI docs version must always match CLI version

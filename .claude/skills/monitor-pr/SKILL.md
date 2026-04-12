@@ -55,20 +55,25 @@ last=""
 while true; do
   failing=$(gh pr checks "$PR" 2>/dev/null \
     | awk '$2=="fail" || $2=="cancel"' | wc -l | tr -d ' ')
-  unresolved=$(gh api graphql -f query='
-    query($o:String!,$r:String!,$n:Int!){
+  pending=$(gh pr checks "$PR" 2>/dev/null \
+    | awk '$2=="pending"' | wc -l | tr -d ' ')
+  unresolved=$(gh api graphql --paginate -f query='
+    query($o:String!,$r:String!,$n:Int!,$endCursor:String){
       repository(owner:$o,name:$r){
         pullRequest(number:$n){
-          reviewThreads(first:100){ nodes{ isResolved } }
+          reviewThreads(first:100, after:$endCursor){
+            nodes{ isResolved }
+            pageInfo{ hasNextPage endCursor }
+          }
         }
       }
     }' -f o="$OWNER" -f r="$REPO" -F n="$PR" 2>/dev/null \
-    | jq '[.data.repository.pullRequest.reviewThreads.nodes[]
-           | select(.isResolved==false)] | length')
-  state="fail=${failing:-?} unresolved=${unresolved:-?}"
+    | jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]
+             | select(.isResolved==false)] | length')
+  state="fail=${failing:-?} pending=${pending:-?} unresolved=${unresolved:-?}"
   if [ "$state" != "$last" ]; then
-    if [ "$failing" = "0" ] && [ "$unresolved" = "0" ]; then
-      echo "clean: all required checks pass, zero unresolved threads"
+    if [ "$failing" = "0" ] && [ "$pending" = "0" ] && [ "$unresolved" = "0" ]; then
+      echo "clean: all checks pass, none pending, zero unresolved threads"
     else
       echo "change: $state — triage needed"
     fi
@@ -104,14 +109,16 @@ loops, or skip directives.
 
 ### 2. Fetch every review thread with resolution + outdated state
 
-REST doesn't expose `isResolved`/`isOutdated`. Use GraphQL:
+REST doesn't expose `isResolved`/`isOutdated`. Use GraphQL, and
+**paginate** via `--paginate` + an `$endCursor` variable so PRs with >100
+threads don't silently truncate:
 
 ```bash
-gh api graphql -f query='
-query($owner:String!, $repo:String!, $number:Int!) {
+gh api graphql --paginate -f query='
+query($owner:String!, $repo:String!, $number:Int!, $endCursor:String) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
-      reviewThreads(first:100) {
+      reviewThreads(first:100, after:$endCursor) {
         nodes {
           id
           isResolved
@@ -123,11 +130,16 @@ query($owner:String!, $repo:String!, $number:Int!) {
             nodes { databaseId author { login } body createdAt }
           }
         }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
 }' -f owner=<owner> -f repo=<repo> -F number=<pr>
 ```
+
+`gh --paginate` walks `pageInfo.endCursor` until `hasNextPage: false` and
+emits one JSON document per page to stdout. When consuming, slurp with
+`jq -s` and iterate across pages (e.g. `jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[]] | ...'`).
 
 ### 3. Triage each unresolved thread
 
