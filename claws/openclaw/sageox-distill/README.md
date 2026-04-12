@@ -36,7 +36,6 @@ Once installed, ask your OpenClaw agent things like:
 
 - "Distill all my SageOx repos."
 - "Add `~/src/sageox/ox` to the distill manifest."
-- "Schedule distillation every 4 hours."
 - "Show me the distill repos."
 - "Switch ox install method." (re-runs the curl-vs-git setup)
 - "Update ox now." (forces a git pull + rebuild on the git install path)

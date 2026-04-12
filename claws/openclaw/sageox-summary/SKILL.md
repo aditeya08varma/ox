@@ -42,120 +42,32 @@ and stop. Do not proceed until the user has fixed it.
 
 ### 1. Environment variables
 
-Verify `ANTHROPIC_API_KEY` is set and non-empty in the skill's process
-environment:
+This skill declares `ANTHROPIC_API_KEY` in `primaryEnv`, so OpenClaw
+injects it from per-skill config or shell env before the skill runs.
+Verify it landed:
 
 ```bash
 test -n "$ANTHROPIC_API_KEY"
 ```
 
-This skill declares `ANTHROPIC_API_KEY` in `requires.env` and `primaryEnv`,
-which means OpenClaw will inject it from per-skill config when configured.
-Never echo the key value — only confirm its presence.
+Never echo the key value — only confirm its presence. If the check
+fails, point the user at the setup guide and stop:
+<https://github.com/sageox/ox/blob/main/claws/openclaw/README.md#environment-setup>
+(covers per-skill `apiKey`, shell env, the precedence rule, and
+sandboxed Docker runs).
 
-If the var is missing, tell the user one of the following options:
+### 2. Required binaries
 
-**Option A — Per-skill config in `~/.openclaw/openclaw.json` (recommended).**
-Lets the user use a different Anthropic key for this skill than for their
-host agent:
+`ox`, `claude`, and `jq` are declared in the front matter's
+`requires.bins`, so OpenClaw checks them before running the skill.
+`claude` (npm) and `jq` (brew) have declarative installs in the front
+matter; `ox` does not. If OpenClaw reports a missing bin, surface its
+message to the user and stop — except for `ox`, which has the
+interactive install flow in § 4 below. `claude -p` reads
+`ANTHROPIC_API_KEY` from its process environment, so no `claude login`
+is required.
 
-```json5
-{
-  skills: {
-    entries: {
-      "sageox-summary": {
-        apiKey: "sk-ant-..."
-        // or with a SecretRef:
-        // apiKey: { source: "env", provider: "default", id: "MY_SAGEOX_KEY" }
-      }
-    }
-  }
-}
-```
-
-OpenClaw injects this as `ANTHROPIC_API_KEY` into the skill's process
-environment for the duration of the run, then reverts it. Subprocesses
-spawned by the skill (`claude -p`, etc.) inherit it naturally.
-
-**Option B — Shell env / `~/.openclaw/.env`.** If the user is fine with the
-host agent and this skill sharing one Anthropic key, just export
-`ANTHROPIC_API_KEY` from the shell or add it to `~/.openclaw/.env`:
-
-```sh
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-**⚠️ Critical precedence rule:** OpenClaw injects the per-skill `apiKey`
-**only if `ANTHROPIC_API_KEY` is not already set** in its process
-environment. If the user's login shell exports it (e.g., from `~/.zshrc`),
-the host value passes through and the per-skill key is silently ignored.
-To verify before launching OpenClaw: `env | grep ANTHROPIC_API_KEY` should
-print nothing if Option A is in use.
-
-**Sandboxed runs (Docker).** Per-skill `apiKey` does NOT apply inside the
-sandbox — `process.env` is not inherited. For sandboxed sessions, configure
-`agents.defaults.sandbox.docker.env.ANTHROPIC_API_KEY` instead.
-
-### 2. Detect the operating system
-
-```bash
-uname -s
-```
-
-- `Darwin` → macOS
-- `Linux` → Linux
-
-Use the detected OS to choose install commands for any missing tools below.
-
-### 3. Required binaries
-
-Check each required binary is on the skill subprocess PATH:
-
-```bash
-command -v ox
-command -v claude
-command -v jq
-```
-
-If any are missing, install them using the OS-appropriate commands in the
-next section.
-
-### 4. Installing missing tools
-
-#### Installing `jq`
-
-- **macOS:** `brew install jq`
-- **Linux (Debian/Ubuntu):** `sudo apt-get update && sudo apt-get install -y jq`
-- **Linux (Fedora/RHEL):** `sudo dnf install -y jq`
-- **Linux (Arch):** `sudo pacman -S --noconfirm jq`
-- **Linux (Alpine):** `sudo apk add jq`
-
-#### Installing `claude` (Claude Code CLI)
-
-Claude Code ships as an npm package and works the same on macOS and Linux:
-
-```bash
-npm install -g @anthropic-ai/claude-code
-```
-
-If `npm` is not installed:
-
-- **macOS:** `brew install node`
-- **Linux (Debian/Ubuntu):** `sudo apt-get install -y nodejs npm`
-- **Linux (Fedora/RHEL):** `sudo dnf install -y nodejs npm`
-- **Linux (Arch):** `sudo pacman -S --noconfirm nodejs npm`
-
-After installing the CLI, verify:
-
-```bash
-claude --version
-```
-
-This skill does **not** require `claude login` — `claude -p` reads
-`ANTHROPIC_API_KEY` from its process environment, which OpenClaw injects
-from per-skill config (or which the user supplies via shell env).
-
-#### Path validation rules
+### 3. Path validation rules
 
 Several steps below ask the user for a path (clone path) or read a path
 from a JSON state file. Before interpolating any such value into a shell
@@ -184,7 +96,7 @@ even though this skill writes them: the user (or a process running as
 the user) may have edited the file by hand or by another tool between
 runs. Re-validate every read.
 
-#### Installing `ox` — interactive setup
+### 4. Installing `ox` — interactive setup
 
 The `ox` CLI install method is a one-time choice stored in
 `~/.openclaw/memory/sageox-ox-install.json`. Check that file first:
@@ -233,7 +145,7 @@ and Linux; pick based on whether the user wants a pinned release or
 `main` with optional auto-update, **not** based on their operating
 system.
 
-##### Option 1: curl install
+#### Option 1: curl install
 
 Download and run the ox install script. The agent should print the source
 URL and a head/tail preview of the downloaded script before executing it,
@@ -286,7 +198,7 @@ EOF
 on PATH. If `command -v ox` still fails after install, ask the user to
 check their shell PATH.
 
-##### Option 2: build from git source
+#### Option 2: build from git source
 
 1. Verify Go ≥ 1.24 is installed:
 
@@ -375,14 +287,14 @@ check their shell PATH.
    restarted the skill. OpenClaw loads `.env` into the skill subprocess,
    so an updated PATH takes effect on the next invocation.
 
-##### Updating `ox` from git (auto-update flow)
+#### Updating `ox` from git (auto-update flow)
 
 On every subsequent run, if the memory file says
 `install_method == "git"` and `auto_update == true`:
 
 1. Read `clone_path` from `~/.openclaw/memory/sageox-ox-install.json`.
 2. **Re-validate** it against the Path validation rules in Prerequisites
-   § 4, including the additional clone-path checks (must be under
+   § 3, including the additional clone-path checks (must be under
    `$HOME`, must exist, must contain a `.git` subdirectory). The memory
    file is user-writable and may have been edited externally between
    runs — never trust persisted values without re-validation.
@@ -444,8 +356,7 @@ it.
 
 ## Summary Pipeline
 
-When the user asks for a summary (or when triggered by a cron job), run
-the following steps in order.
+When the user asks for a summary, run the following steps in order.
 
 ### Step 1: Load the Manifest and Endpoint
 
@@ -541,35 +452,6 @@ that pull in many daily files. If it fails, surface the error to the user.
 
 Return Claude's stdout to the user directly. It is already formatted for
 Slack mrkdwn. Do not reformat or annotate — just show it.
-
-## Scheduling
-
-When the user asks to schedule summaries:
-
-1. Suggest a default of daily at 9am local time if the user doesn't
-   specify.
-2. Confirm the schedule with the user before creating it.
-3. Create a cron job that runs this skill's summary pipeline.
-
-Common schedules:
-
-- Daily at 9am: `0 9 * * *`
-- Weekdays at 8am: `0 8 * * 1-5`
-- Twice daily (morning + afternoon): `0 9,16 * * 1-5`
-
-If the user also has a distill schedule, suggest running summaries on a
-schedule that trails the distill by at least 30 minutes so the daily
-files are up to date before summarization.
-
-The cron job must source `~/.openclaw/.env` before running (cron has a
-minimal environment by default). A typical crontab line:
-
-```cron
-0 9 * * * set -a; . $HOME/.openclaw/.env; set +a; openclaw run sageox-summary
-```
-
-Adjust the invocation to match however OpenClaw runs skills on the
-user's system.
 
 ## Output
 
