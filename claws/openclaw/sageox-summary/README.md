@@ -35,7 +35,6 @@ specifically:
 Once installed, ask your OpenClaw agent things like:
 
 - "Give me the daily SageOx summary."
-- "Schedule a summary every morning at 9am."
 - "Switch ox install method." (re-runs the curl-vs-git setup)
 - "Update ox now." (forces a git pull + rebuild on the git install path)
 

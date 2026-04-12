@@ -37,107 +37,29 @@ Do not proceed until the user has fixed it.
 
 ### 1. Environment variables
 
-Verify `ANTHROPIC_API_KEY` is set and non-empty in the skill's process
-environment:
+This skill declares `ANTHROPIC_API_KEY` in `primaryEnv`, so OpenClaw
+injects it from per-skill config or shell env before the skill runs.
+Verify it landed:
 
 ```bash
 test -n "$ANTHROPIC_API_KEY"
 ```
 
-This skill declares `ANTHROPIC_API_KEY` in `requires.env` and `primaryEnv`,
-which means OpenClaw will inject it from per-skill config when configured.
-Never echo the key value — only confirm its presence.
+Never echo the key value — only confirm its presence. If the check
+fails, point the user at the setup guide and stop:
+<https://github.com/sageox/ox/blob/main/claws/openclaw/README.md#environment-setup>
+(covers per-skill `apiKey`, shell env, the precedence rule, and
+sandboxed Docker runs).
 
-If the var is missing, tell the user one of the following options:
+### 2. Required binaries
 
-**Option A — Per-skill config in `~/.openclaw/openclaw.json` (recommended).**
-Lets the user use a different Anthropic key for this skill than for their
-host agent:
+`git`, `gh`, and `ox` are declared in the front matter's `requires.bins`,
+so OpenClaw checks them before running the skill. `gh` has a declarative
+brew install in the front matter; `git` and `ox` do not. If OpenClaw
+reports a missing bin, surface its message to the user and stop — except
+for `ox`, which has the interactive install flow in § 4 below.
 
-```json5
-{
-  skills: {
-    entries: {
-      "sageox-distill": {
-        apiKey: "sk-ant-..."
-        // or with a SecretRef:
-        // apiKey: { source: "env", provider: "default", id: "MY_SAGEOX_KEY" }
-      }
-    }
-  }
-}
-```
-
-OpenClaw injects this as `ANTHROPIC_API_KEY` into the skill's process
-environment for the duration of the run, then reverts it. Subprocesses
-spawned by the skill (`ox distill`, etc.) inherit it naturally.
-
-**Option B — Shell env / `~/.openclaw/.env`.** If the user is fine with the
-host agent and this skill sharing one Anthropic key, just export
-`ANTHROPIC_API_KEY` from the shell or add it to `~/.openclaw/.env`:
-
-```sh
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-**⚠️ Critical precedence rule:** OpenClaw injects the per-skill `apiKey`
-**only if `ANTHROPIC_API_KEY` is not already set** in its process
-environment. If the user's login shell exports it (e.g., from `~/.zshrc`),
-the host value passes through and the per-skill key is silently ignored.
-To verify before launching OpenClaw: `env | grep ANTHROPIC_API_KEY` should
-print nothing if Option A is in use.
-
-**Sandboxed runs (Docker).** Per-skill `apiKey` does NOT apply inside the
-sandbox — `process.env` is not inherited. For sandboxed sessions, configure
-`agents.defaults.sandbox.docker.env.ANTHROPIC_API_KEY` instead.
-
-### 2. Detect the operating system
-
-```bash
-uname -s
-```
-
-- `Darwin` → macOS
-- `Linux` → Linux
-
-Use the detected OS to choose install commands for any missing tools below.
-
-### 3. Required binaries
-
-Check each required binary is on the skill subprocess PATH:
-
-```bash
-command -v git
-command -v gh
-command -v ox
-```
-
-If any are missing, install them using the OS-appropriate commands in the
-next section.
-
-### 4. Installing missing tools
-
-#### Installing `git`
-
-- **macOS:** `brew install git` (Homebrew) or use the Xcode Command Line
-  Tools: `xcode-select --install`
-- **Linux (Debian/Ubuntu):** `sudo apt-get update && sudo apt-get install -y git`
-- **Linux (Fedora/RHEL):** `sudo dnf install -y git`
-- **Linux (Arch):** `sudo pacman -S --noconfirm git`
-- **Linux (Alpine):** `sudo apk add git`
-
-#### Installing `gh` (GitHub CLI)
-
-- **macOS:** `brew install gh`
-- **Linux (Debian/Ubuntu):** follow the apt instructions at
-  <https://github.com/cli/cli/blob/trunk/docs/install_linux.md>
-- **Linux (Fedora/RHEL):** `sudo dnf install -y gh`
-- **Linux (Arch):** `sudo pacman -S --noconfirm github-cli`
-- **Linux (Alpine):** `sudo apk add github-cli`
-
-After install, the user runs `gh auth login` once.
-
-#### Path validation rules
+### 3. Path validation rules
 
 Several steps below ask the user for a path (repo path, clone path) or
 read a path from a JSON state file. Before interpolating any such value
@@ -166,7 +88,7 @@ even though this skill writes them: the user (or a process running as
 the user) may have edited the file by hand or by another tool between
 runs. Re-validate every read.
 
-#### Installing `ox` — interactive setup
+### 4. Installing `ox` — interactive setup
 
 The `ox` CLI install method is a one-time choice stored in
 `~/.openclaw/memory/sageox-ox-install.json`. Check that file first:
@@ -215,7 +137,7 @@ and Linux; pick based on whether the user wants a pinned release or
 `main` with optional auto-update, **not** based on their operating
 system.
 
-##### Option 1: curl install
+#### Option 1: curl install
 
 Download and run the ox install script. The agent should print the source
 URL and a head/tail preview of the downloaded script before executing it,
@@ -268,7 +190,7 @@ EOF
 on PATH. If `command -v ox` still fails after install, ask the user to
 check their shell PATH.
 
-##### Option 2: build from git source
+#### Option 2: build from git source
 
 1. Verify Go ≥ 1.24 is installed:
 
@@ -357,14 +279,14 @@ check their shell PATH.
    restarted the skill. OpenClaw loads `.env` into the skill subprocess,
    so an updated PATH takes effect on the next invocation.
 
-##### Updating `ox` from git (auto-update flow)
+#### Updating `ox` from git (auto-update flow)
 
 On every subsequent run, if the memory file says
 `install_method == "git"` and `auto_update == true`:
 
 1. Read `clone_path` from `~/.openclaw/memory/sageox-ox-install.json`.
 2. **Re-validate** it against the Path validation rules in Prerequisites
-   § 4, including the additional clone-path checks (must be under
+   § 3, including the additional clone-path checks (must be under
    `$HOME`, must exist, must contain a `.git` subdirectory). The memory
    file is user-writable and may have been edited externally between
    runs — never trust persisted values without re-validation.
@@ -416,7 +338,7 @@ The manifest format is:
 - If the manifest does not exist, ask the user which repos to include. For
   each repo path provided:
   1. **Validate the path against the Path validation rules in
-     Prerequisites § 4.** Reject and re-prompt on failure.
+     Prerequisites § 3.** Reject and re-prompt on failure.
   2. Verify the directory exists.
   3. Verify `.sageox/config.json` exists (confirms `ox init` was run).
   4. Read `team_id` from `.sageox/config.json`. **Treat the value as
@@ -436,8 +358,7 @@ The manifest format is:
 
 ## Distill Pipeline
 
-When the user asks to distill (or when triggered by a cron job), run the
-following phases in order.
+When the user asks to distill, run the following phases in order.
 
 ### Phase 1: Sync and Index
 
@@ -497,47 +418,18 @@ injection or inherited from the host shell — see Prerequisites § 1), so
 `ox distill` picks it up naturally:
 
 ```bash
-ox distill --sync --layer daily --concurrency 3 --model sonnet
+ox distill --sync --layer daily --concurrency 3 --model sonnet --quiet
 ```
 
-Report the output of each distill run to the user. Include the team ID
-and which repo was used as the working directory.
-
-If a distill fails, report the error and continue with the next team.
-Do not abort the pipeline for a single team failure.
-
-## Scheduling
-
-When the user asks to schedule distillation:
-
-1. Create a cron job that runs the full distill pipeline (phases 1-3) at
-   the requested frequency.
-2. Suggest a default of every 4 hours if the user doesn't specify.
-3. Confirm the schedule with the user before creating it.
-
-Common schedules:
-
-- Every 4 hours: `0 */4 * * *`
-- Three times daily (morning, midday, evening): `0 8,12,18 * * *`
-- Every 2 hours during work hours: `0 */2 9-17 * * 1-5`
-
-The cron job must source `~/.openclaw/.env` before running (cron has a
-minimal environment by default). A typical crontab line:
-
-```cron
-0 */4 * * * set -a; . $HOME/.openclaw/.env; set +a; openclaw run sageox-distill
-```
-
-Adjust the invocation to match however OpenClaw runs skills on the
-user's system.
+`--quiet` suppresses non-error output, so a successful run prints
+nothing and a failed run prints only the error. If `ox distill` exits
+0, report `<team_id>: ok`. If it exits non-zero, report
+`<team_id>: failed — <first line of stderr>` and continue with the
+next team. Do not abort the pipeline for a single team failure.
 
 ## Output
 
-After each distill run, provide a brief status summary:
-
-- How many teams were processed
-- How many repos were synced and indexed
-- Any errors or warnings encountered
-- Whether the daemon sync completed or timed out
-
-Keep the output concise. The user can ask for details if needed.
+After all teams have run, print one line per team (`<team_id>: ok` or
+`<team_id>: failed — <reason>`) and nothing else. No preamble, no
+counts, no daemon-sync recap. If every team passed, a single `all ok`
+line is fine. The user can ask for details if they want them.
