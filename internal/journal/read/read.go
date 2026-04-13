@@ -1,14 +1,6 @@
 package read
 
-import (
-	"context"
-	"errors"
-)
-
-// errNotImplemented is returned by reader entry points that Unit 1 stubs
-// out. Later units replace it with real implementations. Callers should
-// use errors.Is to check for this sentinel.
-var errNotImplemented = errors.New("journal read: not yet implemented")
+import "context"
 
 // ListEntries enumerates journal entries matching q without materializing
 // their bodies. The returned entries are ordered by Date ascending, then
@@ -32,10 +24,16 @@ func LoadEntries(ctx context.Context, q ReadQuery, ids []string) ([]Entry, error
 	return loadEntries(ctx, q, ids)
 }
 
-// Since is the list+load composite used by ox journal since. It is
-// stubbed in Unit 1 and lands in Unit 5.
+// Since is the list+load composite used by ox journal since. It
+// enumerates entries in q's window via listEntries (bodies off),
+// materializes their bodies via loadEntries (bodies on), and returns
+// parallel slices where bodies[i] corresponds to entries[i]. The
+// ListMeta carries the day-rounded effective window the envelope
+// needs; warnings from the list scan pass through unchanged.
+//
+// Empty window is not an error: callers get ([]Entry{}, []string{},
+// meta, nil) so the envelope emits `entries: []` + empty bodies
+// array per spec §3.6.
 func Since(ctx context.Context, q ReadQuery) ([]Entry, []string, ListMeta, error) {
-	_ = ctx
-	_ = q
-	return nil, nil, ListMeta{}, errNotImplemented
+	return sinceEntries(ctx, q)
 }

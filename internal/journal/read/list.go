@@ -32,16 +32,30 @@ var (
 // listEntries is the real implementation behind ListEntries. See the
 // exported wrapper for contract; this function assumes q has already
 // been checked once by the exported call site.
+//
+// When q.NoTimeFilter is true, Since/Until validation is skipped and
+// the effective window widens to [time.Time{}, 9999-12-31) — a range
+// the per-layer walkers' half-open filters trivially pass every file
+// through. In that mode the caller is responsible for passing an
+// explicit Layer (LayerAuto requires a real window to resolve).
 func listEntries(ctx context.Context, q ReadQuery) ([]Entry, ListMeta, error) {
-	if q.Since.IsZero() || q.Until.IsZero() {
-		return nil, ListMeta{}, errors.New("journal read: Since and Until must be set")
-	}
-	if q.Until.Before(q.Since) {
-		return nil, ListMeta{}, errors.New("journal read: Until is before Since")
+	if !q.NoTimeFilter {
+		if q.Since.IsZero() || q.Until.IsZero() {
+			return nil, ListMeta{}, errors.New("journal read: Since and Until must be set")
+		}
+		if q.Until.Before(q.Since) {
+			return nil, ListMeta{}, errors.New("journal read: Until is before Since")
+		}
 	}
 
-	effSince := dayFloor(q.Since)
-	effUntil := dayCeil(q.Until)
+	var effSince, effUntil time.Time
+	if q.NoTimeFilter {
+		effSince = time.Time{}
+		effUntil = time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
+	} else {
+		effSince = dayFloor(q.Since)
+		effUntil = dayCeil(q.Until)
+	}
 
 	meta := ListMeta{
 		LayerResolved:  q.Layer,
@@ -51,6 +65,9 @@ func listEntries(ctx context.Context, q ReadQuery) ([]Entry, ListMeta, error) {
 
 	layer := q.Layer
 	if layer == "" || layer == LayerAuto {
+		if q.NoTimeFilter {
+			return nil, meta, errors.New("journal read: NoTimeFilter requires an explicit Layer (not auto)")
+		}
 		layer = resolveLayer(q)
 		meta.LayerResolved = layer
 	}

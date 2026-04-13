@@ -44,15 +44,22 @@ type journalEnvelope struct {
 // fills the subset it owns:
 //
 //   - list populates Entries and Window.
-//   - show populates Entries (and, per-row, Bodies) and never sets
-//     Window.
+//   - show populates Entries (and, per-row, body_md on each row) and
+//     never sets Bodies or Window.
 //   - since populates Entries, Bodies, and Window.
 //
-// Truncated is set by list when Limit was hit. It is never set by show
-// or since.
+// Bodies is `*[]string` — a pointer — so since can always emit
+// `"bodies": []` even on the empty-window path (spec §3.6 requires an
+// empty array, not a dropped field), while list and show leave the
+// pointer nil and omitempty drops the field entirely. Plain []string
+// with omitempty collapses empty-slice and nil-slice to the same
+// dropped-field encoding, which would violate since's contract.
+//
+// Truncated is set by list and since when Limit was hit. It is never
+// set by show.
 type journalEnvelopeData struct {
 	Entries   []journalEnvelopeEntry `json:"entries"`
-	Bodies    []string               `json:"bodies,omitempty"`
+	Bodies    *[]string              `json:"bodies,omitempty"`
 	Window    *journalEnvelopeWindow `json:"window,omitempty"`
 	Truncated bool                   `json:"truncated,omitempty"`
 }

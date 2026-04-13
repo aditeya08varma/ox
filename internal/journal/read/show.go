@@ -41,8 +41,10 @@ func loadEntries(ctx context.Context, q ReadQuery, ids []string) ([]Entry, error
 	if len(q.Teams) == 0 {
 		return nil, errors.New("journal read: no team provided")
 	}
-	if q.Since.IsZero() || q.Until.IsZero() {
-		return nil, errors.New("journal read: Since and Until must be set")
+	if !q.NoTimeFilter {
+		if q.Since.IsZero() || q.Until.IsZero() {
+			return nil, errors.New("journal read: Since and Until must be set")
+		}
 	}
 
 	indexQ := q

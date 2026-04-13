@@ -75,17 +75,15 @@ func runJournalShow(cmd *cobra.Command, args []string) error {
 			journalShowErrorFormat(flags.Format), "team_not_found", err.Error(), elapsed())
 	}
 
-	// show has no --since/--until; the bodyless index scan inside
-	// LoadEntries needs a bounded window but must cover every plausible
-	// stored entry. Use the UNIX epoch through ten years out as a
-	// sentinel "whole journal" window. The reader's day-floor/day-ceil
-	// rounding is applied on both ends, which is harmless here.
+	// show has no --since/--until; it reads the whole journal regardless
+	// of date. NoTimeFilter short-circuits the window filter in listEntries
+	// so the index scan returns every daily file under Teams. See
+	// ReadQuery.NoTimeFilter doc.
 	q := read.ReadQuery{
-		Since:    time.Unix(0, 0).UTC(),
-		Until:    time.Now().UTC().AddDate(10, 0, 0),
-		Layer:    read.LayerDaily,
-		Teams:    teams,
-		WantBody: true,
+		NoTimeFilter: true,
+		Layer:        read.LayerDaily,
+		Teams:        teams,
+		WantBody:     true,
 	}
 	entries, err := read.LoadEntries(context.Background(), q, args)
 	if err != nil {

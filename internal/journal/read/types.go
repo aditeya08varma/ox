@@ -28,13 +28,23 @@ const (
 // ReadQuery is the input to every reader entry point. Since/Until are UTC
 // instants already resolved from user input by the CLI layer. The reader
 // never interprets a naked string and never consults a time.Location.
+//
+// NoTimeFilter, when true, suppresses the Since/Until filter entirely:
+// listEntries skips its window validation and the per-layer walkers
+// return every entry scoped to Layer + Teams + Limit. This is the
+// composition hook ox journal show uses to mean "every entry regardless
+// of date" — previously implemented by a time.Unix(0,0)..now+10y
+// sentinel. When NoTimeFilter is true, Layer must be an explicit enum
+// (daily / weekly / monthly); LayerAuto with NoTimeFilter is undefined
+// because the window width is what auto-resolution reads.
 type ReadQuery struct {
-	Since    time.Time
-	Until    time.Time
-	Layer    Layer
-	Teams    []TeamRef
-	Limit    int
-	WantBody bool
+	Since        time.Time
+	Until        time.Time
+	Layer        Layer
+	Teams        []TeamRef
+	Limit        int
+	WantBody     bool
+	NoTimeFilter bool
 }
 
 // TeamRef points the reader at one team-context root. Slug is the

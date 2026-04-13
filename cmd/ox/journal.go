@@ -1,14 +1,6 @@
 package main
 
-import (
-	"errors"
-
-	"github.com/spf13/cobra"
-)
-
-// errJournalNotImplemented is the Unit 1 placeholder response for every
-// ox journal subcommand. Units 3–5 replace each RunE with a reader call.
-var errJournalNotImplemented = errors.New("ox journal: not yet implemented")
+import "github.com/spf13/cobra"
 
 var journalCmd = &cobra.Command{
 	Use:    "journal",
@@ -34,12 +26,11 @@ var journalShowCmd = &cobra.Command{
 }
 
 var journalSinceCmd = &cobra.Command{
-	Use:    "since <duration>",
-	Short:  "Dump journal entries from the last <duration>",
-	Hidden: true,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return errJournalNotImplemented
-	},
+	Use:           "since <duration>",
+	Short:         "Dump journal entries from the last <duration>",
+	Hidden:        true,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 func init() {
