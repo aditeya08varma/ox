@@ -64,6 +64,38 @@ func TestJournalCitationsBridge_CanonicalParserRoundTrip(t *testing.T) {
 	}
 }
 
+// TestJournalRegexBridge_CanonicalPatternsMatch pins cmd/ox's canonical
+// filename regexes (distill.go:40/43/46) to the shared memoryio
+// constants that the standalone reader (internal/journal/read) compiles
+// from. If a future edit changes distill.go's regex literal without
+// updating internal/journal/memoryio/patterns.go, the reader and the
+// distill pipeline will disagree on which filenames are valid and this
+// test fails immediately.
+//
+// Failure prevented: the reader silently classifies a filename the
+// distill pipeline accepts (or vice versa) because a regex was tweaked
+// on one side only, so a listing under ox journal list omits an entry
+// that is present on disk.
+func TestJournalRegexBridge_CanonicalPatternsMatch(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		got    string
+		want   string
+		source string
+	}{
+		{"dailyDateRe", dailyDateRe.String(), memoryio.DailyDatePattern, "cmd/ox/distill.go:40"},
+		{"weeklyRe", weeklyRe.String(), memoryio.WeeklyPattern, "cmd/ox/distill.go:43"},
+		{"monthlyRe", monthlyRe.String(), memoryio.MonthlyPattern, "cmd/ox/distill.go:46"},
+	}
+	for _, tc := range cases {
+		if tc.got != tc.want {
+			t.Errorf("%s at %s drifted:\n  got : %q\n  want: %q (memoryio.%s)",
+				tc.name, tc.source, tc.got, tc.want, tc.name)
+		}
+	}
+}
+
 // TestJournalFrontmatterBridge_CanonicalParserRoundTrip pins cmd/ox's
 // canonical parseDailySources (distill.go:1516) against the reader's
 // memoryio.ParseFrontmatterSources. Both copies must produce byte-equal

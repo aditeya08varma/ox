@@ -359,6 +359,29 @@ of a working daily path.
 - No changes to `cmd/ox/distill*.go`. Parallel tz-removal work does
   not touch `internal/journal/read` at all.
 
+**Additive-only constraint, with a narrow exit-code exception.**
+Commits through Unit 5 stay additive: new files under
+`internal/journal/read/`, `internal/journal/memoryio/`, and
+`cmd/ox/journal_*.go`, plus test files for each. Pre-existing files
+— `cmd/ox/distill*.go`, `cmd/ox/main.go`, `cmd/ox/journal.go`'s
+`journalCmd` parent, etc. — are not modified.
+
+The single bounded exception is exit-code propagation for the
+command layer's typed errors: Unit 3 adds one `errors.As` check for
+`*journalExitError` to `cmd/ox/main.go`'s `executeWithFrictionRecovery`
+so that usage errors from `ox journal list|show|since` can bypass
+friction recovery and surface exit code 2 per §3. The check is:
+
+- Scoped to a single function (`executeWithFrictionRecovery`).
+- Behaviorally inert for non-journal commands — the `errors.As`
+  branch misses and existing friction recovery runs unchanged.
+- Verified by `TestJournalList_InProc_UsageErrorExitCode`.
+
+No other modifications to `cmd/ox/main.go`, `cmd/ox/distill*.go`, or
+any pre-existing `cmd/ox/*.go` files are permitted through Unit 5.
+Units 4 and 5 must not interpret this carve-out as license to touch
+`main.go` for other reasons; any such change remains a Blocker.
+
 **Dependencies within this plan.** None.
 
 ---

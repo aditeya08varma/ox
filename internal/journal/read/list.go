@@ -9,23 +9,24 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/journal/memoryio"
 )
 
-// Local copies of the filename regexes from cmd/ox/distill.go. The reader
-// package is standalone by design — it must not import from cmd/ox —
-// so the canonical patterns are duplicated here. Unit 3 adds a pin-test
-// that fails if either copy drifts from the original. weeklyRe and
-// monthlyRe are unused in Unit 1 (daily only); Unit 3 wires them into
-// listWeeklyForTeam / listMonthlyForTeam. Package-level vars do not
-// trigger Go's unused-variable rule.
+// The filename regexes are compiled from string constants defined in
+// internal/journal/memoryio/patterns.go. memoryio is the shared source of
+// truth between this standalone reader and cmd/ox/distill.go, whose own
+// regex vars are pinned to the same memoryio constants by a bridge test
+// in cmd/ox/journal_citations_bridge_test.go. That keeps the three places
+// that touch memory filenames in lockstep without cmd/ox needing to
+// import the reader (it cannot — cmd/ox is package main).
 var (
-	dailyDateRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})`)
-	weeklyRe    = regexp.MustCompile(`^(\d{4})-W(\d{2})`)
-	monthlyRe   = regexp.MustCompile(`^(\d{4}-\d{2})(?:-[0-9a-f-]+)?\.md$`)
+	dailyDateRe = regexp.MustCompile(memoryio.DailyDatePattern)
+	weeklyRe    = regexp.MustCompile(memoryio.WeeklyPattern)
+	monthlyRe   = regexp.MustCompile(memoryio.MonthlyPattern)
 )
 
 // listEntries is the real implementation behind ListEntries. See the
@@ -54,14 +55,6 @@ func listEntries(ctx context.Context, q ReadQuery) ([]Entry, ListMeta, error) {
 		meta.LayerResolved = layer
 	}
 
-	if layer != LayerDaily {
-		meta.Warnings = append(meta.Warnings, Warning{
-			Code:    "layer_not_implemented",
-			Message: fmt.Sprintf("layer %q not yet implemented", string(layer)),
-		})
-		return nil, meta, nil
-	}
-
 	if len(q.Teams) == 0 {
 		return nil, meta, errors.New("journal read: no team provided")
 	}
@@ -71,8 +64,19 @@ func listEntries(ctx context.Context, q ReadQuery) ([]Entry, ListMeta, error) {
 		if err := ctx.Err(); err != nil {
 			return nil, meta, err
 		}
-		if err := listDailyForTeam(ctx, team, effSince, effUntil, q.WantBody, &out, &meta); err != nil {
-			return nil, meta, fmt.Errorf("list daily team=%s: %w", team.Slug, err)
+		var err error
+		switch layer {
+		case LayerDaily:
+			err = listDailyForTeam(ctx, team, effSince, effUntil, q.WantBody, &out, &meta)
+		case LayerWeekly:
+			err = listWeeklyForTeam(ctx, team, effSince, effUntil, q.WantBody, &out, &meta)
+		case LayerMonthly:
+			err = listMonthlyForTeam(ctx, team, effSince, effUntil, q.WantBody, &out, &meta)
+		default:
+			return nil, meta, fmt.Errorf("journal read: unknown layer %q", string(layer))
+		}
+		if err != nil {
+			return nil, meta, fmt.Errorf("list %s team=%s: %w", layer, team.Slug, err)
 		}
 	}
 
@@ -155,6 +159,157 @@ func listDailyForTeam(ctx context.Context, team TeamRef, effSince, effUntil time
 		*out = append(*out, *entry)
 	}
 	return nil
+}
+
+// listWeeklyForTeam walks memory/weekly under one team root and returns
+// entries whose ISO week overlaps [effSince, effUntil). The week span is
+// [Monday 00:00Z, next Monday 00:00Z). Entry.Date is the Monday date in
+// YYYY-MM-DD form so weekly rows sort naturally alongside daily rows
+// under the spec §3.4 "Date ascending" rule.
+func listWeeklyForTeam(ctx context.Context, team TeamRef, effSince, effUntil time.Time, wantBody bool, out *[]Entry, meta *ListMeta) error {
+	if team.Path == "" {
+		return errors.New("team path is empty")
+	}
+	dir := weeklyDir(team.Path)
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read dir=%s: %w", dir, err)
+	}
+	for _, de := range dirEntries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := de.Name()
+		if de.IsDir() || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		rel := filepath.ToSlash(filepath.Join("memory", "weekly", name))
+
+		m := weeklyRe.FindStringSubmatch(name)
+		if m == nil {
+			meta.Warnings = append(meta.Warnings, Warning{
+				Path:    rel,
+				Code:    "malformed_filename",
+				Message: "weekly file missing YYYY-WXX prefix",
+			})
+			continue
+		}
+		year, err1 := strconv.Atoi(m[1])
+		week, err2 := strconv.Atoi(m[2])
+		if err1 != nil || err2 != nil || week < 1 || week > 53 {
+			meta.Warnings = append(meta.Warnings, Warning{
+				Path:    rel,
+				Code:    "malformed_date",
+				Message: fmt.Sprintf("parse ISO year/week from %q", name),
+			})
+			continue
+		}
+		weekStart := isoWeekMonday(year, week)
+		weekEnd := weekStart.AddDate(0, 0, 7)
+		// Half-open intersection with the half-open effective window.
+		if !weekStart.Before(effUntil) || !weekEnd.After(effSince) {
+			continue
+		}
+
+		abs := filepath.Join(dir, name)
+		dateStr := weekStart.Format("2006-01-02")
+		entry, err := parseEntryFile(abs, LayerWeekly, team.Slug, dateStr, wantBody)
+		if err != nil {
+			meta.Warnings = append(meta.Warnings, Warning{
+				Path:    rel,
+				Code:    "read_error",
+				Message: err.Error(),
+			})
+			continue
+		}
+		entry.RelPath = rel
+		*out = append(*out, *entry)
+	}
+	return nil
+}
+
+// listMonthlyForTeam walks memory/monthly under one team root and returns
+// entries whose calendar month overlaps [effSince, effUntil). Entry.Date
+// is the first-of-month in YYYY-MM-DD form.
+func listMonthlyForTeam(ctx context.Context, team TeamRef, effSince, effUntil time.Time, wantBody bool, out *[]Entry, meta *ListMeta) error {
+	if team.Path == "" {
+		return errors.New("team path is empty")
+	}
+	dir := monthlyDir(team.Path)
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("read dir=%s: %w", dir, err)
+	}
+	for _, de := range dirEntries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		name := de.Name()
+		if de.IsDir() || !strings.HasSuffix(name, ".md") {
+			continue
+		}
+		rel := filepath.ToSlash(filepath.Join("memory", "monthly", name))
+
+		m := monthlyRe.FindStringSubmatch(name)
+		if m == nil {
+			meta.Warnings = append(meta.Warnings, Warning{
+				Path:    rel,
+				Code:    "malformed_filename",
+				Message: "monthly file missing YYYY-MM prefix",
+			})
+			continue
+		}
+		monthStart, err := time.ParseInLocation("2006-01", m[1], time.UTC)
+		if err != nil {
+			meta.Warnings = append(meta.Warnings, Warning{
+				Path:    rel,
+				Code:    "malformed_date",
+				Message: fmt.Sprintf("parse month from %q: %v", name, err),
+			})
+			continue
+		}
+		monthEnd := monthStart.AddDate(0, 1, 0)
+		if !monthStart.Before(effUntil) || !monthEnd.After(effSince) {
+			continue
+		}
+
+		abs := filepath.Join(dir, name)
+		dateStr := monthStart.Format("2006-01-02")
+		entry, err := parseEntryFile(abs, LayerMonthly, team.Slug, dateStr, wantBody)
+		if err != nil {
+			meta.Warnings = append(meta.Warnings, Warning{
+				Path:    rel,
+				Code:    "read_error",
+				Message: err.Error(),
+			})
+			continue
+		}
+		entry.RelPath = rel
+		*out = append(*out, *entry)
+	}
+	return nil
+}
+
+// isoWeekMonday returns the UTC midnight of the Monday that starts ISO
+// week (year, week). Computed by picking January 4 of `year` — which
+// ISO 8601 guarantees is in week 1 — and advancing to the Monday of
+// that week, then stepping (week-1) * 7 days forward. See
+// https://en.wikipedia.org/wiki/ISO_week_date.
+func isoWeekMonday(year, week int) time.Time {
+	jan4 := time.Date(year, 1, 4, 0, 0, 0, 0, time.UTC)
+	// time.Weekday: Sunday=0..Saturday=6. ISO Monday=1..Sunday=7.
+	wd := int(jan4.Weekday())
+	if wd == 0 {
+		wd = 7
+	}
+	week1Monday := jan4.AddDate(0, 0, -(wd - 1))
+	return week1Monday.AddDate(0, 0, (week-1)*7)
 }
 
 // parseEntryFile opens one .md file, pulls source-list metadata from the

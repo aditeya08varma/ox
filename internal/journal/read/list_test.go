@@ -484,9 +484,67 @@ func TestListEntries_LegacyPrefixIsTrusted(t *testing.T) {
 	}
 }
 
-func TestListEntries_WeeklyLayerUnsupportedWarns(t *testing.T) {
+// mustWriteLayerFile writes a .md file under memory/<layer>/ with a
+// deterministic mtime. Mirrors mustWriteDaily but parameterized by
+// subdirectory so weekly/monthly tests can share one helper.
+func mustWriteLayerFile(t *testing.T, teamRoot, layer, name, body string, mtime time.Time) string {
+	t.Helper()
+	dir := filepath.Join(teamRoot, "memory", layer)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", layer, err)
+	}
+	p := filepath.Join(dir, name)
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatalf("write %s: %v", name, err)
+	}
+	if err := os.Chtimes(p, mtime, mtime); err != nil {
+		t.Fatalf("chtimes %s: %v", name, err)
+	}
+	return p
+}
+
+const sampleWeeklyBody = `---
+sources:
+  - memory/daily/2026-04-06-019c8a0e.md
+  - memory/daily/2026-04-07-019c8a0f.md
+---
+# Weekly Memory — 2026-W15 (2026-04-06 → 2026-04-12)
+
+A weekly synthesis. [1]
+
+## Sources
+
+1. [PR #500 — weekly][1]
+
+[1]: https://github.com/sageox/ox/pull/500
+`
+
+const sampleMonthlyBody = `---
+sources:
+  - memory/weekly/2026-W14-019c7c10.md
+  - memory/weekly/2026-W15-019c8a0e.md
+---
+# Monthly Memory — 2026-04
+
+A monthly synthesis.
+`
+
+// TestListEntries_WeeklyInWindow — a weekly file whose ISO week overlaps
+// the requested window must be returned with date=<Monday of that week>.
+// Failure prevented: weekly listing regresses to the pre-Unit 3 stub
+// that surfaced a layer_not_implemented warning.
+func TestListEntries_WeeklyInWindow(t *testing.T) {
 	t.Parallel()
 	teamRoot := t.TempDir()
+	// ISO week 2026-W15 = Mon 2026-04-06 through Sun 2026-04-12.
+	w15Mtime := time.Date(2026, 4, 13, 10, 0, 0, 0, time.UTC)
+	mustWriteLayerFile(t, teamRoot, "weekly",
+		"2026-W15-019c8a0e.md", sampleWeeklyBody, w15Mtime)
+	// An out-of-window weekly that the reader must NOT return.
+	w10Mtime := time.Date(2026, 3, 9, 10, 0, 0, 0, time.UTC)
+	mustWriteLayerFile(t, teamRoot, "weekly",
+		"2026-W10-019c7000.md", sampleWeeklyBody, w10Mtime)
+
 	q := ReadQuery{
 		Since: time.Date(2026, 4, 6, 0, 0, 0, 0, time.UTC),
 		Until: time.Date(2026, 4, 13, 0, 0, 0, 0, time.UTC),
@@ -497,11 +555,245 @@ func TestListEntries_WeeklyLayerUnsupportedWarns(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListEntries: %v", err)
 	}
-	if entries != nil {
-		t.Fatalf("entries = %v, want nil for unsupported layer", entries)
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1 (only W15 overlaps): %+v", len(entries), entries)
 	}
-	if len(meta.Warnings) == 0 || meta.Warnings[0].Code != "layer_not_implemented" {
-		t.Fatalf("warnings = %+v, want layer_not_implemented", meta.Warnings)
+	if entries[0].Layer != LayerWeekly {
+		t.Fatalf("Layer = %q, want weekly", entries[0].Layer)
+	}
+	if entries[0].Date != "2026-04-06" {
+		t.Fatalf("Date = %q, want 2026-04-06 (Monday of W15)", entries[0].Date)
+	}
+	if entries[0].RelPath != "memory/weekly/2026-W15-019c8a0e.md" {
+		t.Fatalf("RelPath = %q", entries[0].RelPath)
+	}
+	if meta.LayerResolved != LayerWeekly {
+		t.Fatalf("LayerResolved = %q", meta.LayerResolved)
+	}
+	for _, w := range meta.Warnings {
+		if w.Code == "layer_not_implemented" {
+			t.Fatalf("reader still emits stub warning: %+v", w)
+		}
+	}
+}
+
+// TestListEntries_MonthlyInWindow — a monthly file whose calendar month
+// overlaps the requested window must be returned with date=<first of
+// month>. Failure prevented: monthly listing regresses to the pre-Unit 3
+// stub.
+func TestListEntries_MonthlyInWindow(t *testing.T) {
+	t.Parallel()
+	teamRoot := t.TempDir()
+	aprMtime := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	mustWriteLayerFile(t, teamRoot, "monthly",
+		"2026-04.md", sampleMonthlyBody, aprMtime)
+	// Out-of-window monthly.
+	janMtime := time.Date(2026, 2, 1, 10, 0, 0, 0, time.UTC)
+	mustWriteLayerFile(t, teamRoot, "monthly",
+		"2026-01.md", sampleMonthlyBody, janMtime)
+
+	q := ReadQuery{
+		Since: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		Until: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+		Layer: LayerMonthly,
+		Teams: []TeamRef{{Slug: "sageox", Path: teamRoot}},
+	}
+	entries, meta, err := ListEntries(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1 (only 2026-04 overlaps)", len(entries))
+	}
+	if entries[0].Layer != LayerMonthly {
+		t.Fatalf("Layer = %q, want monthly", entries[0].Layer)
+	}
+	if entries[0].Date != "2026-04-01" {
+		t.Fatalf("Date = %q, want 2026-04-01", entries[0].Date)
+	}
+	if entries[0].RelPath != "memory/monthly/2026-04.md" {
+		t.Fatalf("RelPath = %q", entries[0].RelPath)
+	}
+	if meta.LayerResolved != LayerMonthly {
+		t.Fatalf("LayerResolved = %q", meta.LayerResolved)
+	}
+}
+
+// TestListEntries_MonthlyWithUUIDSuffix — the monthly regex allows an
+// optional UUID7 suffix ("2026-04-<uuid>.md"). Failure prevented: the
+// reader only accepts the bare "2026-04.md" form and silently drops
+// modern UUID-suffixed monthlies.
+func TestListEntries_MonthlyWithUUIDSuffix(t *testing.T) {
+	t.Parallel()
+	teamRoot := t.TempDir()
+	mtime := time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC)
+	mustWriteLayerFile(t, teamRoot, "monthly",
+		"2026-04-019c8a0e.md", sampleMonthlyBody, mtime)
+
+	q := ReadQuery{
+		Since: time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+		Until: time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+		Layer: LayerMonthly,
+		Teams: []TeamRef{{Slug: "sageox", Path: teamRoot}},
+	}
+	entries, _, err := ListEntries(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %d, want 1", len(entries))
+	}
+}
+
+// TestListEntries_AutoResolvesLayer — Layer=auto must pick daily for a
+// narrow window, weekly for a full ISO week, monthly for a full calendar
+// month, and reflect the resolved layer in ListMeta.LayerResolved.
+// Failure prevented: --layer=auto regression that leaves LayerResolved
+// empty or mis-resolves.
+func TestListEntries_AutoResolvesLayer(t *testing.T) {
+	t.Parallel()
+	teamRoot := t.TempDir()
+	mustWriteDaily(t, teamRoot,
+		"2026-04-12-019c8a3f.md", sampleDailyBody,
+		time.Date(2026, 4, 12, 12, 0, 0, 0, time.UTC))
+	mustWriteLayerFile(t, teamRoot, "weekly",
+		"2026-W15-019c8a0e.md", sampleWeeklyBody,
+		time.Date(2026, 4, 13, 10, 0, 0, 0, time.UTC))
+	mustWriteLayerFile(t, teamRoot, "monthly",
+		"2026-04.md", sampleMonthlyBody,
+		time.Date(2026, 5, 1, 10, 0, 0, 0, time.UTC))
+
+	cases := []struct {
+		name      string
+		since     time.Time
+		until     time.Time
+		wantLayer Layer
+	}{
+		{
+			name:      "24h window resolves daily",
+			since:     time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC),
+			until:     time.Date(2026, 4, 12, 23, 59, 0, 0, time.UTC),
+			wantLayer: LayerDaily,
+		},
+		{
+			name:      "full ISO week resolves weekly",
+			since:     time.Date(2026, 4, 6, 0, 0, 0, 0, time.UTC),
+			until:     time.Date(2026, 4, 13, 0, 0, 0, 0, time.UTC),
+			wantLayer: LayerWeekly,
+		},
+		{
+			name:      "full calendar month resolves monthly",
+			since:     time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC),
+			until:     time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC),
+			wantLayer: LayerMonthly,
+		},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			q := ReadQuery{
+				Since: tc.since,
+				Until: tc.until,
+				Layer: LayerAuto,
+				Teams: []TeamRef{{Slug: "sageox", Path: teamRoot}},
+			}
+			_, meta, err := ListEntries(context.Background(), q)
+			if err != nil {
+				t.Fatalf("ListEntries: %v", err)
+			}
+			if meta.LayerResolved != tc.wantLayer {
+				t.Fatalf("LayerResolved = %q, want %q", meta.LayerResolved, tc.wantLayer)
+			}
+		})
+	}
+}
+
+// TestListEntries_WeeklyMonthlyMalformedFilenamesWarn — the weekly and
+// monthly walkers must surface malformed filenames as ListMeta.Warnings
+// and keep going, not halt the listing. Covers both regex-miss paths
+// (no YYYY-Www or YYYY-MM prefix) and parse-failure paths (week out of
+// range for weekly, month > 12 for monthly).
+//
+// Failure prevented: a single stray file in memory/weekly or
+// memory/monthly crashes the whole list, or hides valid neighbors.
+func TestListEntries_WeeklyMonthlyMalformedFilenamesWarn(t *testing.T) {
+	t.Parallel()
+	teamRoot := t.TempDir()
+
+	// Regex-miss: neither matches ^(\d{4})-W(\d{2}) / ^(\d{4}-\d{2}).
+	mustWriteLayerFile(t, teamRoot, "weekly",
+		"not-a-week.md", sampleWeeklyBody,
+		time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC))
+	mustWriteLayerFile(t, teamRoot, "monthly",
+		"not-a-month.md", sampleMonthlyBody,
+		time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC))
+	// Parse-failure: regex matches but the extracted values are out of
+	// range. Week 00 fails the `week < 1` check; month 13 fails
+	// time.ParseInLocation for "2006-01".
+	mustWriteLayerFile(t, teamRoot, "weekly",
+		"2026-W00-019c0000.md", sampleWeeklyBody,
+		time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC))
+	mustWriteLayerFile(t, teamRoot, "monthly",
+		"2026-13.md", sampleMonthlyBody,
+		time.Date(2026, 4, 10, 10, 0, 0, 0, time.UTC))
+	// A neighboring valid file to prove the walker does not give up.
+	mustWriteLayerFile(t, teamRoot, "weekly",
+		"2026-W15-019c8a0e.md", sampleWeeklyBody,
+		time.Date(2026, 4, 13, 10, 0, 0, 0, time.UTC))
+
+	q := ReadQuery{
+		Since: time.Date(2026, 4, 6, 0, 0, 0, 0, time.UTC),
+		Until: time.Date(2026, 4, 13, 0, 0, 0, 0, time.UTC),
+		Layer: LayerWeekly,
+		Teams: []TeamRef{{Slug: "sageox", Path: teamRoot}},
+	}
+	entries, meta, err := ListEntries(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ListEntries weekly: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Date != "2026-04-06" {
+		t.Fatalf("weekly entries = %+v, want 1 row for W15", entries)
+	}
+	sawMalformedFilename := false
+	sawMalformedDate := false
+	for _, w := range meta.Warnings {
+		if w.Path == "memory/weekly/not-a-week.md" && w.Code == "malformed_filename" {
+			sawMalformedFilename = true
+		}
+		if w.Path == "memory/weekly/2026-W00-019c0000.md" && w.Code == "malformed_date" {
+			sawMalformedDate = true
+		}
+	}
+	if !sawMalformedFilename {
+		t.Errorf("weekly warnings missing malformed_filename for not-a-week.md: %+v", meta.Warnings)
+	}
+	if !sawMalformedDate {
+		t.Errorf("weekly warnings missing malformed_date for W00 file: %+v", meta.Warnings)
+	}
+
+	q.Layer = LayerMonthly
+	q.Since = time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	q.Until = time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	_, meta, err = ListEntries(context.Background(), q)
+	if err != nil {
+		t.Fatalf("ListEntries monthly: %v", err)
+	}
+	sawMalformedFilename = false
+	sawMalformedDate = false
+	for _, w := range meta.Warnings {
+		if w.Path == "memory/monthly/not-a-month.md" && w.Code == "malformed_filename" {
+			sawMalformedFilename = true
+		}
+		if w.Path == "memory/monthly/2026-13.md" && w.Code == "malformed_date" {
+			sawMalformedDate = true
+		}
+	}
+	if !sawMalformedFilename {
+		t.Errorf("monthly warnings missing malformed_filename for not-a-month.md: %+v", meta.Warnings)
+	}
+	if !sawMalformedDate {
+		t.Errorf("monthly warnings missing malformed_date for 2026-13.md: %+v", meta.Warnings)
 	}
 }
 
