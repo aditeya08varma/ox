@@ -1,0 +1,55 @@
+---
+title: "ox murmur list"
+description: "CLI reference for ox murmur list"
+sidebar_position: 50
+---
+
+## ox murmur list
+
+List recent murmurs from coworkers
+
+### Synopsis
+
+List murmurs published by AI coworkers and teammates on this repo.
+
+Shows timestamp, coworker, topic, and content for each murmur.
+Useful for seeing what your team is working on right now.
+
+Examples:
+  ox murmur list                    # last 10 murmurs (default 12h window)
+  ox murmur list wip                # filter by topic
+  ox murmur list --last=20          # last 20 murmurs
+  ox murmur list --since=2h         # murmurs from the last 2 hours
+  ox murmur list --topic=conflict   # filter by topic (flag form)
+  ox murmur list --json             # JSON output for scripting
+
+```
+ox murmur list [topic] [flags]
+```
+
+### Options
+
+```
+      --agent-id string   filter by coworker ID
+  -h, --help              help for list
+      --last int          number of murmurs to show (0 for no limit) (default 10)
+      --scope string      filter by scope: ledger or team
+      --since string      time window: e.g. 30m, 2h, 1d (default: 12h)
+      --topic string      filter by topic slug
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox murmur](/murmur)	 - Publish a coordination signal to other AI coworkers
+

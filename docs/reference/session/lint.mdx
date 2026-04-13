@@ -1,0 +1,56 @@
+---
+title: "ox session lint"
+description: "CLI reference for ox session lint"
+sidebar_position: 57
+---
+
+## ox session lint
+
+Validate session raw.jsonl for web viewer compatibility
+
+### Synopsis
+
+Validate that a session's raw.jsonl is correctly formatted for the web viewer.
+
+Checks that every entry has a valid type (user, assistant, system, tool),
+required fields are present, and the format matches what the web viewer
+parser expects.
+
+Use --file to lint a standalone JSONL file instead of a ledger session.
+Use --all to lint all sessions in the ledger.
+
+Examples:
+  ox session lint OxRvKb
+  ox session lint 2026-03-11T22-13-rsnodgrass-OxRvKb
+  ox session lint --file /tmp/raw.jsonl
+  ox session lint --all
+  ox session lint --all --skip-eid
+
+```
+ox session lint [session-name] [flags]
+```
+
+### Options
+
+```
+      --all           lint all sessions in the ledger
+      --file string   lint a standalone JSONL file instead of a ledger session
+  -h, --help          help for lint
+      --skip-eid      skip missing-eid warnings (for older sessions without entry IDs)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox session](/session)	 - Manage AI coworker sessions
+

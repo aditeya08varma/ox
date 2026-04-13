@@ -149,10 +149,9 @@ func init() {
 func runConfigSet(cmd *cobra.Command, args []string) error {
 	key := args[0]
 	value := args[1]
-	// lowercase non-timezone, non-attribution values for consistency (e.g., "Auto" → "auto")
-	// timezone values are case-sensitive IANA names (e.g., "US/Pacific")
-	// attribution values are case-sensitive free-text (e.g., "Co-Authored-By: ...")
-	if key != "timezone" && !strings.HasPrefix(key, "attribution.") {
+	// lowercase non-attribution values for consistency (e.g., "Auto" → "auto").
+	// attribution values are case-sensitive free-text (e.g., "Co-Authored-By: ...").
+	if !strings.HasPrefix(key, "attribution.") {
 		value = strings.ToLower(value)
 	}
 

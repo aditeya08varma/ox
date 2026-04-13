@@ -140,7 +140,7 @@ func TestEnumerateWeeks(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			weeks := enumerateWeeks(tt.lastTime, tt.now, time.UTC)
+			weeks := enumerateWeeks(tt.lastTime, tt.now)
 			assert.GreaterOrEqual(t, len(weeks), tt.wantMin, "got %d weeks: %v", len(weeks), weeks)
 			assert.LessOrEqual(t, len(weeks), tt.wantMax, "got %d weeks: %v", len(weeks), weeks)
 
@@ -183,7 +183,7 @@ func TestEnumerateMonths(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			months := enumerateMonths(tt.lastTime, tt.now, nil)
+			months := enumerateMonths(tt.lastTime, tt.now)
 			if tt.want != nil {
 				assert.Equal(t, tt.want, months)
 			}
@@ -279,7 +279,7 @@ func TestContentHash_Properties(t *testing.T) {
 
 func TestGroupObservationsByDay_EdgeCases(t *testing.T) {
 	t.Run("empty input", func(t *testing.T) {
-		groups := groupObservationsByDay(nil, nil)
+		groups := groupObservationsByDay(nil)
 		assert.Empty(t, groups)
 	})
 
@@ -288,7 +288,7 @@ func TestGroupObservationsByDay_EdgeCases(t *testing.T) {
 			{Content: "has time", RecordedAt: time.Date(2026, 3, 10, 9, 0, 0, 0, time.UTC)},
 			{Content: "no time", RecordedAt: time.Time{}},
 		}
-		groups := groupObservationsByDay(obs, nil)
+		groups := groupObservationsByDay(obs)
 		assert.Len(t, groups, 1)
 		assert.Len(t, groups["2026-03-10"], 1)
 	})
@@ -299,7 +299,7 @@ func TestGroupObservationsByDay_EdgeCases(t *testing.T) {
 			{Content: "second", RecordedAt: time.Date(2026, 3, 10, 14, 0, 0, 0, time.UTC)},
 			{Content: "third", RecordedAt: time.Date(2026, 3, 10, 18, 0, 0, 0, time.UTC)},
 		}
-		groups := groupObservationsByDay(obs, nil)
+		groups := groupObservationsByDay(obs)
 		require.Len(t, groups["2026-03-10"], 3)
 		assert.Equal(t, "first", groups["2026-03-10"][0].Content)
 		assert.Equal(t, "second", groups["2026-03-10"][1].Content)
@@ -379,7 +379,7 @@ func TestSaveAndLoadDistillStateV2(t *testing.T) {
 
 func TestDetermineLayers_ExplicitMonthly(t *testing.T) {
 	now := time.Date(2026, 3, 25, 12, 0, 0, 0, time.UTC)
-	plan := determineLayers(&distillStateV2{}, "monthly", now, nil)
+	plan := determineLayers(&distillStateV2{}, "monthly", now)
 	assert.False(t, plan.Daily, "daily should be false for explicit monthly")
 	assert.Empty(t, plan.Weeks, "weeks should be empty for explicit monthly")
 	assert.NotEmpty(t, plan.Months, "months should be non-empty for explicit monthly")
@@ -402,4 +402,35 @@ func TestISOWeekRange_LastWeekOfYear(t *testing.T) {
 	// week 52 of 2025: Dec 22-28
 	assert.Equal(t, 12, int(start.Month()))
 	assert.Equal(t, 22, start.Day())
+}
+
+// --- Team-timezone revert regression ---------------------------------------
+//
+// These tests lock in that every date helper buckets in UTC. A prior
+// team-timezone feature routed a *time.Location through these helpers;
+// the revert (journal-timezone-plan.md) removes the parameter entirely
+// and hardcodes UTC. Failure prevented: reintroducing a tz-aware code
+// path that buckets near-midnight observations on the wrong day.
+
+func TestGroupObservationsByDay_UTCBucketing(t *testing.T) {
+	la, err := time.LoadLocation("America/Los_Angeles")
+	require.NoError(t, err)
+	// 2026-04-12 23:30 America/Los_Angeles == 2026-04-13 06:30 UTC
+	obs := []distillObservation{
+		{Content: "late", RecordedAt: time.Date(2026, 4, 12, 23, 30, 0, 0, la)},
+	}
+	groups := groupObservationsByDay(obs)
+	require.Len(t, groups, 1)
+	assert.Len(t, groups["2026-04-13"], 1, "expected UTC day 2026-04-13, got %v", groups)
+}
+
+func TestDetermineLayers_MonthlyBoundaryAlwaysUTC(t *testing.T) {
+	// 2026-04-01 00:00 UTC is 2026-03-31 17:00 in America/Los_Angeles.
+	// A local view would say "March → April" and enqueue March; a UTC
+	// view says "April → April" → no months to run.
+	lastMonthly := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	state := &distillStateV2{LastMonthly: lastMonthly.Format(time.RFC3339)}
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	plan := determineLayers(state, "monthly", now)
+	assert.Empty(t, plan.Months, "expected no months in UTC view, got %v", plan.Months)
 }

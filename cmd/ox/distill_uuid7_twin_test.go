@@ -511,7 +511,7 @@ func TestMonthlyReadsUUID7WeeklyFiles(t *testing.T) {
 	}
 
 	// readWeeklyFilesForMonth for April 2026
-	summaries, files, err := readWeeklyFilesForMonth(weeklyDir, 2026, 4, time.UTC)
+	summaries, files, err := readWeeklyFilesForMonth(weeklyDir, 2026, 4)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(summaries), 2, "must find at least 2 weekly files for April 2026")
 	assert.Len(t, files, len(summaries))
@@ -870,7 +870,7 @@ func TestWeeklySummary_UUID7_RealCodePath_NoGitConflict(t *testing.T) {
 
 	// readWeeklyFilesForMonth must find both files
 	weeklyDir := filepath.Join(nodeBPath, "memory", "weekly")
-	summaries, files, err := readWeeklyFilesForMonth(weeklyDir, 2026, 4, time.UTC)
+	summaries, files, err := readWeeklyFilesForMonth(weeklyDir, 2026, 4)
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, len(summaries), 2, "readWeeklyFilesForMonth must find both UUID7 weekly files")
 	assert.Len(t, files, len(summaries))

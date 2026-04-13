@@ -382,6 +382,19 @@ func init() {
 	})
 
 	// ============================================================
+	// Config hygiene checks
+	// ============================================================
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugTimezoneScrub,
+		Name:        "Timezone cleanup",
+		Category:    "SageOx Configuration",
+		FixLevel:    FixLevelAuto,
+		Description: "Removes dead timezone keys left behind by older ox versions from .sageox/config.json and team config.toml",
+		Run:         checkTimezoneScrub,
+	})
+
+	// ============================================================
 	// Team Context checks
 	// ============================================================
 

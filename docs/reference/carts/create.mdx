@@ -1,0 +1,39 @@
+---
+title: "ox carts create"
+description: "CLI reference for ox carts create"
+sidebar_position: 14
+---
+
+## ox carts create
+
+Create a new cart
+
+```
+ox carts create TITLE [flags]
+```
+
+### Options
+
+```
+  -a, --assignee string      Assign to a team member
+  -d, --description string   Description
+  -h, --help                 help for create
+  -p, --priority int         Priority: 0 (critical) to 4 (backlog) (default 2)
+  -t, --type string          Cart type: bug, task, feature, epic, chore (default "task")
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox carts](/carts)	 - Manage carts — trackable work items backed by DoltDB
+

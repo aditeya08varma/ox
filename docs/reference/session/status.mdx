@@ -1,7 +1,7 @@
 ---
 title: "ox session status"
 description: "CLI reference for ox session status"
-sidebar_position: 9
+sidebar_position: 61
 ---
 
 ## ox session status
@@ -12,15 +12,16 @@ Check recording status
 
 Check the current session recording status.
 
-Shows whether a recording is in progress, and if so, displays:
-- Recording title (if set)
-- Duration
-- Coding agent being recorded
-- Session file location
+Shows all active recordings in this project. With multiple worktrees
+or agents, there may be several recordings in progress simultaneously.
+
+Use --current to filter to the calling agent's recording only
+(requires SAGEOX_AGENT_ID environment variable).
 
 Examples:
-  ox session status
-  ox session status --json
+  ox session status              # show all active recordings
+  ox session status --json       # JSON output
+  ox session status --current    # only this agent's recording
 
 ```
 ox session status [flags]
@@ -29,7 +30,8 @@ ox session status [flags]
 ### Options
 
 ```
-  -h, --help   help for status
+      --current   only show this agent's recording (uses SAGEOX_AGENT_ID)
+  -h, --help      help for status
 ```
 
 ### Options inherited from parent commands

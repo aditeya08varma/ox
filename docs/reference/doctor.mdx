@@ -1,7 +1,7 @@
 ---
 title: "ox doctor"
 description: "CLI reference for ox doctor"
-sidebar_position: 2
+sidebar_position: 33
 ---
 
 ## ox doctor
@@ -21,11 +21,13 @@ ox doctor [flags]
 ### Options
 
 ```
-      --fix                automatically fix issues where possible
-      --fix-slug strings   fix specific issue(s) by slug (repeatable, e.g., --fix-slug=ledger-path --fix-slug=team-symlink)
-  -h, --help               help for doctor
-  -v, --verbose            show all checks including passed and skipped
-  -y, --yes                answer yes to all prompts (for non-interactive use)
+      --fix                     automatically fix issues where possible
+      --fix-slug strings        fix specific issue(s) by slug (repeatable, e.g., --fix-slug=ledger-path --fix-slug=team-symlink)
+      --force-session-uploads   Force detection and upload of incomplete sessions
+      --gc                      force garbage collection (reclone) of team contexts
+  -h, --help                    help for doctor
+  -v, --verbose                 show all checks including passed and skipped
+  -y, --yes                     answer yes to all prompts (for non-interactive use)
 ```
 
 ### Options inherited from parent commands

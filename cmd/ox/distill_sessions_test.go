@@ -747,7 +747,7 @@ func TestScanPendingSessionsStartedAt(t *testing.T) {
 		// Dir name says 2026-03-10 (local time), but raw.jsonl started_at
 		// is 2026-03-10T23:30:00-07:00 which is 2026-03-11 in UTC
 		dirName := "2026-03-10T23-30-ryan-Ox7f3a"
-		createSessionDir(t, sessionsDir, dirName, testSummary("Timezone test", 0.8))
+		createSessionDir(t, sessionsDir, dirName, testSummary("UTC date test", 0.8))
 		rawContent := `{"_meta":{"schema_version":"1","started_at":"2026-03-10T23:30:00-07:00"}}`
 		if err := os.WriteFile(filepath.Join(sessionsDir, dirName, "raw.jsonl"), []byte(rawContent), 0o644); err != nil {
 			t.Fatal(err)
@@ -802,8 +802,8 @@ func TestSessionSummaryToFactsStartedAt(t *testing.T) {
 			Who:       "ryan",
 			StartedAt: startedAt,
 			Summary: &sessionsummary.SummarizeResponse{
-				Title:   "Timezone test",
-				Summary: "Testing timezone handling",
+				Title:   "UTC date test",
+				Summary: "Testing UTC bucketing",
 			},
 		}
 

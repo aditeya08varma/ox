@@ -253,8 +253,8 @@ func TestCalculateThanksColumnsWidth(t *testing.T) {
 		want  int
 	}{
 		{"empty names", []string{}, 3, 0},
-		{"single short name", []string{"Jo"}, 1, 4},           // maxWidth=2, colWidth=4
-		{"single short name 3 cols", []string{"Jo"}, 3, 12},   // maxWidth=2, colWidth=4, *3
+		{"single short name", []string{"Jo"}, 1, 4},                                // maxWidth=2, colWidth=4
+		{"single short name 3 cols", []string{"Jo"}, 3, 12},                        // maxWidth=2, colWidth=4, *3
 		{"long names capped at 20", []string{"abcdefghijklmnopqrstuvwxyz"}, 2, 44}, // capped 20, colWidth=22, *2
 		{"mixed lengths", []string{"short", "a-longer-name", "x"}, 2, 30},          // maxWidth=13, colWidth=15, *2
 	}
@@ -427,7 +427,7 @@ func TestGroupObservationsByDay_ZeroTimestamps(t *testing.T) {
 		{Content: "zero timestamp", RecordedAt: time.Time{}},
 	}
 
-	groups := groupObservationsByDay(observations, nil)
+	groups := groupObservationsByDay(observations)
 	// zero timestamp entries should be skipped
 	assert.Len(t, groups, 1, "zero timestamp entries should be excluded")
 	assert.Len(t, groups["2026-03-15"], 1)
@@ -435,7 +435,7 @@ func TestGroupObservationsByDay_ZeroTimestamps(t *testing.T) {
 }
 
 func TestGroupObservationsByDay_Empty(t *testing.T) {
-	groups := groupObservationsByDay(nil, nil)
+	groups := groupObservationsByDay(nil)
 	assert.Empty(t, groups)
 }
 
@@ -446,7 +446,7 @@ func TestGroupObservationsByDay_MultipleDays(t *testing.T) {
 		{Content: "day1-b", RecordedAt: time.Date(2026, 3, 15, 14, 0, 0, 0, time.UTC)},
 	}
 
-	groups := groupObservationsByDay(observations, nil)
+	groups := groupObservationsByDay(observations)
 	assert.Len(t, groups, 2)
 	assert.Len(t, groups["2026-03-15"], 2)
 	assert.Len(t, groups["2026-03-16"], 1)

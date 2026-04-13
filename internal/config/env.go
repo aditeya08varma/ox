@@ -26,8 +26,4 @@ const (
 	// EnvGitHubSyncIssues overrides the issue sync mode.
 	// Consumed by: ResolveGitHubSyncIssues()
 	EnvGitHubSyncIssues = "OX_GITHUB_SYNC_ISSUES"
-
-	// EnvTimezone overrides the timezone for date grouping.
-	// Consumed by: ResolveTimezone()
-	EnvTimezone = "OX_TIMEZONE"
 )

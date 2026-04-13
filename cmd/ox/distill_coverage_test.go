@@ -38,7 +38,7 @@ func TestDetermineLayers_DailyOnly(t *testing.T) {
 		// monthly was done recently
 		LastMonthly: now.Format(time.RFC3339),
 	}
-	plan := determineLayers(state, "daily", now, nil)
+	plan := determineLayers(state, "daily", now)
 	if !plan.Daily {
 		t.Error("expected Daily=true when explicit='daily'")
 	}
@@ -57,7 +57,7 @@ func TestDetermineLayers_WeeklyOnly(t *testing.T) {
 	state := &distillStateV2{
 		LastWeekly: now.Add(-14 * 24 * time.Hour).Format(time.RFC3339),
 	}
-	plan := determineLayers(state, "weekly", now, nil)
+	plan := determineLayers(state, "weekly", now)
 	if plan.Daily {
 		t.Error("expected Daily=false when explicit='weekly'")
 	}
@@ -77,7 +77,7 @@ func TestDetermineLayers_NoWeeksWhenRecent(t *testing.T) {
 		// weekly done 2 days ago, less than 7 day threshold
 		LastWeekly: now.Add(-2 * 24 * time.Hour).Format(time.RFC3339),
 	}
-	plan := determineLayers(state, "", now, nil)
+	plan := determineLayers(state, "", now)
 	if len(plan.Weeks) != 0 {
 		t.Errorf("expected no weeks when last weekly is recent, got %d", len(plan.Weeks))
 	}
@@ -359,7 +359,7 @@ func TestEnumerateWeeks_ZeroLastTime(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 3, 26, 12, 0, 0, 0, time.UTC)
-	weeks := enumerateWeeks(time.Time{}, now, time.UTC)
+	weeks := enumerateWeeks(time.Time{}, now)
 
 	// with zero lastTime, should look back 91 days max
 	if len(weeks) == 0 {
@@ -378,7 +378,7 @@ func TestEnumerateMonths_ZeroLastTime(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 3, 26, 12, 0, 0, 0, time.UTC)
-	months := enumerateMonths(time.Time{}, now, nil)
+	months := enumerateMonths(time.Time{}, now)
 
 	if len(months) == 0 {
 		t.Error("expected some months with zero lastTime")
@@ -397,7 +397,7 @@ func TestEnumerateMonths_DoesNotIncludeIncompleteMonth(t *testing.T) {
 	// mid-month: the current month is not complete
 	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
 	lastTime := time.Date(2026, 4, 30, 23, 59, 59, 0, time.UTC)
-	months := enumerateMonths(lastTime, now, nil)
+	months := enumerateMonths(lastTime, now)
 
 	// should include May but not June
 	for _, m := range months {
@@ -416,4 +416,3 @@ func TestEnumerateMonths_DoesNotIncludeIncompleteMonth(t *testing.T) {
 		t.Error("should include completed May")
 	}
 }
-

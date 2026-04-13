@@ -1,0 +1,47 @@
+---
+title: "ox adapter install"
+description: "CLI reference for ox adapter install"
+sidebar_position: 4
+---
+
+## ox adapter install
+
+Install an adapter from the registry or a GitHub repository
+
+### Synopsis
+
+Install an adapter binary by name (from the built-in registry) or by
+GitHub URL (github.com/<owner>/<repo>).
+
+Examples:
+  ox adapter install cursor          # install by name from registry
+  ox adapter install github.com/sageox/ox-adapters  # install by URL
+
+Downloads the latest release binary for the current platform and installs
+it to ~/.local/share/ox/adapters/.
+
+```
+ox adapter install <name|github-url> [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for install
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox adapter](/adapter)	 - Manage external adapter binaries
+
