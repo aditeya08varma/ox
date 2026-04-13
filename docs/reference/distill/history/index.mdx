@@ -19,7 +19,15 @@ ox distill history [flags]
 ### Options
 
 ```
-  -h, --help   help for history
+      --all-teams       merge entries across every registered team context
+      --format string   output format: json|text (default "json")
+  -h, --help            help for history
+      --layer string    layer to read: daily|weekly|monthly|auto (default "auto")
+      --limit int       cap the number of entries returned (0 = unlimited)
+      --since string    start of window (duration like 24h, or absolute RFC3339/YYYY-MM-DD[THH:MM[:SS]])
+      --team string     team slug, id, or name (defaults to the repo's active team)
+      --tz string       IANA timezone for naked absolute timestamps (e.g. America/Los_Angeles)
+      --until string    end of window (absolute timestamp; defaults to now)
 ```
 
 ### Options inherited from parent commands

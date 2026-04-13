@@ -19,9 +19,14 @@ import (
 //     The positional <dur> is always anchored to time.Now() and the
 //     window is [now-dur, now]. --tz is meaningless for a relative
 //     window and is explicitly not accepted.
-//   - --format defaults to content (spec §3.6: content is the format
-//     factory/distill/summary.ts pipes straight into Claude). json
-//     and text are also supported for symmetry with list.
+//   - --format accepts only content|json. content is the default
+//     (spec §3.6: content is the format factory/distill/summary.ts
+//     pipes straight into Claude); json is supported for programmatic
+//     callers. text is intentionally NOT accepted — there is no spec'd
+//     text rendering for since, and falling through to list's text
+//     renderer would emit the wrong shape (metadata rows instead of
+//     assembled bodies). A dedicated text renderer can be added later
+//     if a caller needs it; the gate is additive.
 //   - --limit defaults to 100 per spec §3.6 (list's default is 0 =
 //     unlimited, since list is an enumeration; since materializes
 //     bodies so a default cap is prudent).
@@ -52,7 +57,7 @@ func registerDistillHistorySinceFlags(cmd *cobra.Command, flags *distillHistoryS
 	f.StringVar(&flags.Layer, "layer", "auto", "layer to read: daily|weekly|monthly|auto")
 	f.StringVar(&flags.Team, "team", "", "team slug, id, or name (defaults to the repo's active team)")
 	f.BoolVar(&flags.AllTeams, "all-teams", false, "merge entries across every registered team context")
-	f.StringVar(&flags.Format, "format", "content", "output format: content|json|text")
+	f.StringVar(&flags.Format, "format", "content", "output format: content|json")
 	f.IntVar(&flags.Limit, "limit", 100, "cap the number of entries returned")
 }
 
@@ -61,8 +66,9 @@ func registerDistillHistorySinceFlags(cmd *cobra.Command, flags *distillHistoryS
 // time.Now() in UTC, calls read.Since (list → load composition), and
 // emits the caller-requested format. Content is the default because
 // the primary consumer (factory/distill/summary.ts) pipes this output
-// straight into Claude; json and text are supported for symmetry with
-// list.
+// straight into Claude; json is supported for programmatic callers.
+// text is intentionally not accepted — see the comment at the format
+// validation branch below for the rationale.
 func runDistillHistorySince(cmd *cobra.Command, args []string) error {
 	flags := distillHistorySinceFlagSet
 	start := time.Now()
