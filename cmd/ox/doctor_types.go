@@ -173,12 +173,15 @@ const (
 	CheckSlugAgentWorkerBinary = "agent-worker-binary"
 
 	// Code Search checks
-	CheckSlugCodeIndex          = "code-index"
-	CheckSlugCodeDBConsistency  = "codedb-consistency"
+	CheckSlugCodeIndex         = "code-index"
+	CheckSlugCodeDBConsistency = "codedb-consistency"
 
 	// Ledger Infrastructure checks
 	CheckSlugLedgerSparseCheckout = "ledger-sparse-checkout"
 
 	// Attribution checks
 	CheckSlugScoreThresholdRange = "score-threshold-range"
+
+	// Config hygiene checks
+	CheckSlugTimezoneScrub = "timezone-scrub"
 )
