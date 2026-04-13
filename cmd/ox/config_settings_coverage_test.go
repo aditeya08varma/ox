@@ -260,3 +260,29 @@ func TestResolveConfigValue_AllKnownKeys(t *testing.T) {
 		})
 	}
 }
+
+// --- Team-timezone revert regression (Unit 4) -----------------------------
+//
+// These tests lock in that the `timezone` key is no longer a recognized
+// config setting. Failure prevented: re-adding a timezone entry to the
+// registry would silently resurrect a setting that the distill helpers
+// no longer consult.
+
+func TestGetSetting_TimezoneRemoved(t *testing.T) {
+	t.Parallel()
+	assert.Nil(t, GetSetting("timezone"), "timezone setting must no longer be registered")
+}
+
+func TestSetConfigValue_TimezoneRejected(t *testing.T) {
+	t.Parallel()
+	err := SetConfigValue("timezone", "UTC", ConfigLevelUser, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown setting")
+}
+
+func TestAllSettings_NoTimezoneEntry(t *testing.T) {
+	t.Parallel()
+	for _, s := range AllSettings {
+		assert.NotEqual(t, "timezone", s.Key, "AllSettings must not contain a timezone entry")
+	}
+}
