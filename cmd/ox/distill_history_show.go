@@ -30,9 +30,17 @@ var distillHistoryShowFlagSet distillHistoryShowFlags
 
 func init() {
 	distillHistoryShowCmd.RunE = runDistillHistoryShow
-	f := distillHistoryShowCmd.Flags()
-	f.StringVar(&distillHistoryShowFlagSet.Team, "team", "", "team slug, id, or name (defaults to the repo's active team)")
-	f.StringVar(&distillHistoryShowFlagSet.Format, "format", "json", "output format: json|text|content")
+	registerDistillHistoryShowFlags(distillHistoryShowCmd, &distillHistoryShowFlagSet)
+}
+
+// registerDistillHistoryShowFlags binds every user-controllable flag on
+// the provided cobra command. Shared by production init() and the
+// in-process test helper so the test surface cannot drift out of sync
+// with production flag definitions.
+func registerDistillHistoryShowFlags(cmd *cobra.Command, flags *distillHistoryShowFlags) {
+	f := cmd.Flags()
+	f.StringVar(&flags.Team, "team", "", "team slug, id, or name (defaults to the repo's active team)")
+	f.StringVar(&flags.Format, "format", "json", "output format: json|text|content")
 }
 
 // runDistillHistoryShow is the RunE for `ox distill history show`. It validates

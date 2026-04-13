@@ -30,7 +30,7 @@ var distillHistoryShowCmd = &cobra.Command{
 
 var distillHistorySinceCmd = &cobra.Command{
 	Use:           "since <duration>",
-	Short:         "Dump distilled summary entries from the last <duration>",
+	Short:         "Dump distilled summary entries from the last `<duration>`",
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }

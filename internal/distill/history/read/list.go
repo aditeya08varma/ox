@@ -236,6 +236,18 @@ func listWeeklyForTeam(ctx context.Context, team TeamRef, effSince, effUntil tim
 			continue
 		}
 		weekStart := isoWeekMonday(year, week)
+		// Reject nonexistent ISO week numbers for the given year (e.g.
+		// W53 in a year that only has 52 ISO weeks). We detect this by
+		// round-tripping: if the Monday we computed doesn't report the
+		// same (year, week) under ISOWeek, the input week is invalid.
+		if gotYear, gotWeek := weekStart.ISOWeek(); gotYear != year || gotWeek != week {
+			meta.Warnings = append(meta.Warnings, Warning{
+				Path:    rel,
+				Code:    "malformed_date",
+				Message: fmt.Sprintf("ISO year/week %d-W%02d does not exist in %q", year, week, name),
+			})
+			continue
+		}
 		weekEnd := weekStart.AddDate(0, 0, 7)
 		// Half-open intersection with the half-open effective window.
 		if !weekStart.Before(effUntil) || !weekEnd.After(effSince) {
@@ -382,14 +394,24 @@ func parseEntryFile(absPath string, layer Layer, teamSlug, dateStr string, wantB
 	return e, nil
 }
 
-// sortEntries orders by Date ascending, then CreatedAt ascending within
-// the same Date. Matches the spec §3.4 ordering contract for list.
+// sortEntries orders by Date ascending, then CreatedAt ascending, then
+// Team, then ID within the same (Date, CreatedAt) pair. Matches the
+// spec §3.4 ordering contract for list; the Team and ID tie-breakers
+// give `--all-teams` merges a deterministic order even when two
+// entries share an identical Date+CreatedAt (e.g. cross-team files
+// staged at the same instant).
 func sortEntries(out []Entry) {
 	sort.SliceStable(out, func(i, j int) bool {
 		if out[i].Date != out[j].Date {
 			return out[i].Date < out[j].Date
 		}
-		return out[i].CreatedAt.Before(out[j].CreatedAt)
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		if out[i].Team != out[j].Team {
+			return out[i].Team < out[j].Team
+		}
+		return out[i].ID < out[j].ID
 	})
 }
 

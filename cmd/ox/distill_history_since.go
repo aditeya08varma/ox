@@ -37,12 +37,23 @@ var distillHistorySinceFlagSet distillHistorySinceFlags
 
 func init() {
 	distillHistorySinceCmd.RunE = runDistillHistorySince
-	f := distillHistorySinceCmd.Flags()
-	f.StringVar(&distillHistorySinceFlagSet.Layer, "layer", "auto", "layer to read: daily|weekly|monthly|auto")
-	f.StringVar(&distillHistorySinceFlagSet.Team, "team", "", "team slug, id, or name (defaults to the repo's active team)")
-	f.BoolVar(&distillHistorySinceFlagSet.AllTeams, "all-teams", false, "merge entries across every registered team context")
-	f.StringVar(&distillHistorySinceFlagSet.Format, "format", "content", "output format: content|json|text (default: content)")
-	f.IntVar(&distillHistorySinceFlagSet.Limit, "limit", 100, "cap the number of entries returned")
+	registerDistillHistorySinceFlags(distillHistorySinceCmd, &distillHistorySinceFlagSet)
+}
+
+// registerDistillHistorySinceFlags binds every user-controllable flag on
+// the provided cobra command, using the pointer-to-flag-set pattern that
+// the init() function uses for production and the in-process tests use
+// for drift-safe construction. Keeping the flag set in one place means a
+// flag that gets added/removed/renamed in production is automatically
+// picked up by the test helper, so tests can't go stale while the real
+// command surface drifts out from under them.
+func registerDistillHistorySinceFlags(cmd *cobra.Command, flags *distillHistorySinceFlags) {
+	f := cmd.Flags()
+	f.StringVar(&flags.Layer, "layer", "auto", "layer to read: daily|weekly|monthly|auto")
+	f.StringVar(&flags.Team, "team", "", "team slug, id, or name (defaults to the repo's active team)")
+	f.BoolVar(&flags.AllTeams, "all-teams", false, "merge entries across every registered team context")
+	f.StringVar(&flags.Format, "format", "content", "output format: content|json|text")
+	f.IntVar(&flags.Limit, "limit", 100, "cap the number of entries returned")
 }
 
 // runDistillHistorySince is the RunE for `ox distill history since`. It validates

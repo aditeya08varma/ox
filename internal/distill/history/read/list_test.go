@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -817,6 +818,17 @@ func TestListEntries_UnreadableDirErrors(t *testing.T) {
 	// A non-ErrNotExist failure from os.ReadDir (e.g. permission denied)
 	// must surface as an error rather than silently emptying out, so an
 	// ops failure does not look like a clean "no entries".
+	//
+	// chmod(0) is a POSIX-only permission-denied vector. On Windows, on
+	// filesystems that ignore mode bits (some tmpfs/fat variants), and
+	// when the test process runs as root, the chmod either errors or
+	// silently has no effect. Skip in those cases rather than flake.
+	if runtime.GOOS == "windows" {
+		t.Skip("chmod-based permission denial is POSIX-only; skipping on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses chmod-based permissions; skipping test that relies on them")
+	}
 	teamRoot := t.TempDir()
 	dailyDirPath := filepath.Join(teamRoot, "memory", "daily")
 	if err := os.MkdirAll(dailyDirPath, 0o755); err != nil {

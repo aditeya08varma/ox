@@ -75,7 +75,7 @@ journal body in the window as one contiguous markdown stream.
 ## 2. Reader library design
 
 The reader lives at `internal/distill/history/read`. Every read command in
-`cmd/ox/journal_*.go` is a thin translator: parse flags → build a
+`cmd/ox/distill_history_*.go` is a thin translator: parse flags → build a
 `ReadQuery` → call one of three entry points → marshal the result to
 the envelope.
 
@@ -362,7 +362,7 @@ of a working daily path.
 **Additive-only constraint, with a narrow exit-code exception.**
 Commits through Unit 5 stay additive: new files under
 `internal/distill/history/read/`, `internal/distill/history/memoryio/`, and
-`cmd/ox/journal_*.go`, plus test files for each. Pre-existing files
+`cmd/ox/distill_history_*.go`, plus test files for each. Pre-existing files
 — `cmd/ox/distill*.go`, `cmd/ox/main.go`, `cmd/ox/distill_history.go`'s
 `distillHistoryCmd` parent, etc. — are not modified.
 
@@ -522,7 +522,7 @@ resolution — only needs to be solved once here.
 
 **Integration test strategy.**
 
-- A new `cmd/ox/journal_list_test.go` that uses
+- A new `cmd/ox/distill_history_list_test.go` that uses
   `config.CreateInitializedProject`, writes daily + weekly + monthly
   fixtures, runs `distillHistoryListCmd.Execute()` in-process with JSON
   output, decodes the envelope, asserts fields.
@@ -596,7 +596,7 @@ split-brain between Unit 3's metadata path and this unit's body path.
 
 **Integration test strategy.**
 
-- `cmd/ox/journal_show_test.go` runs the command end-to-end against
+- `cmd/ox/distill_history_show_test.go` runs the command end-to-end against
   a populated fixture, asserts JSON envelope, text output, and
   content output for all three format modes.
 - Partial-success scenario: pass three IDs where one is `not_found`,
@@ -654,7 +654,7 @@ own unit keeps the commit scope small and makes the tests prove the
 
 **Integration test strategy.**
 
-- `cmd/ox/journal_since_test.go`:
+- `cmd/ox/distill_history_since_test.go`:
   - happy path: 3 daily entries in the last 6 h, assert JSON
     envelope, text mode, and content mode.
   - `--all-teams` with two team fixtures: assert the merged output

@@ -94,15 +94,9 @@ func runDistillHistoryListInProc(t *testing.T, args ...string) (string, string, 
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	f := cmd.Flags()
-	f.StringVar(&distillHistoryListFlagSet.Since, "since", "", "")
-	f.StringVar(&distillHistoryListFlagSet.Until, "until", "", "")
-	f.StringVar(&distillHistoryListFlagSet.TZ, "tz", "", "")
-	f.StringVar(&distillHistoryListFlagSet.Layer, "layer", "auto", "")
-	f.StringVar(&distillHistoryListFlagSet.Team, "team", "", "")
-	f.BoolVar(&distillHistoryListFlagSet.AllTeams, "all-teams", false, "")
-	f.IntVar(&distillHistoryListFlagSet.Limit, "limit", 0, "")
-	f.StringVar(&distillHistoryListFlagSet.Format, "format", "json", "")
+	// Reuse the production flag binder so the test surface cannot drift
+	// out of sync with `distillHistoryListCmd`.
+	registerDistillHistoryListFlags(cmd, &distillHistoryListFlagSet)
 
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)

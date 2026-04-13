@@ -33,12 +33,10 @@ func runDistillHistorySinceInProc(t *testing.T, args ...string) (string, string,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	f := cmd.Flags()
-	f.StringVar(&distillHistorySinceFlagSet.Layer, "layer", "auto", "")
-	f.StringVar(&distillHistorySinceFlagSet.Team, "team", "", "")
-	f.BoolVar(&distillHistorySinceFlagSet.AllTeams, "all-teams", false, "")
-	f.StringVar(&distillHistorySinceFlagSet.Format, "format", "content", "")
-	f.IntVar(&distillHistorySinceFlagSet.Limit, "limit", 100, "")
+	// Reuse the production flag binder so the test surface cannot drift
+	// out of sync with `distillHistorySinceCmd`. Any flag added or removed
+	// in registerDistillHistorySinceFlags is automatically reflected here.
+	registerDistillHistorySinceFlags(cmd, &distillHistorySinceFlagSet)
 
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)

@@ -38,15 +38,23 @@ var distillHistoryListFlagSet distillHistoryListFlags
 
 func init() {
 	distillHistoryListCmd.RunE = runDistillHistoryList
-	f := distillHistoryListCmd.Flags()
-	f.StringVar(&distillHistoryListFlagSet.Since, "since", "", "start of window (duration like 24h, or absolute RFC3339/YYYY-MM-DD[THH:MM[:SS]])")
-	f.StringVar(&distillHistoryListFlagSet.Until, "until", "", "end of window (absolute timestamp; defaults to now)")
-	f.StringVar(&distillHistoryListFlagSet.TZ, "tz", "", "IANA timezone for naked absolute timestamps (e.g. America/Los_Angeles)")
-	f.StringVar(&distillHistoryListFlagSet.Layer, "layer", "auto", "layer to read: daily|weekly|monthly|auto")
-	f.StringVar(&distillHistoryListFlagSet.Team, "team", "", "team slug, id, or name (defaults to the repo's active team)")
-	f.BoolVar(&distillHistoryListFlagSet.AllTeams, "all-teams", false, "merge entries across every registered team context")
-	f.IntVar(&distillHistoryListFlagSet.Limit, "limit", 0, "cap the number of entries returned (0 = unlimited)")
-	f.StringVar(&distillHistoryListFlagSet.Format, "format", "json", "output format: json|text")
+	registerDistillHistoryListFlags(distillHistoryListCmd, &distillHistoryListFlagSet)
+}
+
+// registerDistillHistoryListFlags binds every user-controllable flag on
+// the provided cobra command. Keeping the binding in one place means the
+// in-process test helper can reuse it, so tests cannot go stale while
+// the production flag surface drifts out from under them.
+func registerDistillHistoryListFlags(cmd *cobra.Command, flags *distillHistoryListFlags) {
+	f := cmd.Flags()
+	f.StringVar(&flags.Since, "since", "", "start of window (duration like 24h, or absolute RFC3339/YYYY-MM-DD[THH:MM[:SS]])")
+	f.StringVar(&flags.Until, "until", "", "end of window (absolute timestamp; defaults to now)")
+	f.StringVar(&flags.TZ, "tz", "", "IANA timezone for naked absolute timestamps (e.g. America/Los_Angeles)")
+	f.StringVar(&flags.Layer, "layer", "auto", "layer to read: daily|weekly|monthly|auto")
+	f.StringVar(&flags.Team, "team", "", "team slug, id, or name (defaults to the repo's active team)")
+	f.BoolVar(&flags.AllTeams, "all-teams", false, "merge entries across every registered team context")
+	f.IntVar(&flags.Limit, "limit", 0, "cap the number of entries returned (0 = unlimited)")
+	f.StringVar(&flags.Format, "format", "json", "output format: json|text")
 }
 
 // runDistillHistoryList is the RunE for `ox distill history list`. It resolves the time

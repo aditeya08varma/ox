@@ -31,9 +31,9 @@ func runDistillHistoryShowInProc(t *testing.T, args ...string) (string, string, 
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
-	f := cmd.Flags()
-	f.StringVar(&distillHistoryShowFlagSet.Team, "team", "", "")
-	f.StringVar(&distillHistoryShowFlagSet.Format, "format", "json", "")
+	// Reuse the production flag binder so the test surface cannot drift
+	// out of sync with `distillHistoryShowCmd`.
+	registerDistillHistoryShowFlags(cmd, &distillHistoryShowFlagSet)
 
 	var out, errb bytes.Buffer
 	cmd.SetOut(&out)

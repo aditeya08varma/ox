@@ -1058,10 +1058,13 @@ embedded in the UUID7 portion. (Concretely: a daily summary written at
 - Option (c) violates the no-migration constraint and rewrites shared
   git history — Ryan-review territory.
 
-The new reader documents this in stderr the first time it observes a
-filename-prefix-vs-UUID7-day mismatch (`once-per-process` warning, not
-once per file): "legacy daily entry written under non-UTC timezone;
-date field reflects filename, not UUID7 instant".
+The shipped reader handles this silently: it trusts the filename
+prefix as the entry's event day, does not parse the UUID7 for
+filtering, and emits no stderr warning or `agent_hint`. This is a
+deliberate simplification over earlier drafts that proposed a
+once-per-process stderr warning — the mismatch is observable via the
+entry's `date` field in the envelope, and adding noisy stderr would
+violate the stdout/stderr discipline the agent-ux contract depends on.
 
 **`parseFactDate` becomes legacy-only.** The function at
 `cmd/ox/distill_discussions.go:456` and its `tz ...*time.Location`
@@ -1092,11 +1095,10 @@ by earlier runs in the same day. Without intervention this means the
 
 | Command | Rule |
 |---|---|
-| `journal list` | Returns every entry whose `date` falls in the window as a separate row. Ordered by `date` ascending then `created_at` ascending. The `truncated` field in the response is set when `limit` was hit. |
-| `journal since 24h` | Returns every entry from the last 24h, in chronological order, concatenated in `--format=content`. Consumers get all 4 daily files in order — they decide how to merge. |
-| `journal show 2026-04-12` | A bare date prefix matches MULTIPLE entries. The default behavior is to return ALL of them in the envelope, in `created_at` order, in a single `entries` array. Callers that want only the latest can pass `--latest` (see below) or use the full id. |
-| `journal show 2026-04-12 --latest` | Returns only the most recent entry for that date. |
-| `journal summarize` | Each invocation MUST compute a non-overlapping window. The window's lower bound is `max(--since-resolved, latest_entry_in_layer.created_at)`. This means a 6h cadence summarize that runs every 6h emits non-overlapping windows even though the user passed `--since=6h`. The `since` field in the response reflects the *effective* lower bound, not the literal `now - 6h`. |
+| `ox distill history list` | Returns every entry whose `date` falls in the window as a separate row. Ordered by `date` ascending then `created_at` ascending. The `truncated` field in the response is set when `limit` was hit. |
+| `ox distill history since 24h` | Returns every entry from the last 24h, in chronological order, concatenated in `--format=content`. Consumers get all 4 daily files in order — they decide how to merge. |
+| `ox distill history show 2026-04-12` | A bare date prefix matches MULTIPLE entries. The command ALWAYS returns every matching entry in the envelope, in `created_at` order, in a single `entries` array. Callers that want only the latest must pick it themselves from the returned `entries` array, or pass the full stem id of the specific entry they want. `--latest` is deliberately NOT a flag — see note below. |
+| `ox journal summarize` | Each invocation MUST compute a non-overlapping window. The window's lower bound is `max(--since-resolved, latest_entry_in_layer.created_at)`. This means a 6h cadence summarize that runs every 6h emits non-overlapping windows even though the user passed `--since=6h`. The `since` field in the response reflects the *effective* lower bound, not the literal `now - 6h`. |
 | Facts already cited in a prior same-day daily entry | Filtered out via the existing `idx.distilledSources()` check (`cmd/ox/distill.go:1058-1077`). New entries only cover facts not yet referenced by ANY entry on the same day. |
 
 The result: multiple-files-per-day is a first-class state in the
@@ -1104,8 +1106,12 @@ read surface, but `summarize` does NOT produce duplicate content
 inside those files. Entries for the same day are temporally
 non-overlapping slices of the day's facts.
 
-`journal show 2026-04-12 --latest` is the affordance for "I want
-today's most recent rollup, ignoring earlier partial runs."
+For "I want today's most recent rollup, ignoring earlier partial
+runs," callers either pass the full stem id of the newest file or
+pick the last element of the returned `entries` array (which is
+sorted `created_at` ascending). `--latest` is deliberately NOT a
+flag on `show` — the "newest snapshot" concept is rejected because
+late-arriving facts mean no single snapshot is canonical for a day.
 
 ### 5.d. `extract` idempotency fingerprint
 
@@ -1588,15 +1594,16 @@ a single, narrow decision.
    90% case ("show me what's currently in play"). Confirm before
    implementation; flipping the default is a breaking change later.
 
-8. **Legacy daily-file warning loudness.** §5.b's recommendation (a)
-   trusts the filename prefix on legacy files written under the old
-   team-tz pipeline and emits a single once-per-process stderr warning
-   on first mismatch. Alternatives: silent (less noise, harder to
-   debug a confused user); per-file warning (noisier but
-   self-contained per CLI run); structured `agent_hint` in the
-   envelope on `journal list` / `since` when any returned entry is a
-   legacy mismatch (machine-actionable). Confirm the once-per-process
-   stderr policy is the right loudness.
+8. **Legacy daily-file warning loudness — RESOLVED: silent.** §5.b's
+   recommendation (a) trusts the filename prefix on legacy files
+   written under the old team-tz pipeline. The shipped reader handles
+   this silently: no stderr warning, no `agent_hint`, no per-file or
+   once-per-process output. The mismatch is observable via the entry's
+   `date` field in the envelope, and stdout/stderr cleanliness is more
+   valuable than a debug breadcrumb for a case that is rare and
+   self-documenting. Earlier drafts of this spec proposed a noisier
+   policy; see `ox-ejv` for the follow-up to align the remaining
+   spec language with the shipped silent-tolerance contract.
 
 9. **Should `ox doctor` actively scrub the dead `timezone` keys?**
    Per §6.4, `OX_TIMEZONE` env vars and `timezone:` config keys are

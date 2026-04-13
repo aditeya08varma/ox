@@ -122,7 +122,17 @@ func findSourcesHeadingEnd(md string) int {
 // nextH2HeadingIndex returns the byte offset of the next "## " heading in
 // s, or -1 if none. Used to bound the Sources section at the next H2 so
 // an appendix following the citations does not leak into the parse.
+//
+// The offset-0 case matters: ParseSourcesSection passes in `rest`, which
+// begins immediately after the "## Sources" line. An empty Sources
+// section directly followed by "## Appendix" (no citations, no blank
+// line) leaves `rest` starting with "## ", and without the offset-0
+// check nextH2HeadingIndex would return -1 — causing the parser to
+// swallow the appendix as citation content.
 func nextH2HeadingIndex(s string) int {
+	if strings.HasPrefix(s, "## ") {
+		return 0
+	}
 	if i := strings.Index(s, "\n## "); i >= 0 {
 		return i
 	}
