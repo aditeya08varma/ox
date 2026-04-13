@@ -615,6 +615,18 @@ func readPendingGitHubFacts(tcPath string, since time.Time) (map[string][]discus
 			continue
 		}
 
+		// fast path: the github fact filename prefix is structurally the
+		// same `day` string that gets written into the content header as
+		// `RecordedAt: day + "T00:00:00Z"` (see extractGitHubFacts). Filename
+		// and content date can't disagree, so skipping pre-cutoff files by
+		// name is safe and avoids opening them. Legacy files without a
+		// parseable prefix fall through to the content-date check below.
+		if cutoffDate != "" {
+			if m := factFilenameDateRe.FindStringSubmatch(name); m != nil && m[1] < cutoffDate {
+				continue
+			}
+		}
+
 		data, err := os.ReadFile(filepath.Join(factsDir, entry.Name()))
 		if err != nil {
 			continue
@@ -629,7 +641,8 @@ func readPendingGitHubFacts(tcPath string, since time.Time) (map[string][]discus
 			continue
 		}
 
-		// filter by since (UTC date comparison)
+		// belt-and-suspenders content check, for legacy files without a
+		// filename-prefix date.
 		if cutoffDate != "" && date < cutoffDate {
 			continue
 		}

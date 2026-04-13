@@ -382,12 +382,20 @@ func sessionSummaryToFacts(input sessionInput, repoID, ep string) []facts.Fact {
 }
 
 // readPendingSessionFacts reads fact files from memory/.session-facts/<date>/
-// that were written since the given timestamp, grouped by session date.
-// Uses file mtime (not directory date) for the since filter so that
-// late-arriving sessions (e.g., March 10 session synced on March 27)
-// are included even when since is past the session date.
-// Returns a map of YYYY-MM-DD → []discussionFactEntry for seamless merge
-// with discussion and github facts in distillDaily.
+// within the lookback window, grouped by session date.
+//
+// The parent directory name is the authoritative session date.
+// extractSessionFacts writes each fact under .session-facts/<s.Date>/, where
+// s.Date comes from the session's parsed StartedAt. Directory-level filtering
+// lets us skip whole old directories without opening any file inside them.
+//
+// We deliberately do NOT filter by file mtime. mtime is not clone-stable:
+// git clone resets every file's mtime to checkout time, so on a fresh clone
+// (blue/green GC, new machine) an mtime filter would let every historical
+// fact through regardless of the session's actual date. Path-based filtering
+// is identical across clones, and the alreadyDistilled check in distillDaily
+// (via idx.distilledSources) handles dedup of facts already consumed by
+// existing daily summaries.
 func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discussionFactEntry, error) {
 	sessionFactsDir := filepath.Join(tcPath, "memory", ".session-facts")
 	dateDirs, err := os.ReadDir(sessionFactsDir)
@@ -396,6 +404,11 @@ func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discu
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read session-facts dir: %w", err)
+	}
+
+	var cutoffDate string
+	if !since.IsZero() {
+		cutoffDate = since.UTC().Format("2006-01-02")
 	}
 
 	result := make(map[string][]discussionFactEntry)
@@ -410,7 +423,11 @@ func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discu
 			continue
 		}
 
-		// read all .jsonl files in this date directory
+		// path-based filter: skip the whole directory if it's before the cutoff
+		if cutoffDate != "" && date < cutoffDate {
+			continue
+		}
+
 		datePath := filepath.Join(sessionFactsDir, date)
 		files, err := os.ReadDir(datePath)
 		if err != nil {
@@ -422,15 +439,6 @@ func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discu
 				continue
 			}
 
-			// filter by file mtime — includes late-arriving sessions
-			// whose session date is older than since
-			if !since.IsZero() {
-				info, err := f.Info()
-				if err == nil && info.ModTime().Before(since) {
-					continue
-				}
-			}
-
 			data, err := os.ReadFile(filepath.Join(datePath, f.Name()))
 			if err != nil {
 				continue
@@ -440,17 +448,10 @@ func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discu
 				continue
 			}
 
-			// Use parseFactDate to extract the UTC date from content metadata.
-			// Falls back to directory name if no parseable date in content.
-			factDate := parseFactDate(content, f.Name())
-			if factDate == "" {
-				factDate = date // fallback to directory name
-			}
-
-			result[factDate] = append(result[factDate], discussionFactEntry{
+			result[date] = append(result[date], discussionFactEntry{
 				Content: content,
 				RelPath: filepath.Join("memory", ".session-facts", date, f.Name()),
-				Date:    factDate,
+				Date:    date,
 			})
 		}
 	}

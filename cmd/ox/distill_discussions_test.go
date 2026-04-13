@@ -388,6 +388,67 @@ func TestReadDiscussionFacts_SinceFilter(t *testing.T) {
 	}
 }
 
+// Failure prevented: the discussion directory name is server-assigned and its
+// YYYY-MM-DD prefix may not match the UTC day of the event's recorded_at (e.g.
+// a local-timezone-prefixed directory whose event rolls into the next UTC day).
+// The content-derived date must win; a filename-prefix fast-path would silently
+// drop the fact. See ox-vhm and the code-reviewer finding on the distill
+// mtime-fix PR.
+func TestReadDiscussionFacts_FilenameOlderThanContent(t *testing.T) {
+	tcPath := t.TempDir()
+	factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
+	if err := os.MkdirAll(factsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// filename prefix = 2026-03-10 (local-date), content recorded_at = 2026-03-11 UTC.
+	// The fact should land in the 2026-03-11 bucket and survive a cutoff of 2026-03-11.
+	name := "2026-03-10-2345-ryan-019d6da5-5835-7261-baa5-e8bc3983beff.jsonl"
+	content := `{"_meta":{"schema_version":"2","source_type":"discussion","recorded_at":"2026-03-11T06:45:00Z"}}
+{"headline":"late-night decision","category":"decision","timestamp":"2026-03-11T06:45:00Z"}
+`
+	if err := os.WriteFile(filepath.Join(factsDir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	since := time.Date(2026, 3, 11, 0, 0, 0, 0, time.UTC)
+	result, err := readPendingDiscussionFacts(tcPath, since)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result["2026-03-11"]) != 1 {
+		t.Errorf("content-date bucket (2026-03-11) should contain 1 entry, got %d", len(result["2026-03-11"]))
+	}
+	if _, ok := result["2026-03-10"]; ok {
+		t.Error("filename-prefix bucket (2026-03-10) must not appear: content date is authoritative")
+	}
+}
+
+// Failure prevented: legacy discussion fact files without a YYYY-MM-DD prefix
+// (e.g. a manually-authored arch-review note) must still be read and parsed
+// from content, not skipped because the filename has no prefix.
+func TestReadDiscussionFacts_LegacyFilenameNoPrefix(t *testing.T) {
+	tcPath := t.TempDir()
+	factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
+	if err := os.MkdirAll(factsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.WriteFile(filepath.Join(factsDir, "arch-review.md"),
+		[]byte("Architecture decisions\n\n---\n*(created 2026-03-11)*\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	since := time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)
+	result, err := readPendingDiscussionFacts(tcPath, since)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(result["2026-03-11"]) != 1 {
+		t.Errorf("legacy unprefixed file with content-date 2026-03-11 should be included, got %d", len(result["2026-03-11"]))
+	}
+}
+
 func TestReadPendingDiscussionFactsEmptyDir(t *testing.T) {
 	tcPath := t.TempDir() // no .discussion-facts dir
 
