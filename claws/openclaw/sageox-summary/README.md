@@ -44,13 +44,25 @@ Once installed, ask your OpenClaw agent things like:
    (shared with [`sageox-distill`](../sageox-distill/)).
 2. **Computes the team context directories** from the SageOx endpoint
    slug.
-3. **Builds a prompt** from `assets/SUMMARIZE.md`, substituting per-team
-   directories.
-4. **Runs `claude -p`** with read-only access to each team's context dir.
+3. **Selects new daily files** for the last 24 hours by UTC date prefix,
+   via the bundled `scripts/select-new-files.sh`. The window covers
+   both today and yesterday's date-prefixed files to cleanly handle the
+   day boundary, then filters out anything already included in a prior
+   summary via `~/.openclaw/memory/sageox-summary-state.json`. If
+   nothing is new, the skill prints one line and exits without calling
+   Claude.
+4. **Builds a prompt** from `assets/SUMMARIZE.md`, substituting the
+   per-team list of new files to read.
+5. **Runs `claude -p`** with read-only access to each team's context dir.
    `ANTHROPIC_API_KEY` is supplied by OpenClaw's per-skill `apiKey`
    injection (or by your shell, if configured that way) — see
    [Environment setup](../README.md#environment-setup).
-5. **Returns the summary** — already formatted for Slack mrkdwn.
+6. **Updates the summary state** on success via
+   `scripts/update-state.sh` — atomically merges the newly-summarized
+   basenames into each team's `included_files`, prunes stale entries
+   outside the window, and persists the file so the next run picks up
+   where this one left off.
+7. **Returns the summary** — already formatted for Slack mrkdwn.
 
 The output is structured into four sections:
 

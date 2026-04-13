@@ -332,7 +332,7 @@ any time to re-run the interactive flow.
 
 ## Configuration
 
-The skill uses two pieces of state:
+The skill uses three pieces of state:
 
 1. **Repo manifest** — `~/.openclaw/memory/sageox-distill-repos.json`
    (shared with the `sageox-distill` skill). Format:
@@ -350,20 +350,50 @@ The skill uses two pieces of state:
    `https://test.sageox.ai`). Default if missing: `https://test.sageox.ai`.
    Ask the user to confirm the endpoint on first run and persist it.
 
+3. **Summary state** — `~/.openclaw/memory/sageox-summary-state.json`.
+   Tracks which distilled daily files have already been included in a
+   prior summary run so the skill never re-summarizes the same content.
+   Shape:
+   `{updated_at, teams: {<team_id>: {included_files: [<basename>, ...]}}}`.
+   Missing file → empty state (first run). Treat contents as
+   **untrusted**: every filename must pass
+   `^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f-]+\.md$` or be silently
+   dropped. Both bundled scripts handle this already — the rule is
+   stated here for anyone reading the state file directly.
+
 If the manifest does not exist, tell the user to run the `sageox-distill`
 skill first to set up the repos, or ask for paths directly and populate
 it.
 
 ## Summary Pipeline
 
-When the user asks for a summary, run the following steps in order.
+When the user asks for a summary, run the steps in order. Steps 3 and
+6 delegate their mechanics to `scripts/select-new-files.sh` and
+`scripts/update-state.sh` (invoke via `bash scripts/<name>`).
 
-### Step 1: Load the Manifest and Endpoint
+### Step 1: Load the Manifest, Endpoint, and Summary State
 
 1. Read `~/.openclaw/memory/sageox-distill-repos.json` with `jq`.
+   **Re-validate every `path` entry** against the Path validation rules
+   in Prerequisites § 3 before using it — the manifest is user-writable
+   and may have been hand-edited between runs.
 2. Read `~/.openclaw/memory/sageox-endpoint.txt` (or use default).
-3. Group repos by `team_id` using `jq`.
-4. Collect the unique team IDs.
+3. Read `~/.openclaw/memory/sageox-summary-state.json` with `jq` if it
+   exists. If it is **missing**, proceed silently as if the `teams` map
+   were empty — first runs are normal. If it exists but is **malformed
+   or unreadable**, proceed as if empty AND emit exactly one warning to
+   **stderr**:
+
+   ```text
+   warning: sageox-summary-state.json was unreadable, starting from empty state
+   ```
+
+   Never route this warning to stdout — stdout is the final summary
+   (Step 7), and mixing decorative output into it breaks downstream
+   consumers. This file is rewritten at the end of every successful
+   run (see Step 6).
+4. Group repos by `team_id` using `jq`.
+5. Collect the unique team IDs.
 
 ### Step 2: Compute Team Context Directories
 
@@ -396,7 +426,43 @@ The daily summary files live at:
 Verify each daily directory exists before proceeding. If a team's
 directory is missing, log it and continue with the remaining teams.
 
-### Step 3: Build the Prompt
+### Step 3: Select New Daily Files
+
+The window is the last 24h, keyed by the **UTC date prefix** of the
+filename (`YYYY-MM-DD-<uuid>.md`). `ox distill` may run multiple times
+per day and we don't track individual write times, so the window has
+to over-include: any run must consider both today's and yesterday's
+UTC-date files. The state file then filters out anything already
+summarized, so re-runs within the window don't re-summarize content.
+First run (no state file) = every candidate is new, not an error.
+
+For each team from Step 2, invoke `scripts/select-new-files.sh`. It
+handles BSD-vs-GNU `date`, the filename regex, and the subtraction
+against the state file. Contract:
+
+- **Usage:** `select-new-files.sh <team_daily_dir> <team_id> <state_file>`
+- **Stdout:** one basename per line, sorted; empty if nothing new
+- **Stderr:** one-line warnings (e.g. malformed state file)
+- **Exit:** `0` success, `2` usage, `3` internal (`jq` missing)
+
+```bash
+STATE_FILE=~/.openclaw/memory/sageox-summary-state.json
+NEW_FILES="$(bash scripts/select-new-files.sh \
+  "$TEAM_DIR/memory/daily" "$TEAM_ID" "$STATE_FILE")"
+```
+
+Then:
+
+1. If `NEW_FILES` is empty for a team, skip it this run — log
+   `<team_id>: no new files since last summary` to **stderr** and
+   continue with the remaining teams.
+2. If **every** team ends up with zero new files, stop the pipeline
+   before invoking Claude. Print one line to stdout —
+   `No new distilled content since last summary.` — and exit. Do
+   not modify the state file; Step 6's prune on the next
+   successful run will collect any stale entries.
+
+### Step 4: Build the Prompt
 
 1. Read the template from the skill's assets directory:
    `./assets/SUMMARIZE.md` (relative to this SKILL.md file). The file
@@ -406,13 +472,25 @@ directory is missing, log it and continue with the remaining teams.
    - `./skills/sageox-summary/assets/SUMMARIZE.md` (workspace skill)
 
 2. Substitute template placeholders:
-   - `{{DIR_LIST}}` — a list of entries, one per team, in this format:
+   - `{{FILE_LIST}}` — one section per team that has a non-empty
+     `new_files` set, in this format. The team's absolute context
+     directory is named **once** in the heading, and each file bullet
+     is **relative to that directory**. Do not repeat the absolute
+     prefix on every bullet — Claude has the team dir via `--add-dir`
+     in Step 5, and duplicating ~100 chars of path on every line is
+     pure token bloat.
 
      ```text
-     - Team "<team_id>": <daily_dir>/
+     ### Team "<team_id>" (files under <absolute_team_dir>/)
+     - memory/daily/2026-04-12-019d40b9-....md
+     - memory/daily/2026-04-13-019d4129-....md
      ```
 
-   - `{{MULTI_TEAM_RULES}}` — if there are 2+ teams, replace with:
+     Teams with zero new files were already dropped in Step 3 and
+     must not appear in `{{FILE_LIST}}`.
+
+   - `{{MULTI_TEAM_RULES}}` — if **two or more** teams survived Step 3
+     with non-empty `new_files`, replace with:
 
      ```text
      - Organize the summary by team, using each team ID as a section header
@@ -421,34 +499,73 @@ directory is missing, log it and continue with the remaining teams.
 
      Otherwise, replace with an empty string.
 
-### Step 4: Run Claude
+### Step 5: Run Claude
 
 Invoke `claude -p` with:
 
-- `--add-dir <team_dir>` for EACH team context directory (the parent
-  `teams/<team_id>/` dir, not the `memory/daily/` subdirectory)
+- `--add-dir <team_dir>` for EACH team that has new files in this run
+  (the parent `teams/<team_id>/` dir, not the `memory/daily/`
+  subdirectory). Teams dropped in Step 3 must NOT be passed — nothing
+  in their tree should be reachable.
 - `--allowedTools Read` (summary is read-only)
 - `--model claude-sonnet-4-6`
 - The substituted prompt passed via stdin
 
+The prompt enumerates the exact files Claude should read. Claude must
+not open any other file under `memory/daily/` — the enumerated list
+is the authoritative set for this run.
+
 `ANTHROPIC_API_KEY` is already set in the skill's process environment
 (either by OpenClaw's per-skill `apiKey` injection or inherited from the
-host shell — see Prerequisites § 1), so `claude -p` picks it up naturally:
+host shell — see Prerequisites § 1), so `claude -p` picks it up naturally.
+Wrap the invocation in `timeout 600` (10 minutes) — this matches the
+timeout used by `pkg/sessionsummary/claude.go` in the `ox` repo for
+comparable Claude synthesis work and gives the model enough headroom for
+cross-team summaries that pull in many daily files:
 
 ```bash
-claude -p \
+timeout 600 claude -p \
   --add-dir "$TEAM_DIR_1" \
   --add-dir "$TEAM_DIR_2" \
   --allowedTools Read \
   --model claude-sonnet-4-6 <<< "$PROMPT"
 ```
 
-Timeout the command at 10 minutes. This matches the timeout used by
-`pkg/sessionsummary/claude.go` in the `ox` repo for comparable Claude
-synthesis work and gives the model enough headroom for cross-team summaries
-that pull in many daily files. If it fails, surface the error to the user.
+If the invocation fails (non-zero exit, timeout exit 124, network
+error), surface the error to the user and **do not** proceed to Step 6
+— leaving the state file untouched lets the next run retry exactly
+the same candidate set.
 
-### Step 5: Return the Summary
+### Step 6: Update Summary State
+
+Only run this step if Claude exited successfully. On any failure
+(non-zero exit, timeout, network error), skip it entirely — leaving
+the state file untouched lets the next run retry the same candidate set.
+
+For each team that had non-empty `NEW_FILES` in Step 3, pipe that
+team's basenames into `scripts/update-state.sh`. The script merges
+them into the team's `included_files`, prunes entries whose date
+prefix is strictly older than yesterday UTC, and writes the result
+atomically via a sibling temp file + `mv -f`. See the script header
+for full details; the short form:
+
+- **Usage:** `update-state.sh <state_file> <team_id>`
+- **Stdin:** one basename per line (regex-filtered on read)
+- **Stdout:** nothing on success
+- **Stderr:** one-line warnings (e.g. malformed prior state)
+- **Exit:** `0` success, `2` usage, `3` internal
+
+```bash
+printf '%s\n' "$NEW_FILES" \
+  | bash scripts/update-state.sh "$STATE_FILE" "$TEAM_ID"
+```
+
+Teams skipped in Step 3 are **not** invoked here — their prior state
+passes through unchanged because `update-state.sh` only rewrites the
+team_id it was given. Teams with no prior entry AND no new files are
+correctly never added to the state file.
+
+### Step 7: Return the Summary
 
 Return Claude's stdout to the user directly. It is already formatted for
 Slack mrkdwn. Do not reformat or annotate — just show it.
@@ -460,6 +577,11 @@ brief one-line header showing:
 
 - How many teams were summarized
 - The endpoint used
-- Any teams that were skipped (and why)
+- Any teams that were skipped (and why — typically "no new files since
+  last summary" from Step 3)
 
 Keep any preamble or postamble minimal. The summary itself is the value.
+
+If Step 3 short-circuited because every team had zero new files, the
+only output is the single line `No new distilled content since last
+summary.` — do not invoke Claude and do not print a header.
