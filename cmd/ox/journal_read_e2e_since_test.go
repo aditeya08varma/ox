@@ -282,7 +282,17 @@ func TestJournalRead_JR16_SinceAllTeamsContent_ConcatenatedMarkers(t *testing.T)
 	now := time.Now().UTC()
 	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
-	secondary := addSecondaryTeam(t, e, "team_read_e2e_t2", "Journal Read E2E T2", "journal-read-e2e-t2")
+	// Discriminator for the slug-order regression: choose a secondary slug
+	// that alphabetically sorts BEFORE the primary's "journal-read-e2e"
+	// (harness_test.go:195). With the default "journal-read-e2e-t2" slug
+	// plus the recipe's (primary -3h, secondary -2h) mtimes, BOTH
+	// slug-order and time-order put primary first — so the assertion
+	// below would pass regressed code that switched to slug ordering.
+	// "alpha-journal-read-e2e" flips slug-order to secondary-first while
+	// leaving time-order as primary-first, so the primary-first check
+	// below now discriminates the two. JR-14/15 keep their default slug;
+	// this change is scoped to JR-16 to avoid rippling their assertions.
+	secondary := addSecondaryTeam(t, e, "team_alpha_read_e2e", "Alpha Read E2E", "alpha-journal-read-e2e")
 	fx := recipeMultiTeamList(t, e.primaryTeam, secondary, now)
 
 	out, exit := e.Run(t, "journal", "since", "24h", "--all-teams", "--format=content")
@@ -301,10 +311,14 @@ func TestJournalRead_JR16_SinceAllTeamsContent_ConcatenatedMarkers(t *testing.T)
 	//   Dailies[1] = secondary team, mtime now-2h, body "Secondary team daily."
 	// Both are today-dated. listEntries merges teams with sortEntries
 	// (date asc, created_at asc) per list.go:1-108 — so with identical
-	// dates the older mtime (primary, -3h) must come first. This is NOT
-	// team-slug order: if the reader ever switched to slug order the
-	// secondary would sort before the primary alphabetically and this
-	// test would trip.
+	// dates the older mtime (primary, -3h) must come first.
+	//
+	// Slug-order discriminator: the secondary's slug "alpha-journal-read-e2e"
+	// sorts BEFORE the primary's "journal-read-e2e". Under time-order the
+	// primary's older mtime wins (primary first); under slug-order the
+	// secondary's lexically earlier slug wins (secondary first). So the
+	// primary-first assertion below catches a regression that switched the
+	// merge key from (date, created_at) to (team_slug, ...).
 	primary := fx.Dailies[0]
 	secondaryDaily := fx.Dailies[1]
 
