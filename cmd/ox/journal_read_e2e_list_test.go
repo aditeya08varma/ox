@@ -28,10 +28,6 @@ import (
 	"time"
 )
 
-// skipPendingUnit3 gates the assertion block of every list skeleton
-// until Unit 3 of journal-read-plan.md lands.
-const skipPendingUnit3 = "impl not landed yet: depends on Unit 3 (ox journal list + journal_time.go)"
-
 // decodeJournalEnvelope parses the first JSON object line out of a
 // combined stdout+stderr blob and returns three slices of that blob:
 //
