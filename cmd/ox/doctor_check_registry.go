@@ -381,6 +381,10 @@ func init() {
 		Run:         func(_ bool) checkResult { return checkScoreThresholdRange() },
 	})
 
+	// ============================================================
+	// Config hygiene checks
+	// ============================================================
+
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugTimezoneScrub,
 		Name:        "Timezone cleanup",
