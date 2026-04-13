@@ -31,7 +31,21 @@ type DirtyOverlayDebouncer struct {
 	timer    *time.Timer
 	lastFire time.Time
 	ctx      context.Context
-	stopped  bool // prevents stale fire() callbacks from mutating state
+	stopped  bool
+	// generation increments on every OnSettled and Stop. Each scheduled fire
+	// captures the generation in which it was created; when the fire callback
+	// runs, a generation mismatch means a newer OnSettled has superseded it
+	// and the fire must be dropped. This replaces relying on time.Timer.Stop()
+	// alone, which can't cancel a timer whose callback has already been
+	// started in its own goroutine but not yet acquired d.mu.
+	generation uint64
+
+	// fireHook is called with the captured lastFire timestamp after the fire
+	// has committed. Test-only; nil in production. Exists so tests can observe
+	// the exact moment the debouncer considers a fire to have happened,
+	// instead of measuring wall-clock time downstream inside RefreshDirtyOverlay
+	// where scheduler jitter can compress observed gaps far below minGap.
+	fireHook func(time.Time)
 }
 
 // NewDirtyOverlayDebouncer creates a debouncer that triggers dirty overlay
@@ -58,6 +72,7 @@ func (d *DirtyOverlayDebouncer) Stop() {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.stopped = true
+	d.generation++
 	if d.timer != nil {
 		d.timer.Stop()
 		d.timer = nil
@@ -75,12 +90,18 @@ func (d *DirtyOverlayDebouncer) OnSettled() {
 		return
 	}
 
+	// Best-effort cancel of any currently-scheduled timer. Stop() may return
+	// false if the timer already expired and its callback goroutine has been
+	// started but is blocked on d.mu — in that case we can't reach it, and
+	// rely on the generation check in fire() to turn it into a no-op.
 	if d.timer != nil {
 		d.timer.Stop()
 	}
 
+	d.generation++
+	gen := d.generation
+
 	delay := d.debounce
-	// enforce minimum interval between rebuilds
 	if !d.lastFire.IsZero() {
 		sinceLastFire := time.Since(d.lastFire)
 		if sinceLastFire < d.minGap {
@@ -91,25 +112,33 @@ func (d *DirtyOverlayDebouncer) OnSettled() {
 		}
 	}
 
-	d.timer = time.AfterFunc(delay, d.fire)
+	d.timer = time.AfterFunc(delay, func() { d.fire(gen) })
 }
 
-// fire triggers the dirty overlay rebuild.
-// Checks the stopped flag to avoid mutating state after Stop() or when a stale
-// timer fires concurrently with OnSettled() installing a new timer.
-func (d *DirtyOverlayDebouncer) fire() {
+// fire triggers the dirty overlay rebuild. The gen parameter is the generation
+// value captured when this fire was scheduled. If OnSettled (or Stop) has run
+// since then, d.generation will have advanced and this fire is stale: it must
+// return without touching lastFire or running the refresh, so the next
+// generation's fire can enforce minGap against a consistent baseline.
+func (d *DirtyOverlayDebouncer) fire(gen uint64) {
 	d.mu.Lock()
-	if d.stopped {
+	if d.stopped || gen != d.generation {
 		d.mu.Unlock()
 		return
 	}
-	d.lastFire = time.Now()
+	now := time.Now()
+	d.lastFire = now
 	d.timer = nil
 	ctx := d.ctx
+	hook := d.fireHook
 	d.mu.Unlock()
 
 	if ctx == nil {
 		return
+	}
+
+	if hook != nil {
+		hook(now)
 	}
 
 	d.logger.Debug("dirty overlay debouncer: triggering refresh")
