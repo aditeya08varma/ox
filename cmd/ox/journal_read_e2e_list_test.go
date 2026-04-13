@@ -534,6 +534,9 @@ func TestJournalRead_JR19_TeamNotFound_ErrorEnvelope(t *testing.T) {
 
 	// Wipe the team context: empty config.local.toml and remove the
 	// primary team root so nothing the reader walks finds a registered team.
+	// resolveJournalTeams calls config.FindRepoTeamContext which returns nil
+	// on an empty config, so the command layer funnels through
+	// writeJournalRuntimeError with code "team_not_found".
 	emptyCfg := filepath.Join(e.workspace, ".sageox", "config.local.toml")
 	if err := os.WriteFile(emptyCfg, []byte(""), 0o600); err != nil {
 		t.Fatalf("wipe config.local.toml: %v", err)
@@ -543,11 +546,30 @@ func TestJournalRead_JR19_TeamNotFound_ErrorEnvelope(t *testing.T) {
 	}
 
 	out, exit := e.Run(t, "journal", "list", "--since=24h", "--format=json")
-	t.Logf("JR-19 exit=%d out_bytes=%d", exit, len(out))
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: exit 1, success=false, error.code="team_not_found",
-	// retryable=false.
+	if exit != 1 {
+		t.Fatalf("JR-19: exit=%d want 1 (runtime error, not usage error)\nout:\n%s", exit, out)
+	}
+	env, _, _ := decodeJournalEnvelope(t, out)
+	if env.Success {
+		t.Fatalf("JR-19: success=true want false")
+	}
+	if env.Error == nil {
+		t.Fatalf("JR-19: error envelope is nil")
+	}
+	if env.Error.Code != "team_not_found" {
+		t.Fatalf("JR-19: error.code=%q want %q", env.Error.Code, "team_not_found")
+	}
+	if env.Error.Retryable {
+		t.Fatalf("JR-19: error.retryable=true want false (missing config is not transient)")
+	}
+	if env.Error.Message == "" {
+		t.Fatalf("JR-19: error.message is empty — must carry a human-readable explanation")
+	}
+	// Defensive: no data block on an error envelope. If this fires, the
+	// command is leaking partial state back to the agent alongside the error.
+	if env.Data != nil {
+		t.Fatalf("JR-19: data=%+v want nil on error envelope", env.Data)
+	}
 }
 
 // TestJournalRead_JR20_UsageError_InvalidSince — bad duration flag.
@@ -557,14 +579,33 @@ func TestJournalRead_JR20_UsageError_InvalidSince(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
 	e := setupJournalE2E(t, now)
-	fx := recipeMinimalDaily(t, e.primaryTeam, now)
+	// Stage a valid daily so we can prove the usage error fires BEFORE
+	// the reader walks files — a non-zero len(entries) here would mean the
+	// reader silently fell back to now() instead of rejecting the bad flag.
+	_ = recipeMinimalDaily(t, e.primaryTeam, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=not-a-duration", "--format=json")
-	t.Logf("JR-20 exit=%d out_bytes=%d dailies=%d", exit, len(out), len(fx.Dailies))
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: exit 2; stdout is JSON error envelope with
-	// error.code="usage_error" (or equivalent).
+	if exit != 2 {
+		t.Fatalf("JR-20: exit=%d want 2 (usage error, distinct from runtime exit 1)\nout:\n%s", exit, out)
+	}
+	env, _, _ := decodeJournalEnvelope(t, out)
+	if env.Success {
+		t.Fatalf("JR-20: success=true want false")
+	}
+	if env.Error == nil {
+		t.Fatalf("JR-20: error envelope is nil")
+	}
+	if env.Error.Code != "usage_error" {
+		t.Fatalf("JR-20: error.code=%q want %q", env.Error.Code, "usage_error")
+	}
+	if env.Error.Retryable {
+		t.Fatalf("JR-20: error.retryable=true want false (bad flag is not transient)")
+	}
+	// The daily that we staged must not leak into the error envelope —
+	// the reader is expected to refuse to run at all on a bad --since.
+	if env.Data != nil {
+		t.Fatalf("JR-20: data=%+v want nil — usage errors must not carry partial results", env.Data)
+	}
 }
 
 // TestJournalRead_JR21_AbsoluteTzRoundTrip — LA-local day window that
@@ -573,9 +614,7 @@ func TestJournalRead_JR20_UsageError_InvalidSince(t *testing.T) {
 func TestJournalRead_JR21_AbsoluteTzRoundTrip(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	if now.Hour() == 23 && now.Minute() >= 59 {
-		t.Skip("within seconds of UTC midnight — window rounding unstable, retry")
-	}
+	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
 	fx := recipeTwoConsecutiveUtcDays(t, e.primaryTeam, now)
 
@@ -592,12 +631,48 @@ func TestJournalRead_JR21_AbsoluteTzRoundTrip(t *testing.T) {
 		"--until="+until,
 		"--tz=America/Los_Angeles",
 		"--format=json")
-	t.Logf("JR-21 exit=%d out_bytes=%d dailies=%d since=%s until=%s",
-		exit, len(out), len(fx.Dailies), since, until)
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: exit 0; both files returned; window.since = yesterday 00:00Z;
-	// window.until = <yesterday+2d> 00:00Z (the 48h rounded window).
+	if exit != 0 {
+		t.Fatalf("JR-21: exit=%d want 0\nout:\n%s", exit, out)
+	}
+	env, _, _ := decodeJournalEnvelope(t, out)
+	if env.Data == nil || len(env.Data.Entries) != 2 {
+		t.Fatalf("JR-21: want 2 entries (yesterday+today UTC after LA→UTC rounding), got data=%+v", env.Data)
+	}
+	// Recipe stages fx.Dailies[0]=yesterday(UTC prefix), fx.Dailies[1]=today(UTC prefix).
+	// sortEntries orders by (date asc) so yesterday must precede today.
+	wantYesterday := fx.Dailies[0]
+	wantToday := fx.Dailies[1]
+	got0 := env.Data.Entries[0]
+	got1 := env.Data.Entries[1]
+	if got0.ID != wantYesterday.ID || got1.ID != wantToday.ID {
+		t.Fatalf("JR-21: ordering wrong: got [%s, %s] want [%s, %s] (date asc)",
+			got0.ID, got1.ID, wantYesterday.ID, wantToday.ID)
+	}
+	if got0.Date != wantYesterday.Date {
+		t.Fatalf("JR-21: entry[0].date=%q want %q", got0.Date, wantYesterday.Date)
+	}
+	if got1.Date != wantToday.Date {
+		t.Fatalf("JR-21: entry[1].date=%q want %q", got1.Date, wantToday.Date)
+	}
+	// Window assertions: the LA-local window [yesterday 00:00 LA, yesterday
+	// 23:59 LA] converts to UTC as [yesterday 07:00Z, today 06:59Z] in PDT
+	// (or 08:00/07:59 in PST). dayFloor/dayCeil then round outward to
+	// [yesterday 00:00Z, tomorrow 00:00Z) — a two-day window containing
+	// both staged files. The specific expected strings are derived from
+	// the captured `now` so the test is agnostic to DST.
+	if env.Data.Window == nil {
+		t.Fatalf("JR-21: window is nil")
+	}
+	wantSince := dayFloorUTC(daysBack(now, 1)).Format(time.RFC3339)
+	wantUntil := dayCeilUTC(now).Format(time.RFC3339)
+	if env.Data.Window.Since != wantSince {
+		t.Fatalf("JR-21: window.since=%q want %q (outward day-round of LA→UTC)",
+			env.Data.Window.Since, wantSince)
+	}
+	if env.Data.Window.Until != wantUntil {
+		t.Fatalf("JR-21: window.until=%q want %q (outward day-round of LA→UTC)",
+			env.Data.Window.Until, wantUntil)
+	}
 }
 
 // TestJournalRead_JR22_TzConflictAndInvalid — two usage subtests on
@@ -616,11 +691,29 @@ func TestJournalRead_JR22_TzConflictAndInvalid(t *testing.T) {
 			"--since=2026-04-12T09:00-07:00",
 			"--tz=America/Los_Angeles",
 			"--format=json")
-		t.Logf("JR-22A exit=%d out_bytes=%d", exit, len(out))
-
-		t.Skip(skipPendingUnit3)
-		// TODO Unit 3: exit 2; JSON error envelope; error.code="usage_error";
-		// message mentions "conflicting timezone" (or equivalent).
+		if exit != 2 {
+			t.Fatalf("JR-22A: exit=%d want 2 (conflicting tz is a usage error)\nout:\n%s", exit, out)
+		}
+		env, _, _ := decodeJournalEnvelope(t, out)
+		if env.Success {
+			t.Fatalf("JR-22A: success=true want false")
+		}
+		if env.Error == nil {
+			t.Fatalf("JR-22A: error envelope is nil")
+		}
+		if env.Error.Code != "usage_error" {
+			t.Fatalf("JR-22A: error.code=%q want %q", env.Error.Code, "usage_error")
+		}
+		// parseJournalAbsoluteTimestamp emits "conflicting timezone
+		// specification on --since: ..." — match on the "conflicting
+		// timezone" substring so a future message rewording doesn't
+		// accidentally break the guard.
+		if !strings.Contains(env.Error.Message, "conflicting timezone") {
+			t.Fatalf("JR-22A: error.message=%q must mention 'conflicting timezone'", env.Error.Message)
+		}
+		if env.Data != nil {
+			t.Fatalf("JR-22A: data=%+v want nil on a usage-error envelope", env.Data)
+		}
 	})
 
 	t.Run("B_invalid_zone", func(t *testing.T) {
@@ -628,11 +721,26 @@ func TestJournalRead_JR22_TzConflictAndInvalid(t *testing.T) {
 			"--since=2026-04-12T09:00",
 			"--tz=Not/A/Real/Zone",
 			"--format=json")
-		t.Logf("JR-22B exit=%d out_bytes=%d", exit, len(out))
-
-		t.Skip(skipPendingUnit3)
-		// TODO Unit 3: exit 2; JSON error envelope; error.code="usage_error";
-		// message mentions "invalid timezone" (or equivalent).
+		if exit != 2 {
+			t.Fatalf("JR-22B: exit=%d want 2 (invalid zone is a usage error)\nout:\n%s", exit, out)
+		}
+		env, _, _ := decodeJournalEnvelope(t, out)
+		if env.Success {
+			t.Fatalf("JR-22B: success=true want false")
+		}
+		if env.Error == nil {
+			t.Fatalf("JR-22B: error envelope is nil")
+		}
+		if env.Error.Code != "usage_error" {
+			t.Fatalf("JR-22B: error.code=%q want %q", env.Error.Code, "usage_error")
+		}
+		// resolveJournalWindow emits "invalid timezone %q: <LoadLocation err>".
+		if !strings.Contains(env.Error.Message, "invalid timezone") {
+			t.Fatalf("JR-22B: error.message=%q must mention 'invalid timezone'", env.Error.Message)
+		}
+		if env.Data != nil {
+			t.Fatalf("JR-22B: data=%+v want nil on a usage-error envelope", env.Data)
+		}
 	})
 }
 
@@ -643,19 +751,49 @@ func TestJournalRead_JR22_TzConflictAndInvalid(t *testing.T) {
 func TestJournalRead_JR23_EffectiveWindowRounding(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	if now.Hour() == 23 && now.Minute() >= 59 {
-		t.Skip("within seconds of UTC midnight — window rounding unstable, retry")
-	}
+	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
 	fx := recipeMinimalDaily(t, e.primaryTeam, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=6h", "--format=json")
-	t.Logf("JR-23 exit=%d out_bytes=%d dailies=%d", exit, len(out), len(fx.Dailies))
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: exit 0; entries has the one minimal daily;
-	// window.since = day-floor(now - 6h).Format(RFC3339) (not raw now-6h),
-	// window.until = day-ceil(now).Format(RFC3339) (not raw now).
+	if exit != 0 {
+		t.Fatalf("JR-23: exit=%d want 0\nout:\n%s", exit, out)
+	}
+	env, _, _ := decodeJournalEnvelope(t, out)
+	if env.Data == nil || len(env.Data.Entries) != 1 {
+		t.Fatalf("JR-23: want 1 entry (the minimal daily), got data=%+v", env.Data)
+	}
+	if got, want := env.Data.Entries[0].ID, fx.Dailies[0].ID; got != want {
+		t.Fatalf("JR-23: entry.id=%q want %q", got, want)
+	}
+	if env.Data.Window == nil {
+		t.Fatalf("JR-23: window is nil")
+	}
+	// Spec §3.4 rounding contract: the envelope window is always day-rounded
+	// outward from the raw --since/--until, so agents can tell the reader
+	// rounded their input without re-computing the grammar themselves. If
+	// the reader leaked the raw now-6h (an odd time-of-day instant), the
+	// string here would end in something other than T00:00:00Z.
+	wantSince := dayFloorUTC(now.Add(-6 * time.Hour)).Format(time.RFC3339)
+	wantUntil := dayCeilUTC(now).Format(time.RFC3339)
+	if env.Data.Window.Since != wantSince {
+		t.Fatalf("JR-23: window.since=%q want %q (day-floor(now-6h), not raw now-6h)",
+			env.Data.Window.Since, wantSince)
+	}
+	if env.Data.Window.Until != wantUntil {
+		t.Fatalf("JR-23: window.until=%q want %q (day-ceil(now), not raw now)",
+			env.Data.Window.Until, wantUntil)
+	}
+	// Hard lock-in: a raw instant would never end in T00:00:00Z (modulo a
+	// once-per-day collision we've already skipped via skipIfNearUTCMidnight).
+	// This catches a regression that day-rounds the inputs but then formats
+	// the raw values anyway.
+	if !strings.HasSuffix(env.Data.Window.Since, "T00:00:00Z") {
+		t.Fatalf("JR-23: window.since=%q does not end at a UTC midnight — rounding escaped to the wire", env.Data.Window.Since)
+	}
+	if !strings.HasSuffix(env.Data.Window.Until, "T00:00:00Z") {
+		t.Fatalf("JR-23: window.until=%q does not end at a UTC midnight — rounding escaped to the wire", env.Data.Window.Until)
+	}
 }
 
 // TestJournalRead_JR24_StaleFilenameRecentMtime_EventDayWins — 90-day-
