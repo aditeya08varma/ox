@@ -86,8 +86,11 @@ Monitor discipline:
 - **60s poll floor.** Don't drop below; you'll rate-limit yourself against
   the GitHub API and waste tokens on noise.
 - **Only state transitions emit.** Stable state is silent.
-- **Failures are swallowed** (`2>/dev/null`, `|| exit 0`) so a single
-  transient API blip doesn't kill the watch.
+- **Transient failures are tolerated** (`2>/dev/null` on both `gh`
+  calls, `|| echo '[]'` on `gh pr checks`) so a single API blip yields
+  a degraded poll instead of killing the watch. The `${var:-?}`
+  fallbacks in the state string ensure partial results still produce
+  an event rather than a blank state.
 - **One line per event** keeps notifications terse — Monitor turns every
   stdout line into a chat notification.
 
