@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/sageox/ox/internal/journal/memoryio"
 )
 
 // Local copies of the filename regexes from cmd/ox/distill.go. The reader
@@ -156,12 +158,15 @@ func listDailyForTeam(ctx context.Context, team TeamRef, effSince, effUntil time
 }
 
 // parseEntryFile opens one .md file, pulls source-list metadata from the
-// YAML frontmatter, stamps the Entry with filesystem mtime, and
-// optionally includes the body with the frontmatter stripped.
+// YAML frontmatter, parses the rendered "## Sources" section into
+// Citations, stamps the Entry with filesystem mtime, and optionally
+// includes the body with the frontmatter stripped.
 //
-// Unit 1 leaves Citations/CitationCount at zero — Unit 2 bridges through
-// internal/journal/memoryio to reuse cmd/ox/distill_citations.go without
-// duplicating the parser here.
+// Frontmatter parsing, body stripping, and Sources-section parsing all
+// delegate to internal/journal/memoryio so the reader stays standalone
+// (no imports from cmd/ox). The CitationCount field is computed from the
+// parsed Citations slice regardless of wantBody, so list calls can
+// surface the count without materializing the body.
 func parseEntryFile(absPath string, layer Layer, teamSlug, dateStr string, wantBody bool) (*Entry, error) {
 	data, err := os.ReadFile(absPath)
 	if err != nil {
@@ -173,72 +178,25 @@ func parseEntryFile(absPath string, layer Layer, teamSlug, dateStr string, wantB
 	}
 	content := string(data)
 
-	sources := parseFrontmatterSources(content)
+	sources := memoryio.ParseFrontmatterSources(content)
+	citations := memoryio.ParseSourcesSection(content)
 	id := strings.TrimSuffix(filepath.Base(absPath), ".md")
 
 	e := &Entry{
-		ID:          id,
-		Layer:       layer,
-		Date:        dateStr,
-		Team:        teamSlug,
-		SourceFiles: sources,
-		CreatedAt:   stat.ModTime().UTC(),
-		Status:      "ok",
+		ID:            id,
+		Layer:         layer,
+		Date:          dateStr,
+		Team:          teamSlug,
+		SourceFiles:   sources,
+		CitationCount: len(citations),
+		CreatedAt:     stat.ModTime().UTC(),
+		Status:        "ok",
 	}
 	if wantBody {
-		e.BodyMD = stripFrontmatter(content)
+		e.BodyMD = memoryio.StripFrontmatter(content)
+		e.Citations = citations
 	}
 	return e, nil
-}
-
-// parseFrontmatterSources extracts the `sources:` list from YAML
-// frontmatter. Mirrors parseDailySources at cmd/ox/distill.go:1516 so
-// the reader does not import cmd/ox. Unit 2 moves the shared copy into
-// internal/journal/memoryio and re-points both callers at it.
-func parseFrontmatterSources(content string) []string {
-	if !strings.HasPrefix(content, "---\n") {
-		return nil
-	}
-	end := strings.Index(content[4:], "\n---")
-	if end < 0 {
-		return nil
-	}
-	frontmatter := content[4 : 4+end]
-
-	var sources []string
-	inSources := false
-	for _, line := range strings.Split(frontmatter, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "sources:" {
-			inSources = true
-			continue
-		}
-		if inSources && strings.HasPrefix(line, "  - ") {
-			sources = append(sources, strings.TrimPrefix(trimmed, "- "))
-			continue
-		}
-		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
-			inSources = false
-		}
-	}
-	return sources
-}
-
-// stripFrontmatter returns content with any leading YAML frontmatter
-// block (between `---\n` delimiters) removed, including the trailing
-// newline after the closing delimiter. A body that does not start with
-// a frontmatter block is returned unchanged.
-func stripFrontmatter(content string) string {
-	if !strings.HasPrefix(content, "---\n") {
-		return content
-	}
-	end := strings.Index(content[4:], "\n---")
-	if end < 0 {
-		return content
-	}
-	rest := content[4+end+len("\n---"):]
-	rest = strings.TrimPrefix(rest, "\n")
-	return rest
 }
 
 // sortEntries orders by Date ascending, then CreatedAt ascending within

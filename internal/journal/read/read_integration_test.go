@@ -93,6 +93,20 @@ func TestReadIntegration_DailyEndToEnd(t *testing.T) {
 		if filepath.IsAbs(entries[i].RelPath) {
 			t.Fatalf("entries[%d].RelPath = %q must be relative, not absolute", i, entries[i].RelPath)
 		}
+		// Both parsers are wired through internal/journal/memoryio. The
+		// fixture's frontmatter lists two source files and its rendered
+		// "## Sources" section has one citation entry, so the reader
+		// must surface both counts on list (WantBody=false).
+		if len(entries[i].SourceFiles) != 2 {
+			t.Fatalf("entries[%d].SourceFiles = %d, want 2", i, len(entries[i].SourceFiles))
+		}
+		if entries[i].CitationCount != 1 {
+			t.Fatalf("entries[%d].CitationCount = %d, want 1", i, entries[i].CitationCount)
+		}
+		if entries[i].Citations != nil {
+			t.Fatalf("entries[%d].Citations = %#v, want nil on list (WantBody=false)",
+				i, entries[i].Citations)
+		}
 	}
 	if meta.LayerResolved != LayerDaily {
 		t.Fatalf("LayerResolved = %q", meta.LayerResolved)

@@ -9,7 +9,11 @@
 // UTC RFC3339 instants before constructing a ReadQuery.
 package read
 
-import "time"
+import (
+	"time"
+
+	"github.com/sageox/ox/internal/journal/memoryio"
+)
 
 // Layer identifies which directory under memory/ a query or entry belongs to.
 type Layer string
@@ -60,15 +64,11 @@ type Entry struct {
 	Error         *EntryError
 }
 
-// Citation mirrors the on-disk Sources-section citation shape. Populated
-// only when WantBody is true. Unit 2 wires the real parser through
-// internal/journal/memoryio; Unit 1 leaves this slice empty.
-type Citation struct {
-	Num   int
-	Label string
-	URL   string
-	Key   string
-}
+// Citation mirrors the on-disk Sources-section citation shape. It is a
+// type alias for memoryio.Citation so the reader and the bridge share one
+// definition — a future edit that adds a field to memoryio.Citation is
+// surfaced here with no ceremony.
+type Citation = memoryio.Citation
 
 // ListMeta carries whole-call metadata: which layer was actually read
 // (after auto-resolution), the day-rounded effective window, whether the

@@ -34,11 +34,13 @@ sources:
 ---
 # Daily Memory — 2026-04-12
 
-A body paragraph.
+A body paragraph. [1]
 
 ## Sources
 
-[1] PR #487 — fix(doctor)
+1. [PR #487 — fix(doctor)][1]
+
+[1]: https://github.com/sageox/ox/pull/487
 `
 
 func TestResolveLayer(t *testing.T) {
@@ -118,46 +120,54 @@ func TestParseEntryFile(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
-		name         string
-		body         string
-		wantSources  int
-		wantBodyMD   bool
-		bodyContains string
+		name           string
+		body           string
+		wantSources    int
+		wantCitations  int
+		wantBodyMD     bool
+		bodyContains   string
+		wantCiteLabel0 string
 	}{
 		{
-			name:         "with frontmatter and sources",
-			body:         sampleDailyBody,
-			wantSources:  2,
-			wantBodyMD:   true,
-			bodyContains: "# Daily Memory — 2026-04-12",
+			name:           "with frontmatter and sources",
+			body:           sampleDailyBody,
+			wantSources:    2,
+			wantCitations:  1,
+			wantBodyMD:     true,
+			bodyContains:   "# Daily Memory — 2026-04-12",
+			wantCiteLabel0: "PR #487 — fix(doctor)",
 		},
 		{
-			name:         "without frontmatter",
-			body:         "# Just a header\n\nbody\n",
-			wantSources:  0,
-			wantBodyMD:   true,
-			bodyContains: "# Just a header",
+			name:          "without frontmatter",
+			body:          "# Just a header\n\nbody\n",
+			wantSources:   0,
+			wantCitations: 0,
+			wantBodyMD:    true,
+			bodyContains:  "# Just a header",
 		},
 		{
-			name:         "frontmatter with zero sources",
-			body:         "---\ntitle: test\n---\n# Heading\n",
-			wantSources:  0,
-			wantBodyMD:   true,
-			bodyContains: "# Heading",
+			name:          "frontmatter with zero sources",
+			body:          "---\ntitle: test\n---\n# Heading\n",
+			wantSources:   0,
+			wantCitations: 0,
+			wantBodyMD:    true,
+			bodyContains:  "# Heading",
 		},
 		{
-			name:         "malformed frontmatter (no close delimiter) passes through",
-			body:         "---\nsources:\n  - one\n# no close\n",
-			wantSources:  0,
-			wantBodyMD:   true,
-			bodyContains: "---",
+			name:          "malformed frontmatter (no close delimiter) passes through",
+			body:          "---\nsources:\n  - one\n# no close\n",
+			wantSources:   0,
+			wantCitations: 0,
+			wantBodyMD:    true,
+			bodyContains:  "---",
 		},
 		{
-			name:         "no trailing newline",
-			body:         "---\nsources:\n  - memory/foo.jsonl\n---\n# done",
-			wantSources:  1,
-			wantBodyMD:   true,
-			bodyContains: "# done",
+			name:          "no trailing newline",
+			body:          "---\nsources:\n  - memory/foo.jsonl\n---\n# done",
+			wantSources:   1,
+			wantCitations: 0,
+			wantBodyMD:    true,
+			bodyContains:  "# done",
 		},
 	}
 
@@ -194,18 +204,27 @@ func TestParseEntryFile(t *testing.T) {
 			if entry.CreatedAt.IsZero() {
 				t.Fatalf("CreatedAt is zero")
 			}
-			// Unit 1 baseline: both counts are zero because the citation
-			// bridge and fact parser land in Unit 2 (internal/journal/memoryio).
-			// Unit 2's tests will flip these into real counts; pinning zero
-			// here keeps Unit 2 an additive diff.
+			// FactCount stays at zero — the reader does not compute facts;
+			// that lives in the distill pipeline, not the read surface.
 			if entry.FactCount != 0 {
-				t.Fatalf("FactCount = %d, want 0 in Unit 1", entry.FactCount)
+				t.Fatalf("FactCount = %d, want 0 (reader does not compute facts)", entry.FactCount)
 			}
-			if entry.CitationCount != 0 {
-				t.Fatalf("CitationCount = %d, want 0 in Unit 1", entry.CitationCount)
+			// CitationCount is populated from memoryio.ParseSourcesSection
+			// regardless of wantBody so callers can surface the count on
+			// list without materializing the body.
+			if entry.CitationCount != tc.wantCitations {
+				t.Fatalf("CitationCount = %d, want %d", entry.CitationCount, tc.wantCitations)
 			}
-			if len(entry.Citations) != 0 {
-				t.Fatalf("Citations = %d, want 0 in Unit 1", len(entry.Citations))
+			// Citations slice is only populated when wantBody is true —
+			// pins the memory discipline for list vs. show.
+			if len(entry.Citations) != tc.wantCitations {
+				t.Fatalf("len(Citations) = %d, want %d", len(entry.Citations), tc.wantCitations)
+			}
+			if tc.wantCitations > 0 && tc.wantCiteLabel0 != "" {
+				if entry.Citations[0].Label != tc.wantCiteLabel0 {
+					t.Fatalf("Citations[0].Label = %q, want %q",
+						entry.Citations[0].Label, tc.wantCiteLabel0)
+				}
 			}
 		})
 	}
@@ -213,6 +232,10 @@ func TestParseEntryFile(t *testing.T) {
 
 func TestParseEntryFile_BodyOff(t *testing.T) {
 	t.Parallel()
+	// When wantBody=false the entry must expose the cheap metadata
+	// (SourceFiles, CitationCount) but NOT the body or the Citations
+	// slice — those are pulled only for show/since. This pins the
+	// list-vs-show memory discipline.
 	dir := t.TempDir()
 	p := filepath.Join(dir, "2026-04-12-019c8a3f.md")
 	if err := os.WriteFile(p, []byte(sampleDailyBody), 0o644); err != nil {
@@ -228,38 +251,11 @@ func TestParseEntryFile_BodyOff(t *testing.T) {
 	if len(entry.SourceFiles) != 2 {
 		t.Fatalf("sources count = %d, want 2", len(entry.SourceFiles))
 	}
-}
-
-func TestStripFrontmatter(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"no frontmatter", "# body\n", "# body\n"},
-		{"empty body", "---\nkey: val\n---\n", ""},
-		{"leading delimiter only", "---\nfoo\n", "---\nfoo\n"},
-		{
-			name: "frontmatter + body",
-			in:   "---\nsources:\n  - a\n---\n# heading\ntext\n",
-			want: "# heading\ntext\n",
-		},
-		{
-			name: "horizontal rule inside body is preserved",
-			in:   "---\nkey: val\n---\n# heading\n\n---\n\nmore\n",
-			want: "# heading\n\n---\n\nmore\n",
-		},
+	if entry.CitationCount != 1 {
+		t.Fatalf("CitationCount = %d, want 1 (populated on list)", entry.CitationCount)
 	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got := stripFrontmatter(tc.in)
-			if got != tc.want {
-				t.Fatalf("stripFrontmatter(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
+	if entry.Citations != nil {
+		t.Fatalf("Citations = %#v, want nil when WantBody=false", entry.Citations)
 	}
 }
 
