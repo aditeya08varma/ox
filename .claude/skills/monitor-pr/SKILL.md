@@ -161,7 +161,10 @@ Judge each one individually. Do **not** blanket-skip any category.
 ### 4. Fix in code
 
 Actually edit source. Never reply-without-fix. If a comment implies a
-design decision the user should own, `TaskStop` the monitor and ask.
+design decision the user should own, stop your own work and ask — but
+**leave the monitor running**. It's silent while state is stable, costs
+nothing, and will resume emitting as soon as the discussion ends in a
+push or a resolve.
 
 ### 5. Reply + resolve each addressed thread
 
@@ -212,8 +215,9 @@ When the monitor emits `clean: ...`:
 - **Never blanket-dismiss CodeRabbit nitpicks.** Judge each on merit.
 - **Never bypass failing checks** with `--no-verify` or similar.
 - **Confirm before `git push`** unless running autonomously.
-- **Stop and ask** if a comment implies a design decision the user should
-  own, rather than guessing.
+- **Pause and ask** if a comment implies a design decision the user
+  should own, rather than guessing — but **keep the monitor running**
+  during the discussion. It's silent while state is stable.
 - **One-line commit messages**, detail in the PR body.
 
 ## Related
