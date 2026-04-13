@@ -3,16 +3,14 @@ package main
 import "github.com/spf13/cobra"
 
 var journalCmd = &cobra.Command{
-	Use:    "journal",
-	Short:  "Inspect the team memory journal",
-	Long:   "Read-only commands for listing and showing entries in memory/daily, memory/weekly, and memory/monthly under a team-context root.",
-	Hidden: true,
+	Use:   "journal",
+	Short: "Inspect the team memory journal",
+	Long:  "Read-only commands for listing and showing entries in memory/daily, memory/weekly, and memory/monthly under a team-context root.",
 }
 
 var journalListCmd = &cobra.Command{
 	Use:           "list",
 	Short:         "List journal entries in a window",
-	Hidden:        true,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }
@@ -20,7 +18,6 @@ var journalListCmd = &cobra.Command{
 var journalShowCmd = &cobra.Command{
 	Use:           "show <id>...",
 	Short:         "Show one or more journal entries by id",
-	Hidden:        true,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }
@@ -28,7 +25,6 @@ var journalShowCmd = &cobra.Command{
 var journalSinceCmd = &cobra.Command{
 	Use:           "since <duration>",
 	Short:         "Dump journal entries from the last <duration>",
-	Hidden:        true,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 }

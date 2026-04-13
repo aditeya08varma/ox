@@ -363,7 +363,12 @@ results back as memory files in the team context repo.
 Memory files are organized by temporal layers:
   memory/daily/YYYY-MM-DD-{uuid7}.md — daily summaries from raw observations
   memory/weekly/YYYY-WXX.md          — weekly synthesis from dailies
-  memory/monthly/YYYY-MM.md          — monthly synthesis from weeklies`,
+  memory/monthly/YYYY-MM.md          — monthly synthesis from weeklies
+
+To read the memory journal this command writes, use:
+  ox journal list    — enumerate entries in a date window
+  ox journal show    — show one or more entries by id
+  ox journal since   — dump entries from a relative duration (content format)`,
 	RunE: runDistill,
 }
 
