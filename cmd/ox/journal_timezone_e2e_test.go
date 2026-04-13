@@ -144,6 +144,8 @@ func setupTZWorkspace(t *testing.T) tzWorkspace {
 		"GIT_COMMITTER_NAME=Test",
 		"GIT_COMMITTER_EMAIL=test@test.local",
 		"GIT_CONFIG_NOSYSTEM=1",
+		// ox memory subcommand is feature-gated; TZ-01 needs `ox memory put`.
+		"FEATURE_MEMORY=1",
 	}
 
 	return tzWorkspace{
@@ -201,7 +203,7 @@ func writeTZTeamConfig(t *testing.T, w tzWorkspace, content string) {
 		[]byte(content), 0o644))
 }
 
-// tzPutObservation runs `ox memory put <content>`, then rewrites the resulting
+// tzPutObservation runs `ox memory put <json>`, then rewrites the resulting
 // JSONL file's _meta.recorded_at header to target. ox memory put uses
 // time.Now().UTC() internally and gives no caller hook for the timestamp,
 // so the rewrite is the only way to simulate "observation recorded at T".
@@ -209,7 +211,10 @@ func writeTZTeamConfig(t *testing.T, w tzWorkspace, content string) {
 func tzPutObservation(t *testing.T, oxBin string, w tzWorkspace, content string, target time.Time) string {
 	t.Helper()
 
-	out, code, _ := testguard.RunOx(t, oxBin, w.workspace, w.env, "memory", "put", content)
+	payload, err := json.Marshal(map[string]string{"content": content})
+	require.NoError(t, err)
+
+	out, code, _ := testguard.RunOx(t, oxBin, w.workspace, w.env, "memory", "put", string(payload))
 	require.Equal(t, 0, code, "ox memory put failed: %s", out)
 
 	matches, err := filepath.Glob(filepath.Join(w.teamCtx, "memory", ".observations", "*", "*.jsonl"))
@@ -394,10 +399,15 @@ primary = "galex"
 	teamTOMLPath := filepath.Join(w.teamCtx, "config.toml")
 	writeTZTeamConfig(t, w, teamTOML)
 
-	// first run — must scrub stray timezone keys from both files
+	// first run — must scrub stray timezone keys from both files.
+	// Note: the scrub check is FixLevelAuto and runs unconditionally regardless
+	// of other check states, so exit code 1 from orthogonal critical failures
+	// (login, marker) is accepted. File-state assertions below are the canonical
+	// contract per team-lead's option (b) resolution.
 	out1, code1, _ := testguard.RunOx(t, oxBin, w.workspace, w.env,
 		"doctor", "--fix", "--yes")
-	require.Equal(t, 0, code1, "ox doctor --fix failed: %s", out1)
+	require.Contains(t, []int{0, 1}, code1,
+		"ox doctor --fix exit code must be 0 or 1; got %d; output: %s", code1, out1)
 
 	// --- assertions on project config.json after run 1 ---
 	projectBytes1, err := os.ReadFile(projectJSONPath)
@@ -437,10 +447,12 @@ primary = "galex"
 	assert.Contains(t, teamStr1, "session_notification",
 		"session_notification key must survive; got:\n%s", teamStr1)
 
-	// second run — must be a strict byte-level no-op on both files
+	// second run — must be a strict byte-level no-op on both files.
+	// Same exit-code relaxation as run 1: orthogonal failures allowed.
 	out2, code2, _ := testguard.RunOx(t, oxBin, w.workspace, w.env,
 		"doctor", "--fix", "--yes")
-	require.Equal(t, 0, code2, "second ox doctor --fix failed: %s", out2)
+	require.Contains(t, []int{0, 1}, code2,
+		"second ox doctor --fix exit code must be 0 or 1; got %d; output: %s", code2, out2)
 
 	projectBytes2, err := os.ReadFile(projectJSONPath)
 	require.NoError(t, err)
