@@ -108,6 +108,14 @@ func TestDirtyDebouncer_RapidSettles_OnlyOneRefresh(t *testing.T) {
 // TestDirtyDebouncer_MinInterval_VerifiesTimingGaps verifies that the minimum
 // interval enforces actual time gaps between rebuilds, not just a count limit.
 // Failure prevented: continuous file changes cause rebuilds every 5s instead of 30s.
+//
+// Timing is recorded via debouncer.fireHook, which captures the exact wall
+// clock that becomes lastFire — the same value the debouncer uses to enforce
+// minGap. Measuring downstream of RefreshDirtyOverlay (as earlier versions of
+// this test did via mgr.dirtyTestHook) is racy under CI contention because
+// RefreshDirtyOverlay spawns a goroutine and runs work of unpredictable
+// duration between lastFire and the hook firing, which can compress observed
+// gaps far below minGap even when the debouncer is behaving correctly.
 func TestDirtyDebouncer_MinInterval_VerifiesTimingGaps(t *testing.T) {
 	t.Parallel()
 	if testing.Short() {
@@ -117,17 +125,18 @@ func TestDirtyDebouncer_MinInterval_VerifiesTimingGaps(t *testing.T) {
 	dir := t.TempDir()
 	mgr := NewCodeDBManager(dir, codedbTestLogger(), nil)
 
-	var mu sync.Mutex
-	var fireTimes []time.Time
-	mgr.dirtyTestHook = func() {
-		mu.Lock()
-		fireTimes = append(fireTimes, time.Now())
-		mu.Unlock()
-	}
-
 	debouncer := NewDirtyOverlayDebouncer(mgr, debouncerTestLogger())
 	debouncer.debounce = 50 * time.Millisecond
 	debouncer.minGap = 500 * time.Millisecond
+
+	var mu sync.Mutex
+	var fireTimes []time.Time
+	debouncer.fireHook = func(ts time.Time) {
+		mu.Lock()
+		fireTimes = append(fireTimes, ts)
+		mu.Unlock()
+	}
+
 	debouncer.Start(context.Background())
 	defer debouncer.Stop()
 
@@ -149,15 +158,14 @@ func TestDirtyDebouncer_MinInterval_VerifiesTimingGaps(t *testing.T) {
 	require.GreaterOrEqual(t, len(times), 2, "should fire at least twice over 1.5s with 500ms minGap")
 	require.LessOrEqual(t, len(times), 5, "should not fire excessively")
 
-	// verify every consecutive pair respects the minimum interval;
-	// allow 50% tolerance because the test hook records time.Now() after
-	// RefreshDirtyOverlay completes, not when lastFire is set internally,
-	// so CI scheduler jitter can compress observed gaps significantly
+	// Each recorded time is the exact lastFire value the debouncer set.
+	// time.AfterFunc guarantees the timer fires no earlier than scheduled,
+	// and OnSettled schedules the next fire at lastFire+minGap (or later),
+	// so gap >= minGap must hold unconditionally on a correct debouncer.
 	for i := 1; i < len(times); i++ {
 		gap := times[i].Sub(times[i-1])
-		minAllowed := time.Duration(float64(debouncer.minGap) * 0.5)
-		assert.GreaterOrEqual(t, gap, minAllowed,
-			"gap between fire %d and %d was %v, expected >= %v", i-1, i, gap, minAllowed)
+		assert.GreaterOrEqual(t, gap, debouncer.minGap,
+			"gap between fire %d and %d was %v, expected >= %v", i-1, i, gap, debouncer.minGap)
 	}
 }
 
