@@ -76,9 +76,16 @@ func runDistillHistorySince(cmd *cobra.Command, args []string) error {
 		return emitDistillHistorySinceUsageError(cmd.OutOrStdout(), flags.Format,
 			newJournalUsageError(fmt.Sprintf("unexpected positional args after <dur>: %v", args[1:])), elapsed())
 	}
-	if flags.Format != "content" && flags.Format != "json" && flags.Format != "text" {
+	// `since` intentionally does NOT support --format=text. The writeJournalEnvelope
+	// fallback for text would route to renderDistillHistoryListText, which emits
+	// the list view (one metadata row per entry) rather than the assembled bodies
+	// `since` produces — that would be a silent wrong-output bug. Until a dedicated
+	// renderDistillHistorySinceText is spec'd and implemented, reject `text`
+	// explicitly with a usage_error so callers see the deliberate gap instead of
+	// getting misrouted output.
+	if flags.Format != "content" && flags.Format != "json" {
 		return emitDistillHistorySinceUsageError(cmd.OutOrStdout(), flags.Format,
-			newJournalUsageError(fmt.Sprintf("--format must be content|json|text, got %q", flags.Format)), elapsed())
+			newJournalUsageError(fmt.Sprintf("--format must be content|json, got %q (text is not currently supported on since)", flags.Format)), elapsed())
 	}
 	if flags.AllTeams && flags.Team != "" {
 		return emitDistillHistorySinceUsageError(cmd.OutOrStdout(), flags.Format,

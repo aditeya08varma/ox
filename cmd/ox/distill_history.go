@@ -36,6 +36,13 @@ var distillHistorySinceCmd = &cobra.Command{
 }
 
 func init() {
+	// The parent `ox distill history` command defaults to the `list`
+	// behavior via RunE, so it must accept the same flags list binds.
+	// Bind them on the parent too — the shared distillHistoryListFlagSet
+	// means a single Go variable carries the parsed state regardless of
+	// whether cobra dispatched to the parent or the child (CLI is a
+	// single-invocation process, so shared state is safe).
+	registerDistillHistoryListFlags(distillHistoryCmd, &distillHistoryListFlagSet)
 	distillHistoryCmd.AddCommand(distillHistoryListCmd)
 	distillHistoryCmd.AddCommand(distillHistoryShowCmd)
 	distillHistoryCmd.AddCommand(distillHistorySinceCmd)

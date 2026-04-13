@@ -661,7 +661,7 @@ content concatenated in chronological order.
 | `--layer=...` | `auto` | Same semantics as `list`. |
 | `--team=<slug>` | active team | |
 | `--all-teams` | `false` | |
-| `--format=json\|text\|content` | `json` | `content` is the default for downstream summarizers. |
+| `--format=content\|json` | `content` | `content` is the default for downstream summarizers. `text` is intentionally not supported on `since` (no spec'd text shape yet). |
 | `--limit=N` | `100` | Max entries to assemble. |
 
 **Success JSON (`--format=json`).** Same shape as `journal_list` with an

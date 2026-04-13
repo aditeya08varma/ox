@@ -4,11 +4,58 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/distill/history/read"
 	"github.com/spf13/cobra"
+)
+
+// inferShowLayer detects which memory layer an ID belongs to based on
+// its filename-stem shape. Returns the inferred layer, or LayerDaily as
+// the fallback for bare UUID7 short forms and unrecognized shapes (the
+// reader's matchID still handles ambiguous prefixes within the chosen
+// layer).
+//
+// Stem formats are unambiguous because weekly uses a literal `W` on the
+// second segment and monthly has only two date segments where daily has
+// three:
+//
+//   - "YYYY-MM-DD"          (bare date)       → daily
+//   - "YYYY-MM-DD-<uuid7>"  (full daily stem) → daily
+//   - "YYYY-Www"            (bare week)       → weekly
+//   - "YYYY-Www-<uuid7>"    (full weekly)     → weekly
+//   - "YYYY-MM"             (bare month)      → monthly
+//   - "YYYY-MM-<uuid7>"     (full monthly)    → monthly
+//   - "<uuid7>"             (short prefix)    → daily fallback
+//
+// The daily regex is checked before monthly so `YYYY-MM-DD-<uuid7>`
+// stems (which also match the monthly prefix pattern) resolve to daily.
+func inferShowLayer(id string) read.Layer {
+	switch {
+	case showWeeklyIDRe.MatchString(id):
+		return read.LayerWeekly
+	case showDailyIDRe.MatchString(id):
+		return read.LayerDaily
+	case showMonthlyIDRe.MatchString(id):
+		return read.LayerMonthly
+	default:
+		return read.LayerDaily
+	}
+}
+
+var (
+	// showDailyIDRe matches YYYY-MM-DD stems (bare or with a uuid7 suffix).
+	// Anchored with `(-|$)` after the day so it does NOT swallow monthly
+	// stems like `2026-04-<uuid7>` where the third segment is uuid7 chars.
+	showDailyIDRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}(-|$)`)
+	// showWeeklyIDRe matches YYYY-Www stems (literal W on segment 2).
+	showWeeklyIDRe = regexp.MustCompile(`^\d{4}-W\d{2}(-|$)`)
+	// showMonthlyIDRe matches YYYY-MM stems when daily did NOT match first.
+	// Relies on the check order in inferShowLayer — this regex alone
+	// would also match daily stems since daily's prefix is a superset.
+	showMonthlyIDRe = regexp.MustCompile(`^\d{4}-\d{2}(-|$)`)
 )
 
 // distillHistoryShowFlags captures the user-controllable inputs to
@@ -44,10 +91,11 @@ func registerDistillHistoryShowFlags(cmd *cobra.Command, flags *distillHistorySh
 }
 
 // runDistillHistoryShow is the RunE for `ox distill history show`. It validates
-// flags, resolves the active team, walks the daily layer via
-// read.LoadEntries, and emits the partial-success envelope per plan
-// §3 Unit 4. The show command is daily-only for Unit 4 — weekly and
-// monthly show are out of scope and not wired up.
+// flags, resolves the active team, groups the requested IDs by layer
+// (daily/weekly/monthly inferred from stem shape), walks each layer
+// via read.LoadEntries, and emits the partial-success envelope per
+// plan §3 Unit 4. All three layers are supported — a `list --layer=weekly`
+// ID can be piped straight into `show`.
 //
 // Per-ID failures DO NOT abort the call: a mix of ok / not_found /
 // ambiguous entries is a success envelope (exit 0) with per-entry
@@ -83,20 +131,46 @@ func runDistillHistoryShow(cmd *cobra.Command, args []string) error {
 			distillHistoryShowErrorFormat(flags.Format), "team_not_found", err.Error(), elapsed())
 	}
 
-	// show has no --since/--until; it reads across all time (no window filter)
-	// of date. NoTimeFilter short-circuits the window filter in listEntries
-	// so the index scan returns every daily file under Teams. See
-	// ReadQuery.NoTimeFilter doc.
-	q := read.ReadQuery{
-		NoTimeFilter: true,
-		Layer:        read.LayerDaily,
-		Teams:        teams,
-		WantBody:     true,
+	// Group the input IDs by inferred layer so a single `show` call can
+	// resolve daily, weekly, and monthly stems in one shot. Full stems
+	// like "2026-04-12-<uuid7>" are unambiguously daily, "2026-W15-<uuid7>"
+	// is weekly, "2026-04-<uuid7>" is monthly; bare UUID7 short prefixes
+	// fall back to daily (matchID inside the reader still handles the
+	// ambiguous cases within a layer). See inferShowLayer for the regex
+	// discriminators.
+	//
+	// show has no --since/--until; it reads across all time via
+	// NoTimeFilter, which short-circuits the window filter in listEntries
+	// so the index scan returns every file under Teams for the selected
+	// layer. See ReadQuery.NoTimeFilter doc.
+	idsByLayer := map[read.Layer][]string{}
+	for _, id := range args {
+		layer := inferShowLayer(id)
+		idsByLayer[layer] = append(idsByLayer[layer], id)
 	}
-	entries, err := read.LoadEntries(context.Background(), q, args)
-	if err != nil {
-		return writeJournalRuntimeError(cmd.OutOrStdout(),
-			distillHistoryShowErrorFormat(flags.Format), "read_failed", err.Error(), elapsed())
+
+	var entries []read.Entry
+	// Iterate layers in a stable order so multi-layer show calls emit
+	// entries in a predictable sequence: daily, weekly, monthly. Within
+	// a layer, LoadEntries preserves the input-ID order (with bare-date
+	// expansion interleaved at the bare-date arg's position).
+	for _, layer := range []read.Layer{read.LayerDaily, read.LayerWeekly, read.LayerMonthly} {
+		layerIDs := idsByLayer[layer]
+		if len(layerIDs) == 0 {
+			continue
+		}
+		q := read.ReadQuery{
+			NoTimeFilter: true,
+			Layer:        layer,
+			Teams:        teams,
+			WantBody:     true,
+		}
+		layerEntries, err := read.LoadEntries(context.Background(), q, layerIDs)
+		if err != nil {
+			return writeJournalRuntimeError(cmd.OutOrStdout(),
+				distillHistoryShowErrorFormat(flags.Format), "read_failed", err.Error(), elapsed())
+		}
+		entries = append(entries, layerEntries...)
 	}
 
 	allFailed := true

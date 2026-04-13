@@ -898,24 +898,6 @@ func TestListEntries_NoTeamErrors(t *testing.T) {
 	}
 }
 
-func TestStubsReturnNotImplemented(t *testing.T) {
-	t.Parallel()
-	// Unit 1 ships LoadEntries and Since as stubs; Units 4/5 wire them.
-	// These tests exist so the signatures and error contract are pinned
-	// from day one — a silent stub change would break upstream.
-	q := ReadQuery{
-		Since: time.Date(2026, 4, 10, 0, 0, 0, 0, time.UTC),
-		Until: time.Date(2026, 4, 12, 0, 0, 0, 0, time.UTC),
-		Layer: LayerDaily,
-	}
-	if _, err := LoadEntries(context.Background(), q, nil); err == nil {
-		t.Fatalf("LoadEntries: want sentinel error")
-	}
-	if _, _, _, err := Since(context.Background(), q); err == nil {
-		t.Fatalf("Since: want sentinel error")
-	}
-}
-
 func TestPathHelpers(t *testing.T) {
 	t.Parallel()
 	root := "/tmp/team"
