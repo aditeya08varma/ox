@@ -33,29 +33,52 @@ import (
 const skipPendingUnit3 = "impl not landed yet: depends on Unit 3 (ox journal list + journal_time.go)"
 
 // decodeJournalEnvelope parses the first JSON object line out of a
-// combined stdout+stderr blob and returns the envelope plus any trailing
-// stderr-warning lines. testguard.RunOx uses cmd.CombinedOutput, so a
-// successful `ox journal list` call emits the envelope JSON on the first
-// line and any per-file warnings on subsequent lines ("warning: <code>:
-// <msg>"). The split-by-newline scan picks the first line that trims to
-// a "{"-prefixed value and round-trips through json.Unmarshal; anything
-// before that is diagnostic noise and anything after is the stderr tail.
-func decodeJournalEnvelope(t *testing.T, out string) (*journalEnvelope, string) {
+// combined stdout+stderr blob and returns three slices of that blob:
+//
+//   - env         — the decoded envelope struct (never nil; test-fatal on miss)
+//   - envelopeLine — the raw matched JSON line exactly as it appeared on
+//     the wire (post-TrimSpace), so tests can make byte-level assertions
+//     (e.g. literal `"entries":[]`) without accidentally matching warning
+//     lines that follow.
+//   - stderrTail  — every OTHER line from the blob (both before and after
+//     the envelope), joined by "\n". This is where `emitJournalWarnings`
+//     writes its `warning: <code>: <msg>` lines, plus any diagnostic
+//     noise tests want to inspect.
+//
+// testguard.RunOx uses cmd.CombinedOutput, which merges stdout+stderr
+// into one byte stream with no ordering guarantee between the two fds.
+// Tests cannot assume the envelope comes first: stderr is typically
+// unbuffered and can beat the stdout envelope into the pipe. The scan
+// finds the envelope line wherever it lands and concatenates everything
+// else into stderrTail so warning assertions work regardless of order.
+func decodeJournalEnvelope(t *testing.T, out string) (*journalEnvelope, string, string) {
 	t.Helper()
 	lines := strings.Split(out, "\n")
+	envIdx := -1
+	var env journalEnvelope
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
 			continue
 		}
-		var env journalEnvelope
 		if err := json.Unmarshal([]byte(trimmed), &env); err == nil {
-			remainder := strings.Join(lines[i+1:], "\n")
-			return &env, remainder
+			envIdx = i
+			break
 		}
 	}
-	t.Fatalf("no JSON envelope found in output:\n%s", out)
-	return nil, ""
+	if envIdx < 0 {
+		t.Fatalf("no JSON envelope found in output:\n%s", out)
+		return nil, "", ""
+	}
+	envelopeLine := strings.TrimSpace(lines[envIdx])
+	tail := make([]string, 0, len(lines)-1)
+	for i, line := range lines {
+		if i == envIdx {
+			continue
+		}
+		tail = append(tail, line)
+	}
+	return &env, envelopeLine, strings.Join(tail, "\n")
 }
 
 // dayFloorUTC returns the UTC midnight at or before t. It mirrors
@@ -105,7 +128,7 @@ func TestJournalRead_JR01_MinimalDaily_List(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("JR-01: exit=%d want 0\nout:\n%s", exit, out)
 	}
-	env, _ := decodeJournalEnvelope(t, out)
+	env, _, _ := decodeJournalEnvelope(t, out)
 	if !env.Success {
 		t.Fatalf("JR-01: success=false want true; out=%s", out)
 	}
@@ -196,7 +219,7 @@ func TestJournalRead_JR02_EmptyWindow_YesterdayOnly(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("JR-02: exit=%d want 0\nout:\n%s", exit, out)
 	}
-	env, _ := decodeJournalEnvelope(t, out)
+	env, envLine, _ := decodeJournalEnvelope(t, out)
 	if !env.Success {
 		t.Fatalf("JR-02: success=false want true")
 	}
@@ -212,10 +235,12 @@ func TestJournalRead_JR02_EmptyWindow_YesterdayOnly(t *testing.T) {
 	}
 	// The reader must serialize an empty `entries` array, not null. Spec
 	// §4.3 says the field is always present; pairing that with our
-	// nonNilStringSlice / nonNilSlice discipline means the stdout bytes
-	// contain the literal `"entries":[]`.
-	if !strings.Contains(out, `"entries":[]`) {
-		t.Fatalf("JR-02: expected entries to serialize as [], got out=%s", out)
+	// nonNilStringSlice / nonNilSlice discipline means the envelope line
+	// itself (not the whole stdout blob) contains the literal
+	// `"entries":[]`. Scanning envLine instead of out prevents any stray
+	// warning-line substring match from vacuously passing the check.
+	if !strings.Contains(envLine, `"entries":[]`) {
+		t.Fatalf("JR-02: expected entries to serialize as [] on envelope line, got line=%s", envLine)
 	}
 	if env.Data.Truncated {
 		t.Fatalf("JR-02: truncated=true unexpected")
@@ -247,7 +272,7 @@ func TestJournalRead_JR03_MultiSnapshotSameDay_ListOrdering(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("JR-03: exit=%d want 0\nout:\n%s", exit, out)
 	}
-	env, _ := decodeJournalEnvelope(t, out)
+	env, _, _ := decodeJournalEnvelope(t, out)
 	if env.Data == nil || len(env.Data.Entries) != 2 {
 		t.Fatalf("JR-03: want 2 entries (spec §5.c multi-snapshot per day), got data=%+v", env.Data)
 	}
@@ -287,16 +312,37 @@ func TestJournalRead_JR03_MultiSnapshotSameDay_ListOrdering(t *testing.T) {
 func TestJournalRead_JR11_MalformedFilename_ListWarnsNotCrash(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
+	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
 	fx := recipeMalformedFilename(t, e.primaryTeam, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=24h", "--format=json")
-	t.Logf("JR-11 exit=%d out_bytes=%d dailies=%d extras=%d",
-		exit, len(out), len(fx.Dailies), len(fx.ExtraFiles))
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: exit 0, entries has exactly 1 row (the valid file), stderr
-	// carries a warning naming not-a-date.md, no error envelope, no panic.
+	if exit != 0 {
+		t.Fatalf("JR-11: exit=%d want 0 (one bad neighbor must not fail the call)\nout:\n%s", exit, out)
+	}
+	env, _, stderrTail := decodeJournalEnvelope(t, out)
+	if !env.Success {
+		t.Fatalf("JR-11: success=false want true; err=%+v", env.Error)
+	}
+	if env.Error != nil {
+		t.Fatalf("JR-11: unexpected error envelope: %+v", env.Error)
+	}
+	if env.Data == nil || len(env.Data.Entries) != 1 {
+		t.Fatalf("JR-11: want exactly 1 entry (the valid daily), got data=%+v", env.Data)
+	}
+	want := fx.Dailies[0]
+	if got := env.Data.Entries[0]; got.ID != want.ID {
+		t.Fatalf("JR-11: entry.id=%q want %q (the bad neighbor must not be surfaced)", got.ID, want.ID)
+	}
+	// Assert against the reader's ACTUAL emitter format: journal_list.go
+	// emitJournalWarnings writes `"warning: <code>: <message>\n"` — it
+	// deliberately drops Warning.Path. So we match the prefix only; the
+	// spec's aspirational form (which named the offending file) is not
+	// what the command layer emits today. If the emitter grows a Path
+	// column, tighten this assertion.
+	if !strings.Contains(stderrTail, "warning: malformed_filename:") {
+		t.Fatalf("JR-11: expected stderr tail to contain 'warning: malformed_filename:' — got:\n%s", stderrTail)
+	}
 }
 
 // TestJournalRead_JR12_EmptyMarkerOnly_ListIgnoresFactDirs — no
@@ -305,15 +351,35 @@ func TestJournalRead_JR11_MalformedFilename_ListWarnsNotCrash(t *testing.T) {
 func TestJournalRead_JR12_EmptyMarkerOnly_ListIgnoresFactDirs(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
+	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
-	fx := recipeEmptyMarkerOnly(t, e.primaryTeam, now)
+	_ = recipeEmptyMarkerOnly(t, e.primaryTeam, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=24h", "--format=json")
-	t.Logf("JR-12 exit=%d out_bytes=%d dailies=%d facts=%d",
-		exit, len(out), len(fx.Dailies), len(fx.Facts))
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: exit 0, data.entries=[]; fact file not surfaced; no error.
+	if exit != 0 {
+		t.Fatalf("JR-12: exit=%d want 0\nout:\n%s", exit, out)
+	}
+	env, _, stderrTail := decodeJournalEnvelope(t, out)
+	if !env.Success {
+		t.Fatalf("JR-12: success=false want true; err=%+v", env.Error)
+	}
+	if env.Error != nil {
+		t.Fatalf("JR-12: unexpected error envelope: %+v", env.Error)
+	}
+	if env.Data == nil {
+		t.Fatalf("JR-12: data is nil")
+	}
+	if got := len(env.Data.Entries); got != 0 {
+		t.Fatalf("JR-12: entries len=%d want 0 (facts under .github-facts must not surface as dailies); entries=%+v",
+			got, env.Data.Entries)
+	}
+	// The daily reader must not walk sibling subtrees — there is no fact
+	// file to warn about at all, so stderr must be silent. Any "warning:"
+	// line here means the reader is either descending into .github-facts
+	// or failing to filter by directory.
+	if strings.Contains(stderrTail, "warning:") {
+		t.Fatalf("JR-12: unexpected stderr warning — reader may be walking fact subtrees; stderr:\n%s", stderrTail)
+	}
 }
 
 // TestJournalRead_JR13_MixedTzAndUtcLegacy_TrustsPrefix — legacy +
@@ -323,17 +389,45 @@ func TestJournalRead_JR12_EmptyMarkerOnly_ListIgnoresFactDirs(t *testing.T) {
 func TestJournalRead_JR13_MixedTzAndUtcLegacy_TrustsPrefix(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
+	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
 	fx := recipeMixedTzAndUtcLegacy(t, e.primaryTeam, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=48h", "--format=json")
-	t.Logf("JR-13 exit=%d out_bytes=%d dailies=%d", exit, len(out), len(fx.Dailies))
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: both entries returned; legacy has date=yesterday,
-	// modern has date=today; ordered by date asc → legacy first;
-	// stderr is SILENT (no legacy warning). This is the spec §5.b trust-prefix
-	// lock-in.
+	if exit != 0 {
+		t.Fatalf("JR-13: exit=%d want 0\nout:\n%s", exit, out)
+	}
+	env, _, stderrTail := decodeJournalEnvelope(t, out)
+	if env.Data == nil || len(env.Data.Entries) != 2 {
+		t.Fatalf("JR-13: want 2 entries (legacy + modern), got data=%+v", env.Data)
+	}
+	// Recipe: fx.Dailies[0]=legacy(yesterday prefix), fx.Dailies[1]=modern(today prefix).
+	// sortEntries orders by (date asc, created_at asc), so legacy (yesterday)
+	// must come before modern (today) regardless of the narrative UUID7
+	// encoding. This is the lock-in that proves the reader trusts the
+	// filename prefix per spec §5.b item a.
+	wantLegacy := fx.Dailies[0]
+	wantModern := fx.Dailies[1]
+	got0 := env.Data.Entries[0]
+	got1 := env.Data.Entries[1]
+	if got0.ID != wantLegacy.ID || got1.ID != wantModern.ID {
+		t.Fatalf("JR-13: ordering wrong: got [%s, %s] want [%s, %s] (legacy yesterday first)",
+			got0.ID, got1.ID, wantLegacy.ID, wantModern.ID)
+	}
+	if got0.Date != wantLegacy.Date {
+		t.Fatalf("JR-13: legacy entry date=%q want %q (filename prefix, not UUID7 narrative)",
+			got0.Date, wantLegacy.Date)
+	}
+	if got1.Date != wantModern.Date {
+		t.Fatalf("JR-13: modern entry date=%q want %q", got1.Date, wantModern.Date)
+	}
+	// Silent-legacy policy: legacy files carry no stderr warning at all.
+	// Any "warning:" line here breaks that policy — the reader must treat
+	// the filename prefix as authoritative without surfacing a hint that
+	// the UUID7 disagrees.
+	if strings.Contains(stderrTail, "warning:") {
+		t.Fatalf("JR-13: unexpected stderr warning on a legacy/modern mix (silent-legacy policy); stderr:\n%s", stderrTail)
+	}
 }
 
 // TestJournalRead_JR14_MultiTeamDefault_SingleTeam — default list only
@@ -351,7 +445,7 @@ func TestJournalRead_JR14_MultiTeamDefault_SingleTeam(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("JR-14: exit=%d want 0\nout:\n%s", exit, out)
 	}
-	env, _ := decodeJournalEnvelope(t, out)
+	env, _, _ := decodeJournalEnvelope(t, out)
 	if env.Data == nil || len(env.Data.Entries) != 1 {
 		t.Fatalf("JR-14: want 1 entry (primary only), got data=%+v", env.Data)
 	}
@@ -395,7 +489,7 @@ func TestJournalRead_JR15_MultiTeamAllTeams_Merged(t *testing.T) {
 	if exit != 0 {
 		t.Fatalf("JR-15: exit=%d want 0\nout:\n%s", exit, out)
 	}
-	env, _ := decodeJournalEnvelope(t, out)
+	env, _, _ := decodeJournalEnvelope(t, out)
 	if env.Data == nil || len(env.Data.Entries) != 2 {
 		t.Fatalf("JR-15: want 2 entries (merged across teams), got data=%+v", env.Data)
 	}
@@ -572,17 +666,46 @@ func TestJournalRead_JR23_EffectiveWindowRounding(t *testing.T) {
 func TestJournalRead_JR24_StaleFilenameRecentMtime_EventDayWins(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	if now.Hour() == 23 && now.Minute() >= 59 {
-		t.Skip("within seconds of UTC midnight — window rounding unstable, retry")
-	}
+	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
-	fx := recipeStaleFilenameRecentMtime(t, e.primaryTeam, now)
+	_ = recipeStaleFilenameRecentMtime(t, e.primaryTeam, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=24h", "--format=json")
-	t.Logf("JR-24 exit=%d out_bytes=%d dailies=%d", exit, len(out), len(fx.Dailies))
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: exit 0; data.entries=[]; window.since=day-floor(now-24h);
-	// window.until=day-ceil(now); the stale-filename file is EXCLUDED because
-	// the reader filters by filename prefix (90 days ago), not by mtime.
+	if exit != 0 {
+		t.Fatalf("JR-24: exit=%d want 0\nout:\n%s", exit, out)
+	}
+	env, _, stderrTail := decodeJournalEnvelope(t, out)
+	if !env.Success {
+		t.Fatalf("JR-24: success=false want true; err=%+v", env.Error)
+	}
+	if env.Data == nil {
+		t.Fatalf("JR-24: data is nil")
+	}
+	// Core lock-in: the file's mtime is now-1h, which IS inside the
+	// [day-floor(now-24h), day-ceil(now)) window. The file's filename
+	// prefix is 90 days ago, which is NOT inside that window. If the
+	// reader used mtime for filtering, entries would be 1; it uses the
+	// filename prefix, so entries must be 0. This pins spec §5.b item a
+	// (trust the prefix) and §2.1 (event day, not write time) at once.
+	if got := len(env.Data.Entries); got != 0 {
+		t.Fatalf("JR-24: entries len=%d want 0 — reader appears to be filtering by mtime instead of filename prefix; entries=%+v",
+			got, env.Data.Entries)
+	}
+	// The stale file is silently excluded: it is not a malformed filename,
+	// not a malformed date, and not a read error — just out of window. No
+	// stderr warning should fire.
+	if strings.Contains(stderrTail, "warning:") {
+		t.Fatalf("JR-24: unexpected stderr warning on a stale-filename exclusion; stderr:\n%s", stderrTail)
+	}
+	if env.Data.Window == nil {
+		t.Fatalf("JR-24: window is nil")
+	}
+	wantSince := dayFloorUTC(now.Add(-24 * time.Hour)).Format(time.RFC3339)
+	wantUntil := dayCeilUTC(now).Format(time.RFC3339)
+	if env.Data.Window.Since != wantSince {
+		t.Fatalf("JR-24: window.since=%q want %q", env.Data.Window.Since, wantSince)
+	}
+	if env.Data.Window.Until != wantUntil {
+		t.Fatalf("JR-24: window.until=%q want %q", env.Data.Window.Until, wantUntil)
+	}
 }
