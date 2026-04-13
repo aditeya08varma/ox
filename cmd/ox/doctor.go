@@ -896,6 +896,7 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	progress.show("SageOx Configuration")
 	sageoxConfigChecks := []checkResult{
 		checkEndpointConsistency(opts.shouldFix(CheckSlugEndpointConsistency)),
+		checkTimezoneScrub(opts.shouldFix(CheckSlugTimezoneScrub)),
 	}
 	categories = append(categories, checkCategory{
 		name:   "SageOx Configuration",
