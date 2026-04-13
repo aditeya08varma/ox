@@ -388,7 +388,7 @@ func sessionSummaryToFacts(input sessionInput, repoID, ep string) []facts.Fact {
 // are included even when since is past the session date.
 // Returns a map of YYYY-MM-DD → []discussionFactEntry for seamless merge
 // with discussion and github facts in distillDaily.
-func readPendingSessionFacts(tcPath string, since time.Time, tz ...*time.Location) (map[string][]discussionFactEntry, error) {
+func readPendingSessionFacts(tcPath string, since time.Time) (map[string][]discussionFactEntry, error) {
 	sessionFactsDir := filepath.Join(tcPath, "memory", ".session-facts")
 	dateDirs, err := os.ReadDir(sessionFactsDir)
 	if err != nil {
@@ -442,7 +442,7 @@ func readPendingSessionFacts(tcPath string, since time.Time, tz ...*time.Locatio
 
 			// Use parseFactDate to extract the UTC date from content metadata.
 			// Falls back to directory name if no parseable date in content.
-			factDate := parseFactDate(content, f.Name(), tz...)
+			factDate := parseFactDate(content, f.Name())
 			if factDate == "" {
 				factDate = date // fallback to directory name
 			}

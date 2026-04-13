@@ -390,10 +390,9 @@ var factFilenameDateRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})`)
 // readPendingDiscussionFacts reads fact files from memory/.discussion-facts/
 // that were created since the given timestamp, grouped by parsed date.
 // Dates are parsed from content (footer) or filename, not filesystem mtime.
-// Dates are always UTC. The tz variadic is retained for caller compatibility
-// and ignored; Unit 2 will strip the parameter entirely.
+// Dates are always UTC.
 // Returns a map of YYYY-MM-DD → []discussionFactEntry.
-func readPendingDiscussionFacts(tcPath string, since time.Time, tz ...*time.Location) (map[string][]discussionFactEntry, error) {
+func readPendingDiscussionFacts(tcPath string, since time.Time) (map[string][]discussionFactEntry, error) {
 	factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
 
 	// compute cutoff date in UTC (matches parseFactDate's UTC-only bucketing)
@@ -427,12 +426,12 @@ func readPendingDiscussionFacts(tcPath string, since time.Time, tz ...*time.Loca
 		}
 
 		// parse date from footer first, then fallback to filename
-		date := parseFactDate(content, entry.Name(), tz...)
+		date := parseFactDate(content, entry.Name())
 		if date == "" {
 			continue
 		}
 
-		// filter by since (using same timezone as parseFactDate)
+		// filter by since (UTC date comparison)
 		if cutoffDate != "" && date < cutoffDate {
 			continue
 		}
@@ -449,9 +448,7 @@ func readPendingDiscussionFacts(tcPath string, since time.Time, tz ...*time.Loca
 
 // parseFactDate extracts a YYYY-MM-DD date from fact file content in UTC.
 // Tries (in order): JSONL _meta header, markdown footer, filename prefix.
-// The tz variadic is retained for caller compatibility and ignored; Unit 2
-// will strip the parameter entirely.
-func parseFactDate(content, filename string, tz ...*time.Location) string {
+func parseFactDate(content, filename string) string {
 	// try JSONL _meta header: {"_meta":{"recorded_at":"2026-03-10T14:23:00Z",...}}
 	if firstLine, _, ok := strings.Cut(content, "\n"); ok || content != "" {
 		if !ok {

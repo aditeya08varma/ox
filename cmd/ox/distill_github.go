@@ -589,10 +589,8 @@ func buildGitHubExtractorPrompt(clustersJSON, interval, guidelines string) strin
 
 // readPendingGitHubFacts reads fact files from memory/.github-facts/
 // that were created since the given timestamp. Same structure as
-// readPendingDiscussionFacts. Dates are always UTC. The tz variadic is
-// retained for caller compatibility and ignored; Unit 2 will strip the
-// parameter entirely.
-func readPendingGitHubFacts(tcPath string, since time.Time, tz ...*time.Location) (map[string][]discussionFactEntry, error) {
+// readPendingDiscussionFacts. Dates are always UTC.
+func readPendingGitHubFacts(tcPath string, since time.Time) (map[string][]discussionFactEntry, error) {
 	factsDir := filepath.Join(tcPath, "memory", ".github-facts")
 
 	// compute cutoff date in UTC (matches parseFactDate's UTC-only bucketing)
@@ -626,12 +624,12 @@ func readPendingGitHubFacts(tcPath string, since time.Time, tz ...*time.Location
 			continue
 		}
 
-		date := parseFactDate(content, entry.Name(), tz...)
+		date := parseFactDate(content, entry.Name())
 		if date == "" {
 			continue
 		}
 
-		// filter by since (using same timezone as parseFactDate)
+		// filter by since (UTC date comparison)
 		if cutoffDate != "" && date < cutoffDate {
 			continue
 		}

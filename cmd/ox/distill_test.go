@@ -15,7 +15,7 @@ func TestDetermineLayers(t *testing.T) {
 	now := time.Now().UTC()
 
 	t.Run("explicit daily", func(t *testing.T) {
-		plan := determineLayers(&distillStateV2{}, "daily", now, nil)
+		plan := determineLayers(&distillStateV2{}, "daily", now)
 		if !plan.Daily {
 			t.Error("expected Daily=true")
 		}
@@ -25,7 +25,7 @@ func TestDetermineLayers(t *testing.T) {
 	})
 
 	t.Run("fresh state triggers all layers", func(t *testing.T) {
-		plan := determineLayers(&distillStateV2{}, "", now, nil)
+		plan := determineLayers(&distillStateV2{}, "", now)
 		if !plan.Daily {
 			t.Error("expected Daily=true")
 		}
@@ -42,7 +42,7 @@ func TestDetermineLayers(t *testing.T) {
 			LastWeekly:  now.Add(-24 * time.Hour).Format(time.RFC3339),
 			LastMonthly: now.Add(-24 * time.Hour).Format(time.RFC3339),
 		}
-		plan := determineLayers(state, "", now, nil)
+		plan := determineLayers(state, "", now)
 		if !plan.Daily {
 			t.Error("expected Daily=true")
 		}
@@ -59,7 +59,7 @@ func TestDetermineLayers(t *testing.T) {
 			LastWeekly:  now.Add(-8 * 24 * time.Hour).Format(time.RFC3339),
 			LastMonthly: now.Add(-24 * time.Hour).Format(time.RFC3339),
 		}
-		plan := determineLayers(state, "", now, nil)
+		plan := determineLayers(state, "", now)
 		if !plan.Daily {
 			t.Error("expected Daily=true")
 		}
@@ -76,7 +76,7 @@ func TestDetermineLayers_MultipleWeeks(t *testing.T) {
 		LastWeekly:  now.Add(-21 * 24 * time.Hour).Format(time.RFC3339),
 		LastMonthly: now.Add(-24 * time.Hour).Format(time.RFC3339),
 	}
-	plan := determineLayers(state, "", now, nil)
+	plan := determineLayers(state, "", now)
 	require.GreaterOrEqual(t, len(plan.Weeks), 2, "expected at least 2 weeks for 3-week gap")
 	// verify actual ISO week values: Feb 19 is W08, now Mar 12 is W11
 	// determineLayers returns W08, W09, W10 (all completed weeks in the gap)
@@ -95,13 +95,13 @@ func TestDetermineLayers_MultipleMonths(t *testing.T) {
 		LastWeekly:  now.Add(-24 * time.Hour).Format(time.RFC3339),
 		LastMonthly: time.Date(2025, 12, 31, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
 	}
-	plan := determineLayers(state, "", now, nil)
+	plan := determineLayers(state, "", now)
 	require.ElementsMatch(t, []string{"2026-01", "2026-02"}, plan.Months, "expected exactly Jan and Feb 2026")
 }
 
 func TestDetermineLayers_ExplicitLayer(t *testing.T) {
 	now := time.Now().UTC()
-	plan := determineLayers(&distillStateV2{}, "weekly", now, nil)
+	plan := determineLayers(&distillStateV2{}, "weekly", now)
 	if plan.Daily {
 		t.Error("expected Daily=false for explicit weekly")
 	}
@@ -531,7 +531,7 @@ func TestGroupObservationsByDay(t *testing.T) {
 		{Content: "obs4", RecordedAt: time.Date(2026, 3, 12, 8, 0, 0, 0, time.UTC)},
 	}
 
-	groups := groupObservationsByDay(obs, nil)
+	groups := groupObservationsByDay(obs)
 	if len(groups) != 3 {
 		t.Errorf("expected 3 day groups, got %d", len(groups))
 	}
@@ -552,7 +552,7 @@ func TestGroupObservationsByDay_SingleDay(t *testing.T) {
 		{Content: "obs2", RecordedAt: time.Date(2026, 3, 10, 14, 0, 0, 0, time.UTC)},
 	}
 
-	groups := groupObservationsByDay(obs, nil)
+	groups := groupObservationsByDay(obs)
 	if len(groups) != 1 {
 		t.Errorf("expected 1 day group, got %d", len(groups))
 	}
@@ -748,7 +748,7 @@ func TestReadWeeklyFilesForMonth(t *testing.T) {
 	// Week 5: Jan 26 - Feb 1. Does not overlap March.
 	os.WriteFile(filepath.Join(weeklyDir, "2026-W05.md"), []byte("week 5"), 0o644)
 
-	contents, names, err := readWeeklyFilesForMonth(weeklyDir, 2026, 3, nil) // March
+	contents, names, err := readWeeklyFilesForMonth(weeklyDir, 2026, 3) // March
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -823,6 +823,15 @@ func TestParseFactDate(t *testing.T) {
 			content:  "No date anywhere",
 			filename: "random-name.md",
 			want:     "",
+		},
+		{
+			// Regression: team-timezone revert. A recorded_at with a non-UTC
+			// offset must bucket to the UTC date, not the local date. Here
+			// 2026-03-10T23:30:00-07:00 is 2026-03-11T06:30:00Z → 2026-03-11.
+			name:     "jsonl meta with tz offset buckets to UTC day",
+			content:  "{\"_meta\":{\"schema_version\":\"2\",\"source_type\":\"discussion\",\"recorded_at\":\"2026-03-10T23:30:00-07:00\"}}\n{\"headline\":\"test\"}",
+			filename: "2026-03-10-2330-ryan.jsonl",
+			want:     "2026-03-11",
 		},
 	}
 
