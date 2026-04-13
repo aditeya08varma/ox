@@ -138,11 +138,11 @@ func executeWithFrictionRecovery(args []string, attempt int) int {
 	}
 
 	// Commands may return a typed exit-code error that already carries a
-	// rendered envelope (ox journal list/show/since use this path to
+	// rendered envelope (ox distill history list/show/since use this path to
 	// surface usage_error as exit 2 without going through the default
 	// error printer or friction recovery). RunE writes the envelope to
 	// stdout before returning; here we only need to honor the code.
-	var jexit *journalExitError
+	var jexit *distillHistoryExitError
 	if errors.As(err, &jexit) {
 		return jexit.ExitCode
 	}

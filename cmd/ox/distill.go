@@ -366,9 +366,9 @@ Memory files are organized by temporal layers:
   memory/monthly/YYYY-MM.md          — monthly synthesis from weeklies
 
 To read the memory journal this command writes, use:
-  ox journal list    — enumerate entries in a date window
-  ox journal show    — show one or more entries by id
-  ox journal since   — dump entries from a relative duration (content format)`,
+  ox distill history list    — enumerate entries in a date window
+  ox distill history show    — show one or more entries by id
+  ox distill history since   — dump entries from a relative duration (content format)`,
 	RunE: runDistill,
 }
 

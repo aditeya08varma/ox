@@ -1,11 +1,11 @@
 <!-- doc-audience: ai -->
-# `ox journal` — Team Memory Journal
+# `ox distill history` — Team Memory Journal
 
 Status: spec
 Owner: agent-ux
 Supersedes (in spirit): the `ox distill` pipeline shape, not its on-disk artifacts.
 
-This spec defines a new top-level CLI surface — `ox journal` — and the
+This spec defines a new top-level CLI surface — `ox distill history` — and the
 pipeline restructure that splits today's monolithic `ox distill` into
 extract, summarize, and read concerns. It is a **what** spec; it does not
 prescribe Go packages, function signatures, or implementation order.
@@ -20,7 +20,7 @@ called out at the bottom — anything not in "Open questions" is decided.
 
 ### 1.1 What this delivers
 
-1. A new top-level namespace, `ox journal`, that owns the team's daily /
+1. A new top-level namespace, `ox distill history`, that owns the team's daily /
    weekly / monthly journal — the rolled-up, human-readable record under
    `memory/daily/`, `memory/weekly/`, `memory/monthly/`.
 2. A visible sub-namespace, `ox journal facts`, that exposes the raw fact
@@ -42,7 +42,7 @@ called out at the bottom — anything not in "Open questions" is decided.
   hands Claude an `--add-dir` and tells it to "find today's files". The
   consumer guesses about timezone, file naming (`YYYY-MM-DD.md` vs
   `YYYY-MM-DD-<uuid7>.md`), late-arriving days, and multi-summary days.
-  After this change there is one canonical answer: `ox journal since 24h
+  After this change there is one canonical answer: `ox distill history since 24h
   --format=content`.
 - **Agents hard-coding `memory/...` paths.** Any AI coworker that wants
   to read the journal currently has to know the directory layout, the
@@ -55,7 +55,7 @@ called out at the bottom — anything not in "Open questions" is decided.
   session uploads, after a GitHub webhook lands) while `summarize` runs
   on a periodic schedule (every 6 hours, end of day, etc.).
 - **Discoverability.** `ox distill` is a verb most users do not connect
-  to "where is my team's recent activity?". `ox journal` matches the
+  to "where is my team's recent activity?". `ox distill history` matches the
   mental model of the artifact.
 
 ### 1.3 What this explicitly does NOT deliver
@@ -158,7 +158,7 @@ flowchart LR
 
 ## 3. Command reference
 
-All commands live under `ox journal`. JSON is the default. `--format=text`
+All commands live under `ox distill history`. JSON is the default. `--format=text`
 is human-readable. `--format=content` (only on `since`, `show`, `facts
 show`) emits assembled markdown ready to feed an LLM, with no envelope.
 
@@ -391,7 +391,7 @@ completed months since the last monthly (matching today's
     "facts_consumed": 14,
     "facts_skipped_already_distilled": 22
   },
-  "agent_hint": "Wrote 1 daily entry. Use `ox journal since 24h --format=content` to feed it to a downstream summarizer.",
+  "agent_hint": "Wrote 1 daily entry. Use `ox distill history since 24h --format=content` to feed it to a downstream summarizer.",
   "elapsed_ms": 12044
 }
 ```
@@ -427,10 +427,10 @@ done in 12.0s
 
 ---
 
-### 3.4 `ox journal list`
+### 3.4 `ox distill history list`
 
 ```
-ox journal list [--since=<dur>] [--until=<ts>]
+ox distill history list [--since=<dur>] [--until=<ts>]
                 [--layer=daily|weekly|monthly|auto]
                 [--team=<slug>] [--all-teams]
                 [--limit=N] [--format=json|text]
@@ -457,7 +457,7 @@ only — no entry bodies. Agents call this first, then call `show` /
 ```json
 {
   "success": true,
-  "type": "journal_list",
+  "type": "distill_history_list",
   "data": {
     "window": {
       "since": "2026-04-05T00:00:00Z",
@@ -528,10 +528,10 @@ correct shape.
 
 ---
 
-### 3.5 `ox journal show`
+### 3.5 `ox distill history show`
 
 ```
-ox journal show <id>... [--team=<slug>]
+ox distill history show <id>... [--team=<slug>]
                         [--format=json|text|content]
 ```
 
@@ -553,7 +553,7 @@ allowed; results come back in argument order.
 ```json
 {
   "success": true,
-  "type": "journal_show",
+  "type": "distill_history_show",
   "data": {
     "entries": [
       {
@@ -602,7 +602,7 @@ entry 2026-04-12-019c8a3f  daily  team=sageox
   "success": false,
   "error": {
     "code": "id_ambiguous",
-    "message": "prefix '2026-04-12' matches 2 entries; pass full id or use `ox journal list`",
+    "message": "prefix '2026-04-12' matches 2 entries; pass full id or use `ox distill history list`",
     "retryable": false
   }
 }
@@ -627,7 +627,7 @@ the envelope reports per-id results in the `entries` array with a
 ```json
 {
   "success": true,
-  "type": "journal_show",
+  "type": "distill_history_show",
   "data": {
     "entries": [
       {"id": "2026-04-12-019c8a3f", "status": "ok", "...": "..."},
@@ -639,10 +639,10 @@ the envelope reports per-id results in the `entries` array with a
 
 ---
 
-### 3.6 `ox journal since`
+### 3.6 `ox distill history since`
 
 ```
-ox journal since <dur> [--layer=daily|weekly|monthly|auto]
+ox distill history since <dur> [--layer=daily|weekly|monthly|auto]
                        [--team=<slug>] [--all-teams]
                        [--format=json|text|content]
                        [--limit=N]
@@ -671,7 +671,7 @@ markdown body of each entry (frontmatter stripped):
 ```json
 {
   "success": true,
-  "type": "journal_since",
+  "type": "distill_history_since",
   "data": {
     "window": {"since": "...Z", "until": "...Z"},
     "entries": [ /* same as list */ ],
@@ -1495,7 +1495,7 @@ The TypeScript caller currently:
 After this change, the caller can replace steps 1–2 with:
 
 ```sh
-ox journal since 24h --format=content
+ox distill history since 24h --format=content
 ```
 
 …and pipe stdout to the same downstream summarizer. The TS rewrite
