@@ -53,10 +53,9 @@ produces zero events, an eventful PR produces one event per transition.
 PR=<number>; OWNER=<owner>; REPO=<repo>
 last=""
 while true; do
-  failing=$(gh pr checks "$PR" 2>/dev/null \
-    | awk '$2=="fail" || $2=="cancel"' | wc -l | tr -d ' ')
-  pending=$(gh pr checks "$PR" 2>/dev/null \
-    | awk '$2=="pending"' | wc -l | tr -d ' ')
+  checks=$(gh pr checks "$PR" --json bucket 2>/dev/null || echo '[]')
+  failing=$(jq '[.[] | select(.bucket=="fail" or .bucket=="cancel")] | length' <<<"$checks")
+  pending=$(jq '[.[] | select(.bucket=="pending")] | length' <<<"$checks")
   unresolved=$(gh api graphql --paginate -f query='
     query($o:String!,$r:String!,$n:Int!,$endCursor:String){
       repository(owner:$o,name:$r){
@@ -94,8 +93,8 @@ Monitor discipline:
 
 ## Reacting to a `change:` event
 
-When the monitor emits `change: fail=N unresolved=M`, do the following.
-Keep the monitor running the whole time.
+When the monitor emits `change: fail=N pending=P unresolved=M`, do the
+following. Keep the monitor running the whole time.
 
 ### 1. Failing checks
 
