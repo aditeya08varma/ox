@@ -99,6 +99,18 @@ func TestJournalRead_JR04_ShowBareDate_ReturnsAllSnapshots(t *testing.T) {
 	if strings.HasPrefix(got0.BodyMD, "---") || strings.HasPrefix(got1.BodyMD, "---") {
 		t.Fatalf("JR-04: frontmatter fence leaked into BodyMD on at least one row")
 	}
+	// Strict Status pin — parseEntryFile at internal/journal/read/list.go:365
+	// unconditionally stamps Status: "ok" on every successful parse, and
+	// journal_show.go:97's allFailed detector is an exact-string "ok" check.
+	// A silent refactor that dropped the stamp would flip allFailed true for
+	// healthy rows and route into the Exit 1 branch with a spurious
+	// id_not_found. Byte-match the unit-level pin at show_test.go:179.
+	if got0.Status != "ok" {
+		t.Fatalf("JR-04: entries[0].status=%q want 'ok' on a success row", got0.Status)
+	}
+	if got1.Status != "ok" {
+		t.Fatalf("JR-04: entries[1].status=%q want 'ok' on a success row", got1.Status)
+	}
 }
 
 // TestJournalRead_JR05_ShowLatestRejected — --latest must be rejected
@@ -186,12 +198,12 @@ func TestJournalRead_JR06_ShowShortUUID7Prefix(t *testing.T) {
 		t.Fatalf("JR-06: entry.id=%q want %q — short prefix matched the wrong file",
 			got.ID, fx.Dailies[0].ID)
 	}
-	// Partial-success fields must be absent/ok on a successful single-row
-	// match. A non-empty, non-"ok" Status here would mean the short
-	// prefix went down the not_found / ambiguous branch and still
-	// returned a row, which is a contract violation.
-	if got.Status != "" && got.Status != "ok" {
-		t.Fatalf("JR-06: entry.status=%q want 'ok' or empty on a success row", got.Status)
+	// Strict Status pin — parseEntryFile stamps "ok" unconditionally on
+	// every successful parse (list.go:365); journal_show.go:97 does an
+	// exact-string "ok" check to decide allFailed. Loose "" || "ok" here
+	// would miss a silent drop of the stamp. Byte-match show_test.go:179.
+	if got.Status != "ok" {
+		t.Fatalf("JR-06: entry.status=%q want 'ok' on a success row", got.Status)
 	}
 	if got.Error != nil {
 		t.Fatalf("JR-06: entry.error=%+v want nil on a success row", got.Error)
@@ -383,9 +395,12 @@ func TestJournalRead_JR17_ShowJsonFormat_FullBody(t *testing.T) {
 		t.Fatalf("JR-17: citations array empty but citation_count=%d — show must populate both",
 			got.CitationCount)
 	}
-	// Partial-success fields must not be set on a success row.
-	if got.Status != "" && got.Status != "ok" {
-		t.Fatalf("JR-17: entry.status=%q want 'ok' or empty on a success row", got.Status)
+	// Strict Status pin — see JR-04/JR-06 comments. Loose "" || "ok" hides
+	// a regression in parseEntryFile that silently drops the stamp, which
+	// would flip journal_show.go:97's allFailed detector to true for a
+	// healthy row and route it into the Exit 1 branch.
+	if got.Status != "ok" {
+		t.Fatalf("JR-17: entry.status=%q want 'ok' on a success row", got.Status)
 	}
 	if got.Error != nil {
 		t.Fatalf("JR-17: entry.error=%+v want nil on a success row", got.Error)
@@ -434,8 +449,12 @@ func TestJournalRead_JR18_ShowBadFrontmatterNeighbor_SurvivesGoodID(t *testing.T
 	if got.BodyMD == "" {
 		t.Fatalf("JR-18: BodyMD empty — good entry did not materialize despite a valid ID lookup")
 	}
-	if got.Status != "" && got.Status != "ok" {
-		t.Fatalf("JR-18: entry.status=%q want 'ok' or empty on the surviving row", got.Status)
+	// Strict Status pin — see JR-04/JR-06/JR-17 comments. The surviving
+	// row must carry the "ok" stamp even in the presence of a bad
+	// neighbor, so the allFailed detector in journal_show.go:97 keeps the
+	// call on the Exit 0 success branch.
+	if got.Status != "ok" {
+		t.Fatalf("JR-18: entry.status=%q want 'ok' on the surviving row", got.Status)
 	}
 	if got.Error != nil {
 		t.Fatalf("JR-18: entry.error=%+v want nil on the surviving row", got.Error)
