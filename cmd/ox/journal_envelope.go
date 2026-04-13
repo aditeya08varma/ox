@@ -66,17 +66,24 @@ type journalEnvelopeData struct {
 // CitationCount are always populated, so list callers can show counts
 // without materializing bodies.
 type journalEnvelopeEntry struct {
-	ID            string               `json:"id"`
-	Layer         string               `json:"layer"`
-	Date          string               `json:"date"`
-	Team          string               `json:"team,omitempty"`
-	Path          string               `json:"path"`
-	FactCount     int                  `json:"fact_count"`
-	CitationCount int                  `json:"citation_count"`
-	SourceFiles   []string             `json:"source_files"`
-	CreatedAt     string               `json:"created_at"`
-	Citations     []memoryio.Citation  `json:"citations,omitempty"`
-	BodyMD        string               `json:"body_md,omitempty"`
+	ID            string                `json:"id"`
+	Layer         string                `json:"layer"`
+	Date          string                `json:"date"`
+	Team          string                `json:"team,omitempty"`
+	Path          string                `json:"path"`
+	FactCount     int                   `json:"fact_count"`
+	CitationCount int                   `json:"citation_count"`
+	SourceFiles   []string              `json:"source_files"`
+	CreatedAt     string                `json:"created_at,omitempty"`
+	Citations     []memoryio.Citation   `json:"citations,omitempty"`
+	BodyMD        string                `json:"body_md,omitempty"`
+	// Status and Error are populated only by `ox journal show`'s
+	// partial-success envelope. list leaves them empty. When Status
+	// is "not_found" / "ambiguous" / "read_error", Error carries the
+	// per-ID detail and the row's other fields may be partially
+	// unset (only ID is guaranteed).
+	Status string                `json:"status,omitempty"`
+	Error  *journalEnvelopeError `json:"error,omitempty"`
 }
 
 // journalEnvelopeWindow mirrors the Window object in spec §4.3. The

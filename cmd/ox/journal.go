@@ -26,12 +26,11 @@ var journalListCmd = &cobra.Command{
 }
 
 var journalShowCmd = &cobra.Command{
-	Use:    "show <id>...",
-	Short:  "Show one or more journal entries by id",
-	Hidden: true,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return errJournalNotImplemented
-	},
+	Use:           "show <id>...",
+	Short:         "Show one or more journal entries by id",
+	Hidden:        true,
+	SilenceUsage:  true,
+	SilenceErrors: true,
 }
 
 var journalSinceCmd = &cobra.Command{

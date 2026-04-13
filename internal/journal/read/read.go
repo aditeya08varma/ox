@@ -22,13 +22,14 @@ func ListEntries(ctx context.Context, q ReadQuery) ([]Entry, ListMeta, error) {
 	return listEntries(ctx, q)
 }
 
-// LoadEntries materializes entry bodies for a specific set of IDs. It is
-// stubbed in Unit 1 and lands in Unit 4 (ox journal show).
+// LoadEntries materializes entry bodies for a specific set of IDs. It
+// is the data path behind `ox journal show`. Per-ID errors are attached
+// to the returned Entry's Status / Error fields; whole-call failures
+// (empty team set, index scan I/O error, invalid window) are returned
+// as a Go error so the command layer maps them to a single envelope
+// error. See show.go for the ID grammar and partial-success contract.
 func LoadEntries(ctx context.Context, q ReadQuery, ids []string) ([]Entry, error) {
-	_ = ctx
-	_ = q
-	_ = ids
-	return nil, errNotImplemented
+	return loadEntries(ctx, q, ids)
 }
 
 // Since is the list+load composite used by ox journal since. It is
