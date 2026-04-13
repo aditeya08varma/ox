@@ -525,10 +525,14 @@ func TestReadPendingSessionFacts(t *testing.T) {
 		}
 	})
 
-	t.Run("filters by file mtime not directory date", func(t *testing.T) {
+	// Failure prevented: on a fresh clone (blue/green GC), git resets every
+	// file mtime to checkout time, so an mtime-based filter would pass every
+	// historical fact through and re-distill months of old dailies.
+	// See ox-97v / ox-wt4.
+	t.Run("filters by directory date not mtime (fresh-clone regression)", func(t *testing.T) {
 		tcPath := t.TempDir()
 
-		// create two files: one old (backdate mtime), one new (current mtime)
+		// two files: old directory date (2026-03-09), new directory date (2026-03-11)
 		for _, item := range []struct {
 			date, name string
 		}{
@@ -545,47 +549,66 @@ func TestReadPendingSessionFacts(t *testing.T) {
 			}
 		}
 
-		// backdate the old file's mtime to before since
-		oldFile := filepath.Join(tcPath, "memory", ".session-facts", "2026-03-09", "2026-03-09T14-23-ryan-Ox7f3a.jsonl")
-		oldTime := time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC)
-		os.Chtimes(oldFile, oldTime, oldTime)
+		// simulate a fresh clone: force BOTH files to have mtime = now.
+		// Under the old mtime-based filter both would pass; under path-based
+		// filtering the 2026-03-09 directory is excluded by its name alone.
+		now := time.Now()
+		for _, rel := range []string{
+			"memory/.session-facts/2026-03-09/2026-03-09T14-23-ryan-Ox7f3a.jsonl",
+			"memory/.session-facts/2026-03-11/2026-03-11T09-00-alice-OxABCD.jsonl",
+		} {
+			if err := os.Chtimes(filepath.Join(tcPath, rel), now, now); err != nil {
+				t.Fatal(err)
+			}
+		}
 
-		// since = 1 second ago — new file (current mtime) is after since, old file is before
-		since := time.Now().Add(-time.Second)
+		// cutoff = 2026-03-10 → 2026-03-09 dir excluded, 2026-03-11 dir included
+		since, _ := time.Parse("2006-01-02", "2026-03-10")
 		result, err := readPendingSessionFacts(tcPath, since)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if len(result) != 1 {
-			t.Errorf("got %d date groups, want 1 (only fresh file)", len(result))
+			t.Errorf("got %d date groups, want 1", len(result))
 		}
 		if _, ok := result["2026-03-11"]; !ok {
-			t.Error("expected 2026-03-11 in results (fresh mtime)")
+			t.Error("expected 2026-03-11 in results (directory >= cutoff)")
+		}
+		if _, ok := result["2026-03-09"]; ok {
+			t.Error("2026-03-09 should be excluded (directory < cutoff) regardless of mtime")
 		}
 	})
 
-	t.Run("late-arriving session included despite old date", func(t *testing.T) {
+	// Failure prevented: stale-mtime files (e.g., after a long-lived workspace
+	// sits idle and since jumps forward on the next distill run) should STILL
+	// be surfaced if their directory date is inside the window. mtime is not
+	// consulted at all.
+	t.Run("stale mtime inside window still included", func(t *testing.T) {
 		tcPath := t.TempDir()
-
-		// simulate a March 10 session extracted today (fresh mtime)
-		dir := filepath.Join(tcPath, "memory", ".session-facts", "2026-03-10")
+		dir := filepath.Join(tcPath, "memory", ".session-facts", "2026-03-11")
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "2026-03-10T14-23-ryan-Ox7f3a.jsonl"),
-			[]byte(`{"_meta":{"schema_version":"2","source_type":"session","recorded_at":"2026-03-10T00:00:00Z"}}
-{"headline":"late fact","source_type":"session"}`), 0o644); err != nil {
+		file := filepath.Join(dir, "2026-03-11T09-00-alice-OxABCD.jsonl")
+		if err := os.WriteFile(file,
+			[]byte(`{"_meta":{"schema_version":"2","source_type":"session","recorded_at":"2026-03-11T00:00:00Z"}}
+{"headline":"fact","source_type":"session"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
 
-		// since = March 25 — file mtime is now (fresh), so it should be included
-		since, _ := time.Parse("2006-01-02", "2026-03-25")
+		// force file mtime to a year ago — path-based filter must ignore it
+		ancient := time.Now().AddDate(-1, 0, 0)
+		if err := os.Chtimes(file, ancient, ancient); err != nil {
+			t.Fatal(err)
+		}
+
+		since, _ := time.Parse("2006-01-02", "2026-03-10")
 		result, err := readPendingSessionFacts(tcPath, since)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		if len(result["2026-03-10"]) != 1 {
-			t.Errorf("late-arriving session should be included, got %d entries", len(result["2026-03-10"]))
+		if len(result["2026-03-11"]) != 1 {
+			t.Errorf("stale-mtime file inside window should be included, got %d entries", len(result["2026-03-11"]))
 		}
 	})
 

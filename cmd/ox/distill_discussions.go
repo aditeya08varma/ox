@@ -384,13 +384,27 @@ type discussionFactEntry struct {
 // factFooterDateRe matches the "(created YYYY-MM-DD)" footer in discussion fact files.
 var factFooterDateRe = regexp.MustCompile(`\(created (\d{4}-\d{2}-\d{2})\)`)
 
-// factFilenameDateRe matches YYYY-MM-DD prefix in discussion fact filenames / dirnames.
-var factFilenameDateRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})`)
+// factFilenameDateRe matches a YYYY-MM-DD prefix in discussion/github fact
+// filenames / dirnames. Requires a trailing separator (dash, dot, slash, or
+// end-of-string) so an accidental run-on like "20260310foo" is NOT matched
+// as "2026-03-10".
+var factFilenameDateRe = regexp.MustCompile(`^(\d{4}-\d{2}-\d{2})(?:[-./]|$)`)
 
 // readPendingDiscussionFacts reads fact files from memory/.discussion-facts/
-// that were created since the given timestamp, grouped by parsed date.
-// Dates are parsed from content (footer) or filename, not filesystem mtime.
-// Dates are always UTC.
+// within the lookback window, grouped by their content-derived date.
+//
+// The authoritative date for each fact is parsed from the file's content
+// (JSONL _meta.recorded_at → markdown footer → filename prefix, in that
+// order). Filesystem mtime is never consulted — it is not clone-stable.
+//
+// Unlike the github reader, there is intentionally NO filename-prefix
+// fast-path: the discussion directory name is server-assigned and its
+// YYYY-MM-DD prefix is not guaranteed to match the UTC day of the event's
+// recorded_at. A fast path would silently drop facts in timezone-edge
+// cases. Discussion fact files are small, so opening every candidate is
+// cheap. See readPendingGitHubFacts for the symmetric path where filename
+// ↔ content consistency is structurally guaranteed.
+//
 // Returns a map of YYYY-MM-DD → []discussionFactEntry.
 func readPendingDiscussionFacts(tcPath string, since time.Time) (map[string][]discussionFactEntry, error) {
 	factsDir := filepath.Join(tcPath, "memory", ".discussion-facts")
@@ -416,6 +430,15 @@ func readPendingDiscussionFacts(tcPath string, since time.Time) (map[string][]di
 			continue
 		}
 
+		// NOTE: no filename-prefix fast path here. The discussion directory
+		// name is server-assigned and ox cannot enforce that the YYYY-MM-DD
+		// prefix matches the UTC day of the content's recorded_at. In the
+		// timezone-edge case (e.g., a local-date-prefixed dir whose event
+		// rolls into the next UTC day) a filename fast-path would silently
+		// drop facts. Discussion fact files are small, so the content-date
+		// check below is cheap enough. See github-facts for the symmetric
+		// path where filename ↔ content consistency IS structurally
+		// guaranteed and a fast path is safe.
 		data, err := os.ReadFile(filepath.Join(factsDir, entry.Name()))
 		if err != nil {
 			continue
@@ -431,7 +454,7 @@ func readPendingDiscussionFacts(tcPath string, since time.Time) (map[string][]di
 			continue
 		}
 
-		// filter by since (UTC date comparison)
+		// filter by since (UTC date comparison on content-derived date)
 		if cutoffDate != "" && date < cutoffDate {
 			continue
 		}

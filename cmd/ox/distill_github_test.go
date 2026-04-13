@@ -608,6 +608,53 @@ func TestReadPendingGitHubFacts_FiltersBySince(t *testing.T) {
 	assert.Len(t, result["2026-03-20"], 1)
 }
 
+// Failure prevented: legacy github fact files that lack the YYYY-MM-DD
+// filename prefix (hand-written or produced before the current naming
+// convention) must still be read and parsed from content. The filename-prefix
+// fast-path in readPendingGitHubFacts must only short-circuit when the regex
+// actually matches; otherwise the file falls through to the content check.
+func TestReadPendingGitHubFacts_LegacyFilenameNoPrefix(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	factsDir := filepath.Join(dir, "memory", ".github-facts")
+	require.NoError(t, os.MkdirAll(factsDir, 0o755))
+
+	content := `{"_meta":{"schema_version":"2","source_type":"github","recorded_at":"2026-03-11T00:00:00Z"}}
+{"headline":"legacy","source_type":"github","timestamp":"2026-03-11T00:00:00Z"}
+`
+	require.NoError(t, os.WriteFile(filepath.Join(factsDir, "manual-github-notes.jsonl"), []byte(content), 0o644))
+
+	since := time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)
+	result, err := readPendingGitHubFacts(dir, since)
+	require.NoError(t, err)
+	require.Len(t, result["2026-03-11"], 1, "legacy unprefixed file with content-date 2026-03-11 should be included")
+}
+
+// Failure prevented: the filename-prefix fast path must actually cut off
+// pre-cutoff files. If the fast path regresses (e.g. someone widens the
+// match incorrectly), a 2026-03-05 file with a valid prefix should still
+// NOT appear when cutoff = 2026-03-10.
+func TestReadPendingGitHubFacts_FastPathSkipsPreCutoff(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	factsDir := filepath.Join(dir, "memory", ".github-facts")
+	require.NoError(t, os.MkdirAll(factsDir, 0o755))
+
+	content := `{"_meta":{"schema_version":"2","source_type":"github","recorded_at":"2026-03-05T00:00:00Z"}}
+{"headline":"old","source_type":"github","timestamp":"2026-03-05T00:00:00Z"}
+`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(factsDir, "2026-03-05-019526a0-1111-7abc-8def-0123456789ab-commits.jsonl"),
+		[]byte(content), 0o644))
+
+	since := time.Date(2026, 3, 10, 0, 0, 0, 0, time.UTC)
+	result, err := readPendingGitHubFacts(dir, since)
+	require.NoError(t, err)
+	require.Empty(t, result, "2026-03-05 fact must be excluded by cutoff 2026-03-10")
+}
+
 func TestReadPendingGitHubFacts_UUID7Filenames(t *testing.T) {
 	t.Parallel()
 
