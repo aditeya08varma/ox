@@ -93,9 +93,7 @@ func TestJournalSince_InProc_HappyPathJSON(t *testing.T) {
 	t.Chdir(projectRoot)
 
 	now := time.Now().UTC()
-	if now.Hour() == 23 && now.Minute() >= 59 {
-		t.Skip("within seconds of UTC midnight — window rounding unstable, retry")
-	}
+	skipIfNearUTCMidnight(t, now)
 	id1, id2 := stageSinceTodayFixtures(t, teamRoot, now)
 
 	out, stderrStr, err := runJournalSinceInProc(t, "6h", "--format=json", "--layer=daily")
@@ -182,9 +180,7 @@ func TestJournalSince_InProc_ContentFormatRichMarkers(t *testing.T) {
 	t.Chdir(projectRoot)
 
 	now := time.Now().UTC()
-	if now.Hour() == 23 && now.Minute() >= 59 {
-		t.Skip("within seconds of UTC midnight — window rounding unstable, retry")
-	}
+	skipIfNearUTCMidnight(t, now)
 	id1, id2 := stageSinceTodayFixtures(t, teamRoot, now)
 	today := now.Format("2006-01-02")
 
@@ -236,9 +232,7 @@ func TestJournalSince_InProc_ContentFormatGolden(t *testing.T) {
 	t.Chdir(projectRoot)
 
 	now := time.Now().UTC()
-	if now.Hour() == 23 && now.Minute() >= 59 {
-		t.Skip("within seconds of UTC midnight — window rounding unstable, retry")
-	}
+	skipIfNearUTCMidnight(t, now)
 	today := now.Format("2006-01-02")
 	id := today + "-019c8a3f-0001"
 	writeFile(t,
@@ -354,9 +348,7 @@ func TestJournalSince_InProc_AllTeamsMerged(t *testing.T) {
 	t.Chdir(projectRoot)
 
 	now := time.Now().UTC()
-	if now.Hour() == 23 && now.Minute() >= 59 {
-		t.Skip("within seconds of UTC midnight — window rounding unstable, retry")
-	}
+	skipIfNearUTCMidnight(t, now)
 	today := now.Format("2006-01-02")
 	idA := today + "-019c8a3f-0001"
 	idB := today + "-019c8aaa-0001"
@@ -423,9 +415,7 @@ func TestJournalSince_InProc_LimitRespected(t *testing.T) {
 	t.Chdir(projectRoot)
 
 	now := time.Now().UTC()
-	if now.Hour() == 23 && now.Minute() >= 59 {
-		t.Skip("within seconds of UTC midnight — window rounding unstable, retry")
-	}
+	skipIfNearUTCMidnight(t, now)
 	stageSinceTodayFixtures(t, teamRoot, now)
 
 	out, _, err := runJournalSinceInProc(t, "6h", "--layer=daily", "--limit=1", "--format=json")

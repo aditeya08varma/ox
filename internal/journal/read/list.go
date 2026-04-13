@@ -38,6 +38,16 @@ var (
 // the per-layer walkers' half-open filters trivially pass every file
 // through. In that mode the caller is responsible for passing an
 // explicit Layer (LayerAuto requires a real window to resolve).
+//
+// WARNING — sentinel meta window under NoTimeFilter: when NoTimeFilter
+// is set, meta.EffectiveSince is the zero time and meta.EffectiveUntil
+// is 9999-12-31. These are NOT real instants; they exist only to make
+// the per-layer filename half-open filters a no-op. Callers must NOT
+// surface these values in user-facing envelopes (e.g. the CLI command
+// layer's `window.since` / `window.until` fields). Today ox journal
+// show is the only NoTimeFilter consumer and it never emits the window
+// field — the value lives purely inside the reader. Any new consumer
+// that chooses NoTimeFilter inherits the same contract.
 func listEntries(ctx context.Context, q ReadQuery) ([]Entry, ListMeta, error) {
 	if !q.NoTimeFilter {
 		if q.Since.IsZero() || q.Until.IsZero() {
@@ -50,6 +60,7 @@ func listEntries(ctx context.Context, q ReadQuery) ([]Entry, ListMeta, error) {
 
 	var effSince, effUntil time.Time
 	if q.NoTimeFilter {
+		// Sentinels, not timestamps. See the function-level WARNING.
 		effSince = time.Time{}
 		effUntil = time.Date(9999, 12, 31, 0, 0, 0, 0, time.UTC)
 	} else {

@@ -221,10 +221,7 @@ func renderJournalSinceContent(w io.Writer, entries []read.Entry, bodies []strin
 		if e.Status != "" && e.Status != "ok" {
 			continue
 		}
-		var body string
-		if i < len(bodies) {
-			body = bodies[i]
-		}
+		body := bodies[i]
 		if body == "" {
 			continue
 		}
