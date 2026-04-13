@@ -3,9 +3,12 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -289,4 +292,120 @@ func TestIsTOMLTimezoneLine(t *testing.T) {
 			assert.Equal(t, tt.want, isTOMLTimezoneLine(tt.in))
 		})
 	}
+}
+
+// TestCheckTimezoneScrub_ScrubsProjectAndTeamConfigs exercises the full check
+// wrapper: a real git repo with a .sageox/config.json containing a dead
+// timezone key plus a team context whose config.toml also carries one. Both
+// must be scrubbed, and the result must surface as a single info-priority
+// warning (not a failure, so exit code stays 0).
+//
+// Failure prevented: the scrubber helpers work in isolation but the check
+// wiring (findGitRoot + LoadLocalConfig loop + result aggregation) silently
+// regresses, e.g. dropping the team iteration or misclassifying the priority.
+func TestCheckTimezoneScrub_ScrubsProjectAndTeamConfigs(t *testing.T) {
+	// cannot be t.Parallel — Chdir is process-global.
+	gitRoot := t.TempDir()
+
+	initCmd := exec.Command("git", "init")
+	initCmd.Dir = gitRoot
+	require.NoError(t, initCmd.Run())
+
+	sageoxDir := filepath.Join(gitRoot, ".sageox")
+	require.NoError(t, os.MkdirAll(sageoxDir, 0755))
+
+	projectConfig := `{
+  "org": "sageox",
+  "project": "ox",
+  "timezone": "America/New_York"
+}`
+	projectPath := filepath.Join(sageoxDir, "config.json")
+	require.NoError(t, os.WriteFile(projectPath, []byte(projectConfig), 0600))
+
+	teamDir := t.TempDir()
+	teamConfigPath := filepath.Join(teamDir, "config.toml")
+	teamConfig := `# team header comment
+timezone = "Europe/London"
+session_recording = "auto"
+`
+	require.NoError(t, os.WriteFile(teamConfigPath, []byte(teamConfig), 0644))
+
+	localCfg := &config.LocalConfig{
+		TeamContexts: []config.TeamContext{
+			{TeamID: "sageox", TeamName: "SageOx", Path: teamDir},
+		},
+	}
+	require.NoError(t, config.SaveLocalConfig(gitRoot, localCfg))
+
+	t.Chdir(gitRoot)
+	result := checkTimezoneScrub(true)
+
+	assert.True(t, result.passed, "scrub is info-level, result should be passed=true")
+	assert.True(t, result.warning, "scrub should surface as a warning")
+	assert.Equal(t, "info", result.priority, "scrub priority must be info")
+	assert.Contains(t, result.message, "2 file(s)", "message should report both files")
+	assert.Contains(t, result.detail, ".sageox/config.json", "detail lists project config")
+	assert.Contains(t, result.detail, "team sageox config.toml", "detail lists team config")
+
+	// project config.json timezone key must be gone, unrelated keys preserved.
+	rawProject, err := os.ReadFile(projectPath)
+	require.NoError(t, err)
+	var parsedProject map[string]string
+	require.NoError(t, json.Unmarshal(rawProject, &parsedProject))
+	_, present := parsedProject["timezone"]
+	assert.False(t, present, "project config timezone must be removed")
+	assert.Equal(t, "sageox", parsedProject["org"], "unrelated project keys preserved")
+	assert.Equal(t, "ox", parsedProject["project"], "unrelated project keys preserved")
+
+	// team config.toml timezone line must be gone, comment + other keys preserved.
+	rawTeam, err := os.ReadFile(teamConfigPath)
+	require.NoError(t, err)
+	teamStr := string(rawTeam)
+	assert.NotContains(t, teamStr, "timezone", "team config timezone line must be removed")
+	assert.Contains(t, teamStr, "# team header comment", "leading comment preserved")
+	assert.Contains(t, teamStr, `session_recording = "auto"`, "unrelated team keys preserved")
+}
+
+// TestScrubJSONTimezone_PreservesFileMode verifies the auto-fix does not
+// silently tighten or loosen permissions on an existing config file.
+//
+// Failure prevented: a hardcoded 0600 or 0644 in the writer path silently
+// changes permissions on scrubbed files, surprising users whose configs were
+// group-readable by design.
+func TestScrubJSONTimezone_PreservesFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not meaningful on Windows")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"timezone": "UTC"}`), 0640))
+
+	got, err := scrubJSONTimezone(path)
+	require.NoError(t, err)
+	require.True(t, got, "scrub should report a change")
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0640), info.Mode().Perm(), "file mode must be preserved")
+}
+
+// TestScrubTOMLTimezone_PreservesFileMode verifies the TOML writer also
+// preserves the source file mode. Same rationale as the JSON variant.
+func TestScrubTOMLTimezone_PreservesFileMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not meaningful on Windows")
+	}
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	require.NoError(t, os.WriteFile(path, []byte("timezone = \"UTC\"\nsession_recording = \"auto\"\n"), 0640))
+
+	got, err := scrubTOMLTimezone(path)
+	require.NoError(t, err)
+	require.True(t, got, "scrub should report a change")
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0640), info.Mode().Perm(), "file mode must be preserved")
 }

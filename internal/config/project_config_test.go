@@ -592,3 +592,40 @@ func TestResolveProjectRootOverride(t *testing.T) {
 		assert.Equal(t, "", ResolveProjectRootOverride())
 	})
 }
+
+// --- Silent-drop regression for removed fields --------------------------------
+
+// TestLoadProjectConfig_SilentlyDropsStrayTimezoneKey verifies that an older
+// config.json carrying a top-level `timezone` key still loads cleanly after
+// the field was removed from ProjectConfig during the team-timezone revert.
+// Unrelated fields must continue to round-trip through the loader.
+//
+// Failure prevented: a future change to LoadProjectConfig (e.g. switching to
+// a strict decoder with DisallowUnknownFields) would break older configs on
+// disk without warning. Doctor's timezone-scrub auto-fix depends on the
+// loader staying permissive until the scrub runs.
+func TestLoadProjectConfig_SilentlyDropsStrayTimezoneKey(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	RequireSageoxDir(t, tmpDir)
+
+	raw := `{
+  "config_version": "` + CurrentConfigVersion + `",
+  "org": "sageox",
+  "team": "platform",
+  "project": "ox",
+  "update_frequency_hours": 24,
+  "timezone": "America/New_York"
+}`
+	configPath := filepath.Join(tmpDir, sageoxDir, projectConfigFilename)
+	require.NoError(t, os.WriteFile(configPath, []byte(raw), 0600))
+
+	cfg, err := LoadProjectConfig(tmpDir)
+	require.NoError(t, err, "stray timezone key must not make loader error")
+	require.NotNil(t, cfg)
+
+	assert.Equal(t, "sageox", cfg.Org)
+	assert.Equal(t, "platform", cfg.Team)
+	assert.Equal(t, "ox", cfg.Project)
+	assert.Equal(t, 24, cfg.UpdateFrequencyHours)
+}

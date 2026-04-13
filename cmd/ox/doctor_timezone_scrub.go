@@ -16,6 +16,9 @@ import (
 // silently ignores them, so we inspect the raw JSON/TOML to catch stray values
 // left behind by older ox versions.
 //
+// The `fix` parameter is ignored: scrubbing a dead key is always safe, so
+// this check runs unconditionally under FixLevelAuto.
+//
 // Failure prevented: silent drift where orphaned timezone keys linger in user
 // configs and mislead operators into thinking the feature still exists.
 func checkTimezoneScrub(_ bool) checkResult {
@@ -27,11 +30,11 @@ func checkTimezoneScrub(_ bool) checkResult {
 	var scrubbed []string
 
 	configPath := filepath.Join(gitRoot, ".sageox", "config.json")
-	didScrub, err := scrubJSONTimezone(configPath)
+	projectDidScrub, err := scrubJSONTimezone(configPath)
 	if err != nil {
 		return FailedCheck("Timezone cleanup", "config.json scrub failed", err.Error())
 	}
-	if didScrub {
+	if projectDidScrub {
 		scrubbed = append(scrubbed, ".sageox/config.json")
 	}
 
@@ -42,13 +45,13 @@ func checkTimezoneScrub(_ bool) checkResult {
 				continue
 			}
 			tomlPath := filepath.Join(tc.Path, "config.toml")
-			didScrub, err := scrubTOMLTimezone(tomlPath)
+			teamDidScrub, err := scrubTOMLTimezone(tomlPath)
 			if err != nil {
 				return FailedCheck("Timezone cleanup",
 					fmt.Sprintf("team %s config.toml scrub failed", tc.TeamID),
 					err.Error())
 			}
-			if didScrub {
+			if teamDidScrub {
 				scrubbed = append(scrubbed, fmt.Sprintf("team %s config.toml", tc.TeamID))
 			}
 		}
@@ -65,13 +68,19 @@ func checkTimezoneScrub(_ bool) checkResult {
 // scrubJSONTimezone removes a top-level "timezone" key from a JSON file if
 // present. Returns (true, nil) if a key was removed, (false, nil) if the file
 // is missing, not valid JSON, or already clean. Uses map[string]json.RawMessage
-// so unrelated values round-trip unchanged.
+// so unrelated values round-trip unchanged. The existing file mode is
+// preserved so the auto-fix never silently tightens or loosens permissions.
 func scrubJSONTimezone(path string) (bool, error) {
-	data, err := os.ReadFile(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
+		return false, err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return false, err
 	}
 
@@ -90,7 +99,7 @@ func scrubJSONTimezone(path string) (bool, error) {
 		return false, err
 	}
 	newData = append(newData, '\n')
-	if err := os.WriteFile(path, newData, 0600); err != nil {
+	if err := os.WriteFile(path, newData, info.Mode().Perm()); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -99,13 +108,20 @@ func scrubJSONTimezone(path string) (bool, error) {
 // scrubTOMLTimezone removes any top-level `timezone = ...` line from a TOML
 // file, preserving all surrounding lines including comments. Lines inside a
 // `[table]` section are ignored — only the root-level assignment is scrubbed.
-// Returns (true, nil) if a line was removed, (false, nil) otherwise.
+// Returns (true, nil) if a line was removed, (false, nil) otherwise. The
+// existing file mode is preserved so the auto-fix never silently tightens or
+// loosens permissions.
 func scrubTOMLTimezone(path string) (bool, error) {
-	data, err := os.ReadFile(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
 		}
+		return false, err
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return false, err
 	}
 
@@ -132,7 +148,7 @@ func scrubTOMLTimezone(path string) (bool, error) {
 	}
 
 	newContent := strings.Join(out, "\n")
-	if err := os.WriteFile(path, []byte(newContent), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(newContent), info.Mode().Perm()); err != nil {
 		return false, err
 	}
 	return true, nil
