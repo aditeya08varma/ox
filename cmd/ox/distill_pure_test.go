@@ -403,3 +403,57 @@ func TestISOWeekRange_LastWeekOfYear(t *testing.T) {
 	assert.Equal(t, 12, int(start.Month()))
 	assert.Equal(t, 22, start.Day())
 }
+
+// --- Team-timezone revert regression (Unit 1) -----------------------------
+//
+// These tests lock in that every date helper uses UTC regardless of a
+// caller-supplied *time.Location. A team timezone feature used to route
+// through these helpers; the revert (journal-timezone-plan.md) hardcodes
+// UTC. Failure prevented: reintroducing a tz-aware code path that buckets
+// near-midnight observations on the wrong day.
+
+func TestGroupObservationsByDay_UTCRegardlessOfTZ(t *testing.T) {
+	la, err := time.LoadLocation("America/Los_Angeles")
+	require.NoError(t, err)
+	// 2026-04-12 23:30 America/Los_Angeles == 2026-04-13 06:30 UTC
+	obs := []distillObservation{
+		{Content: "late", RecordedAt: time.Date(2026, 4, 12, 23, 30, 0, 0, la)},
+	}
+	groups := groupObservationsByDay(obs, la)
+	require.Len(t, groups, 1)
+	assert.Len(t, groups["2026-04-13"], 1, "expected UTC day 2026-04-13, got %v", groups)
+}
+
+func TestDetermineLayers_MonthlyBoundaryAlwaysUTC(t *testing.T) {
+	la, err := time.LoadLocation("America/Los_Angeles")
+	require.NoError(t, err)
+	// 2026-04-01 00:00 UTC == 2026-03-31 17:00 LA. LA view would say
+	// "March → April" and enqueue March; UTC says "April → April" → none.
+	lastMonthly := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	state := &distillStateV2{LastMonthly: lastMonthly.Format(time.RFC3339)}
+	now := time.Date(2026, 4, 15, 12, 0, 0, 0, time.UTC)
+	plan := determineLayers(state, "monthly", now, la)
+	assert.Empty(t, plan.Months, "expected no months in UTC view, got %v", plan.Months)
+}
+
+func TestEnumerateWeeks_IgnoresTZParameter(t *testing.T) {
+	la, err := time.LoadLocation("America/Los_Angeles")
+	require.NoError(t, err)
+	lastTime := time.Date(2026, 2, 20, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 3, 16, 0, 0, 0, 0, time.UTC)
+	weeksUTC := enumerateWeeks(lastTime, now, time.UTC)
+	weeksLA := enumerateWeeks(lastTime, now, la)
+	assert.Equal(t, weeksUTC, weeksLA, "tz parameter must be ignored: utc=%v la=%v", weeksUTC, weeksLA)
+}
+
+func TestEnumerateMonths_IgnoresTZParameter(t *testing.T) {
+	la, err := time.LoadLocation("America/Los_Angeles")
+	require.NoError(t, err)
+	// lastTime = 2026-04-01 UTC is 2026-03-31 17:00 LA — a real zone
+	// mismatch across the month boundary.
+	lastTime := time.Date(2026, 4, 1, 0, 0, 0, 0, time.UTC)
+	now := time.Date(2026, 6, 20, 12, 0, 0, 0, time.UTC)
+	monthsUTC := enumerateMonths(lastTime, now, time.UTC)
+	monthsLA := enumerateMonths(lastTime, now, la)
+	assert.Equal(t, monthsUTC, monthsLA, "tz parameter must be ignored: utc=%v la=%v", monthsUTC, monthsLA)
+}

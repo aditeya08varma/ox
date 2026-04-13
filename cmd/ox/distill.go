@@ -164,36 +164,26 @@ func inferMonthlyHighWater(tcPath string) time.Time {
 	return endOfMonth(t)
 }
 
-// endOfDay returns 23:59:59 of the given date in the specified timezone.
-// If no timezone is provided, UTC is used.
+// endOfDay returns 23:59:59 UTC of the given date.
+// The tz variadic is retained for caller compatibility and ignored; Unit 2
+// will strip the parameter entirely.
 func endOfDay(t time.Time, tz ...*time.Location) time.Time {
-	loc := time.UTC
-	if len(tz) > 0 && tz[0] != nil {
-		loc = tz[0]
-	}
-	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, loc)
+	return time.Date(t.Year(), t.Month(), t.Day(), 23, 59, 59, 0, time.UTC)
 }
 
-// endOfMonth returns the last second of the given month in the specified timezone.
-// If no timezone is provided, UTC is used.
+// endOfMonth returns the last second of the given month in UTC.
+// The tz variadic is retained for caller compatibility and ignored.
 func endOfMonth(t time.Time, tz ...*time.Location) time.Time {
-	loc := time.UTC
-	if len(tz) > 0 && tz[0] != nil {
-		loc = tz[0]
-	}
 	// first day of next month, minus one second
-	return time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, loc).Add(-time.Second)
+	return time.Date(t.Year(), t.Month()+1, 1, 0, 0, 0, 0, time.UTC).Add(-time.Second)
 }
 
-// isoWeekRange returns the Monday 00:00:00 and Sunday 23:59:59 of the given ISO week
-// in the specified timezone. Pass nil for UTC.
+// isoWeekRange returns the Monday 00:00:00 and Sunday 23:59:59 UTC of the
+// given ISO week. The tz variadic is retained for caller compatibility and
+// ignored.
 func isoWeekRange(year, week int, tz ...*time.Location) (start, end time.Time) {
-	loc := time.UTC
-	if len(tz) > 0 && tz[0] != nil {
-		loc = tz[0]
-	}
 	// Jan 4 is always in ISO week 1
-	jan4 := time.Date(year, 1, 4, 0, 0, 0, 0, loc)
+	jan4 := time.Date(year, 1, 4, 0, 0, 0, 0, time.UTC)
 	// Find Monday of ISO week 1
 	weekday := jan4.Weekday()
 	if weekday == 0 {
@@ -203,23 +193,21 @@ func isoWeekRange(year, week int, tz ...*time.Location) (start, end time.Time) {
 
 	start = week1Monday.AddDate(0, 0, (week-1)*7)
 	end = start.AddDate(0, 0, 6) // Sunday
-	end = time.Date(end.Year(), end.Month(), end.Day(), 23, 59, 59, 0, loc)
+	end = time.Date(end.Year(), end.Month(), end.Day(), 23, 59, 59, 0, time.UTC)
 	return start, end
 }
 
-// groupObservationsByDay groups observations by their RecordedAt date in the given timezone.
-// Keys are YYYY-MM-DD strings. Observations within each group maintain their sort order.
-// If tz is nil, UTC is used.
+// groupObservationsByDay groups observations by their RecordedAt date in UTC.
+// Keys are YYYY-MM-DD strings. Observations within each group maintain their
+// sort order. The tz parameter is retained for caller compatibility and
+// ignored; Unit 2 will strip the parameter entirely.
 func groupObservationsByDay(observations []distillObservation, tz *time.Location) map[string][]distillObservation {
-	if tz == nil {
-		tz = time.UTC
-	}
 	groups := make(map[string][]distillObservation)
 	for _, obs := range observations {
 		if obs.RecordedAt.IsZero() {
 			continue
 		}
-		day := obs.RecordedAt.In(tz).Format("2006-01-02")
+		day := obs.RecordedAt.UTC().Format("2006-01-02")
 		groups[day] = append(groups[day], obs)
 	}
 	return groups
@@ -277,12 +265,10 @@ func readDailyFilesForDateRange(dailyDir, startDate, endDate string) ([]string, 
 }
 
 // readWeeklyFilesForMonth reads weekly .md files whose ISO week overlaps with
-// the given year-month. Returns contents and filenames.
-// tz is used for week boundary calculations; if nil, UTC is used.
+// the given year-month. Returns contents and filenames. Month boundaries are
+// computed in UTC. The tz parameter is retained for caller compatibility and
+// ignored.
 func readWeeklyFilesForMonth(weeklyDir string, year, month int, tz *time.Location) ([]string, []string, error) {
-	if tz == nil {
-		tz = time.UTC
-	}
 	entries, err := os.ReadDir(weeklyDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -291,8 +277,8 @@ func readWeeklyFilesForMonth(weeklyDir string, year, month int, tz *time.Locatio
 		return nil, nil, err
 	}
 
-	monthStart := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, tz)
-	monthEnd := time.Date(year, time.Month(month+1), 1, 0, 0, 0, 0, tz).Add(-time.Second)
+	monthStart := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+	monthEnd := time.Date(year, time.Month(month+1), 1, 0, 0, 0, 0, time.UTC).Add(-time.Second)
 
 	type weeklyFile struct {
 		name string
@@ -661,10 +647,11 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	extractGuidelines := loadGuidance(tc.Path, "EXTRACT.md")
 	distillGuidelines := loadGuidance(tc.Path, "DISTILL.md")
 
-	// resolve team timezone for date bucketing
-	tz := config.ResolveTimezone(projectRoot)
-
-	now := time.Now().In(tz)
+	// Team-timezone feature removed: date bucketing is always UTC. The tz
+	// local is retained as time.UTC so helpers that still accept a
+	// *time.Location parameter compile; Unit 2 will strip the parameter.
+	tz := time.UTC
+	now := time.Now().UTC()
 
 	// determine which layers to run
 	plan := determineLayers(state, distillLayer, now, tz)
@@ -757,12 +744,10 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 }
 
 // determineLayers returns a distillPlan describing which layers and periods to distill.
-// When multiple week/month boundaries have been crossed since last run, each gets its own entry.
-// tz is used for date boundary calculations; if nil, UTC is used.
+// When multiple week/month boundaries have been crossed since last run, each
+// gets its own entry. Calendar boundaries are computed in UTC; the tz
+// parameter is retained for caller compatibility and ignored.
 func determineLayers(state *distillStateV2, explicit string, now time.Time, tz *time.Location) distillPlan {
-	if tz == nil {
-		tz = time.UTC
-	}
 	var plan distillPlan
 
 	if explicit == "daily" || explicit == "" {
@@ -779,11 +764,10 @@ func determineLayers(state *distillStateV2, explicit string, now time.Time, tz *
 
 	if explicit == "monthly" || explicit == "" {
 		lastMonthly := state.lastMonthlyTime()
-		// Normalize both sides to the team timezone before comparing calendar
-		// months, so a timezone change between runs doesn't skip or reprocess months.
-		lastInTZ := lastMonthly.In(tz)
-		nowInTZ := now.In(tz)
-		if lastMonthly.IsZero() || lastInTZ.Year() < nowInTZ.Year() || lastInTZ.Month() < nowInTZ.Month() {
+		// Compare calendar months in UTC.
+		lastInUTC := lastMonthly.UTC()
+		nowInUTC := now.UTC()
+		if lastMonthly.IsZero() || lastInUTC.Year() < nowInUTC.Year() || lastInUTC.Month() < nowInUTC.Month() {
 			plan.Months = enumerateMonths(lastMonthly, now, tz)
 		}
 	}
@@ -797,12 +781,10 @@ func (p distillPlan) isEmpty() bool {
 }
 
 // enumerateWeeks returns each completed ISO week between lastTime and now.
-// A week is "completed" if its Sunday has passed relative to now.
-// tz is used for week boundary calculations; if nil, UTC is used.
+// A week is "completed" if its Sunday has passed relative to now. Week
+// boundaries are always UTC; the tz parameter is retained for caller
+// compatibility and ignored.
 func enumerateWeeks(lastTime, now time.Time, tz *time.Location) []isoWeek {
-	if tz == nil {
-		tz = time.UTC
-	}
 	var weeks []isoWeek
 
 	// Start from the week after lastTime
@@ -831,22 +813,20 @@ func enumerateWeeks(lastTime, now time.Time, tz *time.Location) []isoWeek {
 }
 
 // enumerateMonths returns each completed month between lastTime and now.
-// A month is "completed" if its last day has passed relative to now.
-// Starts from the month after lastTime to avoid re-processing.
-// tz is used for month boundary calculations; if nil, UTC is used.
+// A month is "completed" if its last day has passed relative to now. Starts
+// from the month after lastTime to avoid re-processing. Calendar boundaries
+// are always UTC; the tz parameter is retained for caller compatibility and
+// ignored.
 func enumerateMonths(lastTime, now time.Time, tz *time.Location) []string {
-	if tz == nil {
-		tz = time.UTC
-	}
 	var months []string
 
 	var cursor time.Time
 	if lastTime.IsZero() {
 		// If no prior monthly, start from a reasonable lookback (12 months max)
-		cursor = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, tz).AddDate(-1, 0, 0)
+		cursor = time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, time.UTC).AddDate(-1, 0, 0)
 	} else {
 		// Start from the next month after last processed
-		cursor = time.Date(lastTime.Year(), lastTime.Month()+1, 1, 0, 0, 0, 0, tz)
+		cursor = time.Date(lastTime.Year(), lastTime.Month()+1, 1, 0, 0, 0, 0, time.UTC)
 	}
 
 	for !cursor.After(now) {
@@ -1081,7 +1061,7 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		return nil
 	}
 
-	// group observations by day (in team timezone)
+	// group observations by day (UTC)
 	obsByDay := groupObservationsByDay(observations, tz)
 
 	// union all day keys
@@ -1109,7 +1089,6 @@ func distillDaily(ctx context.Context, cmd *cobra.Command, backend agentcli.Back
 		}
 		return nil
 	}
-
 
 	for _, day := range days {
 		dayObs := obsByDay[day]

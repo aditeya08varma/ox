@@ -440,8 +440,7 @@ func readPendingSessionFacts(tcPath string, since time.Time, tz ...*time.Locatio
 				continue
 			}
 
-			// Use parseFactDate to extract the date from content metadata,
-			// converting UTC timestamps to the team timezone for day-bucketing.
+			// Use parseFactDate to extract the UTC date from content metadata.
 			// Falls back to directory name if no parseable date in content.
 			factDate := parseFactDate(content, f.Name(), tz...)
 			if factDate == "" {
