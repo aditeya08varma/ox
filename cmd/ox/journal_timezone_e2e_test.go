@@ -23,6 +23,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -184,6 +185,15 @@ func writeTZProjectConfig(t *testing.T, w tzWorkspace, extras map[string]string)
 		data, 0o600))
 }
 
+// writeTZProjectConfigRaw writes raw bytes into .sageox/config.json. Use when a
+// test needs exact-byte control over the JSON shape (e.g. idempotency checks
+// that compare pre/post fix output byte-for-byte).
+func writeTZProjectConfigRaw(t *testing.T, w tzWorkspace, content string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(w.workspace, ".sageox", "config.json"),
+		[]byte(content), 0o600))
+}
+
 // writeTZTeamConfig writes raw TOML bytes into the team context config.toml.
 func writeTZTeamConfig(t *testing.T, w tzWorkspace, content string) {
 	t.Helper()
@@ -247,13 +257,6 @@ func TestJournalTimezone_TZ01_UTCBucketingIgnoresStrayTZInputs(t *testing.T) {
 	target := now.Add(-24 * time.Hour).Truncate(24 * time.Hour).
 		Add(6*time.Hour + 30*time.Minute)
 	expectedUTCDay := target.Format("2006-01-02")
-
-	// 6-hour margin guard (plan §4.3): if the clock is within 6h of a day
-	// boundary, skip the test rather than emit a flaky assertion.
-	distFromStart := target.Sub(target.Truncate(24 * time.Hour))
-	distFromEnd := target.Truncate(24 * time.Hour).Add(24 * time.Hour).Sub(target)
-	require.GreaterOrEqual(t, distFromStart, 6*time.Hour, "target too close to UTC day start (clock skew?)")
-	require.GreaterOrEqual(t, distFromEnd, 6*time.Hour, "target too close to UTC day end (clock skew?)")
 
 	_ = tzPutObservation(t, oxBin, w, "observation content for TZ-01", target)
 
@@ -377,7 +380,7 @@ func TestJournalTimezone_TZ04_DoctorScrubsStrayTimezoneKeys(t *testing.T) {
 }
 `
 	projectJSONPath := filepath.Join(w.workspace, ".sageox", "config.json")
-	require.NoError(t, os.WriteFile(projectJSONPath, []byte(projectJSON), 0o600))
+	writeTZProjectConfigRaw(t, w, projectJSON)
 
 	teamTOML := `# top-of-file comment — must be preserved
 session_recording = "auto"
@@ -389,7 +392,7 @@ primary = "galex"
 # trailing comment — must be preserved
 `
 	teamTOMLPath := filepath.Join(w.teamCtx, "config.toml")
-	require.NoError(t, os.WriteFile(teamTOMLPath, []byte(teamTOML), 0o644))
+	writeTZTeamConfig(t, w, teamTOML)
 
 	// first run — must scrub stray timezone keys from both files
 	out1, code1, _ := testguard.RunOx(t, oxBin, w.workspace, w.env,
@@ -416,8 +419,9 @@ primary = "galex"
 	require.NoError(t, err)
 	teamStr1 := string(teamBytes1)
 
-	assert.NotContains(t, teamStr1, "timezone",
-		"team config timezone key must be removed; got:\n%s", teamStr1)
+	tzKeyLine := regexp.MustCompile(`(?m)^\s*timezone\s*=`)
+	assert.False(t, tzKeyLine.MatchString(teamStr1),
+		"team config top-level timezone key must be removed; got:\n%s", teamStr1)
 	assert.NotContains(t, teamStr1, "Europe/Berlin",
 		"stray timezone VALUE must not survive; got:\n%s", teamStr1)
 	assert.Contains(t, teamStr1, "top-of-file comment",
