@@ -19,9 +19,11 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -30,23 +32,148 @@ import (
 // until Unit 3 of journal-read-plan.md lands.
 const skipPendingUnit3 = "impl not landed yet: depends on Unit 3 (ox journal list + journal_time.go)"
 
+// decodeJournalEnvelope parses the first JSON object line out of a
+// combined stdout+stderr blob and returns the envelope plus any trailing
+// stderr-warning lines. testguard.RunOx uses cmd.CombinedOutput, so a
+// successful `ox journal list` call emits the envelope JSON on the first
+// line and any per-file warnings on subsequent lines ("warning: <code>:
+// <msg>"). The split-by-newline scan picks the first line that trims to
+// a "{"-prefixed value and round-trips through json.Unmarshal; anything
+// before that is diagnostic noise and anything after is the stderr tail.
+func decodeJournalEnvelope(t *testing.T, out string) (*journalEnvelope, string) {
+	t.Helper()
+	lines := strings.Split(out, "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
+			continue
+		}
+		var env journalEnvelope
+		if err := json.Unmarshal([]byte(trimmed), &env); err == nil {
+			remainder := strings.Join(lines[i+1:], "\n")
+			return &env, remainder
+		}
+	}
+	t.Fatalf("no JSON envelope found in output:\n%s", out)
+	return nil, ""
+}
+
+// dayFloorUTC returns the UTC midnight at or before t. It mirrors
+// list.go:dayFloor (unexported) so JR-* tests can compute the expected
+// day-rounded window bound from the spec without reaching into the
+// reader package. The spec is the source of truth — if list.go's rounding
+// ever diverges from this helper, that is itself a bug.
+func dayFloorUTC(t time.Time) time.Time {
+	u := t.UTC()
+	return time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+}
+
+// dayCeilUTC returns the exclusive UTC-midnight upper bound for a
+// half-open day window containing t.
+func dayCeilUTC(t time.Time) time.Time {
+	return dayFloorUTC(t).Add(24 * time.Hour)
+}
+
+// skipIfNearUTCMidnight skips the test if `now` is within 10 seconds of
+// a UTC day boundary. The harness captures `now` once and the production
+// subprocess captures its own `time.Now()` a few milliseconds later;
+// when those straddle a day boundary the day-rounded window in the
+// envelope disagrees with the test's expected bounds. Ten seconds is far
+// more margin than the subprocess startup budget so the skip is rare in
+// practice.
+func skipIfNearUTCMidnight(t *testing.T, now time.Time) {
+	t.Helper()
+	u := now.UTC()
+	sod := time.Date(u.Year(), u.Month(), u.Day(), 0, 0, 0, 0, time.UTC)
+	eod := sod.Add(24 * time.Hour)
+	if u.Sub(sod) < 10*time.Second || eod.Sub(u) < 10*time.Second {
+		t.Skip("within 10s of UTC midnight — window bounds may straddle a day boundary")
+	}
+}
+
 // TestJournalRead_JR01_MinimalDaily_List — one in-window daily.
 // Failure prevented: reader cannot locate memory/daily/ under the
 // staged team context at all.
 func TestJournalRead_JR01_MinimalDaily_List(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
+	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
 	fx := recipeMinimalDaily(t, e.primaryTeam, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=24h", "--format=json")
-	t.Logf("JR-01 exit=%d out_bytes=%d dailies=%d", exit, len(out), len(fx.Dailies))
+	if exit != 0 {
+		t.Fatalf("JR-01: exit=%d want 0\nout:\n%s", exit, out)
+	}
+	env, _ := decodeJournalEnvelope(t, out)
+	if !env.Success {
+		t.Fatalf("JR-01: success=false want true; out=%s", out)
+	}
+	if env.Type != "journal_list" {
+		t.Fatalf("JR-01: type=%q want %q", env.Type, "journal_list")
+	}
+	if env.Error != nil {
+		t.Fatalf("JR-01: unexpected error envelope: %+v", env.Error)
+	}
+	if env.Data == nil {
+		t.Fatalf("JR-01: data is nil; out=%s", out)
+	}
+	if got := len(env.Data.Entries); got != 1 {
+		t.Fatalf("JR-01: entries len=%d want 1; entries=%+v", got, env.Data.Entries)
+	}
 
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: assert exit 0; parse envelope; entries has exactly one row
-	// with id=fx.Dailies[0].ID, layer=daily, date=fx.Dailies[0].Date, path set,
-	// fact_count, citation_count, source_files; window.since/until are RFC3339 Z;
-	// window.layer_resolved=daily.
+	want := fx.Dailies[0]
+	got := env.Data.Entries[0]
+	if got.ID != want.ID {
+		t.Fatalf("JR-01: entry.id=%q want %q", got.ID, want.ID)
+	}
+	if got.Layer != "daily" {
+		t.Fatalf("JR-01: entry.layer=%q want %q", got.Layer, "daily")
+	}
+	if got.Date != want.Date {
+		t.Fatalf("JR-01: entry.date=%q want %q", got.Date, want.Date)
+	}
+	if got.Team != e.primaryTeam.slug {
+		t.Fatalf("JR-01: entry.team=%q want %q (slug, not id)", got.Team, e.primaryTeam.slug)
+	}
+	if got.Path != want.Rel {
+		t.Fatalf("JR-01: entry.path=%q want %q", got.Path, want.Rel)
+	}
+	if got.FactCount != 0 {
+		t.Fatalf("JR-01: entry.fact_count=%d want 0 (reader does not populate fact_count yet)", got.FactCount)
+	}
+	if got.CitationCount != 1 {
+		t.Fatalf("JR-01: entry.citation_count=%d want 1 (body has one numbered ref)", got.CitationCount)
+	}
+	if len(got.SourceFiles) != 1 || got.SourceFiles[0] != want.Sources[0] {
+		t.Fatalf("JR-01: entry.source_files=%v want %v", got.SourceFiles, want.Sources)
+	}
+	createdAt, err := time.Parse(time.RFC3339, got.CreatedAt)
+	if err != nil {
+		t.Fatalf("JR-01: parse created_at=%q: %v", got.CreatedAt, err)
+	}
+	if delta := createdAt.Sub(want.Mtime.UTC()); delta < -2*time.Second || delta > 2*time.Second {
+		t.Fatalf("JR-01: created_at=%s drifts from mtime=%s by %s (>2s)",
+			createdAt.Format(time.RFC3339), want.Mtime.UTC().Format(time.RFC3339), delta)
+	}
+
+	if env.Data.Window == nil {
+		t.Fatalf("JR-01: window is nil")
+	}
+	wantSince := dayFloorUTC(now.Add(-24 * time.Hour)).Format(time.RFC3339)
+	wantUntil := dayCeilUTC(now).Format(time.RFC3339)
+	if env.Data.Window.Since != wantSince {
+		t.Fatalf("JR-01: window.since=%q want %q", env.Data.Window.Since, wantSince)
+	}
+	if env.Data.Window.Until != wantUntil {
+		t.Fatalf("JR-01: window.until=%q want %q", env.Data.Window.Until, wantUntil)
+	}
+	if env.Data.Window.LayerResolved != "daily" {
+		t.Fatalf("JR-01: window.layer_resolved=%q want %q", env.Data.Window.LayerResolved, "daily")
+	}
+	if env.Data.Truncated {
+		t.Fatalf("JR-01: truncated=true unexpected for a single-row window")
+	}
 }
 
 // TestJournalRead_JR02_EmptyWindow_YesterdayOnly — 1h window over a
@@ -55,18 +182,55 @@ func TestJournalRead_JR01_MinimalDaily_List(t *testing.T) {
 func TestJournalRead_JR02_EmptyWindow_YesterdayOnly(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
-	if now.Hour() == 23 && now.Minute() >= 59 {
-		t.Skip("within seconds of UTC midnight — window rounding unstable, retry")
+	skipIfNearUTCMidnight(t, now)
+	// Within the first UTC hour, --since=1h rounds back to yesterday and
+	// the staged yesterday file would (correctly) be in window — the
+	// recipe's intent is to exercise an empty window, so we skip.
+	if now.Hour() == 0 {
+		t.Skip("first UTC hour: --since=1h crosses back to yesterday; the yesterday-only fixture would be in window")
 	}
 	e := setupJournalE2E(t, now)
-	fx := recipeYesterdayOnly(t, e.primaryTeam, now)
+	_ = recipeYesterdayOnly(t, e.primaryTeam, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=1h", "--format=json")
-	t.Logf("JR-02 exit=%d out_bytes=%d dailies=%d", exit, len(out), len(fx.Dailies))
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: exit 0, success=true, data.entries=[], data.truncated=false,
-	// window.since=today 00:00:00Z, window.until=tomorrow 00:00:00Z, no warnings.
+	if exit != 0 {
+		t.Fatalf("JR-02: exit=%d want 0\nout:\n%s", exit, out)
+	}
+	env, _ := decodeJournalEnvelope(t, out)
+	if !env.Success {
+		t.Fatalf("JR-02: success=false want true")
+	}
+	if env.Error != nil {
+		t.Fatalf("JR-02: unexpected error envelope: %+v", env.Error)
+	}
+	if env.Data == nil {
+		t.Fatalf("JR-02: data is nil")
+	}
+	if got := len(env.Data.Entries); got != 0 {
+		t.Fatalf("JR-02: entries len=%d want 0 (yesterday file must be out of 1h window); entries=%+v",
+			got, env.Data.Entries)
+	}
+	// The reader must serialize an empty `entries` array, not null. Spec
+	// §4.3 says the field is always present; pairing that with our
+	// nonNilStringSlice / nonNilSlice discipline means the stdout bytes
+	// contain the literal `"entries":[]`.
+	if !strings.Contains(out, `"entries":[]`) {
+		t.Fatalf("JR-02: expected entries to serialize as [], got out=%s", out)
+	}
+	if env.Data.Truncated {
+		t.Fatalf("JR-02: truncated=true unexpected")
+	}
+	if env.Data.Window == nil {
+		t.Fatalf("JR-02: window is nil")
+	}
+	wantSince := dayFloorUTC(now.Add(-1 * time.Hour)).Format(time.RFC3339)
+	wantUntil := dayCeilUTC(now).Format(time.RFC3339)
+	if env.Data.Window.Since != wantSince {
+		t.Fatalf("JR-02: window.since=%q want %q", env.Data.Window.Since, wantSince)
+	}
+	if env.Data.Window.Until != wantUntil {
+		t.Fatalf("JR-02: window.until=%q want %q", env.Data.Window.Until, wantUntil)
+	}
 }
 
 // TestJournalRead_JR03_MultiSnapshotSameDay_ListOrdering — two
@@ -75,16 +239,46 @@ func TestJournalRead_JR02_EmptyWindow_YesterdayOnly(t *testing.T) {
 func TestJournalRead_JR03_MultiSnapshotSameDay_ListOrdering(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
+	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
 	fx := recipeMultiSnapshotSameDay(t, e.primaryTeam, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=24h", "--format=json")
-	t.Logf("JR-03 exit=%d out_bytes=%d dailies=%d", exit, len(out), len(fx.Dailies))
+	if exit != 0 {
+		t.Fatalf("JR-03: exit=%d want 0\nout:\n%s", exit, out)
+	}
+	env, _ := decodeJournalEnvelope(t, out)
+	if env.Data == nil || len(env.Data.Entries) != 2 {
+		t.Fatalf("JR-03: want 2 entries (spec §5.c multi-snapshot per day), got data=%+v", env.Data)
+	}
 
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: two entries, ordered by date asc then created_at asc →
-	// fx.Dailies[0] (older mtime) before fx.Dailies[1] (newer). Both share
-	// date=today.
+	// Recipe stages: fx.Dailies[0]=older (mtime -4h), fx.Dailies[1]=newer (mtime -2h).
+	// Reader sort order is (date asc, created_at asc) per list.go:sortEntries,
+	// so the older snapshot must precede the newer one.
+	want0 := fx.Dailies[0]
+	want1 := fx.Dailies[1]
+	got0 := env.Data.Entries[0]
+	got1 := env.Data.Entries[1]
+	if got0.ID != want0.ID || got1.ID != want1.ID {
+		t.Fatalf("JR-03: ordering wrong: got [%s, %s] want [%s, %s] (older mtime first)",
+			got0.ID, got1.ID, want0.ID, want1.ID)
+	}
+	if got0.Date != want0.Date || got1.Date != want1.Date {
+		t.Fatalf("JR-03: dates wrong: [%s, %s] want [%s, %s] (both = today)",
+			got0.Date, got1.Date, want0.Date, want1.Date)
+	}
+	ca0, err := time.Parse(time.RFC3339, got0.CreatedAt)
+	if err != nil {
+		t.Fatalf("JR-03: parse created_at[0]=%q: %v", got0.CreatedAt, err)
+	}
+	ca1, err := time.Parse(time.RFC3339, got1.CreatedAt)
+	if err != nil {
+		t.Fatalf("JR-03: parse created_at[1]=%q: %v", got1.CreatedAt, err)
+	}
+	if !ca0.Before(ca1) {
+		t.Fatalf("JR-03: expected created_at ascending, got [0]=%s [1]=%s",
+			ca0.Format(time.RFC3339), ca1.Format(time.RFC3339))
+	}
 }
 
 // TestJournalRead_JR11_MalformedFilename_ListWarnsNotCrash — a stray
@@ -148,16 +342,42 @@ func TestJournalRead_JR13_MixedTzAndUtcLegacy_TrustsPrefix(t *testing.T) {
 func TestJournalRead_JR14_MultiTeamDefault_SingleTeam(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
+	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
 	secondary := addSecondaryTeam(t, e, "team_read_e2e_t2", "Journal Read E2E T2", "journal-read-e2e-t2")
 	fx := recipeMultiTeamList(t, e.primaryTeam, secondary, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=24h", "--format=json")
-	t.Logf("JR-14 exit=%d out_bytes=%d dailies=%d", exit, len(out), len(fx.Dailies))
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: exit 0, entries has exactly 1 row (primary only); that row's
-	// team field equals e.primaryTeam.id; secondary's daily is NOT present.
+	if exit != 0 {
+		t.Fatalf("JR-14: exit=%d want 0\nout:\n%s", exit, out)
+	}
+	env, _ := decodeJournalEnvelope(t, out)
+	if env.Data == nil || len(env.Data.Entries) != 1 {
+		t.Fatalf("JR-14: want 1 entry (primary only), got data=%+v", env.Data)
+	}
+	got := env.Data.Entries[0]
+	wantPrimary := fx.Dailies[0]
+	wantSecondary := fx.Dailies[1]
+	if got.ID != wantPrimary.ID {
+		t.Fatalf("JR-14: entry.id=%q want %q (primary daily, secondary must be excluded)",
+			got.ID, wantPrimary.ID)
+	}
+	// Team field is the slug resolved via teamSlugOrID (journal_list.go),
+	// not the raw team_id. The TODO left on this skeleton was wrong; guard
+	// against a regression that starts emitting team_id.
+	// Team field is the slug resolved via teamSlugOrID (journal_list.go),
+	// not the raw team_id. The TODO left on this skeleton was wrong; the
+	// slug equality check below is the standing guard against a regression
+	// that starts emitting team_id. (The harness guarantees id != slug, so
+	// a separate "team != id" assertion would be dead code.)
+	if got.Team != e.primaryTeam.slug {
+		t.Fatalf("JR-14: entry.team=%q want slug %q (teamSlugOrID picks Slug over TeamID)",
+			got.Team, e.primaryTeam.slug)
+	}
+	// Defensive: the secondary daily must not appear anywhere in entries.
+	if got.ID == wantSecondary.ID {
+		t.Fatalf("JR-14: secondary daily %q leaked into default list", got.ID)
+	}
 }
 
 // TestJournalRead_JR15_MultiTeamAllTeams_Merged — --all-teams merges
@@ -166,16 +386,48 @@ func TestJournalRead_JR14_MultiTeamDefault_SingleTeam(t *testing.T) {
 func TestJournalRead_JR15_MultiTeamAllTeams_Merged(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()
+	skipIfNearUTCMidnight(t, now)
 	e := setupJournalE2E(t, now)
 	secondary := addSecondaryTeam(t, e, "team_read_e2e_t2", "Journal Read E2E T2", "journal-read-e2e-t2")
 	fx := recipeMultiTeamList(t, e.primaryTeam, secondary, now)
 
 	out, exit := e.Run(t, "journal", "list", "--since=24h", "--all-teams", "--format=json")
-	t.Logf("JR-15 exit=%d out_bytes=%d dailies=%d", exit, len(out), len(fx.Dailies))
-
-	t.Skip(skipPendingUnit3)
-	// TODO Unit 3: two entries; ordering = date asc, created_at asc, then team
-	// slug asc as tiebreaker; each row carries its own team field.
+	if exit != 0 {
+		t.Fatalf("JR-15: exit=%d want 0\nout:\n%s", exit, out)
+	}
+	env, _ := decodeJournalEnvelope(t, out)
+	if env.Data == nil || len(env.Data.Entries) != 2 {
+		t.Fatalf("JR-15: want 2 entries (merged across teams), got data=%+v", env.Data)
+	}
+	// Recipe stages primary daily at mtime=-3h and secondary daily at
+	// mtime=-2h. Both share date=today. list.go:sortEntries orders by
+	// (date asc, created_at asc) — so primary (older) comes first.
+	want0 := fx.Dailies[0] // primary
+	want1 := fx.Dailies[1] // secondary
+	got0 := env.Data.Entries[0]
+	got1 := env.Data.Entries[1]
+	if got0.ID != want0.ID || got1.ID != want1.ID {
+		t.Fatalf("JR-15: ordering wrong: got [%s, %s] want [%s, %s] (created_at asc: primary -3h < secondary -2h)",
+			got0.ID, got1.ID, want0.ID, want1.ID)
+	}
+	if got0.Team != e.primaryTeam.slug {
+		t.Fatalf("JR-15: entry[0].team=%q want %q (primary slug)", got0.Team, e.primaryTeam.slug)
+	}
+	if got1.Team != secondary.slug {
+		t.Fatalf("JR-15: entry[1].team=%q want %q (secondary slug)", got1.Team, secondary.slug)
+	}
+	ca0, err := time.Parse(time.RFC3339, got0.CreatedAt)
+	if err != nil {
+		t.Fatalf("JR-15: parse created_at[0]=%q: %v", got0.CreatedAt, err)
+	}
+	ca1, err := time.Parse(time.RFC3339, got1.CreatedAt)
+	if err != nil {
+		t.Fatalf("JR-15: parse created_at[1]=%q: %v", got1.CreatedAt, err)
+	}
+	if !ca0.Before(ca1) {
+		t.Fatalf("JR-15: expected created_at ascending across merged teams, got [0]=%s [1]=%s",
+			ca0.Format(time.RFC3339), ca1.Format(time.RFC3339))
+	}
 }
 
 // TestJournalRead_JR19_TeamNotFound_ErrorEnvelope — no team context
