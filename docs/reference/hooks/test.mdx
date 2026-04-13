@@ -1,28 +1,32 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox hooks test"
+description: "CLI reference for ox hooks test"
+sidebar_position: 39
 ---
 
-## ox logout
+## ox hooks test
 
-Log out of SageOx
+Fire a synthetic event to test hooks
 
 ### Synopsis
 
-Remove local authentication token and log out of SageOx.
+Fires a synthetic event through the hook runner to verify hooks work.
+
+The event is dispatched to all matching hooks with a test payload.
+Hooks have a 500ms timeout. Results are printed after ~700ms.
+
+Example:
+  ox hooks test murmur.received
+  ox hooks test daemon.started
 
 ```
-ox logout [flags]
+ox hooks test <event> [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+  -h, --help   help for test
 ```
 
 ### Options inherited from parent commands
@@ -38,5 +42,5 @@ ox logout [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox hooks](/hooks)	 - Manage event hooks for daemon notifications
 

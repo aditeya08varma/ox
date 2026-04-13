@@ -1,28 +1,26 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox murmur resume"
+description: "CLI reference for ox murmur resume"
+sidebar_position: 52
 ---
 
-## ox logout
+## ox murmur resume
 
-Log out of SageOx
+Resume murmur nudging for this session
 
 ### Synopsis
 
-Remove local authentication token and log out of SageOx.
+Resumes automatic murmur nudges for the current agent session after a previous pause.
 
 ```
-ox logout [flags]
+ox murmur resume [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+      --agent-id string   agent ID (falls back to SAGEOX_AGENT_ID env)
+  -h, --help              help for resume
 ```
 
 ### Options inherited from parent commands
@@ -38,5 +36,5 @@ ox logout [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox murmur](/murmur)	 - Publish a coordination signal to other AI coworkers
 

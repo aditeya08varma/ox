@@ -1,0 +1,55 @@
+---
+title: "ox session score"
+description: "CLI reference for ox session score"
+sidebar_position: 60
+---
+
+## ox session score
+
+Report or view SageOx contribution score for this session
+
+### Synopsis
+
+Report how much SageOx team context influenced this session's work.
+
+Without flags, displays the current score. With --score, sets or updates it.
+
+The score determines whether commits receive SageOx attribution:
+  none         (0.0)  No influence
+  minor        (0.3)  Confirmed an approach
+  moderate     (0.5)  Guided decisions
+  significant  (0.7)  Domain knowledge otherwise unavailable
+  critical     (1.0)  Entirely shaped the approach
+
+Examples:
+  ox session score                                      # view current score
+  ox session score --score moderate                     # set score
+  ox session score --score significant --reason "..."   # set score with explanation
+
+```
+ox session score [flags]
+```
+
+### Options
+
+```
+  -h, --help            help for score
+      --reason string   Detailed explanation of SageOx influence
+      --score string    SageOx contribution level (none, minor, moderate, significant, critical)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox session](/session)	 - Manage AI coworker sessions
+

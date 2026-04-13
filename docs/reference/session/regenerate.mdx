@@ -1,0 +1,67 @@
+---
+title: "ox session regenerate"
+description: "CLI reference for ox session regenerate"
+sidebar_position: 59
+---
+
+## ox session regenerate
+
+Regenerate session artifacts or re-redact session data
+
+### Synopsis
+
+Regenerate session artifacts from raw data.
+
+By default, regenerates markdown artifacts (summary.md, session.md)
+from raw session data.
+
+With --redact, re-applies all current REDACT.md rules (team + repo + user
+layers), regenerates all downstream artifacts (session.md, summary.md),
+and uploads updated content to LFS.
+Old LFS blobs become orphaned after regeneration. Server-side blob purge
+will be handled by the /api/v1/git/lfs/purge cloud API endpoint.
+
+The session name supports partial matching (e.g. agent ID suffix).
+
+With --summary, re-generates summary.json using the current prompt template
+by invoking Claude. Requires the claude CLI to be installed. Single-session
+only (ledgers can contain 10,000+ sessions; each requires an LLM invocation).
+
+Examples:
+  ox session regenerate OxK3ZN                          # regenerate artifacts
+  ox session regenerate --all                           # regenerate all artifacts
+  ox session regenerate OxK3ZN --redact                 # re-redact session
+  ox session regenerate --redact --all                  # re-redact all sessions
+  ox session regenerate OxK3ZN --redact --dry-run       # preview redaction
+  ox session regenerate OxK3ZN --summary                # re-summarize with current prompt
+
+```
+ox session regenerate [session-name] [flags]
+```
+
+### Options
+
+```
+      --all       regenerate all sessions
+      --dry-run   preview what would change without modifying anything (--redact only)
+      --force     skip confirmation prompts
+  -h, --help      help for regenerate
+      --redact    re-apply current REDACT.md rules to session data
+      --summary   re-generate summary.json using current prompt template (requires claude CLI)
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox session](/session)	 - Manage AI coworker sessions
+

@@ -1,28 +1,21 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox carts start"
+description: "CLI reference for ox carts start"
+sidebar_position: 24
 ---
 
-## ox logout
+## ox carts start
 
-Log out of SageOx
-
-### Synopsis
-
-Remove local authentication token and log out of SageOx.
+Claim a cart and start working on it
 
 ```
-ox logout [flags]
+ox carts start ID [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+  -h, --help   help for start
 ```
 
 ### Options inherited from parent commands
@@ -38,5 +31,5 @@ ox logout [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox carts](/carts)	 - Manage carts — trackable work items backed by DoltDB
 

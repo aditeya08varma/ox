@@ -1,28 +1,21 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox adapter reload"
+description: "CLI reference for ox adapter reload"
+sidebar_position: 7
 ---
 
-## ox logout
+## ox adapter reload
 
-Log out of SageOx
-
-### Synopsis
-
-Remove local authentication token and log out of SageOx.
+Signal daemon to re-scan adapter directories
 
 ```
-ox logout [flags]
+ox adapter reload [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+  -h, --help   help for reload
 ```
 
 ### Options inherited from parent commands
@@ -38,5 +31,5 @@ ox logout [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox adapter](/adapter)	 - Manage external adapter binaries
 

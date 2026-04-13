@@ -1,0 +1,61 @@
+---
+title: "ox hooks add"
+description: "CLI reference for ox hooks add"
+sidebar_position: 36
+---
+
+## ox hooks add
+
+Register a new event hook
+
+### Synopsis
+
+Register a hook script to run when a daemon event fires.
+
+The command receives the event as JSON on stdin and has a 500ms timeout.
+
+Valid events:
+  agent.idle
+  agent.registered
+  daemon.started
+  daemon.stopped
+  murmur.critical
+  murmur.received
+  session.available
+  session.started
+  session.stopped
+  session.uploaded
+  sync.completed
+  sync.failed
+  * (matches all events)
+
+Examples:
+  ox hooks add murmur.received 'notify-send "Murmur" "$(cat)"'
+  ox hooks add session.uploaded 'curl -X POST https://slack.example.com/hook -d @-'
+  ox hooks add '*' 'logger -t ox'
+
+```
+ox hooks add <event> <command> [flags]
+```
+
+### Options
+
+```
+  -h, --help   help for add
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox hooks](/hooks)	 - Manage event hooks for daemon notifications
+

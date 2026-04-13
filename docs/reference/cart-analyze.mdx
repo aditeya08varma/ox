@@ -1,28 +1,30 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox cart-analyze"
+description: "CLI reference for ox cart-analyze"
+sidebar_position: 11
 ---
 
-## ox logout
+## ox cart-analyze
 
-Log out of SageOx
+Dump cart + session + murmur data for AI analysis
 
 ### Synopsis
 
-Remove local authentication token and log out of SageOx.
+Reads carts (planned work), sessions (work evidence), and murmurs
+(coordination signals) for a time range and outputs structured JSON.
+
+Designed for consumption by Claude Code or Claude Cowork for visualization.
 
 ```
-ox logout [flags]
+ox cart-analyze [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+  -h, --help           help for cart-analyze
+      --since string   Start of time window (e.g. 24h, 7d, 2026-03-20) (default "24h")
+      --until string   End of time window (default: now)
 ```
 
 ### Options inherited from parent commands

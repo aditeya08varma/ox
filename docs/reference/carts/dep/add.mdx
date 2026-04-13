@@ -1,28 +1,22 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox carts dep add"
+description: "CLI reference for ox carts dep add"
+sidebar_position: 16
 ---
 
-## ox logout
+## ox carts dep add
 
-Log out of SageOx
-
-### Synopsis
-
-Remove local authentication token and log out of SageOx.
+Add a dependency (FROM depends on TO)
 
 ```
-ox logout [flags]
+ox carts dep add FROM TO [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+  -h, --help          help for add
+      --type string   Dependency type: blocks, related, discovered-from (default "blocks")
 ```
 
 ### Options inherited from parent commands
@@ -38,5 +32,5 @@ ox logout [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox carts dep](/carts/dep)	 - Manage cart dependencies
 

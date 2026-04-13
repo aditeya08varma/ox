@@ -1,33 +1,30 @@
 ---
-title: "ox login"
-description: "CLI reference for ox login"
-sidebar_position: 46
+title: "ox code insights"
+description: "CLI reference for ox code insights"
+sidebar_position: 29
 ---
 
-## ox login
+## ox code insights
 
-Authenticate with sageox.ai
-
-### Synopsis
-
-Authenticate with sageox.ai to access premium features and sync your configuration.
+Show planning-relevant code insights (hotspots, contention, recent activity)
 
 ```
-ox login [flags]
+ox code insights [flags]
 ```
 
 ### Options
 
 ```
-      --endpoint string   SageOx endpoint URL (overrides SAGEOX_ENDPOINT)
-  -h, --help              help for login
+      --days int    time window in days (default 14)
+  -h, --help        help for insights
+      --json        structured JSON output for agents
+      --limit int   max rows per section (default 10)
 ```
 
 ### Options inherited from parent commands
 
 ```
   -c, --config string    config file path (default: .sageox/config.yaml)
-      --json             output in JSON format (default: false)
       --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
       --profile          generate CPU profile and execution trace for performance analysis (default: false)
   -q, --quiet            suppress non-error output (default: false)
@@ -36,5 +33,5 @@ ox login [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox code](/code)	 - Search code in this repo
 

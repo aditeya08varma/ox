@@ -1,28 +1,22 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox code index"
+description: "CLI reference for ox code index"
+sidebar_position: 28
 ---
 
-## ox logout
+## ox code index
 
-Log out of SageOx
-
-### Synopsis
-
-Remove local authentication token and log out of SageOx.
+Index a git repository (alias for 'ox index code')
 
 ```
-ox logout [flags]
+ox code index [url] [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+      --full   wipe index and rebuild from scratch
+  -h, --help   help for index
 ```
 
 ### Options inherited from parent commands
@@ -38,5 +32,5 @@ ox logout [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox code](/code)	 - Search code in this repo
 

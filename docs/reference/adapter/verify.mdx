@@ -1,28 +1,26 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox adapter verify"
+description: "CLI reference for ox adapter verify"
+sidebar_position: 10
 ---
 
-## ox logout
+## ox adapter verify
 
-Log out of SageOx
+Run compliance tests against an adapter
 
 ### Synopsis
 
-Remove local authentication token and log out of SageOx.
+Run the adapter protocol compliance test suite against a named adapter.
+Verifies the adapter correctly implements info, detect, and serve-mode commands.
 
 ```
-ox logout [flags]
+ox adapter verify <name> [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+  -h, --help   help for verify
 ```
 
 ### Options inherited from parent commands
@@ -38,5 +36,5 @@ ox logout [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox adapter](/adapter)	 - Manage external adapter binaries
 

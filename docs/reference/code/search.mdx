@@ -1,28 +1,23 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox code search"
+description: "CLI reference for ox code search"
+sidebar_position: 30
 ---
 
-## ox logout
+## ox code search
 
-Log out of SageOx
-
-### Synopsis
-
-Remove local authentication token and log out of SageOx.
+Search indexed code using queries
 
 ```
-ox logout [flags]
+ox code search <query> [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+      --full-json   full uncompacted JSON output (~6x more context tokens)
+  -h, --help        help for search
+      --limit int   max results to return (default 10)
 ```
 
 ### Options inherited from parent commands
@@ -38,5 +33,5 @@ ox logout [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox code](/code)	 - Search code in this repo
 

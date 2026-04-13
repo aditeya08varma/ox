@@ -1,28 +1,30 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox adapter link"
+description: "CLI reference for ox adapter link"
+sidebar_position: 5
 ---
 
-## ox logout
+## ox adapter link
 
-Log out of SageOx
+Symlink a local adapter binary for development
 
 ### Synopsis
 
-Remove local authentication token and log out of SageOx.
+Create a symlink in the adapter directory pointing to a locally-built binary.
+The binary must exist and respond to the 'info' subcommand.
+
+This is the recommended workflow for adapter development:
+  go build -o ./bin/ox-adapter-myagent ./cmd/ox-adapter-myagent
+  ox adapter link ./bin/ox-adapter-myagent
 
 ```
-ox logout [flags]
+ox adapter link <path> [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+  -h, --help   help for link
 ```
 
 ### Options inherited from parent commands
@@ -38,5 +40,5 @@ ox logout [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox adapter](/adapter)	 - Manage external adapter binaries
 

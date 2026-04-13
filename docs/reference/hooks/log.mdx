@@ -1,28 +1,25 @@
 ---
-title: "ox logout"
-description: "CLI reference for ox logout"
-sidebar_position: 47
+title: "ox hooks log"
+description: "CLI reference for ox hooks log"
+sidebar_position: 38
 ---
 
-## ox logout
+## ox hooks log
 
-Log out of SageOx
+Show how to view hook execution logs
 
 ### Synopsis
 
-Remove local authentication token and log out of SageOx.
+Hook execution is logged to the daemon log. This command shows how to find those entries.
 
 ```
-ox logout [flags]
+ox hooks log [flags]
 ```
 
 ### Options
 
 ```
-      --all               logout from all endpoints
-      --endpoint string   endpoint to logout from
-  -f, --force             skip confirmation prompt (for scripting)
-  -h, --help              help for logout
+  -h, --help   help for log
 ```
 
 ### Options inherited from parent commands
@@ -38,5 +35,5 @@ ox logout [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox hooks](/hooks)	 - Manage event hooks for daemon notifications
 

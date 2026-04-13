@@ -1,7 +1,7 @@
 ---
 title: "ox session view"
 description: "CLI reference for ox session view"
-sidebar_position: 10
+sidebar_position: 63
 ---
 
 ## ox session view
@@ -13,14 +13,15 @@ View a session
 View a session in your preferred format.
 
 Without arguments, shows the most recent session in the web viewer.
-Default format is configurable via 'ox config set view_format web|html|text|json'.
+Default format is configurable via 'ox config set view_format web|text|json'.
 
 Examples:
   ox session view                         # open in web viewer (default)
   ox session view 2026-01-06T14-32-ryan   # specific session in web viewer
-  ox session view --html                  # view local session in browser (HTML)
   ox session view --text                  # view local session in terminal (markdown)
   ox session view --json                  # view local session as structured JSON
+  ox session view --context                  # show what context the AI coworker had
+  ox session view --context --json            # context trace as structured JSON
   ox session view --input /path/to/raw.jsonl
 
 ```
@@ -30,8 +31,8 @@ ox session view [session-name] [flags]
 ### Options
 
 ```
+      --context        show context trace (what context was available and influenced decisions)
   -h, --help           help for view
-      --html           view local session in browser (HTML)
   -i, --input string   input JSONL file path
       --json           view local session as structured JSON
       --latest         show most recent session
