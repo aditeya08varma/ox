@@ -143,12 +143,41 @@ try_git_update() {
       ;;
   esac
 
-  # Run the update from the RESOLVED path. Non-fatal on failure — fall
-  # back to the existing binary. Capture output so we can show a useful
-  # tail-of-log on failure without polluting stdout on the success path.
+  # Refuse to reset a dirty working tree. The fetch + reset below
+  # would otherwise silently destroy uncommitted contributor work on
+  # every auto_update=true invocation — users iterating on ox locally
+  # would lose edits between saves. Skip the update instead and let
+  # the final readiness gate decide whether the existing binary is
+  # still usable; the user can commit/stash and re-run explicitly.
+  if [ -n "$(git -C "$real_clone_path" status --porcelain 2>/dev/null)" ]; then
+    echo "warning: $real_clone_path has uncommitted or untracked files; skipping auto-update" >&2
+    return
+  fi
+
+  # Update the working tree via fetch + reset --hard instead of
+  # `git pull --ff-only`. The origin URL check above only verifies
+  # `.git/config`; the working tree content is unsigned and
+  # hand-editable, so a tampered Makefile would otherwise run under
+  # `make install`. Fetching from the allow-listed origin and
+  # resetting to its default-branch tip enforces that we build only
+  # what is actually on upstream. `remote set-head origin --auto`
+  # refreshes the symbolic `origin/HEAD` ref so we reset to whatever
+  # the remote calls its default (main/master/trunk), without
+  # hardcoding a name that could drift.
+  #
+  # Still non-fatal on failure — fall back to the existing binary.
+  # Capture output so we can show a useful tail-of-log on failure
+  # without polluting stdout on the success path.
   log="$(mktemp "${TMPDIR:-/tmp}/ox-update.XXXXXXXX")"
   trap 'rm -f "$log" 2>/dev/null' RETURN
-  if ! ( cd "$real_clone_path" && git pull --ff-only && make build && make install ) > "$log" 2>&1; then
+  if ! (
+    cd "$real_clone_path"
+    git fetch --quiet origin
+    git remote set-head origin --auto >/dev/null 2>&1 || true
+    git reset --hard --quiet origin/HEAD
+    make build
+    make install
+  ) > "$log" 2>&1; then
     echo "warning: ox auto-update failed; continuing with existing binary" >&2
     echo "--- last 10 lines of update log ---" >&2
     tail -10 "$log" >&2

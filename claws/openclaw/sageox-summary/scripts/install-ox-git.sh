@@ -170,8 +170,10 @@ if [ -L "$REAL_CLONE_PATH" ]; then
   exit 2
 fi
 
+JUST_CLONED=0
 if [ ! -d "$REAL_CLONE_PATH/.git" ]; then
   git clone https://github.com/sageox/ox.git "$REAL_CLONE_PATH"
+  JUST_CLONED=1
 fi
 
 # Defense-in-depth canonicalization. The ancestor validation above
@@ -223,6 +225,41 @@ case "$ORIGIN_URL" in
     exit 2
     ;;
 esac
+
+# If we're adopting an existing directory (not a fresh clone above),
+# the origin URL check is necessary but not sufficient: `.git/config`
+# is just a text file, and the working tree content is unsigned. A
+# hand-edited Makefile could execute arbitrary code under the user's
+# UID. Re-fetch from the allow-listed origin and `reset --hard` the
+# working tree to the fetched default-branch tip, so `make install`
+# runs the official code.
+#
+# Gated on `git status --porcelain` being empty: contributors who run
+# this script on their own dev clone (iterating on ox itself with
+# auto_update=true) would otherwise lose uncommitted work on every
+# invocation. If the tree is dirty, refuse and ask them to commit or
+# stash. A fresh clone never hits this path.
+if [ "$JUST_CLONED" = "0" ]; then
+  if [ -n "$(git -C "$REAL_CLONE_PATH" status --porcelain 2>/dev/null)" ]; then
+    echo "error: $REAL_CLONE_PATH has uncommitted or untracked files; refusing to reset" >&2
+    echo "       commit or stash your changes, then re-run" >&2
+    exit 2
+  fi
+  # `fetch origin` updates all `origin/*` tracking refs; `remote
+  # set-head origin --auto` refreshes the symbolic `origin/HEAD` to
+  # match the remote's current default branch, so we reset to
+  # whatever upstream calls its default (main/master/trunk) without
+  # hardcoding a name.
+  if ! git -C "$REAL_CLONE_PATH" fetch --quiet origin; then
+    echo "error: git fetch origin failed in $REAL_CLONE_PATH" >&2
+    exit 3
+  fi
+  git -C "$REAL_CLONE_PATH" remote set-head origin --auto >/dev/null 2>&1 || true
+  if ! git -C "$REAL_CLONE_PATH" reset --hard --quiet origin/HEAD; then
+    echo "error: git reset --hard origin/HEAD failed in $REAL_CLONE_PATH" >&2
+    exit 3
+  fi
+fi
 
 # Build and install in a subshell so the cd doesn't leak.
 ( cd "$REAL_CLONE_PATH" && make build && make install )
