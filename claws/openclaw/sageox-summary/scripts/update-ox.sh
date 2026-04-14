@@ -128,9 +128,15 @@ try_git_update() {
   # before running its Makefile. The state file is user-writable and
   # could point at any user-owned git repo under $HOME; `git pull &&
   # make install` on a random repo is a code-execution footgun.
+  #
+  # Accept HTTPS, scp-style SSH, and URI-style SSH — `git remote
+  # get-url` emits exactly what's stored in config without
+  # normalizing between the SSH variants, so the allow-list has to
+  # cover each form users actually configure.
   case "$(git -C "$real_clone_path" remote get-url origin 2>/dev/null || true)" in
     https://github.com/sageox/ox|https://github.com/sageox/ox.git) ;;
     git@github.com:sageox/ox|git@github.com:sageox/ox.git) ;;
+    ssh://git@github.com/sageox/ox|ssh://git@github.com/sageox/ox.git) ;;
     *)
       echo "warning: clone_path is not a sageox/ox checkout; skipping auto-update: $real_clone_path" >&2
       return

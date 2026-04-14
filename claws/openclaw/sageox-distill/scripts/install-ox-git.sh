@@ -157,14 +157,43 @@ REAL_PARENT="$(cd "$PARENT_DIR" && pwd -P)"
 # path on every future run.
 REAL_CLONE_PATH="$REAL_PARENT/$(basename "$CLONE_PATH")"
 
+# Reject a symlinked final path component. A symlink at REAL_CLONE_PATH
+# could point at a user-owned sageox/ox checkout anywhere on disk — the
+# `test -O` and `git -C` checks below both follow symlinks, so they'd
+# both pass, and `make install` would run in the escaped tree while
+# the state file recorded only the alias. Policy: the clone target is
+# either a plain directory we create, or an existing plain directory
+# we adopt. Never a symlink. Users who want to reorganize their clone
+# should move it and re-run the interactive install.
+if [ -L "$REAL_CLONE_PATH" ]; then
+  echo "error: clone target must not be a symlink: $REAL_CLONE_PATH" >&2
+  exit 2
+fi
+
 if [ ! -d "$REAL_CLONE_PATH/.git" ]; then
   git clone https://github.com/sageox/ox.git "$REAL_CLONE_PATH"
 fi
 
+# Defense-in-depth canonicalization. The ancestor validation above
+# guarantees REAL_PARENT is physical, and the -L check immediately
+# above rejects a symlinked leaf, so `cd && pwd -P` here should be a
+# no-op — but run it anyway and re-check against $REAL_HOME so that
+# any residual aliasing (e.g., a future change that adds a
+# code path that doesn't go through the walk-up) still fails closed.
+REAL_CLONE_PATH="$(cd "$REAL_CLONE_PATH" && pwd -P)"
+case "$REAL_CLONE_PATH" in
+  "$REAL_HOME"/*) ;;
+  *)
+    echo "error: clone target escapes \$HOME via symlink: $REAL_CLONE_PATH" >&2
+    exit 2
+    ;;
+esac
+
 # After clone (or existing-dir detection), the target itself must be
 # owned by the current user. `git clone` inherits parent-directory
 # ownership by default, but this catches the case where someone
-# pre-created the target as a symlink to a foreign tree.
+# pre-created the target as a directory owned by another user (shared
+# /opt, /var, etc.).
 if [ ! -O "$REAL_CLONE_PATH" ]; then
   echo "error: clone target not owned by current user: $REAL_CLONE_PATH" >&2
   exit 2
@@ -178,10 +207,17 @@ fi
 # footgun. A fresh clone a few lines up guarantees the origin is
 # correct, but the existing-dir branch and "switch ox install method"
 # re-runs do not.
+#
+# Accept the three canonical origin forms: HTTPS, scp-style SSH, and
+# URI-style SSH (with and without the `.git` suffix). `git remote
+# get-url` emits exactly what's stored in config — it does NOT
+# normalize between scp-style and URI-style — so the allow-list has
+# to cover the variants users actually configure.
 ORIGIN_URL="$(git -C "$REAL_CLONE_PATH" remote get-url origin 2>/dev/null || true)"
 case "$ORIGIN_URL" in
   https://github.com/sageox/ox|https://github.com/sageox/ox.git) ;;
   git@github.com:sageox/ox|git@github.com:sageox/ox.git) ;;
+  ssh://git@github.com/sageox/ox|ssh://git@github.com/sageox/ox.git) ;;
   *)
     echo "error: $REAL_CLONE_PATH is not a sageox/ox checkout (origin: ${ORIGIN_URL:-<none>})" >&2
     exit 2
