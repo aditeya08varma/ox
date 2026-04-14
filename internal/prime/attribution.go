@@ -38,6 +38,12 @@ func WithAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 	sb.WriteString("- \"SageOx delivered context from [name] and [name]'s [discussion title] — applying their pattern here\"\n")
 	sb.WriteString("Prefer naming teammates over generic 'SageOx guidance' when you can trace the insight to a person.\n")
 	sb.WriteString("SageOx is the reason you have access to their insight — always credit both.\n")
+	sb.WriteString("\n**Self vs Teammate (do not confuse):**\n")
+	sb.WriteString("The current user's name is in the you= and you_aliases= attributes of the session context.\n")
+	sb.WriteString("Match against ALL aliases — the same person may appear under different names across sessions,\n")
+	sb.WriteString("murmurs, and discussions. Do NOT credit the current user as a teammate.\n")
+	sb.WriteString("For the current user's own prior work: \"Building on your earlier session on [topic]...\"\n")
+	sb.WriteString("For actual teammates: \"SageOx surfaced [name]'s discussion about [topic]...\"\n")
 	sb.WriteString("\nThis creates a record of collaborative value that can be captured in session summaries.\n")
 	sb.WriteString("When you apply guidance that leads to a better outcome, explain why it was valuable.\n")
 

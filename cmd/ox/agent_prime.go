@@ -58,6 +58,23 @@ type intentCommand = prime.IntentCommand
 type agentGuidance = prime.Guidance
 type UserNotice = prime.UserNotice
 
+// uniqueNonEmpty returns deduplicated, non-empty strings preserving input order.
+func uniqueNonEmpty(vals ...string) []string {
+	seen := make(map[string]struct{}, len(vals))
+	out := make([]string, 0, len(vals))
+	for _, v := range vals {
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
 // withAttributionGuidance delegates to prime.WithAttributionGuidance.
 func withAttributionGuidance(content string, loggedIn bool, attr config.ResolvedAttribution) string {
 	return prime.WithAttributionGuidance(content, loggedIn, attr)
@@ -238,6 +255,30 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// get project-specific endpoint (single source of truth)
 	projectEndpoint := endpoint.GetForProject(projectRoot)
 
+	// resolve current user's identity early so all output paths (fresh, degraded, unavailable)
+	// can include it. Agents use this to distinguish self vs teammate in attribution.
+	// collect ALL name forms from ALL sources (OAuth, git config, derived) because
+	// sessions use DisplayName, murmurs use Username, discussions use full Name,
+	// and git commits use git config user.name/user.email — each may differ.
+	userAttribution := identity.ResolveAttribution(projectEndpoint, config.GetDisplayName())
+	currentUserName := userAttribution.DisplayName
+	aliasInputs := []string{
+		userAttribution.DisplayName,
+		userAttribution.Name,
+		userAttribution.Username,
+		userAttribution.Email,
+		identity.FirstNameFromSlug(userAttribution.Username),
+	}
+	if gitIdent, err := repotools.DetectGitIdentity(); err == nil && gitIdent != nil {
+		aliasInputs = append(aliasInputs, gitIdent.Name, gitIdent.Email)
+	}
+	if projectEndpoint != "" {
+		if token, err := auth.GetTokenForEndpoint(projectEndpoint); err == nil && token != nil {
+			aliasInputs = append(aliasInputs, token.UserInfo.Name, token.UserInfo.Email)
+		}
+	}
+	currentUserAliases := uniqueNonEmpty(aliasInputs...)
+
 	// generate agentID and start recording BEFORE auth check — recording is local,
 	// auth is only needed for upload and cloud features
 	store, err := getInstanceStore(projectRoot)
@@ -334,10 +375,12 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				msg = "Authentication expired."
 			}
 			output := agentPrimeOutput{
-				Status:  "degraded",
-				AgentID: agentID,
-				Session: sessionStat,
-				Message: fmt.Sprintf("%s Run 'ox login' to authenticate with %s. Session recording is active locally — data will be uploaded after authentication.", msg, endpointSlug),
+				Status:             "degraded",
+				AgentID:            agentID,
+				Session:            sessionStat,
+				CurrentUserName:    currentUserName,
+				CurrentUserAliases: currentUserAliases,
+				Message:            fmt.Sprintf("%s Run 'ox login' to authenticate with %s. Session recording is active locally — data will be uploaded after authentication.", msg, endpointSlug),
 			}
 			if sessionStat != nil && sessionStat.UserNotification != "" {
 				output.UserNotification = sessionStat.UserNotification
@@ -450,6 +493,8 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		NeedsDoctorAgent: needsDoctorAgent,
 		DoctorHint:       doctorHint,
 		HooksInstalled:   hooksInstalled,
+		CurrentUserName:    currentUserName,
+		CurrentUserAliases: currentUserAliases,
 	}
 
 	// populate cumulative context stats from daemon (best-effort).

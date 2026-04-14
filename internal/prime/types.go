@@ -181,6 +181,12 @@ type Output struct {
 	ObservationDirective string `json:"observation_directive,omitempty"` // proactive instruction to record observations via ox memory put
 	// Murmur directive (behavioral — set when murmuring: "auto")
 	MurmurDirective string `json:"murmur_directive,omitempty"` // proactive instruction to publish WIP status via ox murmur
+	// Current user identity (so agents can distinguish self vs teammate)
+	// Multiple aliases because sessions, murmurs, and discussions each use different name forms.
+	// This is local-only context (not persisted to ledger), so full name is safe here.
+	CurrentUserName    string   `json:"current_user_name,omitempty"`    // privacy-safe display name (e.g., "Ryan S.")
+	CurrentUserAliases []string `json:"current_user_aliases,omitempty"` // all name forms the agent might encounter
+
 	// Code search availability
 	CodeDBAvailable bool   `json:"code_db_available,omitempty"` // true if code search index exists on disk
 	CodeSearchTip   string `json:"code_search_tip,omitempty"`   // guidance on code search availability for this repo
