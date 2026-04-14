@@ -107,31 +107,49 @@ fi
 # Physical path resolution. The textual `case "$HOME/*"` check above
 # only validates the prefix string — a path like `$HOME/link` where
 # `link → /tmp/foo` would pass that check while the real clone target
-# sits outside $HOME. Resolve the PARENT directory physically (the
-# clone path itself may not exist yet) and confirm the resolved
-# location is still under the resolved $HOME and is owned by the
-# current user before we create or write anything.
+# sits outside $HOME. Resolve the path physically and verify ownership
+# before we create or write anything.
 #
 # `cd && pwd -P` is the portable resolver — works on BSD/macOS and
 # GNU/Linux with no `readlink -f` / `realpath` dependency.
-PARENT_DIR="$(dirname "$CLONE_PATH")"
-mkdir -p "$PARENT_DIR"
+#
+# Critically, we must validate BEFORE `mkdir -p` runs. A symlinked
+# ancestor would otherwise let `mkdir -p` create directories in a
+# foreign tree BEFORE the physical check has a chance to reject the
+# path. Walk up from PARENT_DIR to the deepest existing ancestor,
+# resolve IT, and validate the resolved location there — anything
+# mkdir creates beneath a validated ancestor is guaranteed to stay
+# inside it, because mkdir never creates symlinks.
 REAL_HOME="$(cd "$HOME" && pwd -P)"
-if ! REAL_PARENT="$(cd "$PARENT_DIR" && pwd -P)"; then
-  echo "error: could not resolve parent directory: $PARENT_DIR" >&2
-  exit 2
-fi
-case "$REAL_PARENT" in
+PARENT_DIR="$(dirname "$CLONE_PATH")"
+
+ANCESTOR="$PARENT_DIR"
+while [ ! -d "$ANCESTOR" ]; do
+  NEXT="$(dirname "$ANCESTOR")"
+  if [ "$NEXT" = "$ANCESTOR" ]; then
+    echo "error: no existing ancestor found for parent directory: $PARENT_DIR" >&2
+    exit 2
+  fi
+  ANCESTOR="$NEXT"
+done
+REAL_ANCESTOR="$(cd "$ANCESTOR" && pwd -P)"
+case "$REAL_ANCESTOR" in
   "$REAL_HOME"|"$REAL_HOME"/*) ;;
   *)
-    echo "error: parent directory escapes \$HOME via symlink: $REAL_PARENT" >&2
+    echo "error: ancestor directory escapes \$HOME via symlink: $REAL_ANCESTOR" >&2
     exit 2
     ;;
 esac
-if [ ! -O "$REAL_PARENT" ]; then
-  echo "error: parent directory not owned by current user: $REAL_PARENT" >&2
+if [ ! -O "$REAL_ANCESTOR" ]; then
+  echo "error: ancestor directory not owned by current user: $REAL_ANCESTOR" >&2
   exit 2
 fi
+
+# Safe to create missing parents now. mkdir -p creates plain
+# directories under REAL_ANCESTOR, which we've already confirmed is
+# under $HOME and owned by the user.
+mkdir -p "$PARENT_DIR"
+REAL_PARENT="$(cd "$PARENT_DIR" && pwd -P)"
 
 # Reassemble the canonical clone path from the resolved parent + the
 # basename. We use this canonical form everywhere below (clone target,
@@ -139,17 +157,108 @@ fi
 # path on every future run.
 REAL_CLONE_PATH="$REAL_PARENT/$(basename "$CLONE_PATH")"
 
-if [ ! -d "$REAL_CLONE_PATH/.git" ]; then
-  git clone https://github.com/sageox/ox.git "$REAL_CLONE_PATH"
+# Reject a symlinked final path component. A symlink at REAL_CLONE_PATH
+# could point at a user-owned sageox/ox checkout anywhere on disk — the
+# `test -O` and `git -C` checks below both follow symlinks, so they'd
+# both pass, and `make install` would run in the escaped tree while
+# the state file recorded only the alias. Policy: the clone target is
+# either a plain directory we create, or an existing plain directory
+# we adopt. Never a symlink. Users who want to reorganize their clone
+# should move it and re-run the interactive install.
+if [ -L "$REAL_CLONE_PATH" ]; then
+  echo "error: clone target must not be a symlink: $REAL_CLONE_PATH" >&2
+  exit 2
 fi
 
-# After clone, the target itself must also be owned by the current
-# user. `git clone` inherits parent-directory ownership by default but
-# this catches the case where someone pre-created the target as a
-# symlink to a foreign tree.
+JUST_CLONED=0
+if [ ! -d "$REAL_CLONE_PATH/.git" ]; then
+  git clone https://github.com/sageox/ox.git "$REAL_CLONE_PATH"
+  JUST_CLONED=1
+fi
+
+# Defense-in-depth canonicalization. The ancestor validation above
+# guarantees REAL_PARENT is physical, and the -L check immediately
+# above rejects a symlinked leaf, so `cd && pwd -P` here should be a
+# no-op — but run it anyway and re-check against $REAL_HOME so that
+# any residual aliasing (e.g., a future change that adds a
+# code path that doesn't go through the walk-up) still fails closed.
+REAL_CLONE_PATH="$(cd "$REAL_CLONE_PATH" && pwd -P)"
+case "$REAL_CLONE_PATH" in
+  "$REAL_HOME"/*) ;;
+  *)
+    echo "error: clone target escapes \$HOME via symlink: $REAL_CLONE_PATH" >&2
+    exit 2
+    ;;
+esac
+
+# After clone (or existing-dir detection), the target itself must be
+# owned by the current user. `git clone` inherits parent-directory
+# ownership by default, but this catches the case where someone
+# pre-created the target as a directory owned by another user (shared
+# /opt, /var, etc.).
 if [ ! -O "$REAL_CLONE_PATH" ]; then
   echo "error: clone target not owned by current user: $REAL_CLONE_PATH" >&2
   exit 2
+fi
+
+# Defense-in-depth: confirm this is actually a sageox/ox checkout
+# before running its Makefile. If the caller pointed us at a
+# pre-existing user-owned git repo that happens to live at
+# REAL_CLONE_PATH, the existing-dir branch above would skip `git
+# clone` and run THAT repo's `make install` — a code-execution
+# footgun. A fresh clone a few lines up guarantees the origin is
+# correct, but the existing-dir branch and "switch ox install method"
+# re-runs do not.
+#
+# Accept the three canonical origin forms: HTTPS, scp-style SSH, and
+# URI-style SSH (with and without the `.git` suffix). `git remote
+# get-url` emits exactly what's stored in config — it does NOT
+# normalize between scp-style and URI-style — so the allow-list has
+# to cover the variants users actually configure.
+ORIGIN_URL="$(git -C "$REAL_CLONE_PATH" remote get-url origin 2>/dev/null || true)"
+case "$ORIGIN_URL" in
+  https://github.com/sageox/ox|https://github.com/sageox/ox.git) ;;
+  git@github.com:sageox/ox|git@github.com:sageox/ox.git) ;;
+  ssh://git@github.com/sageox/ox|ssh://git@github.com/sageox/ox.git) ;;
+  *)
+    echo "error: $REAL_CLONE_PATH is not a sageox/ox checkout (origin: ${ORIGIN_URL:-<none>})" >&2
+    exit 2
+    ;;
+esac
+
+# If we're adopting an existing directory (not a fresh clone above),
+# the origin URL check is necessary but not sufficient: `.git/config`
+# is just a text file, and the working tree content is unsigned. A
+# hand-edited Makefile could execute arbitrary code under the user's
+# UID. Re-fetch from the allow-listed origin and `reset --hard` the
+# working tree to the fetched default-branch tip, so `make install`
+# runs the official code.
+#
+# Gated on `git status --porcelain` being empty: contributors who run
+# this script on their own dev clone (iterating on ox itself with
+# auto_update=true) would otherwise lose uncommitted work on every
+# invocation. If the tree is dirty, refuse and ask them to commit or
+# stash. A fresh clone never hits this path.
+if [ "$JUST_CLONED" = "0" ]; then
+  if [ -n "$(git -C "$REAL_CLONE_PATH" status --porcelain 2>/dev/null)" ]; then
+    echo "error: $REAL_CLONE_PATH has uncommitted or untracked files; refusing to reset" >&2
+    echo "       commit or stash your changes, then re-run" >&2
+    exit 2
+  fi
+  # `fetch origin` updates all `origin/*` tracking refs; `remote
+  # set-head origin --auto` refreshes the symbolic `origin/HEAD` to
+  # match the remote's current default branch, so we reset to
+  # whatever upstream calls its default (main/master/trunk) without
+  # hardcoding a name.
+  if ! git -C "$REAL_CLONE_PATH" fetch --quiet origin; then
+    echo "error: git fetch origin failed in $REAL_CLONE_PATH" >&2
+    exit 3
+  fi
+  git -C "$REAL_CLONE_PATH" remote set-head origin --auto >/dev/null 2>&1 || true
+  if ! git -C "$REAL_CLONE_PATH" reset --hard --quiet origin/HEAD; then
+    echo "error: git reset --hard origin/HEAD failed in $REAL_CLONE_PATH" >&2
+    exit 3
+  fi
 fi
 
 # Build and install in a subshell so the cd doesn't leak.

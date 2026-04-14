@@ -53,9 +53,15 @@ try_git_update() {
   fi
 
   # Text-level validation. Cheap to run; catches obvious hand-edits
-  # before we go near the filesystem.
+  # before we go near the filesystem. Accept both the textual $HOME
+  # prefix and the resolved $REAL_HOME prefix — install-ox-git.sh
+  # writes the state file with the PHYSICAL clone path, so on a
+  # system where $HOME itself is symlinked (e.g. /Users/foo →
+  # /Volumes/Data/Users/foo) the stored path will start with
+  # $REAL_HOME and the textual check against $HOME alone would
+  # reject every legitimate auto-update.
   case "$clone_path" in
-    "$HOME"/*) ;;
+    "$HOME"/*|"$REAL_HOME"/*) ;;
     *)
       echo "warning: clone_path not under \$HOME; skipping auto-update: $clone_path" >&2
       return
@@ -118,12 +124,60 @@ try_git_update() {
     return
   fi
 
-  # Run the update from the RESOLVED path. Non-fatal on failure — fall
-  # back to the existing binary. Capture output so we can show a useful
-  # tail-of-log on failure without polluting stdout on the success path.
+  # Defense-in-depth: confirm this is actually a sageox/ox checkout
+  # before running its Makefile. The state file is user-writable and
+  # could point at any user-owned git repo under $HOME; `git pull &&
+  # make install` on a random repo is a code-execution footgun.
+  #
+  # Accept HTTPS, scp-style SSH, and URI-style SSH — `git remote
+  # get-url` emits exactly what's stored in config without
+  # normalizing between the SSH variants, so the allow-list has to
+  # cover each form users actually configure.
+  case "$(git -C "$real_clone_path" remote get-url origin 2>/dev/null || true)" in
+    https://github.com/sageox/ox|https://github.com/sageox/ox.git) ;;
+    git@github.com:sageox/ox|git@github.com:sageox/ox.git) ;;
+    ssh://git@github.com/sageox/ox|ssh://git@github.com/sageox/ox.git) ;;
+    *)
+      echo "warning: clone_path is not a sageox/ox checkout; skipping auto-update: $real_clone_path" >&2
+      return
+      ;;
+  esac
+
+  # Refuse to reset a dirty working tree. The fetch + reset below
+  # would otherwise silently destroy uncommitted contributor work on
+  # every auto_update=true invocation — users iterating on ox locally
+  # would lose edits between saves. Skip the update instead and let
+  # the final readiness gate decide whether the existing binary is
+  # still usable; the user can commit/stash and re-run explicitly.
+  if [ -n "$(git -C "$real_clone_path" status --porcelain 2>/dev/null)" ]; then
+    echo "warning: $real_clone_path has uncommitted or untracked files; skipping auto-update" >&2
+    return
+  fi
+
+  # Update the working tree via fetch + reset --hard instead of
+  # `git pull --ff-only`. The origin URL check above only verifies
+  # `.git/config`; the working tree content is unsigned and
+  # hand-editable, so a tampered Makefile would otherwise run under
+  # `make install`. Fetching from the allow-listed origin and
+  # resetting to its default-branch tip enforces that we build only
+  # what is actually on upstream. `remote set-head origin --auto`
+  # refreshes the symbolic `origin/HEAD` ref so we reset to whatever
+  # the remote calls its default (main/master/trunk), without
+  # hardcoding a name that could drift.
+  #
+  # Still non-fatal on failure — fall back to the existing binary.
+  # Capture output so we can show a useful tail-of-log on failure
+  # without polluting stdout on the success path.
   log="$(mktemp "${TMPDIR:-/tmp}/ox-update.XXXXXXXX")"
   trap 'rm -f "$log" 2>/dev/null' RETURN
-  if ! ( cd "$real_clone_path" && git pull --ff-only && make build && make install ) > "$log" 2>&1; then
+  if ! (
+    cd "$real_clone_path"
+    git fetch --quiet origin
+    git remote set-head origin --auto >/dev/null 2>&1 || true
+    git reset --hard --quiet origin/HEAD
+    make build
+    make install
+  ) > "$log" 2>&1; then
     echo "warning: ox auto-update failed; continuing with existing binary" >&2
     echo "--- last 10 lines of update log ---" >&2
     tail -10 "$log" >&2
