@@ -64,7 +64,7 @@ Once installed, ask your OpenClaw agent things like:
 6. **Updates the summary state** on success via
    `scripts/update-state.sh` — atomically merges the newly-summarized
    entry ids into each team's `included_ids`, prunes entries older
-   than two days UTC, and persists the file so the next run picks up
+   than yesterday UTC, and persists the file so the next run picks up
    where this one left off.
 7. **Returns the summary** — already formatted for Slack mrkdwn.
 
