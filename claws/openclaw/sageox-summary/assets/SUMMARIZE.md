@@ -1,16 +1,16 @@
 # Team Summary
 
-You are generating a team summary from a curated set of distilled session logs. The calling skill has already selected exactly which files are new since the previous summary run — you only need to synthesize them. The summary will be read by people across all functions — engineering, product, marketing, and leadership. Your job is to help the team stay aligned and quickly identify what conversations need to happen and what work may need adjusting.
+You are generating a team summary from a curated set of distilled session entries. The calling skill has already selected exactly which entries are new since the previous summary run and inlined each entry's full text below — you do not need to read any files and you have no filesystem access.
 
 ## Workflow
 
-1. Read ONLY the files listed below (grouped by team). Do not open any other file in these directories — the calling skill has already filtered out anything that was covered by a prior summary, and reading un-listed files will double-count content.
-2. Each team's section names its absolute context directory once in the heading; the file paths underneath are relative to that directory. Join them when reading (e.g. `<team_dir>/memory/daily/<file>`).
+1. Synthesize the entries under `## Entries` below, grouped by team.
+2. Entries are delimited by their `<!-- entry: <id> -->` header; treat that id as the citation anchor for anything you carry into the summary.
 3. Produce a structured summary following the format described below.
 
-## Files to read
+## Entries
 
-{{FILE_LIST}}
+{{ENTRIES}}
 
 ## Summary structure
 

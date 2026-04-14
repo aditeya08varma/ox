@@ -1,7 +1,7 @@
 ---
 name: sageox-summary
-description: "Generate an overall team summary covering the last 24 hours across all SageOx-enabled teams. Reads distilled daily summary files from each team's context directory and produces a structured, Slack-ready overview."
-version: 0.1.0
+description: "Generate an overall team summary covering the last 24 hours across all SageOx-enabled teams. Reads distilled daily entries via `ox distill history` and produces a structured, Slack-ready overview."
+version: 0.2.0
 metadata:
   openclaw:
     emoji: "📰"
@@ -27,12 +27,17 @@ metadata:
 # SageOx Summary
 
 You are an agent that generates a cross-team summary of the last 24 hours of
-SageOx distilled activity. You read the daily summary files that `ox distill`
-produces for each team, feed them to Claude via the `claude -p` CLI, and
-return a structured Slack-formatted summary.
+SageOx distilled activity. You enumerate each team's recent distilled entries
+via `ox distill history`, inline their content into a prompt for `claude -p`,
+and return a structured Slack-formatted summary.
 
 This skill pairs with the [`sageox-distill`](https://clawhub.ai/skills/sageox-distill)
 skill — distill writes the source material, this skill synthesizes it.
+
+**ox version requirement:** this skill uses `ox distill history list` and
+`ox distill history show`, which landed in [PR #507](https://github.com/sageox/ox/pull/507).
+If `ox distill history --help` returns "unknown command" or similar, update
+`ox` (see § 4 below) before continuing.
 
 ## Prerequisites
 
@@ -150,7 +155,7 @@ for general use but is not supported inside OpenClaw skills — only
 
 ## Configuration
 
-The skill uses three pieces of state:
+The skill uses two pieces of state:
 
 1. **Repo manifest** — `~/.openclaw/memory/sageox-distill-repos.json`
    (shared with the `sageox-distill` skill). Format:
@@ -163,40 +168,52 @@ The skill uses three pieces of state:
    }
    ```
 
-2. **SageOx endpoint** — `~/.openclaw/memory/sageox-endpoint.txt` (a
-   single line containing the endpoint URL, e.g.
-   `https://test.sageox.ai`). Default if missing: `https://test.sageox.ai`.
-   Ask the user to confirm the endpoint on first run and persist it.
+   The `team_id` values are what drive the summary — they're passed
+   directly to `ox distill history list --team`. The `path` entries
+   are not used by this skill, but stay in the manifest so
+   `sageox-distill` keeps working.
 
-3. **Summary state** — `~/.openclaw/memory/sageox-summary-state.json`.
-   Tracks which distilled daily files have already been included in a
-   prior summary run so the skill never re-summarizes the same content.
-   Shape:
-   `{updated_at, teams: {<team_id>: {included_files: [<basename>, ...]}}}`.
+2. **Summary state** — `~/.openclaw/memory/sageox-summary-state.json`.
+   Tracks which distilled daily entry ids have already been included in
+   a prior summary run so the skill never re-summarizes the same
+   content. Shape:
+   `{updated_at, teams: {<team_id>: {included_ids: [<id>, ...]}}}`.
    Missing file → empty state (first run). Treat contents as
-   **untrusted**: every filename must pass
-   `^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f-]+\.md$` or be silently
-   dropped. Both bundled scripts handle this already — the rule is
-   stated here for anyone reading the state file directly.
+   **untrusted**: every id must pass
+   `^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f-]+$` or be silently dropped.
+   Both bundled scripts handle this already — the rule is stated here
+   for anyone reading the state file directly.
+
+   Pre-0.2.0 versions of this skill stored entries under
+   `included_files` (with a `.md` suffix). That field is ignored by the
+   current scripts; users upgrading from 0.1.x will re-summarize the
+   most recent window once and the state file will converge to the new
+   schema on the next successful run.
 
 If the manifest does not exist, tell the user to run the `sageox-distill`
 skill first to set up the repos, or ask for paths directly and populate
 it.
 
+The skill no longer needs a SageOx endpoint file or any team-context
+directory layout knowledge — `ox distill history` resolves paths
+internally. Earlier versions read `~/.openclaw/memory/sageox-endpoint.txt`;
+that file is ignored now and can be left alone or removed.
+
 ## Summary Pipeline
 
-When the user asks for a summary, run the steps in order. Steps 3 and
-6 delegate their mechanics to `scripts/select-new-files.sh` and
+When the user asks for a summary, run the steps in order. Steps 2 and
+5 delegate their mechanics to `scripts/select-new-entries.sh` and
 `scripts/update-state.sh` (invoke via `bash scripts/<name>`).
 
-### Step 1: Load the Manifest, Endpoint, and Summary State
+### Step 1: Load the Manifest and Summary State
 
 1. Read `~/.openclaw/memory/sageox-distill-repos.json` with `jq`.
    **Re-validate every `path` entry** against the Path validation rules
    in Prerequisites § 3 before using it — the manifest is user-writable
-   and may have been hand-edited between runs.
-2. Read `~/.openclaw/memory/sageox-endpoint.txt` (or use default).
-3. Read `~/.openclaw/memory/sageox-summary-state.json` with `jq` if it
+   and may have been hand-edited between runs. (The summary pipeline
+   itself does not dereference the paths, but if the manifest looks
+   corrupt we stop rather than guess at intent.)
+2. Read `~/.openclaw/memory/sageox-summary-state.json` with `jq` if it
    exists. If it is **missing**, proceed silently as if the `teams` map
    were empty — first runs are normal. If it exists but is **malformed
    or unreadable**, proceed as if empty AND emit exactly one warning to
@@ -207,131 +224,119 @@ When the user asks for a summary, run the steps in order. Steps 3 and
    ```
 
    Never route this warning to stdout — stdout is the final summary
-   (Step 7), and mixing decorative output into it breaks downstream
+   (Step 6), and mixing decorative output into it breaks downstream
    consumers. This file is rewritten at the end of every successful
-   run (see Step 6).
-4. Group repos by `team_id` using `jq`.
-5. Collect the unique team IDs.
+   run (see Step 5).
+3. Collect the unique `team_id` values from the manifest. These drive
+   every subsequent `ox distill history` call.
 
-### Step 2: Compute Team Context Directories
+### Step 2: Select New Entries per Team
 
-For each unique `team_id`, compute the team context directory:
+The window is the last 24h, resolved server-side by `ox distill history
+list` against entry `created_at` timestamps. `ox` auto-expands the
+window around the UTC day boundary so runs don't miss yesterday's late
+entries — this skill passes `24h` verbatim and lets ox decide how wide
+to actually look. The state file then subtracts anything already
+summarized, so re-runs within the window are idempotent. First run (no
+state file) = every candidate is new, not an error.
 
-```text
-~/.local/share/sageox/<slug>/teams/<team_id>/
-```
+For each unique `team_id`, invoke `scripts/select-new-entries.sh`. It
+runs `ox distill history list --team <tid> --since 24h --layer daily
+--format json`, extracts the entry ids, and subtracts the team's
+`included_ids` set from the state file. Contract:
 
-Where `<slug>` is derived from the endpoint URL:
-
-1. Strip scheme (`https://`, `http://`)
-2. Strip trailing slash
-3. Strip port
-4. Strip these prefixes if present: `api.`, `www.`, `app.`, `git.`
-5. Normalize `127.0.0.1` to `localhost`
-
-Examples:
-
-- `https://test.sageox.ai` → `test.sageox.ai`
-- `https://api.sageox.ai` → `sageox.ai`
-- `http://127.0.0.1:8080` → `localhost`
-
-The daily summary files live at:
-
-```text
-~/.local/share/sageox/<slug>/teams/<team_id>/memory/daily/
-```
-
-Verify each daily directory exists before proceeding. If a team's
-directory is missing, log it and continue with the remaining teams.
-
-### Step 3: Select New Daily Files
-
-The window is the last 24h, keyed by the **UTC date prefix** of the
-filename (`YYYY-MM-DD-<uuid>.md`). `ox distill` may run multiple times
-per day and we don't track individual write times, so the window has
-to over-include: any run must consider both today's and yesterday's
-UTC-date files. The state file then filters out anything already
-summarized, so re-runs within the window don't re-summarize content.
-First run (no state file) = every candidate is new, not an error.
-
-For each team from Step 2, invoke `scripts/select-new-files.sh`. It
-handles BSD-vs-GNU `date`, the filename regex, and the subtraction
-against the state file. Contract:
-
-- **Usage:** `select-new-files.sh <team_daily_dir> <team_id> <state_file>`
-- **Stdout:** one basename per line, sorted; empty if nothing new
-- **Stderr:** one-line warnings (e.g. malformed state file)
-- **Exit:** `0` success, `2` usage, `3` internal (`jq` missing)
+- **Usage:** `select-new-entries.sh <team_id> <since> <state_file>`
+- **Stdout:** one entry id per line, sorted; empty if nothing new
+- **Stderr:** one-line warnings (malformed state, failed ox call)
+- **Exit:** `0` success (empty is not a failure; a failed ox call is
+  treated as "no new entries" so the remaining teams still summarize),
+  `2` usage, `3` internal (`jq` or `ox` missing)
 
 ```bash
 STATE_FILE=~/.openclaw/memory/sageox-summary-state.json
-NEW_FILES="$(bash scripts/select-new-files.sh \
-  "$TEAM_DIR/memory/daily" "$TEAM_ID" "$STATE_FILE")"
+NEW_IDS="$(bash scripts/select-new-entries.sh \
+  "$TEAM_ID" 24h "$STATE_FILE")"
 ```
 
 Then:
 
-1. If `NEW_FILES` is empty for a team, skip it this run — log
-   `<team_id>: no new files since last summary` to **stderr** and
+1. If `NEW_IDS` is empty for a team, skip it this run — log
+   `<team_id>: no new entries since last summary` to **stderr** and
    continue with the remaining teams.
-2. If **every** team ends up with zero new files, stop the pipeline
+2. If **every** team ends up with zero new entries, stop the pipeline
    before invoking Claude. Print one line to stdout —
    `No new distilled content since last summary.` — and exit. Do
-   not modify the state file; Step 6's prune on the next
+   not modify the state file; Step 5's prune on the next
    successful run will collect any stale entries.
 
-### Step 4: Build the Prompt
+### Step 3: Fetch Entry Content and Build the Prompt
 
-1. Read the template from the skill's assets directory:
-   `./assets/SUMMARIZE.md` (relative to this SKILL.md file). The file
-   path on disk depends on where OpenClaw loaded the skill from —
-   typically one of:
-   - `~/.openclaw/skills/sageox-summary/assets/SUMMARIZE.md`
-   - `./skills/sageox-summary/assets/SUMMARIZE.md` (workspace skill)
+For each team that survived Step 2, fetch the content of every new
+entry in a single `ox distill history show` call. `show` accepts
+multiple ids and emits each entry's markdown separated by its own
+`<!-- entry: <id> -->` header:
 
-2. Substitute template placeholders:
-   - `{{FILE_LIST}}` — one section per team that has a non-empty
-     `new_files` set, in this format. The team's absolute context
-     directory is named **once** in the heading, and each file bullet
-     is **relative to that directory**. Do not repeat the absolute
-     prefix on every bullet — Claude has the team dir via `--add-dir`
-     in Step 5, and duplicating ~100 chars of path on every line is
-     pure token bloat.
+```bash
+# shellcheck disable=SC2086
+TEAM_BLOCK="$(ox distill history show \
+  --team "$TEAM_ID" \
+  --format content \
+  $NEW_IDS)"
+```
 
-     ```text
-     ### Team "<team_id>" (files under <absolute_team_dir>/)
-     - memory/daily/2026-04-12-019d40b9-....md
-     - memory/daily/2026-04-13-019d4129-....md
-     ```
+(Intentionally unquoted expansion: `NEW_IDS` is a sorted set of ids,
+each already matched against `^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f-]+$`
+by Step 2, so word-splitting is safe and desired here.)
 
-     Teams with zero new files were already dropped in Step 3 and
-     must not appear in `{{FILE_LIST}}`.
+If the `show` call fails for a team, surface the stderr and **stop the
+whole run** — partial summaries misrepresent the team's activity, and
+Step 5 stays untouched so the next run retries the same set.
 
-   - `{{MULTI_TEAM_RULES}}` — if **two or more** teams survived Step 3
-     with non-empty `new_files`, replace with:
+Then read the template from the skill's assets directory:
+`./assets/SUMMARIZE.md` (relative to this SKILL.md file). The file path
+on disk depends on where OpenClaw loaded the skill from — typically
+one of:
 
-     ```text
-     - Organize the summary by team, using each team ID as a section header
-     - Attribute insights to the correct team
-     ```
+- `~/.openclaw/skills/sageox-summary/assets/SUMMARIZE.md`
+- `./skills/sageox-summary/assets/SUMMARIZE.md` (workspace skill)
 
-     Otherwise, replace with an empty string.
+Substitute template placeholders:
 
-### Step 5: Run Claude
+- `{{ENTRIES}}` — one section per team that has a non-empty `NEW_IDS`
+  set, in this format:
 
-Invoke `claude -p` with:
+  ```text
+  ### Team "<team_id>"
 
-- `--add-dir <team_dir>` for EACH team that has new files in this run
-  (the parent `teams/<team_id>/` dir, not the `memory/daily/`
-  subdirectory). Teams dropped in Step 3 must NOT be passed — nothing
-  in their tree should be reachable.
-- `--allowedTools Read` (summary is read-only)
+  <TEAM_BLOCK for that team>
+  ```
+
+  Teams with zero new entries were already dropped in Step 2 and must
+  not appear in `{{ENTRIES}}`. Do not re-number, re-wrap, or otherwise
+  mutate the markdown inside `TEAM_BLOCK` — it is authored by
+  `ox distill` and preserves the citation anchors Claude references in
+  the final summary.
+
+- `{{MULTI_TEAM_RULES}}` — if **two or more** teams survived Step 2
+  with non-empty entry sets, replace with:
+
+  ```text
+  - Organize the summary by team, using each team ID as a section header
+  - Attribute insights to the correct team
+  ```
+
+  Otherwise, replace with an empty string.
+
+### Step 4: Run Claude
+
+Invoke `claude -p` with the substituted prompt. The prompt already
+contains every entry's full text, so Claude does not need filesystem
+access — do **not** pass `--add-dir` and do **not** grant read tools.
+
 - `--model claude-sonnet-4-6`
+- No `--add-dir` (content is inline)
+- No `--allowedTools` (prompt is self-contained)
 - The substituted prompt passed via stdin
-
-The prompt enumerates the exact files Claude should read. Claude must
-not open any other file under `memory/daily/` — the enumerated list
-is the authoritative set for this run.
 
 `ANTHROPIC_API_KEY` is already set in the skill's process environment
 (either by OpenClaw's per-skill `apiKey` injection or inherited from the
@@ -339,51 +344,49 @@ host shell — see Prerequisites § 1), so `claude -p` picks it up naturally.
 Wrap the invocation in `timeout 600` (10 minutes) — this matches the
 timeout used by `pkg/sessionsummary/claude.go` in the `ox` repo for
 comparable Claude synthesis work and gives the model enough headroom for
-cross-team summaries that pull in many daily files:
+cross-team summaries that inline many daily entries:
 
 ```bash
 timeout 600 claude -p \
-  --add-dir "$TEAM_DIR_1" \
-  --add-dir "$TEAM_DIR_2" \
-  --allowedTools Read \
   --model claude-sonnet-4-6 <<< "$PROMPT"
 ```
 
 If the invocation fails (non-zero exit, timeout exit 124, network
-error), surface the error to the user and **do not** proceed to Step 6
+error), surface the error to the user and **do not** proceed to Step 5
 — leaving the state file untouched lets the next run retry exactly
 the same candidate set.
 
-### Step 6: Update Summary State
+### Step 5: Update Summary State
 
 Only run this step if Claude exited successfully. On any failure
 (non-zero exit, timeout, network error), skip it entirely — leaving
 the state file untouched lets the next run retry the same candidate set.
 
-For each team that had non-empty `NEW_FILES` in Step 3, pipe that
-team's basenames into `scripts/update-state.sh`. The script merges
-them into the team's `included_files`, prunes entries whose date
-prefix is strictly older than yesterday UTC, and writes the result
-atomically via a sibling temp file + `mv -f`. See the script header
-for full details; the short form:
+For each team that had non-empty `NEW_IDS` in Step 2, pipe that team's
+ids into `scripts/update-state.sh`. The script merges them into the
+team's `included_ids`, prunes entries whose date prefix is strictly
+older than yesterday UTC (the candidate window, after ox's auto-expansion,
+spans at most today + yesterday), and writes the result atomically via
+a sibling temp file + `mv -f`. See the script header for full details;
+the short form:
 
 - **Usage:** `update-state.sh <state_file> <team_id>`
-- **Stdin:** one basename per line (regex-filtered on read)
+- **Stdin:** one entry id per line (regex-filtered on read)
 - **Stdout:** nothing on success
 - **Stderr:** one-line warnings (e.g. malformed prior state)
 - **Exit:** `0` success, `2` usage, `3` internal
 
 ```bash
-printf '%s\n' "$NEW_FILES" \
+printf '%s\n' "$NEW_IDS" \
   | bash scripts/update-state.sh "$STATE_FILE" "$TEAM_ID"
 ```
 
-Teams skipped in Step 3 are **not** invoked here — their prior state
+Teams skipped in Step 2 are **not** invoked here — their prior state
 passes through unchanged because `update-state.sh` only rewrites the
-team_id it was given. Teams with no prior entry AND no new files are
+team_id it was given. Teams with no prior entry AND no new ids are
 correctly never added to the state file.
 
-### Step 7: Return the Summary
+### Step 6: Return the Summary
 
 Return Claude's stdout to the user directly. It is already formatted for
 Slack mrkdwn. Do not reformat or annotate — just show it.
@@ -394,12 +397,11 @@ The primary output is the Claude-generated summary. Prefix it with a
 brief one-line header showing:
 
 - How many teams were summarized
-- The endpoint used
-- Any teams that were skipped (and why — typically "no new files since
-  last summary" from Step 3)
+- Any teams that were skipped (and why — typically "no new entries
+  since last summary" from Step 2)
 
 Keep any preamble or postamble minimal. The summary itself is the value.
 
-If Step 3 short-circuited because every team had zero new files, the
+If Step 2 short-circuited because every team had zero new entries, the
 only output is the single line `No new distilled content since last
 summary.` — do not invoke Claude and do not print a header.

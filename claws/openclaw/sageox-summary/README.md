@@ -2,10 +2,10 @@
 
 📰 **Generate a Slack-ready cross-team summary of the last 24 hours from SageOx distilled activity.**
 
-`sageox-summary` reads the daily summary files that `ox distill` produces
-for each team, feeds them to `claude -p`, and returns a structured
-Slack-formatted digest organized by what shipped, what's blocked, what
-the team learned, and what's next.
+`sageox-summary` enumerates each team's recent distilled entries via
+`ox distill history`, inlines their content into a prompt for `claude -p`,
+and returns a structured Slack-formatted digest organized by what
+shipped, what's blocked, what the team learned, and what's next.
 
 Pairs with [`sageox-distill`](../sageox-distill/) — distill writes the
 daily source files; this skill synthesizes them. You can use either
@@ -41,26 +41,30 @@ Once installed, ask your OpenClaw agent things like:
 ## What it does
 
 1. **Loads the repo manifest** from `~/.openclaw/memory/sageox-distill-repos.json`
-   (shared with [`sageox-distill`](../sageox-distill/)).
-2. **Computes the team context directories** from the SageOx endpoint
-   slug.
-3. **Selects new daily files** for the last 24 hours by UTC date prefix,
-   via the bundled `scripts/select-new-files.sh`. The window covers
-   both today and yesterday's date-prefixed files to cleanly handle the
-   day boundary, then filters out anything already included in a prior
-   summary via `~/.openclaw/memory/sageox-summary-state.json`. If
-   nothing is new, the skill prints one line and exits without calling
-   Claude.
-4. **Builds a prompt** from `assets/SUMMARIZE.md`, substituting the
-   per-team list of new files to read.
-5. **Runs `claude -p`** with read-only access to each team's context dir.
+   (shared with [`sageox-distill`](../sageox-distill/)) and collects
+   the unique `team_id` values.
+2. **Selects new distilled entries** for the last 24 hours by asking
+   `ox distill history list --team <tid> --since 24h --layer daily`,
+   via the bundled `scripts/select-new-entries.sh`. `ox` auto-expands
+   the window around the UTC day boundary so nothing falls through the
+   cracks at midnight. The script then subtracts anything already
+   included in a prior summary via
+   `~/.openclaw/memory/sageox-summary-state.json`. If nothing is new,
+   the skill prints one line and exits without calling Claude.
+3. **Fetches entry content** in a single `ox distill history show`
+   call per team, which emits the full markdown for every new id
+   separated by `<!-- entry: <id> -->` headers.
+4. **Builds a prompt** from `assets/SUMMARIZE.md`, inlining each team's
+   entry content directly into the prompt — no filesystem access
+   needed.
+5. **Runs `claude -p`** with no `--add-dir` and no tool allowances.
    `ANTHROPIC_API_KEY` is supplied by OpenClaw's per-skill `apiKey`
    injection (or by your shell, if configured that way) — see
    [Environment setup](../README.md#environment-setup).
 6. **Updates the summary state** on success via
    `scripts/update-state.sh` — atomically merges the newly-summarized
-   basenames into each team's `included_files`, prunes stale entries
-   outside the window, and persists the file so the next run picks up
+   entry ids into each team's `included_ids`, prunes entries older
+   than two days UTC, and persists the file so the next run picks up
    where this one left off.
 7. **Returns the summary** — already formatted for Slack mrkdwn.
 
@@ -74,7 +78,8 @@ The output is structured into four sections:
 ## Requirements
 
 - OS: macOS or Linux
-- Binaries: `ox`, `claude`, `jq`
+- Binaries: `ox` with `ox distill history` support (landed in
+  [PR #507](https://github.com/sageox/ox/pull/507)), `claude`, `jq`
 - Env: `ANTHROPIC_API_KEY` (supplied via per-skill `apiKey` config or
   shell env — see [Environment setup](../README.md#environment-setup))
 - A SageOx account with at least one distilled team (run
