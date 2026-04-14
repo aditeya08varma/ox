@@ -53,9 +53,15 @@ try_git_update() {
   fi
 
   # Text-level validation. Cheap to run; catches obvious hand-edits
-  # before we go near the filesystem.
+  # before we go near the filesystem. Accept both the textual $HOME
+  # prefix and the resolved $REAL_HOME prefix — install-ox-git.sh
+  # writes the state file with the PHYSICAL clone path, so on a
+  # system where $HOME itself is symlinked (e.g. /Users/foo →
+  # /Volumes/Data/Users/foo) the stored path will start with
+  # $REAL_HOME and the textual check against $HOME alone would
+  # reject every legitimate auto-update.
   case "$clone_path" in
-    "$HOME"/*) ;;
+    "$HOME"/*|"$REAL_HOME"/*) ;;
     *)
       echo "warning: clone_path not under \$HOME; skipping auto-update: $clone_path" >&2
       return
@@ -117,6 +123,19 @@ try_git_update() {
     echo "warning: resolved clone_path missing .git subdirectory; skipping auto-update: $real_clone_path" >&2
     return
   fi
+
+  # Defense-in-depth: confirm this is actually a sageox/ox checkout
+  # before running its Makefile. The state file is user-writable and
+  # could point at any user-owned git repo under $HOME; `git pull &&
+  # make install` on a random repo is a code-execution footgun.
+  case "$(git -C "$real_clone_path" remote get-url origin 2>/dev/null || true)" in
+    https://github.com/sageox/ox|https://github.com/sageox/ox.git) ;;
+    git@github.com:sageox/ox|git@github.com:sageox/ox.git) ;;
+    *)
+      echo "warning: clone_path is not a sageox/ox checkout; skipping auto-update: $real_clone_path" >&2
+      return
+      ;;
+  esac
 
   # Run the update from the RESOLVED path. Non-fatal on failure — fall
   # back to the existing binary. Capture output so we can show a useful
