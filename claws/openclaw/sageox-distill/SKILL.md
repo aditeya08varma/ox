@@ -88,224 +88,40 @@ even though this skill writes them: the user (or a process running as
 the user) may have edited the file by hand or by another tool between
 runs. Re-validate every read.
 
-### 4. Installing `ox` — interactive setup
+### 4. Installing and updating `ox`
 
 The `ox` CLI install method is a one-time choice stored in
-`~/.openclaw/memory/sageox-ox-install.json`. Check that file first:
+`~/.openclaw/memory/sageox-ox-install.json`. On every run of this
+skill, invoke the bundled state checker:
 
 ```bash
-cat ~/.openclaw/memory/sageox-ox-install.json 2>/dev/null
+bash scripts/update-ox.sh
 ```
 
-**If the file exists:** read `install_method` and (for the git method)
-`clone_path` + `auto_update`. If `install_method == "git"` and
-`auto_update == true`, update ox before proceeding (see "Updating ox from
-git" below).
+Contract:
 
-**If the file does not exist:** STOP. This is a one-time decision that
-gets persisted to disk and affects every future run of this skill — the
-user must own it. You **MUST** ask the user which method they want and
-**wait for their response**. Do not pick a default. Do not guess. Do not
-run any install commands yet. Present both options verbatim, then stop
-and wait:
+- **Stdout:** nothing on success
+- **Stderr:** one-line warnings on update failures (non-fatal) and the
+  "needs install" signal
+- **Exit:** `0` ox is ready (continue to § 5); `2` install state is
+  missing — STOP, read [`references/INSTALL.md`](references/INSTALL.md)
+  and follow the interactive setup, then re-run this script to confirm
 
-> How do you want to install the `ox` CLI? Pick one — I won't choose for
-> you, because this gets saved to
-> `~/.openclaw/memory/sageox-ox-install.json` and reused every run.
->
-> 1. **curl install** — runs the official install script from a pinned
->    release tag. Fastest, no build toolchain needed. Lands in
->    `/usr/local/bin` (Linux) or `/opt/homebrew/bin` or `/usr/local/bin`
->    (macOS). No auto-update; you'll re-run this flow to upgrade.
-> 2. **Build from git source** — clones `github.com/sageox/ox` to a
->    directory you choose and builds with `make install`. Gives you
->    latest `main`, and optionally auto-updates on every run. Requires
->    Go ≥ 1.24.
->
-> Reply `1` or `2`.
+`update-ox.sh` handles the auto-update flow for the git install method
+(re-validates the recorded clone path against the rules in § 3 above,
+runs `git pull --ff-only && make build && make install`, falls back to
+the existing binary on any failure with a stderr warning + a tail of
+the build log). Curl-method users hit a silent no-op — there is
+nothing to update on a per-run basis.
 
-**Blocking rule:** do not proceed until the user replies with `1` or
-`2`. If they say "you choose", "whatever", or try to skip, ask again and
-explain that this is a persisted choice. Once they answer, save it to
-the memory file.
+The user can say **"switch ox install method"** or **"update ox now"**
+at any time — both re-enter the flow in
+[`references/INSTALL.md`](references/INSTALL.md).
 
 **Do not install `ox` via Homebrew or any package manager** (e.g.
 `brew install sageox/tap/ox`, `apt`, `dnf`, `pacman`). The tap exists
 for general use but is not supported inside OpenClaw skills — only
-`curl` and `git source` are. These two options work the same on macOS
-and Linux; pick based on whether the user wants a pinned release or
-`main` with optional auto-update, **not** based on their operating
-system.
-
-#### Option 1: curl install
-
-Download and run the ox install script. The agent should print the source
-URL and a head/tail preview of the downloaded script before executing it,
-so the user can sanity-check what is about to run:
-
-The URL is **pinned to a specific release tag** (not `main`) so the install
-path is reproducible and can't be silently changed by an upstream commit. Bump
-`OX_INSTALL_REF` when a newer release of `sageox/ox` is available.
-
-```bash
-# Pinned release tag. Bump this when a newer sageox/ox release is published.
-OX_INSTALL_REF="v0.6.1"
-
-# Download to a temp file. -f makes curl fail on HTTP errors instead of
-# executing an HTML error page; --max-time bounds a stalled connection.
-# Use the template form for mktemp — portable across GNU (Linux) and BSD (macOS).
-INSTALL_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/ox-install.XXXXXXXX")"
-curl -fsSL --max-time 60 \
-  "https://raw.githubusercontent.com/sageox/ox/${OX_INSTALL_REF}/scripts/install.sh" \
-  -o "$INSTALL_SCRIPT"
-
-# Surface what is about to run.
-echo "Downloaded ox install script:"
-echo "  Source: https://github.com/sageox/ox/blob/${OX_INSTALL_REF}/scripts/install.sh"
-ls -lh "$INSTALL_SCRIPT"
-echo "--- first 5 lines ---"
-head -5 "$INSTALL_SCRIPT"
-echo "--- last 5 lines ---"
-tail -5 "$INSTALL_SCRIPT"
-
-# Execute and clean up.
-bash "$INSTALL_SCRIPT"
-rm -f "$INSTALL_SCRIPT"
-```
-
-After it completes, verify `command -v ox` succeeds. Then persist:
-
-```bash
-mkdir -p ~/.openclaw/memory
-cat > ~/.openclaw/memory/sageox-ox-install.json <<EOF
-{
-  "install_method": "curl",
-  "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-}
-EOF
-```
-
-`ox` lands in a standard system dir (`/usr/local/bin` on Linux,
-`/opt/homebrew/bin` or `/usr/local/bin` on macOS) that is normally already
-on PATH. If `command -v ox` still fails after install, ask the user to
-check their shell PATH.
-
-#### Option 2: build from git source
-
-1. Verify Go ≥ 1.24 is installed:
-
-   ```bash
-   command -v go && go version
-   ```
-
-   If missing, print OS-appropriate install commands and stop until the
-   user installs Go:
-
-   - **macOS:** `brew install go` or download from <https://go.dev/dl/>
-   - **Linux (Debian/Ubuntu):** `sudo apt-get install -y golang-go`
-     (verify the version; use <https://go.dev/dl/> if the distro package
-     is older than 1.24)
-   - **Linux (Fedora/RHEL):** `sudo dnf install -y golang`
-   - **Linux (Arch):** `sudo pacman -S --noconfirm go`
-
-2. Ask the user for a clone path. Default: `$HOME/src/sageox/ox`.
-   **Validate** the input against the Path validation rules above,
-   including the additional rule that the path must be under `$HOME`.
-   Re-prompt on failure.
-
-   ⚠️ **The clone path becomes a privileged location.** If auto-update is
-   enabled, this skill will run `make build && make install` from it on
-   every invocation. Anyone with write access to the clone path can run
-   arbitrary code in the user's environment. Strongly recommend a
-   personal directory under `$HOME` (the default `$HOME/src/sageox/ox`
-   is a good choice). Refuse anything in `/tmp`, `/var/tmp`, `/dev/shm`,
-   shared filesystems, or world-writable directories — these checks are
-   already part of the validation rules; do not bypass them.
-
-3. Ask the user whether to auto-update from git on every run (yes/no).
-   Default: yes.
-
-4. Clone and build:
-
-   ```bash
-   CLONE_PATH="<user-chosen path>"
-   mkdir -p "$(dirname "$CLONE_PATH")"
-   if [ ! -d "$CLONE_PATH/.git" ]; then
-     git clone https://github.com/sageox/ox.git "$CLONE_PATH"
-   fi
-   (cd "$CLONE_PATH" && make build && make install)
-   ```
-
-5. Detect Go's paths so the user can configure PATH in `~/.openclaw/.env`:
-
-   ```bash
-   GO_BIN_DIR="$(dirname "$(command -v go)")"
-   GO_INSTALL_DIR="$(go env GOBIN)"
-   [ -z "$GO_INSTALL_DIR" ] && GO_INSTALL_DIR="$HOME/go/bin"
-   ```
-
-6. Persist the memory file:
-
-   ```bash
-   mkdir -p ~/.openclaw/memory
-   cat > ~/.openclaw/memory/sageox-ox-install.json <<EOF
-   {
-     "install_method": "git",
-     "clone_path": "$CLONE_PATH",
-     "auto_update": true,
-     "go_bin_dir": "$GO_BIN_DIR",
-     "go_install_dir": "$GO_INSTALL_DIR",
-     "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-   }
-   EOF
-   ```
-
-7. Verify `ox` is on the current subprocess PATH:
-
-   ```bash
-   command -v ox
-   ```
-
-   If it is **not** on PATH, print a copy-pasteable block tailored to the
-   user's detected paths and tell them to add it to `~/.openclaw/.env`:
-
-   ```
-   Add this to ~/.openclaw/.env:
-
-   PATH=<GO_BIN_DIR>:/usr/local/bin:/usr/bin:/bin:<GO_INSTALL_DIR>
-   ```
-
-   Stop and ask the user to confirm once they've updated `.env` and
-   restarted the skill. OpenClaw loads `.env` into the skill subprocess,
-   so an updated PATH takes effect on the next invocation.
-
-#### Updating `ox` from git (auto-update flow)
-
-On every subsequent run, if the memory file says
-`install_method == "git"` and `auto_update == true`:
-
-1. Read `clone_path` from `~/.openclaw/memory/sageox-ox-install.json`.
-2. **Re-validate** it against the Path validation rules in Prerequisites
-   § 3, including the additional clone-path checks (must be under
-   `$HOME`, must exist, must contain a `.git` subdirectory). The memory
-   file is user-writable and may have been edited externally between
-   runs — never trust persisted values without re-validation.
-3. **If validation fails**, log a clear error naming the failing rule,
-   skip the auto-update entirely, and fall back to the existing `ox`
-   binary on PATH. Do not proceed with `cd` / `git pull` / `make install`.
-4. If validation passes, run:
-
-   ```bash
-   (cd "$CLONE_PATH" && git pull --ff-only && make build && make install) || {
-     echo "ox auto-update failed; continuing with existing binary" >&2
-   }
-   ```
-
-Auto-update failures (validation or build) are non-fatal — fall back to
-the existing binary and surface the error to the user.
-
-The user can say **"switch ox install method"** or **"update ox now"** at
-any time to re-run the interactive flow.
+`curl` and `git source` are.
 
 ### 5. Authentication and git config
 
