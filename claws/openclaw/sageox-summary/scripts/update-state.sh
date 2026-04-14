@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# update-state.sh — atomically merge a set of newly-summarized basenames
-# into the per-team included_files list, prune stale entries, and write
+# update-state.sh — atomically merge a set of newly-summarized entry ids
+# into the per-team included_ids list, prune stale entries, and write
 # the result back via a temp-file rename.
 #
 # Usage: update-state.sh <state_file> <team_id>
-#        (reads newline-separated basenames from stdin)
+#        (reads newline-separated entry ids from stdin)
 #
 # Arguments:
 #   <state_file>  Absolute path to sageox-summary-state.json
 #   <team_id>     Team id key to merge under
 #
-# Stdin: one basename per line (may be empty). Lines not matching the
-# distill-output regex are silently dropped.
+# Stdin: one entry id per line (may be empty). Lines not matching the
+# distill-output id regex are silently dropped.
 #
 # Stdout: nothing on success.
 # Stderr: single-line warnings (e.g. malformed prior state).
@@ -32,16 +32,19 @@ TEAM_ID="$2"
 
 command -v jq >/dev/null 2>&1 || { echo "error: jq is required" >&2; exit 3; }
 
-FILENAME_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f-]+\.md$'
+ID_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9a-f-]+$'
 
-# Compute the prune cutoff: any entry whose date prefix is strictly older
-# than YESTERDAY_UTC has fallen out of the 24h candidate window forever.
-YESTERDAY_UTC="$(date -u -v-1d +%Y-%m-%d 2>/dev/null \
+# Prune cutoff: drop entries whose date prefix is strictly older than
+# YESTERDAY_UTC. `ox distill history list --since 24h` auto-expands its
+# window around the day boundary, so the candidate set spans at most
+# today + yesterday UTC; keeping state at `>= yesterday` guarantees no
+# id in range is ever dropped. BSD `date` uses `-v`; GNU uses `-d`.
+CUTOFF_UTC="$(date -u -v-1d +%Y-%m-%d 2>/dev/null \
   || date -u -d 'yesterday' +%Y-%m-%d)"
 NOW_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# Read and regex-filter added basenames from stdin.
-ADDED="$(grep -E "$FILENAME_RE" || true)"
+# Read and regex-filter added entry ids from stdin.
+ADDED="$(grep -E "$ID_RE" || true)"
 
 # Load existing state. Missing → {}. Malformed → {} + stderr warning.
 if [ -f "$STATE_FILE" ]; then
@@ -54,19 +57,19 @@ else
 fi
 
 # Merge + prune + dedupe in a single jq pass. Preserves other teams'
-# entries verbatim — only the target team's included_files is rewritten.
+# entries verbatim — only the target team's included_ids is rewritten.
 NEW_STATE="$(
   jq -n \
     --argjson existing "$EXISTING" \
     --arg tid "$TEAM_ID" \
     --arg added "$ADDED" \
-    --arg cutoff "$YESTERDAY_UTC" \
+    --arg cutoff "$CUTOFF_UTC" \
     --arg now "$NOW_UTC" \
-    --arg re "$FILENAME_RE" \
+    --arg re "$ID_RE" \
     '
       ($existing // {}) as $e
     | ($e.teams // {}) as $teams
-    | ($teams[$tid].included_files // []) as $prior
+    | ($teams[$tid].included_ids // []) as $prior
     | ($added | split("\n") | map(select(. != ""))) as $new
     | (($prior + $new)
         | map(select(test($re)))
@@ -74,7 +77,7 @@ NEW_STATE="$(
         | unique
       ) as $merged
     | $e
-      | .teams = ($teams | .[$tid] = {included_files: $merged})
+      | .teams = ($teams | .[$tid] = {included_ids: $merged})
       | .updated_at = $now
     '
 )"
