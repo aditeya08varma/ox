@@ -3,10 +3,17 @@
 # the "is ox installed at all?" check for every invocation of this skill.
 #
 # Reads ~/.openclaw/memory/sageox-ox-install.json. If the install method
-# is git with auto_update enabled, runs git pull + make install from the
-# recorded clone path. Falls back silently to the existing binary on any
+# is git with auto_update enabled, resolves the recorded clone_path to
+# its physical location, verifies ownership, and runs git pull + make
+# install there. Falls back silently to the existing binary on any
 # failure (validation, network, build) — a bad update must never block
 # a working invocation.
+#
+# Before returning `0`, always re-confirms that `ox` is actually on the
+# subprocess PATH. A stale state file + a missing PATH entry is a common
+# failure mode on the curl install path and on git installs whose
+# ~/.openclaw/.env was lost, and reporting "ready" in either case would
+# just push the failure to the next `ox status` call.
 #
 # Usage: update-ox.sh
 #
@@ -14,9 +21,9 @@
 # Stderr: one-line warnings on failure modes; the "needs install" signal
 # Exit:
 #   0 — ox is ready, agent should proceed to next prerequisite
-#   2 — install state file is missing; agent must read
-#       references/INSTALL.md and run the interactive install flow
-#       before continuing
+#   2 — ox is not usable (no state file, or state says installed but
+#       'ox' is not on PATH); agent must read references/INSTALL.md and
+#       run the interactive install flow before continuing
 
 set -euo pipefail
 
@@ -27,87 +34,133 @@ if [ ! -f "$STATE_FILE" ]; then
   exit 2
 fi
 
-# Without jq we can't read the state file, but ox itself may still be
-# on PATH from a prior install. Don't fail — let the caller verify.
-if ! command -v jq >/dev/null 2>&1; then
-  echo "warning: jq not found; cannot read $STATE_FILE; skipping update check" >&2
-  exit 0
-fi
+# Resolve $HOME to its physical path once — used by the symlink-escape
+# check below. If $HOME itself is under a symlink (e.g. /Users/foo →
+# /Volumes/Data/Users/foo), the real clone_path must still resolve under
+# the resolved $HOME, not the textual one.
+REAL_HOME="$(cd "$HOME" && pwd -P)"
 
-INSTALL_METHOD="$(jq -r '.install_method // empty' "$STATE_FILE" 2>/dev/null || true)"
-if [ -z "$INSTALL_METHOD" ]; then
-  echo "warning: $STATE_FILE has no install_method; skipping update check" >&2
-  exit 0
-fi
+# Wrap the whole git-mode update path in a function so that early-exit
+# on any validation failure falls THROUGH to the final command -v ox
+# readiness gate at the bottom of the script. Using `return` here (not
+# `exit 0`) is what makes the gate load-bearing.
+try_git_update() {
+  local clone_path real_clone_path ch log
+  clone_path="$(jq -r '.clone_path // empty' "$STATE_FILE")"
+  if [ -z "$clone_path" ]; then
+    echo "warning: $STATE_FILE missing clone_path; skipping auto-update" >&2
+    return
+  fi
 
-# Curl install: nothing to update on a per-run basis. The user re-runs
-# the interactive flow to bump the pinned release.
-if [ "$INSTALL_METHOD" = "curl" ]; then
-  exit 0
-fi
-
-if [ "$INSTALL_METHOD" != "git" ]; then
-  echo "warning: unknown install_method '$INSTALL_METHOD' in $STATE_FILE; skipping update check" >&2
-  exit 0
-fi
-
-AUTO_UPDATE="$(jq -r '.auto_update // false' "$STATE_FILE")"
-if [ "$AUTO_UPDATE" != "true" ]; then
-  exit 0
-fi
-
-CLONE_PATH="$(jq -r '.clone_path // empty' "$STATE_FILE")"
-if [ -z "$CLONE_PATH" ]; then
-  echo "warning: $STATE_FILE missing clone_path; skipping auto-update" >&2
-  exit 0
-fi
-
-# Re-validate the clone path. The state file is user-writable and may
-# have been edited externally between runs — never trust persisted
-# values without re-checking. Validation failure is non-fatal: skip the
-# update and fall back to the existing ox binary.
-case "$CLONE_PATH" in
-  "$HOME"/*) ;;
-  *)
-    echo "warning: clone_path not under \$HOME; skipping auto-update: $CLONE_PATH" >&2
-    exit 0
-    ;;
-esac
-case "$CLONE_PATH" in
-  *..*)
-    echo "warning: clone_path contains '..'; skipping auto-update: $CLONE_PATH" >&2
-    exit 0
-    ;;
-esac
-for ch in ';' '$' '`' '|' '&' '<' '>' '(' ')' '{' '}' '*' '?' '[' ']' '!' '\'; do
-  case "$CLONE_PATH" in
-    *"$ch"*)
-      echo "warning: clone_path contains shell metacharacter; skipping auto-update" >&2
-      exit 0
+  # Text-level validation. Cheap to run; catches obvious hand-edits
+  # before we go near the filesystem.
+  case "$clone_path" in
+    "$HOME"/*) ;;
+    *)
+      echo "warning: clone_path not under \$HOME; skipping auto-update: $clone_path" >&2
+      return
       ;;
   esac
-done
-case "$CLONE_PATH" in
-  *"
+  case "$clone_path" in
+    *..*)
+      echo "warning: clone_path contains '..'; skipping auto-update: $clone_path" >&2
+      return
+      ;;
+  esac
+  for ch in ';' '$' '`' '|' '&' '<' '>' '(' ')' '{' '}' '*' '?' '[' ']' '!' '"' '\'; do
+    case "$clone_path" in
+      *"$ch"*)
+        echo "warning: clone_path contains shell metacharacter; skipping auto-update" >&2
+        return
+        ;;
+    esac
+  done
+  case "$clone_path" in
+    *"
 "*)
-    echo "warning: clone_path contains a newline; skipping auto-update" >&2
-    exit 0
-    ;;
-esac
-if [ ! -d "$CLONE_PATH/.git" ]; then
-  echo "warning: clone_path missing or not a git repo; skipping auto-update: $CLONE_PATH" >&2
-  exit 0
+      echo "warning: clone_path contains a newline; skipping auto-update" >&2
+      return
+      ;;
+  esac
+
+  # Physical path resolution. `cd && pwd -P` is the portable way to
+  # follow every symlink — works on BSD/macOS and GNU/Linux without
+  # depending on `readlink -f` or `realpath`, neither of which are
+  # guaranteed on older macOS. If the path doesn't exist or we can't
+  # enter it, treat the recorded state as stale and skip the update.
+  local real_clone_path
+  if ! real_clone_path="$(cd "$clone_path" 2>/dev/null && pwd -P)"; then
+    echo "warning: clone_path does not exist or is inaccessible; skipping auto-update: $clone_path" >&2
+    return
+  fi
+
+  # Resolved clone path must still be under the resolved $HOME — this
+  # is the check that catches `~/link → /tmp/foo` symlink escapes.
+  case "$real_clone_path" in
+    "$REAL_HOME"/*) ;;
+    *)
+      echo "warning: clone_path escapes \$HOME via symlink; skipping auto-update: $real_clone_path" >&2
+      return
+      ;;
+  esac
+
+  # Ownership check. `test -O` returns true iff the file is owned by
+  # the effective user ID — POSIX, portable across BSD and GNU. This
+  # blocks the case where a symlink inside $HOME points to a directory
+  # owned by root or another user (shared /opt, /var, etc.).
+  if [ ! -O "$real_clone_path" ]; then
+    echo "warning: clone_path not owned by current user; skipping auto-update: $real_clone_path" >&2
+    return
+  fi
+
+  if [ ! -d "$real_clone_path/.git" ]; then
+    echo "warning: resolved clone_path missing .git subdirectory; skipping auto-update: $real_clone_path" >&2
+    return
+  fi
+
+  # Run the update from the RESOLVED path. Non-fatal on failure — fall
+  # back to the existing binary. Capture output so we can show a useful
+  # tail-of-log on failure without polluting stdout on the success path.
+  log="$(mktemp "${TMPDIR:-/tmp}/ox-update.XXXXXXXX")"
+  trap 'rm -f "$log" 2>/dev/null' RETURN
+  if ! ( cd "$real_clone_path" && git pull --ff-only && make build && make install ) > "$log" 2>&1; then
+    echo "warning: ox auto-update failed; continuing with existing binary" >&2
+    echo "--- last 10 lines of update log ---" >&2
+    tail -10 "$log" >&2
+  fi
+}
+
+# Without jq we can't read the state file, but ox itself may still be
+# on PATH from a prior install. Don't fail — let the final readiness
+# gate decide.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "warning: jq not found; cannot read $STATE_FILE; skipping update check" >&2
+else
+  INSTALL_METHOD="$(jq -r '.install_method // empty' "$STATE_FILE" 2>/dev/null || true)"
+  if [ -z "$INSTALL_METHOD" ]; then
+    echo "warning: $STATE_FILE has no install_method; skipping update check" >&2
+  elif [ "$INSTALL_METHOD" = "curl" ]; then
+    : # Nothing to update on a per-run basis. The user re-runs the
+      # interactive flow to bump the pinned release.
+  elif [ "$INSTALL_METHOD" = "git" ]; then
+    AUTO_UPDATE="$(jq -r '.auto_update // false' "$STATE_FILE")"
+    if [ "$AUTO_UPDATE" = "true" ]; then
+      try_git_update
+    fi
+  else
+    echo "warning: unknown install_method '$INSTALL_METHOD' in $STATE_FILE; skipping update check" >&2
+  fi
 fi
 
-# Run the update. Non-fatal on failure — fall back to existing binary.
-# Capture output so we can show useful tail-of-log on failure without
-# polluting stdout on the success path.
-LOG="$(mktemp "${TMPDIR:-/tmp}/ox-update.XXXXXXXX")"
-trap 'rm -f "$LOG" 2>/dev/null' EXIT
-if ! ( cd "$CLONE_PATH" && git pull --ff-only && make build && make install ) > "$LOG" 2>&1; then
-  echo "warning: ox auto-update failed; continuing with existing binary" >&2
-  echo "--- last 10 lines of update log ---" >&2
-  tail -10 "$LOG" >&2
+# Final readiness gate. Whatever install method the state file records,
+# `ox` must actually be on the subprocess PATH for the rest of the
+# skill to function. A stale state file + a misconfigured ~/.openclaw/.env
+# is a common failure mode that used to only surface on the next
+# `ox status` call — make it surface here instead, with actionable
+# next-step guidance.
+if ! command -v ox >/dev/null 2>&1; then
+  echo "error: 'ox' is not on PATH (install state: ${INSTALL_METHOD:-unknown})" >&2
+  echo "fix: re-read references/INSTALL.md to re-run install or update ~/.openclaw/.env" >&2
+  exit 2
 fi
-
 exit 0

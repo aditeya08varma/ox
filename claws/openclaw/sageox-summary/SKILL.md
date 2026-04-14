@@ -111,9 +111,11 @@ Contract:
 - **Stdout:** nothing on success
 - **Stderr:** one-line warnings on update failures (non-fatal) and the
   "needs install" signal
-- **Exit:** `0` ox is ready (continue to § 5); `2` install state is
-  missing — STOP, read [`references/INSTALL.md`](references/INSTALL.md)
-  and follow the interactive setup, then re-run this script to confirm
+- **Exit:** `0` ox is ready (continue to § 5); `2` ox is not usable
+  (no install state, or state records ox as installed but it isn't on
+  PATH) — STOP, read
+  [`references/INSTALL.md`](references/INSTALL.md), follow the
+  interactive setup, then re-run this script to confirm
 
 `update-ox.sh` handles the auto-update flow for the git install method
 (re-validates the recorded clone path against the rules in § 3 above,
