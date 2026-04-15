@@ -177,23 +177,31 @@ fi
 # known-good ox install on subsequent runs. Only factual state — what
 # was installed, where, when — no preference fields.
 #
+# Use `jq -n --arg` rather than a heredoc so JSON-special characters in
+# values (e.g. `"` or `\` in a pathological $HOME) get escaped correctly
+# instead of producing a malformed state file. `jq` is a hard skill
+# dependency (declared in SKILL.md `requires.bins`), so OpenClaw has
+# already ensured it's available by the time this script runs.
+#
 # Write to a temp file in the same directory, then rename into place.
-# update-ox.sh only checks for the file's existence, so an interrupted
-# write that left a zero-byte or partial JSON file would look
-# "installed" on the next run. Same-directory rename is atomic at the
-# directory-entry level, which is all we need here.
+# update-ox.sh reads this file, so an interrupted write that left a
+# zero-byte or partial JSON file would break the readiness gate.
+# Same-directory rename is atomic at the directory-entry level, which
+# is all we need here.
 STATE_DIR="$HOME/.openclaw/memory"
 STATE_FILE="$STATE_DIR/sageox-ox-install.json"
 mkdir -p "$STATE_DIR"
 TMP_STATE_FILE="$(mktemp "${STATE_DIR}/sageox-ox-install.json.XXXXXXXX")"
 INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-cat > "$TMP_STATE_FILE" <<EOF
-{
-  "ox_install_ref": "$OX_INSTALL_REF",
-  "install_dir": "$INSTALL_DIR",
-  "installed_at": "$INSTALLED_AT"
-}
-EOF
+jq -n \
+  --arg ox_install_ref "$OX_INSTALL_REF" \
+  --arg install_dir    "$INSTALL_DIR" \
+  --arg installed_at   "$INSTALLED_AT" \
+  '{
+    ox_install_ref: $ox_install_ref,
+    install_dir:    $install_dir,
+    installed_at:   $installed_at
+  }' > "$TMP_STATE_FILE"
 mv "$TMP_STATE_FILE" "$STATE_FILE"
 
 echo "ox ${OX_INSTALL_REF} installed successfully"
