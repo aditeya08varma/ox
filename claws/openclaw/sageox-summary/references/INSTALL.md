@@ -10,9 +10,10 @@ and PATH recovery.
 Invoke the bundled helper. It downloads the `ox` release tarball
 directly from GitHub Releases at a tag pinned in the script source,
 verifies it against an sha256 checksum embedded in the script, extracts
-it into `$HOME/.local/bin`, and writes
-`~/.openclaw/memory/sageox-ox-install.json` with `install_method: curl`.
-No sudo, no shell-script piping, no dynamic "latest" resolution.
+it into `$HOME/.local/bin`, and records the install state (pinned
+release tag, install directory, install timestamp) in
+`~/.openclaw/memory/sageox-ox-install.json`. No sudo, no shell-script
+piping, no dynamic "latest" resolution.
 
 ```bash
 bash scripts/install-ox-curl.sh

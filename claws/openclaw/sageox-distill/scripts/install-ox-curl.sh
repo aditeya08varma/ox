@@ -158,13 +158,13 @@ if ! PATH="$INSTALL_DIR:$PATH" command -v ox >/dev/null 2>&1; then
   exit 3
 fi
 
-# Persist the install method so update-ox.sh can short-circuit the curl
-# path on subsequent runs. Schema is shared with install-ox-git.sh.
+# Record install state so update-ox.sh can confirm the skill has a
+# known-good ox install on subsequent runs. Only factual state — what
+# was installed, where, when — no preference fields.
 mkdir -p "$HOME/.openclaw/memory"
 INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$HOME/.openclaw/memory/sageox-ox-install.json" <<EOF
 {
-  "install_method": "curl",
   "ox_install_ref": "$OX_INSTALL_REF",
   "install_dir": "$INSTALL_DIR",
   "installed_at": "$INSTALLED_AT"

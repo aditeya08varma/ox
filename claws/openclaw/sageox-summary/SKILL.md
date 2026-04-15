@@ -1,7 +1,7 @@
 ---
 name: sageox-summary
 description: "Generate an overall team summary covering the last 24 hours across all SageOx-enabled teams. Reads distilled daily entries via `ox distill history` and produces a structured, Slack-ready overview."
-version: 0.2.2
+version: 0.2.3
 metadata:
   openclaw:
     emoji: "📰"
