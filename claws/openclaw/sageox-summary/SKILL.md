@@ -1,27 +1,34 @@
 ---
 name: sageox-summary
 description: "Generate an overall team summary covering the last 24 hours across all SageOx-enabled teams. Reads distilled daily entries via `ox distill history` and produces a structured, Slack-ready overview."
-version: 0.2.3
+version: 0.3.0
 metadata:
-  openclaw:
-    emoji: "📰"
-    os: ["macos", "linux"]
-    primaryEnv: ANTHROPIC_API_KEY
-    requires:
-      env:
-        - ANTHROPIC_API_KEY
-      bins:
-        - ox
-        - claude
-        - jq
-    install:
-      - kind: node
-        package: "@anthropic-ai/claude-code"
-        bins: [claude]
-      - kind: brew
-        formula: jq
-        bins: [jq]
-    homepage: https://sageox.ai
+  {
+    "openclaw":
+      {
+        "emoji": "📰",
+        "os": ["macos", "linux"],
+        "requires": { "bins": ["ox", "claude", "jq"] },
+        "install":
+          [
+            {
+              "id": "node-claude",
+              "kind": "node",
+              "package": "@anthropic-ai/claude-code",
+              "bins": ["claude"],
+              "label": "Install Claude Code CLI (npm)",
+            },
+            {
+              "id": "brew-jq",
+              "kind": "brew",
+              "formula": "jq",
+              "bins": ["jq"],
+              "label": "Install jq (brew)",
+            },
+          ],
+        "homepage": "https://sageox.ai",
+      },
+  }
 ---
 
 # SageOx Summary
@@ -37,7 +44,7 @@ skill — distill writes the source material, this skill synthesizes it.
 **ox version requirement:** this skill uses `ox distill history list` and
 `ox distill history show`, which landed in [PR #507](https://github.com/sageox/ox/pull/507).
 If `ox distill history --help` returns "unknown command" or similar, update
-`ox` (see § 4 below) before continuing.
+`ox` (see § 3 below) before continuing.
 
 ## Prerequisites
 
@@ -45,34 +52,21 @@ Before doing anything else, verify the user's environment. Run every check
 in order. If any required check fails, explain precisely what's missing
 and stop. Do not proceed until the user has fixed it.
 
-### 1. Environment variables
-
-This skill declares `ANTHROPIC_API_KEY` in `primaryEnv`, so OpenClaw
-injects it from per-skill config or shell env before the skill runs.
-Verify it landed:
-
-```bash
-test -n "$ANTHROPIC_API_KEY"
-```
-
-Never echo the key value — only confirm its presence. If the check
-fails, point the user at the setup guide and stop:
-<https://github.com/sageox/ox/blob/main/claws/openclaw/README.md#environment-setup>
-(covers per-skill `apiKey`, shell env, the precedence rule, and
-sandboxed Docker runs).
-
-### 2. Required binaries
+### 1. Required binaries
 
 `ox`, `claude`, and `jq` are declared in the front matter's
 `requires.bins`, so OpenClaw checks them before running the skill.
 `claude` (npm) and `jq` (brew) have declarative installs in the front
 matter; `ox` does not. If OpenClaw reports a missing bin, surface its
 message to the user and stop — except for `ox`, which has the
-interactive install flow in § 4 below. `claude -p` reads
-`ANTHROPIC_API_KEY` from its process environment, so no `claude login`
-is required.
+interactive install flow in § 3 below.
 
-### 3. Path validation rules
+`claude -p` will use whatever credentials `claude` already has — either
+an OAuth session from `claude login` (Pro/Max subscription) or
+`ANTHROPIC_API_KEY` exported in the shell that launched OpenClaw. The
+skill no longer accepts a per-skill `apiKey`.
+
+### 2. Path validation rules
 
 Several steps below read a path from a JSON state file. Before
 interpolating any such value into a shell command, the agent **must**
@@ -94,7 +88,7 @@ even though this skill writes them: the user (or a process running as
 the user) may have edited the file by hand or by another tool between
 runs. Re-validate every read.
 
-### 4. Installing `ox`
+### 3. Installing `ox`
 
 The `ox` CLI install state is recorded in
 `~/.openclaw/memory/sageox-ox-install.json`. On every run of this
@@ -111,7 +105,7 @@ Contract:
   describing what's wrong, followed by a `fix:` line with the
   remediation. Surface both verbatim to the user.
 - **Exit:** `0` ox is pinned, installed, and reports the expected
-  version (continue to § 5); `2` ox is not usable — one of: state file
+  version (continue to § 4); `2` ox is not usable — one of: state file
   missing, binary missing at `$HOME/.local/bin/ox`, `ox` on PATH
   resolves to a different binary, binary fails to run, or binary
   reports a version other than the one recorded in
@@ -130,20 +124,20 @@ The user can say **"reinstall ox"** at any time to re-enter the flow in
 for general use but is not supported inside OpenClaw skills — only the
 pinned-release curl flow is.
 
-### 5. Authentication
+### 4. Authentication
 
 1. `ox status` — confirm ox is authenticated. If not, tell the user to
    run `ox login` and try again.
-2. Smoke-test `claude -p` with the injected key:
+2. Smoke-test `claude -p`:
 
    ```bash
    claude -p "say hi" --model claude-sonnet-4-6
    ```
 
-   If it fails with an auth error, either the per-skill `apiKey` in
-   `~/.openclaw/openclaw.json` is wrong/expired, or the host shell's
-   `ANTHROPIC_API_KEY` (if set) is wrong/expired and is shadowing the
-   per-skill config. Tell the user to fix whichever applies and try again.
+   If it fails with an auth error, `claude` has no usable credentials.
+   Tell the user to either run `claude login` (Pro/Max OAuth) or
+   export `ANTHROPIC_API_KEY` in the shell that launches OpenClaw, then
+   re-run the skill. The skill cannot inject the key itself.
 
 ## Configuration
 
@@ -201,7 +195,7 @@ When the user asks for a summary, run the steps in order. Steps 2 and
 
 1. Read `~/.openclaw/memory/sageox-distill-repos.json` with `jq`.
    **Re-validate every `path` entry** against the Path validation rules
-   in Prerequisites § 3 before using it — the manifest is user-writable
+   in Prerequisites § 2 before using it — the manifest is user-writable
    and may have been hand-edited between runs. (The summary pipeline
    itself does not dereference the paths, but if the manifest looks
    corrupt we stop rather than guess at intent.)
@@ -330,10 +324,10 @@ access — do **not** pass `--add-dir` and do **not** grant read tools.
 - No `--allowedTools` (prompt is self-contained)
 - The substituted prompt passed via stdin
 
-`ANTHROPIC_API_KEY` is already set in the skill's process environment
-(either by OpenClaw's per-skill `apiKey` injection or inherited from the
-host shell — see Prerequisites § 1), so `claude -p` picks it up naturally.
-Wrap the invocation in `timeout 600` (10 minutes) — this matches the
+`claude -p` will use whatever credentials `claude` already has — either
+an OAuth session from `claude login` or `ANTHROPIC_API_KEY` from the
+shell that launched OpenClaw (see Prerequisites § 1). Wrap the
+invocation in `timeout 600` (10 minutes) — this matches the
 timeout used by `pkg/sessionsummary/claude.go` in the `ox` repo for
 comparable Claude synthesis work and gives the model enough headroom for
 cross-team summaries that inline many daily entries:

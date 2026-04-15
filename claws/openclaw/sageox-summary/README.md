@@ -18,14 +18,13 @@ activity → daily team digests → unified readout.
 clawhub install sageox-summary
 ```
 
-Then complete the one-time environment setup in
-[`claws/openclaw/README.md` § Environment setup](../README.md#environment-setup) —
-specifically:
+Then complete the one-time host setup documented in
+[`claws/openclaw/README.md`](../README.md):
 
-- Configure `ANTHROPIC_API_KEY` for the skill via either per-skill
-  `apiKey` in `~/.openclaw/openclaw.json` (recommended; lets you use a
-  separate key from your host agent) or via shell env. **Mind the
-  precedence rule** documented in the link above.
+- **Authenticate `claude`** — either run `claude login` (Pro/Max OAuth)
+  or export `ANTHROPIC_API_KEY` in the shell that launches OpenClaw.
+  `claude -p` inherits its own credentials; the skill no longer accepts
+  a per-skill `apiKey`.
 - Ensure `$HOME/.local/bin` is on `PATH` for the skill subprocess (the
   `ox` install helper lands binaries there) — add
   `PATH=$HOME/.local/bin:$PATH` to `~/.openclaw/.env` if needed.
@@ -57,9 +56,9 @@ Once installed, ask your OpenClaw agent things like:
    entry content directly into the prompt — no filesystem access
    needed.
 5. **Runs `claude -p`** with no `--add-dir` and no tool allowances.
-   `ANTHROPIC_API_KEY` is supplied by OpenClaw's per-skill `apiKey`
-   injection (or by your shell, if configured that way) — see
-   [Environment setup](../README.md#environment-setup).
+   `claude` uses whatever credentials it already has — either
+   `claude login` OAuth or `ANTHROPIC_API_KEY` from the launching
+   shell. See [`../README.md`](../README.md).
 6. **Updates the summary state** on success via
    `scripts/update-state.sh` — atomically merges the newly-summarized
    entry ids into each team's `included_ids`, prunes entries older
@@ -79,16 +78,13 @@ The output is structured into four sections:
 - OS: macOS or Linux
 - Binaries: `ox` with `ox distill history` support (landed in
   [PR #507](https://github.com/sageox/ox/pull/507)), `claude`, `jq`
-- Env: `ANTHROPIC_API_KEY` (supplied via per-skill `apiKey` config or
-  shell env — see [Environment setup](../README.md#environment-setup))
+- `claude` authenticated via `claude login` or `ANTHROPIC_API_KEY` in
+  the launching shell — see [`../README.md`](../README.md)
 - A SageOx account with at least one distilled team (run
   [`sageox-distill`](../sageox-distill/) first)
 
 The skill will walk you through installing any missing pieces on first
 run, including `ox` itself via a pinned-release curl install.
-
-This skill does **not** require `claude login` — it provides an explicit
-API key on every invocation.
 
 ## Links
 

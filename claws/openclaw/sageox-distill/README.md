@@ -18,14 +18,13 @@ from raw repo activity → daily team digests → unified readout.
 clawhub install sageox-distill
 ```
 
-Then complete the one-time environment setup in
-[`claws/openclaw/README.md` § Environment setup](../README.md#environment-setup) —
-specifically:
+Then complete the one-time host setup documented in
+[`claws/openclaw/README.md`](../README.md):
 
-- Configure `ANTHROPIC_API_KEY` for the skill via either per-skill
-  `apiKey` in `~/.openclaw/openclaw.json` (recommended; lets you use a
-  separate key from your host agent) or via shell env. **Mind the
-  precedence rule** documented in the link above.
+- **Authenticate `claude`** — either run `claude login` (Pro/Max OAuth)
+  or export `ANTHROPIC_API_KEY` in the shell that launches OpenClaw.
+  `ox distill` shells out to `claude` and inherits its credentials.
+  The skill no longer accepts a per-skill `apiKey`.
 - Ensure `$HOME/.local/bin` is on `PATH` for the skill subprocess (the
   `ox` install helper lands binaries there) — add
   `PATH=$HOME/.local/bin:$PATH` to `~/.openclaw/.env` if needed.
@@ -48,19 +47,17 @@ Once installed, ask your OpenClaw agent things like:
 4. **Waits for the SageOx daemon** to finish processing.
 5. **Distills each team** via `ox distill --sync --layer daily`.
 
-`ox distill` reads `ANTHROPIC_API_KEY` from its process environment.
-OpenClaw can supply that key per-skill (recommended, via the `apiKey`
-field in `~/.openclaw/openclaw.json`) or you can use a shell-level
-`ANTHROPIC_API_KEY` shared with your host agent. See
-[Environment setup](../README.md#environment-setup) for details and the
-critical precedence rule.
+`ox distill` shells out to `claude` for LLM calls and inherits whatever
+credentials `claude` has — either an OAuth session from `claude login`
+or `ANTHROPIC_API_KEY` from the shell that launches OpenClaw. See
+[`claws/openclaw/README.md`](../README.md) for the full setup.
 
 ## Requirements
 
 - OS: macOS or Linux
-- Binaries: `ox`, `git`, `gh`
-- Env: `ANTHROPIC_API_KEY` (supplied via per-skill `apiKey` config or
-  shell env — see [Environment setup](../README.md#environment-setup))
+- Binaries: `ox`, `git`, `gh`, `jq`, `claude`
+- `claude` authenticated via `claude login` or `ANTHROPIC_API_KEY` in
+  the launching shell — see [`../README.md`](../README.md)
 - A SageOx account (sign up at <https://sageox.ai>)
 - A GitHub account with `gh` authenticated
 
