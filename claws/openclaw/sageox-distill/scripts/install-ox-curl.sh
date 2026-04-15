@@ -161,14 +161,24 @@ fi
 # Record install state so update-ox.sh can confirm the skill has a
 # known-good ox install on subsequent runs. Only factual state — what
 # was installed, where, when — no preference fields.
-mkdir -p "$HOME/.openclaw/memory"
+#
+# Write to a temp file in the same directory, then rename into place.
+# update-ox.sh only checks for the file's existence, so an interrupted
+# write that left a zero-byte or partial JSON file would look
+# "installed" on the next run. Same-directory rename is atomic at the
+# directory-entry level, which is all we need here.
+STATE_DIR="$HOME/.openclaw/memory"
+STATE_FILE="$STATE_DIR/sageox-ox-install.json"
+mkdir -p "$STATE_DIR"
+TMP_STATE_FILE="$(mktemp "${STATE_DIR}/sageox-ox-install.json.XXXXXXXX")"
 INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-cat > "$HOME/.openclaw/memory/sageox-ox-install.json" <<EOF
+cat > "$TMP_STATE_FILE" <<EOF
 {
   "ox_install_ref": "$OX_INSTALL_REF",
   "install_dir": "$INSTALL_DIR",
   "installed_at": "$INSTALLED_AT"
 }
 EOF
+mv "$TMP_STATE_FILE" "$STATE_FILE"
 
 echo "ox ${OX_INSTALL_REF} installed successfully"
