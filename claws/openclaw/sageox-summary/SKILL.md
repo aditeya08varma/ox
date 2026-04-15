@@ -107,12 +107,17 @@ bash scripts/update-ox.sh
 Contract:
 
 - **Stdout:** nothing on success
-- **Stderr:** one-line "needs install" or "not on PATH" signal
-- **Exit:** `0` ox is ready (continue to § 5); `2` ox is not usable
-  (no install state, or state file records ox as installed but it
-  isn't on PATH) — STOP, read
-  [`references/INSTALL.md`](references/INSTALL.md), follow the
-  install flow, then re-run this script to confirm
+- **Stderr:** on any failure, a two-line message — an `error:` line
+  describing what's wrong, followed by a `fix:` line with the
+  remediation. Surface both verbatim to the user.
+- **Exit:** `0` ox is pinned, installed, and reports the expected
+  version (continue to § 5); `2` ox is not usable — one of: state file
+  missing, binary missing at `$HOME/.local/bin/ox`, `ox` on PATH
+  resolves to a different binary, binary fails to run, or binary
+  reports a version other than the one recorded in
+  `sageox-ox-install.json`. On exit `2`, STOP, read
+  [`references/INSTALL.md`](references/INSTALL.md), follow the install
+  flow, then re-run this script to confirm.
 
 There is no per-run auto-update. The curl install pins a specific `ox`
 release by tag and sha256; users pick up newer releases by re-running
