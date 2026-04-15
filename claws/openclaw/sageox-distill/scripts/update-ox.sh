@@ -52,4 +52,31 @@ if [ "$resolved_ox" != "$EXPECTED_OX" ]; then
   exit 2
 fi
 
+# Verify the binary itself still reports the pinned version. The path
+# check above proves PATH order is right; this check proves the bytes
+# behind the path haven't been replaced or corrupted since install.
+# `jq` is required by the skill (see SKILL.md § 2), so it's guaranteed
+# present by the time this script runs.
+expected_ref="$(jq -r '.ox_install_ref // empty' "$STATE_FILE" 2>/dev/null || true)"
+if [ -z "$expected_ref" ]; then
+  echo "error: $STATE_FILE is missing ox_install_ref" >&2
+  echo "fix: re-run the install flow from references/INSTALL.md" >&2
+  exit 2
+fi
+expected_version="${expected_ref#v}"
+
+if ! version_output="$("$EXPECTED_OX" version 2>&1)"; then
+  echo "error: $EXPECTED_OX failed to run" >&2
+  echo "$version_output" >&2
+  echo "fix: re-run the install flow from references/INSTALL.md" >&2
+  exit 2
+fi
+
+first_line="$(printf '%s\n' "$version_output" | head -n1)"
+if [ "$first_line" != "ox $expected_version" ]; then
+  echo "error: $EXPECTED_OX reports '$first_line', expected 'ox $expected_version'" >&2
+  echo "fix: re-run the install flow from references/INSTALL.md" >&2
+  exit 2
+fi
+
 exit 0

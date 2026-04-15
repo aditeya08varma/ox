@@ -152,9 +152,24 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
 fi
 
 # Readiness gate: ox must actually be runnable from this subprocess's
-# PATH, otherwise the memory file would record a broken install.
-if ! PATH="$INSTALL_DIR:$PATH" command -v ox >/dev/null 2>&1; then
-  echo "error: ox installed to $INSTALL_DIR but is not runnable" >&2
+# PATH AND report the pinned release version. The sha256 check earlier
+# guarantees the extracted bytes are exactly what GitHub Releases
+# published for this tag, but those bytes might still fail to execute
+# on the host (libc mismatch, unsupported OS version, stripped
+# dependency, etc.) — catch that now, before we write state claiming a
+# successful install.
+if ! version_output="$(PATH="$INSTALL_DIR:$PATH" ox version 2>&1)"; then
+  echo "error: ox installed to $INSTALL_DIR but failed to run" >&2
+  echo "$version_output" >&2
+  exit 3
+fi
+
+# `ox version` prints "ox <version>\n..." on stdout. Compare the first
+# line exactly rather than substring-matching — a loose *"$OX_VERSION"*
+# pattern would false-positive when e.g. 0.6.3 is a suffix of 10.6.3.
+first_line="$(printf '%s\n' "$version_output" | head -n1)"
+if [ "$first_line" != "ox $OX_VERSION" ]; then
+  echo "error: installed ox reports '$first_line', expected 'ox $OX_VERSION'" >&2
   exit 3
 fi
 
