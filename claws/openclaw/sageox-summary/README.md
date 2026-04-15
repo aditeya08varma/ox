@@ -85,8 +85,7 @@ The output is structured into four sections:
   [`sageox-distill`](../sageox-distill/) first)
 
 The skill will walk you through installing any missing pieces on first
-run, including an interactive choice for how to install `ox` itself
-(curl-pinned-release or git-clone-and-build).
+run, including `ox` itself via a pinned-release curl install.
 
 This skill does **not** require `claude login` — it provides an explicit
 API key on every invocation.

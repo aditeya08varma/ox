@@ -45,7 +45,7 @@ case "$(uname -s)" in
   Linux)   OS="linux"   ;;
   FreeBSD) OS="freebsd" ;;
   *)
-    echo "error: unsupported OS $(uname -s); skill supports macOS and Linux" >&2
+    echo "error: unsupported OS $(uname -s); skill supports macOS, Linux, and FreeBSD" >&2
     exit 3
     ;;
 esac
