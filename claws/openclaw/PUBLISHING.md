@@ -114,7 +114,7 @@ finding before the bad bundle ever leaves your machine.
 | Symptom | Cause / fix |
 |---|---|
 | `account too new` | GitHub account < 1 week old; wait it out. |
-| `metadata mismatch` warning | The skill references an env var or binary not declared under `requires.env` / `requires.bins`. Fix the frontmatter. |
+| `metadata mismatch` warning | The skill references a binary not declared under `requires.bins`. Fix the frontmatter. |
 | `bundle too large` | Something got included it shouldn't have. Add it to `.clawhubignore`. |
 | `fingerprint matches existing version` | Nothing changed since the last publish. Either make a real change or manually bump `version:` in `SKILL.md`. |
 

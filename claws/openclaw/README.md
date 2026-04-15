@@ -23,113 +23,32 @@ clawhub install sageox-distill
 clawhub install sageox-summary
 ```
 
-Both skills run in OpenClaw and require a one-time setup of
-`~/.openclaw/.env` — see [Environment setup](#environment-setup) below.
+Both skills require `claude` to be installed and authenticated, and
+possibly a `PATH=` line in `~/.openclaw/.env` if `$HOME/.local/bin` is
+not on your default `PATH`. See below.
 
-## Environment setup
+## Claude credentials
 
-Both skills declare `ANTHROPIC_API_KEY` in their `requires.env` and
-`primaryEnv`. OpenClaw can supply that key to each skill in two ways —
-pick whichever matches your setup.
+Both skills require the `claude` CLI for LLM calls — `sageox-summary`
+shells out to `claude -p` directly, and `sageox-distill` runs `ox
+distill`, which itself shells out to `claude`. The skills do **not**
+accept a per-skill `apiKey` — earlier versions tried this via
+OpenClaw's `apiKey` injection, but the mechanism is unreliable and has
+been removed.
 
-### Anthropic API key
+Authenticate `claude` once on the host, using either:
 
-#### Recommended: per-skill config in `~/.openclaw/openclaw.json`
+- **`claude login`** — Pro/Max OAuth, stored under `~/.claude/`. No
+  API key needed and recommended if you already have a Claude.ai
+  subscription.
+- **`ANTHROPIC_API_KEY=sk-ant-...`** exported in the shell (or
+  `~/.openclaw/.env`) that launches OpenClaw. `claude` and `ox
+  distill` both read it from the process environment.
 
-This lets you use a **different** Anthropic key for SageOx skills than for
-your host agent (different account, different rate limits, different
-billing). OpenClaw injects the key into the skill's process environment for
-the duration of the run, then reverts it.
+If neither is configured, the skill stops at its prerequisite check and
+tells you which one to set up.
 
-```json5
-{
-  skills: {
-    entries: {
-      "sageox-distill": {
-        apiKey: "sk-ant-..."
-      },
-      "sageox-summary": {
-        apiKey: "sk-ant-..."
-      }
-    }
-  }
-}
-```
-
-If you don't want to keep the key in plaintext JSON, use a SecretRef
-instead and store the actual value in your shell or `~/.openclaw/.env`:
-
-```json5
-{
-  skills: {
-    entries: {
-      "sageox-distill": {
-        apiKey: { source: "env", provider: "default", id: "MY_SAGEOX_KEY" }
-      }
-    }
-  }
-}
-```
-
-```sh
-# in ~/.openclaw/.env or your shell rc
-MY_SAGEOX_KEY=sk-ant-...
-```
-
-See [`docs.openclaw.ai/tools/skills-config`](https://docs.openclaw.ai/tools/skills-config)
-for the full schema.
-
-#### ⚠️ Critical precedence rule
-
-OpenClaw injects the per-skill `apiKey` **only if `ANTHROPIC_API_KEY` is
-not already set in its process environment** (see `env-overrides.ts` in
-the openclaw repo). If your login shell exports `ANTHROPIC_API_KEY` (e.g.,
-from `~/.zshrc`), the host value passes through to the skill and **the
-per-skill `apiKey` is silently ignored.**
-
-To use Option A (separate keys), verify before launching OpenClaw:
-
-```sh
-env | grep ANTHROPIC_API_KEY    # should print nothing
-```
-
-If it prints a value, find where it's exported (`~/.zshrc`, `~/.bashrc`,
-`~/.profile`, your terminal app's env settings) and remove it.
-
-#### Fallback: shared shell env
-
-If you're fine with your host agent and SageOx skills sharing one
-Anthropic key, you can skip the per-skill config entirely and just have
-`ANTHROPIC_API_KEY` set in your shell or `~/.openclaw/.env`:
-
-```sh
-ANTHROPIC_API_KEY=sk-ant-...
-```
-
-The skills pick it up either way.
-
-#### Sandboxed runs (Docker)
-
-Per-skill `apiKey` does **not** apply when OpenClaw runs skills inside a
-sandbox — `process.env` is not inherited into the container. For sandboxed
-sessions, configure the key under `agents.defaults.sandbox.docker.env`
-(or per-agent `agents.list[].sandbox.docker.env`) instead:
-
-```json5
-{
-  agents: {
-    defaults: {
-      sandbox: {
-        docker: {
-          env: { ANTHROPIC_API_KEY: "sk-ant-..." }
-        }
-      }
-    }
-  }
-}
-```
-
-### PATH (required if `$HOME/.local/bin` is not already on PATH)
+## PATH (required if `$HOME/.local/bin` is not already on PATH)
 
 The `ox` install flow shipped with the SageOx skills lands binaries in
 `$HOME/.local/bin`. Some distros (notably stock macOS and some minimal

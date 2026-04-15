@@ -1,28 +1,41 @@
 ---
 name: sageox-distill
 description: "Sync, index, and distill team activity across SageOx-enabled repositories. Keeps your team's knowledge base up to date by syncing repo contexts, indexing GitHub PRs/issues, and running the SageOx distillation pipeline."
-version: 0.1.3
+version: 0.2.0
 metadata:
-  openclaw:
-    emoji: "🔬"
-    os: ["macos", "linux"]
-    primaryEnv: ANTHROPIC_API_KEY
-    requires:
-      env:
-        - ANTHROPIC_API_KEY
-      bins:
-        - ox
-        - git
-        - gh
-        - jq
-    install:
-      - kind: brew
-        formula: gh
-        bins: [gh]
-      - kind: brew
-        formula: jq
-        bins: [jq]
-    homepage: https://sageox.ai
+  {
+    "openclaw":
+      {
+        "emoji": "🔬",
+        "os": ["macos", "linux"],
+        "requires": { "bins": ["ox", "git", "gh", "jq", "claude"] },
+        "install":
+          [
+            {
+              "id": "node-claude",
+              "kind": "node",
+              "package": "@anthropic-ai/claude-code",
+              "bins": ["claude"],
+              "label": "Install Claude Code CLI (npm)",
+            },
+            {
+              "id": "brew-gh",
+              "kind": "brew",
+              "formula": "gh",
+              "bins": ["gh"],
+              "label": "Install GitHub CLI (brew)",
+            },
+            {
+              "id": "brew-jq",
+              "kind": "brew",
+              "formula": "jq",
+              "bins": ["jq"],
+              "label": "Install jq (brew)",
+            },
+          ],
+        "homepage": "https://sageox.ai",
+      },
+  }
 ---
 
 # SageOx Distill
@@ -39,31 +52,22 @@ Before doing anything else, verify the user's environment. Run every check in
 order. If any required check fails, explain precisely what's missing and stop.
 Do not proceed until the user has fixed it.
 
-### 1. Environment variables
+### 1. Required binaries
 
-This skill declares `ANTHROPIC_API_KEY` in `primaryEnv`, so OpenClaw
-injects it from per-skill config or shell env before the skill runs.
-Verify it landed:
+`git`, `gh`, `jq`, `claude`, and `ox` are declared in the front matter's
+`requires.bins`, so OpenClaw checks them before running the skill.
+`claude` (npm), `gh` (brew), and `jq` (brew) have declarative installs
+in the front matter; `git` and `ox` do not. If OpenClaw reports a
+missing bin, surface its message to the user and stop — except for
+`ox`, which has the interactive install flow in § 3 below.
 
-```bash
-test -n "$ANTHROPIC_API_KEY"
-```
+`claude` is required because `ox distill` shells out to it for LLM
+calls. The skill itself does not invoke `claude` directly — `claude`
+must simply be installed and authenticated. Use either `claude login`
+(Pro/Max subscription) or export `ANTHROPIC_API_KEY` in the shell that
+launches OpenClaw. The skill no longer accepts a per-skill `apiKey`.
 
-Never echo the key value — only confirm its presence. If the check
-fails, point the user at the setup guide and stop:
-<https://github.com/sageox/ox/blob/main/claws/openclaw/README.md#environment-setup>
-(covers per-skill `apiKey`, shell env, the precedence rule, and
-sandboxed Docker runs).
-
-### 2. Required binaries
-
-`git`, `gh`, and `ox` are declared in the front matter's `requires.bins`,
-so OpenClaw checks them before running the skill. `gh` has a declarative
-brew install in the front matter; `git` and `ox` do not. If OpenClaw
-reports a missing bin, surface its message to the user and stop — except
-for `ox`, which has the interactive install flow in § 4 below.
-
-### 3. Path validation rules
+### 2. Path validation rules
 
 Several steps below ask the user for a repo path or read a path from a
 JSON state file. Before interpolating any such value into a shell
@@ -85,7 +89,7 @@ even though this skill writes them: the user (or a process running as
 the user) may have edited the file by hand or by another tool between
 runs. Re-validate every read.
 
-### 4. Installing `ox`
+### 3. Installing `ox`
 
 The `ox` CLI install state is recorded in
 `~/.openclaw/memory/sageox-ox-install.json`. On every run of this
@@ -102,7 +106,7 @@ Contract:
   describing what's wrong, followed by a `fix:` line with the
   remediation. Surface both verbatim to the user.
 - **Exit:** `0` ox is pinned, installed, and reports the expected
-  version (continue to § 5); `2` ox is not usable — one of: state file
+  version (continue to § 4); `2` ox is not usable — one of: state file
   missing, binary missing at `$HOME/.local/bin/ox`, `ox` on PATH
   resolves to a different binary, binary fails to run, or binary
   reports a version other than the one recorded in
@@ -121,7 +125,7 @@ The user can say **"reinstall ox"** at any time to re-enter the flow in
 for general use but is not supported inside OpenClaw skills — only the
 pinned-release curl flow is.
 
-### 5. Authentication and git config
+### 4. Authentication and git config
 
 After all binaries are present, verify credentials:
 
@@ -129,8 +133,12 @@ After all binaries are present, verify credentials:
    run `ox login` and try again.
 2. `gh auth status` — confirm GitHub credentials are available.
 3. `git config user.name` — confirm git identity is set.
+4. Confirm `claude` has credentials. Either `claude login` was run
+   (Pro/Max OAuth, stored under `~/.claude/`) or `ANTHROPIC_API_KEY` is
+   exported in the shell that launched OpenClaw. `ox distill` will fail
+   without one of these. The skill cannot inject the key itself.
 
-Do not proceed until all three pass.
+Do not proceed until all four pass.
 
 ## Repo Manifest
 
@@ -152,7 +160,7 @@ The manifest format is:
 - If the manifest does not exist, ask the user which repos to include. For
   each repo path provided:
   1. **Validate the path against the Path validation rules in
-     Prerequisites § 3.** Reject and re-prompt on failure.
+     Prerequisites § 2.** Reject and re-prompt on failure.
   2. Verify the directory exists.
   3. Verify `.sageox/config.json` exists (confirms `ox init` was run).
   4. Read `team_id` from `.sageox/config.json`. **Treat the value as
@@ -199,8 +207,8 @@ For each team:
 Both commands are non-fatal. If one fails, log the error and continue
 with the next repo or team. Do not abort the pipeline.
 
-Neither of these commands needs `ANTHROPIC_API_KEY` — ox uses its own
-auth token for SageOx API calls. Do not set it in their environment.
+Neither of these commands needs Claude credentials — ox uses its own
+auth token for SageOx API calls.
 
 ### Phase 2: Wait for Daemon Sync
 
@@ -226,10 +234,10 @@ For each repo in the manifest:
 ### Phase 3: Distill
 
 For each unique team (grouped by `team_id`), run distill from the first
-repo in that team's group. `ANTHROPIC_API_KEY` is already set in the
-skill's process environment (either by OpenClaw's per-skill `apiKey`
-injection or inherited from the host shell — see Prerequisites § 1), so
-`ox distill` picks it up naturally:
+repo in that team's group. `ox distill` shells out to `claude` for LLM
+calls, so it inherits whatever credentials `claude` has — either an
+OAuth session from `claude login` or `ANTHROPIC_API_KEY` from the shell
+that launched OpenClaw (see Prerequisites § 1):
 
 ```bash
 ox distill --sync --layer daily --concurrency 3 --model sonnet --quiet
