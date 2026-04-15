@@ -1,7 +1,7 @@
 ---
 name: sageox-distill
 description: "Sync, index, and distill team activity across SageOx-enabled repositories. Keeps your team's knowledge base up to date by syncing repo contexts, indexing GitHub PRs/issues, and running the SageOx distillation pipeline."
-version: 0.1.1
+version: 0.1.2
 metadata:
   openclaw:
     emoji: "🔬"
@@ -65,9 +65,9 @@ for `ox`, which has the interactive install flow in § 4 below.
 
 ### 3. Path validation rules
 
-Several steps below ask the user for a path (repo path, clone path) or
-read a path from a JSON state file. Before interpolating any such value
-into a shell command, the agent **must** validate it against these rules:
+Several steps below ask the user for a repo path or read a path from a
+JSON state file. Before interpolating any such value into a shell
+command, the agent **must** validate it against these rules:
 
 1. **Absolute path required.** Must start with `/` or `~`. Reject relative
    paths and bare names.
@@ -75,13 +75,6 @@ into a shell command, the agent **must** validate it against these rules:
 3. **No shell metacharacters.** Reject anything containing any of these
    characters: `;` `$` `` ` `` `|` `&` `<` `>` `(` `)` `{` `}` `*` `?`
    `[` `]` `!` `\` newline.
-4. **For clone paths used by the auto-update flow** (see Option 2 below),
-   apply two additional checks:
-   - Must be **under `$HOME`**. Reject `/tmp`, `/var/tmp`, `/dev/shm`,
-     `/private/tmp`, network mounts, and any other location not owned by
-     the current user.
-   - The path must already exist as a directory and contain a `.git`
-     subdirectory before any `git pull` / `make install` runs.
 
 On any validation failure: print a clear error to the user explaining
 which rule failed and ask them to provide a different path. **Do not
@@ -92,11 +85,11 @@ even though this skill writes them: the user (or a process running as
 the user) may have edited the file by hand or by another tool between
 runs. Re-validate every read.
 
-### 4. Installing and updating `ox`
+### 4. Installing `ox`
 
-The `ox` CLI install method is a one-time choice stored in
+The `ox` CLI install state is recorded in
 `~/.openclaw/memory/sageox-ox-install.json`. On every run of this
-skill, invoke the bundled state checker:
+skill, invoke the bundled readiness gate:
 
 ```bash
 bash scripts/update-ox.sh
@@ -105,29 +98,23 @@ bash scripts/update-ox.sh
 Contract:
 
 - **Stdout:** nothing on success
-- **Stderr:** one-line warnings on update failures (non-fatal) and the
-  "needs install" signal
+- **Stderr:** one-line "needs install" or "not on PATH" signal
 - **Exit:** `0` ox is ready (continue to § 5); `2` ox is not usable
-  (no install state, or state records ox as installed but it isn't on
-  PATH) — STOP, read
+  (no install state, or state file records ox as installed but it
+  isn't on PATH) — STOP, read
   [`references/INSTALL.md`](references/INSTALL.md), follow the
-  interactive setup, then re-run this script to confirm
+  install flow, then re-run this script to confirm
 
-`update-ox.sh` handles the auto-update flow for the git install method
-(re-validates the recorded clone path against the rules in § 3 above,
-runs `git pull --ff-only && make build && make install`, falls back to
-the existing binary on any failure with a stderr warning + a tail of
-the build log). Curl-method users hit a silent no-op — there is
-nothing to update on a per-run basis.
-
-The user can say **"switch ox install method"** or **"update ox now"**
-at any time — both re-enter the flow in
+There is no per-run auto-update. The curl install pins a specific `ox`
+release by tag and sha256; users pick up newer releases by re-running
+`clawhub install` for this skill after a new skill version publishes.
+The user can say **"reinstall ox"** at any time to re-enter the flow in
 [`references/INSTALL.md`](references/INSTALL.md).
 
 **Do not install `ox` via Homebrew or any package manager** (e.g.
 `brew install sageox/tap/ox`, `apt`, `dnf`, `pacman`). The tap exists
-for general use but is not supported inside OpenClaw skills — only
-`curl` and `git source` are.
+for general use but is not supported inside OpenClaw skills — only the
+pinned-release curl flow is.
 
 ### 5. Authentication and git config
 
