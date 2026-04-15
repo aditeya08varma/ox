@@ -151,15 +151,27 @@ if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
   echo "then restart the skill." >&2
 fi
 
-# Readiness gate: ox must actually be runnable from this subprocess's
-# PATH AND report the pinned release version. The sha256 check earlier
-# guarantees the extracted bytes are exactly what GitHub Releases
-# published for this tag, but those bytes might still fail to execute
-# on the host (libc mismatch, unsupported OS version, stripped
+# Readiness gate: the binary at $INSTALL_DIR/ox must exist, be
+# executable, run, and report the pinned release version. The sha256
+# check earlier guarantees the extracted bytes are exactly what GitHub
+# Releases published for this tag, but those bytes might still fail to
+# execute on the host (libc mismatch, unsupported OS version, stripped
 # dependency, etc.) — catch that now, before we write state claiming a
 # successful install.
-if ! version_output="$(PATH="$INSTALL_DIR:$PATH" ox version 2>&1)"; then
-  echo "error: ox installed to $INSTALL_DIR but failed to run" >&2
+#
+# Invoke the literal $INSTALL_DIR/ox path rather than using PATH
+# lookup. If for any reason the install loop above didn't actually
+# write the ox binary (e.g. a future tarball ships only adapters, or
+# the upstream release was mis-packaged), a PATH-based check could
+# silently fall through to a pre-existing system ox and claim success
+# against the wrong binary.
+if [ ! -x "$INSTALL_DIR/ox" ]; then
+  echo "error: expected ox binary missing at $INSTALL_DIR/ox" >&2
+  exit 3
+fi
+
+if ! version_output="$("$INSTALL_DIR/ox" version 2>&1)"; then
+  echo "error: $INSTALL_DIR/ox failed to run" >&2
   echo "$version_output" >&2
   exit 3
 fi
@@ -169,7 +181,7 @@ fi
 # pattern would false-positive when e.g. 0.6.3 is a suffix of 10.6.3.
 first_line="$(printf '%s\n' "$version_output" | head -n1)"
 if [ "$first_line" != "ox $OX_VERSION" ]; then
-  echo "error: installed ox reports '$first_line', expected 'ox $OX_VERSION'" >&2
+  echo "error: $INSTALL_DIR/ox reports '$first_line', expected 'ox $OX_VERSION'" >&2
   exit 3
 fi
 
