@@ -129,39 +129,20 @@ sessions, configure the key under `agents.defaults.sandbox.docker.env`
 }
 ```
 
-### PATH (required if you installed `ox` from git)
+### PATH (required if `$HOME/.local/bin` is not already on PATH)
 
-If you chose the **git clone + build** option for `ox` (see the install
-flow in each skill's `SKILL.md`), you must add a `PATH=` line that
-includes both the Go toolchain and Go's install-output directory.
-
-Absolute paths only — `.env` files do not reliably expand `$PATH`.
-
-```sh
-# macOS (Homebrew Go):
-PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/go/bin
-
-# macOS (Go from go.dev):
-# PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:/Users/you/go/bin
-
-# Linux (apt golang-go):
-# PATH=/usr/lib/go-1.24/bin:/usr/local/bin:/usr/bin:/bin:/home/you/go/bin
-
-# Linux (Go from go.dev):
-# PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin:/home/you/go/bin
-```
-
-To find your paths:
+The `ox` install flow shipped with the SageOx skills lands binaries in
+`$HOME/.local/bin`. Some distros (notably stock macOS and some minimal
+Linux images) do not include that directory on the default `PATH`. If
+the install helper warns to stderr that `$HOME/.local/bin` is not on
+`PATH`, add the following line to `~/.openclaw/.env`:
 
 ```sh
-which go              # Go toolchain dir (parent of the go binary)
-go env GOBIN          # Go install-output dir; fallback: $HOME/go/bin
+PATH=$HOME/.local/bin:$PATH
 ```
 
-If you chose the **curl install** option for `ox`, you do **not** need a
-PATH line — `ox` installs to `/usr/local/bin` (Linux) or
-`/opt/homebrew/bin` / `/usr/local/bin` (macOS), which are normally on PATH
-already.
+OpenClaw loads `.env` into the skill subprocess, so the updated `PATH`
+takes effect on the next invocation.
 
 ## Publishing (maintainers)
 

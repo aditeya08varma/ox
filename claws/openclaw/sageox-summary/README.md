@@ -26,17 +26,16 @@ specifically:
   `apiKey` in `~/.openclaw/openclaw.json` (recommended; lets you use a
   separate key from your host agent) or via shell env. **Mind the
   precedence rule** documented in the link above.
-- (If you choose to build `ox` from git source) extend `PATH` in
-  `~/.openclaw/.env` so the skill subprocess can find `go` and the built
-  `ox` binary
+- Ensure `$HOME/.local/bin` is on `PATH` for the skill subprocess (the
+  `ox` install helper lands binaries there) — add
+  `PATH=$HOME/.local/bin:$PATH` to `~/.openclaw/.env` if needed.
 
 ## Use
 
 Once installed, ask your OpenClaw agent things like:
 
 - "Give me the daily SageOx summary."
-- "Switch ox install method." (re-runs the curl-vs-git setup)
-- "Update ox now." (forces a git pull + rebuild on the git install path)
+- "Reinstall ox." (re-runs the pinned-release install)
 
 ## What it does
 
@@ -86,8 +85,7 @@ The output is structured into four sections:
   [`sageox-distill`](../sageox-distill/) first)
 
 The skill will walk you through installing any missing pieces on first
-run, including an interactive choice for how to install `ox` itself
-(curl-pinned-release or git-clone-and-build).
+run, including `ox` itself via a pinned-release curl install.
 
 This skill does **not** require `claude login` — it provides an explicit
 API key on every invocation.
