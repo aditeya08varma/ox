@@ -1,63 +1,174 @@
 #!/usr/bin/env bash
-# install-ox-curl.sh — download and run the official ox install script
-# from a pinned release tag, then persist the chosen install method to
-# the OpenClaw memory file.
+# install-ox-curl.sh — download a pinned ox release binary directly from
+# GitHub Releases, verify it against an embedded sha256 checksum, and
+# install to $HOME/.local/bin. No sudo, no shell-script piping, no
+# dynamic "latest" resolution.
+#
+# Why this shape: scanners flag `curl | bash` of a remote shell script,
+# and skills that sudo into system paths. This script avoids both. The
+# release tag and per-platform sha256s are pinned in the source below, so
+# an attacker cannot substitute a different binary without also editing
+# this file (which is reviewed on skill publish).
+#
+# Bumping: when a newer sageox/ox release ships, update OX_INSTALL_REF
+# and the OX_SHA256_* constants. Fetch checksums.txt from
+# https://github.com/sageox/ox/releases/download/<tag>/checksums.txt
 #
 # Usage: install-ox-curl.sh
 #
-# Stdout: human-readable progress (download URL, head/tail preview,
-#         install script output)
+# Stdout: human-readable progress
 # Stderr: errors
 # Exit:
 #   0 — success, ox installed and memory file written
-#   3 — internal error (curl missing, install script failed, ox not on
-#       PATH after install)
-#
-# The pinned release tag below makes this script reproducible: future
-# upstream commits to install.sh on main can't change what this skill
-# fetches. Bump OX_INSTALL_REF when a newer sageox/ox release ships.
+#   3 — internal error (curl/tar missing, download failed, checksum
+#       mismatch, unsupported platform, or ox not runnable after install)
 
 set -euo pipefail
 
-OX_INSTALL_REF="v0.6.1"
-INSTALL_URL="https://raw.githubusercontent.com/sageox/ox/${OX_INSTALL_REF}/scripts/install.sh"
-SOURCE_BLOB="https://github.com/sageox/ox/blob/${OX_INSTALL_REF}/scripts/install.sh"
+OX_INSTALL_REF="v0.6.3"
+OX_VERSION="${OX_INSTALL_REF#v}"
+OX_REPO="sageox/ox"
+
+# sha256(ox_<version>_<os>_<arch>.tar.gz) — from the checksums.txt asset
+# on the pinned release. Lock these when bumping OX_INSTALL_REF.
+OX_SHA256_darwin_amd64="4518b40aa7a59bc24b9b5fab324fb0a46f37129d5cf5b1f7cd1402aa6767acf4"
+OX_SHA256_darwin_arm64="3836fc5b1ac6ae6c50c1c80289ba8f1bf703a55b1afe9a446071ba8e960b6865"
+OX_SHA256_linux_amd64="c0de7c16db770206b19fa387708719f6f9b847d24110be14569c33b9ea24bd54"
+OX_SHA256_linux_arm64="f4324c1a0cbeb394e6c0443e4361eb1dc4f36f74e472a5b33df089467cfbdf30"
+OX_SHA256_freebsd_amd64="ff05f45616f08918ac9c0fa3bc6fe45d8a7341e43d203d27f9000ddbcfb30427"
 
 command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 3; }
+command -v tar  >/dev/null 2>&1 || { echo "error: tar is required"  >&2; exit 3; }
 
-# Use the template form for mktemp — portable across GNU (Linux) and BSD (macOS).
-INSTALL_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/ox-install.XXXXXXXX")"
-trap 'rm -f "$INSTALL_SCRIPT" 2>/dev/null' EXIT
+case "$(uname -s)" in
+  Darwin)  OS="darwin"  ;;
+  Linux)   OS="linux"   ;;
+  FreeBSD) OS="freebsd" ;;
+  *)
+    echo "error: unsupported OS $(uname -s); skill supports macOS and Linux" >&2
+    exit 3
+    ;;
+esac
 
-# -f makes curl fail on HTTP errors instead of executing an HTML error page;
-# --max-time bounds a stalled connection.
-curl -fsSL --max-time 60 "$INSTALL_URL" -o "$INSTALL_SCRIPT"
+case "$(uname -m)" in
+  x86_64|amd64)  ARCH="amd64" ;;
+  aarch64|arm64) ARCH="arm64" ;;
+  *)
+    echo "error: unsupported architecture $(uname -m)" >&2
+    exit 3
+    ;;
+esac
 
-# Surface what is about to run so the user can sanity-check it.
-echo "Downloaded ox install script:"
-echo "  Source: $SOURCE_BLOB"
-ls -lh "$INSTALL_SCRIPT"
-echo "--- first 5 lines ---"
-head -5 "$INSTALL_SCRIPT"
-echo "--- last 5 lines ---"
-tail -5 "$INSTALL_SCRIPT"
-
-# Execute.
-bash "$INSTALL_SCRIPT"
-
-# Verify the result before we persist anything.
-if ! command -v ox >/dev/null 2>&1; then
-  echo "error: ox install script ran but 'ox' is not on PATH" >&2
+PLATFORM="${OS}_${ARCH}"
+SHA_VAR="OX_SHA256_${PLATFORM}"
+EXPECTED_SHA="${!SHA_VAR:-}"
+if [ -z "$EXPECTED_SHA" ]; then
+  echo "error: no pinned checksum for platform ${PLATFORM} in ${OX_INSTALL_REF}" >&2
   exit 3
 fi
 
-# Persist the install method.
+ARCHIVE_NAME="ox_${OX_VERSION}_${PLATFORM}.tar.gz"
+DOWNLOAD_URL="https://github.com/${OX_REPO}/releases/download/${OX_INSTALL_REF}/${ARCHIVE_NAME}"
+
+# Portable mktemp template — works on both GNU (Linux) and BSD (macOS).
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ox-install.XXXXXXXX")"
+trap 'rm -rf "$WORK_DIR" 2>/dev/null' EXIT
+
+echo "Downloading ox ${OX_INSTALL_REF} for ${PLATFORM}"
+echo "  from: ${DOWNLOAD_URL}"
+
+# -f fails on HTTP errors, --max-time bounds a stalled connection.
+if ! curl -fsSL --max-time 120 "$DOWNLOAD_URL" -o "$WORK_DIR/$ARCHIVE_NAME"; then
+  echo "error: failed to download ${DOWNLOAD_URL}" >&2
+  exit 3
+fi
+
+echo "Verifying sha256 checksum..."
+if command -v sha256sum >/dev/null 2>&1; then
+  ACTUAL_SHA="$(sha256sum "$WORK_DIR/$ARCHIVE_NAME" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+  ACTUAL_SHA="$(shasum -a 256 "$WORK_DIR/$ARCHIVE_NAME" | awk '{print $1}')"
+else
+  echo "error: neither sha256sum nor shasum is available; refusing to install unverified binary" >&2
+  exit 3
+fi
+
+if [ "$ACTUAL_SHA" != "$EXPECTED_SHA" ]; then
+  echo "error: sha256 mismatch for ${ARCHIVE_NAME}" >&2
+  echo "  expected: $EXPECTED_SHA" >&2
+  echo "  actual:   $ACTUAL_SHA" >&2
+  exit 3
+fi
+echo "  ok: $ACTUAL_SHA"
+
+echo "Extracting archive..."
+if ! tar -xzf "$WORK_DIR/$ARCHIVE_NAME" -C "$WORK_DIR"; then
+  echo "error: failed to extract $ARCHIVE_NAME" >&2
+  exit 3
+fi
+
+INSTALL_DIR="$HOME/.local/bin"
+mkdir -p "$INSTALL_DIR"
+
+# Install ox and every ox-adapter-* binary shipped in the tarball. We
+# glob rather than hardcode the adapter list so new adapters added in
+# future releases work without re-editing this file.
+shopt -s nullglob
+installed=0
+for src in "$WORK_DIR/ox" "$WORK_DIR"/ox-adapter-*; do
+  [ -f "$src" ] || continue
+  name="$(basename "$src")"
+  dest="$INSTALL_DIR/$name"
+  mv "$src" "$dest"
+  chmod +x "$dest"
+
+  # macOS ad-hoc re-sign: avoids slow Gatekeeper checks on first run.
+  # Non-fatal — a failure here does not block install.
+  if [ "$OS" = "darwin" ] && command -v codesign >/dev/null 2>&1; then
+    codesign --remove-signature "$dest" 2>/dev/null || true
+    codesign --force --sign - "$dest" 2>/dev/null || true
+  fi
+
+  installed=$((installed + 1))
+done
+shopt -u nullglob
+
+if [ "$installed" -eq 0 ]; then
+  echo "error: tarball contained no ox binaries" >&2
+  exit 3
+fi
+
+echo "Installed $installed binaries to $INSTALL_DIR"
+
+# PATH guidance — $HOME/.local/bin isn't on PATH by default on every
+# distro. Surface this before the readiness gate so the user sees the
+# fix in context.
+if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
+  echo ""
+  echo "warning: $INSTALL_DIR is not on your PATH" >&2
+  echo "fix: add this line to ~/.openclaw/.env (OpenClaw loads it into the skill subprocess):" >&2
+  echo "  PATH=\"$INSTALL_DIR:\$PATH\"" >&2
+  echo "then restart the skill." >&2
+fi
+
+# Readiness gate: ox must actually be runnable from this subprocess's
+# PATH, otherwise the memory file would record a broken install.
+if ! PATH="$INSTALL_DIR:$PATH" command -v ox >/dev/null 2>&1; then
+  echo "error: ox installed to $INSTALL_DIR but is not runnable" >&2
+  exit 3
+fi
+
+# Persist the install method so update-ox.sh can short-circuit the curl
+# path on subsequent runs. Schema is shared with install-ox-git.sh.
 mkdir -p "$HOME/.openclaw/memory"
 INSTALLED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$HOME/.openclaw/memory/sageox-ox-install.json" <<EOF
 {
   "install_method": "curl",
   "ox_install_ref": "$OX_INSTALL_REF",
+  "install_dir": "$INSTALL_DIR",
   "installed_at": "$INSTALLED_AT"
 }
 EOF
+
+echo "ox ${OX_INSTALL_REF} installed successfully"

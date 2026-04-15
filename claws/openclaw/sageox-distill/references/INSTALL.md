@@ -42,11 +42,12 @@ system.
 
 ## Option 1: curl install
 
-Invoke the bundled helper. It downloads the install script from a
-pinned release tag, prints a head/tail preview so the user can sanity-
-check what is about to run, executes it, verifies `command -v ox`
-succeeds, and writes `~/.openclaw/memory/sageox-ox-install.json` with
-`install_method: curl`.
+Invoke the bundled helper. It downloads the `ox` release tarball
+directly from GitHub Releases at a pinned tag, verifies it against an
+sha256 checksum embedded in the script, extracts it to
+`$HOME/.local/bin`, and writes
+`~/.openclaw/memory/sageox-ox-install.json` with `install_method: curl`.
+No sudo, no shell-script piping, no dynamic "latest" resolution.
 
 ```bash
 bash scripts/install-ox-curl.sh
@@ -55,14 +56,17 @@ bash scripts/install-ox-curl.sh
 Contract:
 
 - **Args:** none
-- **Stdout:** human-readable progress (download URL, head/tail preview,
-  install script output)
-- **Stderr:** errors
-- **Exit:** `0` success; `3` internal (curl missing, install script
-  failed, or `ox` not on PATH after install)
+- **Stdout:** human-readable progress (download URL, checksum
+  verification, extract, install dir)
+- **Stderr:** errors and PATH-configuration guidance
+- **Exit:** `0` success; `3` internal (curl/tar missing, download
+  failed, checksum mismatch, unsupported platform, or `ox` not
+  runnable after install)
 
-If the script exits non-zero, surface its stderr to the user and stop.
-Do not silently retry.
+If the script warns to stderr that `$HOME/.local/bin` is not on PATH,
+surface its PATH guidance verbatim and ask the user to update
+`~/.openclaw/.env` before retrying. If the script exits non-zero,
+surface its stderr and stop — do not silently retry.
 
 ## Option 2: build from git source
 
