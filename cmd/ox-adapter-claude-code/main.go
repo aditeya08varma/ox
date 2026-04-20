@@ -23,25 +23,47 @@ const (
 
 func main() {
 	adapterruntime.Run(adapterruntime.Config{
-		Info:           handleInfo,
-		Detect:         handleDetect,
-		InstallHooks:   handleInstallHooks,
-		CheckHooks:     handleCheckHooks,
-		UninstallHooks: handleUninstallHooks,
-		Read:           handleRead,
-		ReadMetadata:   handleReadMetadata,
-		Diagnose:       handleDiagnose,
+		Info:              handleInfo,
+		Detect:            handleDetect,
+		InstallHooks:      handleInstallHooks,
+		CheckHooks:        handleCheckHooks,
+		UninstallHooks:    handleUninstallHooks,
+		Read:              handleRead,
+		ReadMetadata:      handleReadMetadata,
+		Diagnose:          handleDiagnose,
 		InstallRules:      handleInstallRules,
 		CheckRules:        handleCheckRules,
 		UninstallRules:    handleUninstallRules,
 		InstallCommands:   handleInstallCommands,
 		CheckCommands:     handleCheckCommands,
 		UninstallCommands: handleUninstallCommands,
-		FindSession:    handleFindSession,
-		ImportSession:  handleImportSession,
-		CapturePrior:   handleCapturePrior,
-		Serve:          handleServe,
+		FindSession:       handleFindSession,
+		ReadFromOffset:    handleReadFromOffset,
+		ImportSession:     handleImportSession,
+		CapturePrior:      handleCapturePrior,
+		Serve:             handleServe,
 	})
+}
+
+// handleReadFromOffset is the one-shot mode handler for read-from-offset.
+// The serve-mode handler lives in serve.go (srv.OnReadFromOffset). Hook
+// invocations of the adapter are one-shot — a fresh subprocess per Claude
+// Code PostToolUse — so they go through Config.ReadFromOffset here, not
+// through the serve-mode pipeline. This wiring was missing, which caused
+// issue #519: every hook returned "read-from-offset not implemented" and
+// raw.jsonl stayed header-only.
+func handleReadFromOffset(p adapterprotocol.ReadFromOffsetParams) (*adapterprotocol.ReadFromOffsetResult, error) {
+	if p.SessionFile == "" {
+		return nil, fmt.Errorf("--session-file is required")
+	}
+	entries, newOffset, err := readFromOffset(p.SessionFile, p.Offset)
+	if err != nil {
+		return nil, err
+	}
+	return &adapterprotocol.ReadFromOffsetResult{
+		Entries:   entries,
+		NewOffset: newOffset,
+	}, nil
 }
 
 func handleInfo() (*adapterprotocol.InfoResponse, error) {
