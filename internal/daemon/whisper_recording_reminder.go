@@ -136,7 +136,7 @@ func (s *RecordingReminderSource) shouldRemind(agentID string, agent ActivityEnt
 		return false
 	}
 
-	lastReminder, err := s.store.LatestWhisperTime("recording-reminder", "recording-status", agentID)
+	lastReminder, err := s.store.LatestWhisperTime(whisperstore.SourceRecordingReminder, "recording-status", agentID)
 	if err != nil {
 		return false // store error — skip this tick
 	}

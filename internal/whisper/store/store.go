@@ -465,7 +465,13 @@ func (s *Store) MarkRelayed(murmurID, scope string) error {
 
 // GetAllWhispers returns all whisper entries for an agent without advancing the cursor.
 // Used for inspection/debugging — shows both pending and already-delivered whispers.
-// Pass agentID="" to get all whispers across all agents.
+//
+// Pass agentID="" for an unscoped view across all agents. Personalized
+// whispers (SourceRecordingReminder) targeted at a specific agent are
+// still omitted on unscoped queries — their content embeds per-agent
+// numbers and is meaningless when rendered without the recipient. See
+// GetWhispersPage for the predicate, and #538 for the original leak.
+//
 // Iterates pages until all entries are collected.
 func (s *Store) GetAllWhispers(agentID string) ([]WhisperEntry, error) {
 	var all []WhisperEntry
