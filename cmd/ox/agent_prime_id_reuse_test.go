@@ -94,6 +94,40 @@ func TestResolve_EnvMismatch_DoesNotFallThrough(t *testing.T) {
 	assert.Empty(t, resolved, "non-matching env ID must not fall through to sole-active (#528)")
 }
 
+// TestHasAliveRecordingForID_StaleEnvNotTreatedAsAliveParent guards the
+// parent-agent gating at runAgentPrime's SAGEOX_AGENT_ID check: without this
+// helper returning false for a stale env, a new top-level session would be
+// recorded as a child of a dead agent.
+// Failure prevented: stale SAGEOX_AGENT_ID cross-linking an unrelated new
+// session to a dead orchestrator (#528 CodeRabbit follow-up).
+func TestHasAliveRecordingForID_StaleEnvNotTreatedAsAliveParent(t *testing.T) {
+	projectRoot, repoID := setupTestProject(t)
+	createActiveRecording(t, projectRoot, repoID, "OxLive1")
+
+	states, err := session.LoadAllRecordingStates(projectRoot)
+	require.NoError(t, err)
+
+	assert.True(t, hasAliveRecordingForID(states, "OxLive1"),
+		"live recording must be recognized")
+	assert.False(t, hasAliveRecordingForID(states, "OxStaleEnv"),
+		"stale env value must not be reported as an alive parent")
+	assert.False(t, hasAliveRecordingForID(states, ""),
+		"empty id must never match")
+}
+
+// TestHasAliveRecordingForID_DeadParentRejected verifies that a recording
+// whose parent process has exited is not treated as an alive parent.
+func TestHasAliveRecordingForID_DeadParentRejected(t *testing.T) {
+	projectRoot, repoID := setupTestProject(t)
+	createDeadRecording(t, projectRoot, repoID, "OxDead1")
+
+	states, err := session.LoadAllRecordingStates(projectRoot)
+	require.NoError(t, err)
+
+	assert.False(t, hasAliveRecordingForID(states, "OxDead1"),
+		"recording with dead PID past grace period must not count as alive")
+}
+
 // --- C. Session stop on /clear ---
 
 // TestStopSessionForClear_SetsStoppedAtAndClears verifies that stopSessionForClear
@@ -185,6 +219,14 @@ func setupTestProject(t *testing.T) (string, string) {
 
 func createActiveRecording(t *testing.T, projectRoot, repoID, agentID string) {
 	t.Helper()
+	createActiveRecordingWithPID(t, projectRoot, repoID, agentID, os.Getpid())
+}
+
+// createActiveRecordingWithPID creates an alive recording whose ParentPID is
+// caller-chosen. Use os.Getpid() to simulate "this process owns the recording"
+// or a non-ancestor PID (e.g. 1) to simulate a concurrent, unrelated session.
+func createActiveRecordingWithPID(t *testing.T, projectRoot, repoID, agentID string, parentPID int) {
+	t.Helper()
 	sessionsBase := filepath.Join(session.GetContextPath(repoID), "sessions")
 	sessionPath := filepath.Join(sessionsBase, "2026-04-01T10-00-user-"+agentID)
 
@@ -194,7 +236,7 @@ func createActiveRecording(t *testing.T, projectRoot, repoID, agentID string) {
 		AdapterName: "claude-code",
 		SessionPath: sessionPath,
 		OutputFile:  filepath.Join(sessionPath, "raw.jsonl"),
-		ParentPID:   os.Getpid(), // current process is alive
+		ParentPID:   parentPID,
 	}
 	require.NoError(t, session.SaveRecordingState(projectRoot, state))
 }

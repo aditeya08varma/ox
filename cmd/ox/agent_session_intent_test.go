@@ -283,7 +283,10 @@ func TestIntent_PrimeRequiresCorrelationToReuseAgentID(t *testing.T) {
 	projectRoot, repoID := setupTestProject(t)
 
 	agentID := "OxExisting1"
-	createActiveRecording(t, projectRoot, repoID, agentID)
+	// ParentPID=1 (init): alive but not an ancestor of this test process, so the
+	// strict PID-match branch in runAgentPrime would also miss. This keeps the
+	// fixture honest to the test's "no correlation signal" claim.
+	createActiveRecordingWithPID(t, projectRoot, repoID, agentID, 1)
 
 	// simulate prime's fallback chain: marker → parent PID → env
 	// with none available (worst case: no marker, no env, no PID match)

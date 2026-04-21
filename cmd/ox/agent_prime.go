@@ -340,9 +340,16 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// detect parent agent early: if SAGEOX_AGENT_ID is already set, this is a subagent
 	// and the existing value identifies the parent (orchestrator inherits env vars).
 	// Must happen before startSessionRecording so parent info is recorded in session state.
+	// Only trust the env value if it maps to a currently-alive recording — a stale
+	// SAGEOX_AGENT_ID from a previous, unrelated session would otherwise cross-link
+	// this session as a child of a dead parent (#528).
 	parentAgentID := ""
 	if existing := os.Getenv("SAGEOX_AGENT_ID"); existing != "" && existing != agentID {
-		parentAgentID = existing
+		if states, err := session.LoadAllRecordingStates(projectRoot); err == nil {
+			if hasAliveRecordingForID(states, existing) {
+				parentAgentID = existing
+			}
+		}
 	}
 
 	// attempt to start session recording if enabled (local, no auth needed)
@@ -765,13 +772,26 @@ func resolveAgentIDFromStates(states []*session.RecordingState, envID string) st
 	if envID == "" {
 		return ""
 	}
-	for _, s := range states {
-		if s.AgentID == envID && s.IsAgentAlive() {
-			slog.Debug("prime: reusing agent ID from SAGEOX_AGENT_ID env", "agent_id", envID)
-			return envID
-		}
+	if hasAliveRecordingForID(states, envID) {
+		slog.Debug("prime: reusing agent ID from SAGEOX_AGENT_ID env", "agent_id", envID)
+		return envID
 	}
 	return ""
+}
+
+// hasAliveRecordingForID reports whether agentID corresponds to a currently-alive
+// recording in states. Used by callers that need to distinguish a real, live
+// agent reference from a stale SAGEOX_AGENT_ID left over in the environment.
+func hasAliveRecordingForID(states []*session.RecordingState, agentID string) bool {
+	if agentID == "" {
+		return false
+	}
+	for _, s := range states {
+		if s.AgentID == agentID && s.IsAgentAlive() {
+			return true
+		}
+	}
+	return false
 }
 
 // loadResolvedAttribution loads and merges attribution from user and project configs.
