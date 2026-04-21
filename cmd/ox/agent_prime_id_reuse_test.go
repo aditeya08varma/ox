@@ -48,20 +48,19 @@ func TestPrimeIgnoresEnv_WhenRecordingDead(t *testing.T) {
 
 // --- B. Sole active recording fallback ---
 
-// TestPrimeFallback_SoleActiveRecording verifies that when there is exactly
-// one active recording and no other reuse source, prime falls back to it.
-// Failure prevented: after /clear with no env var or marker, session is orphaned.
-func TestPrimeFallback_SoleActiveRecording(t *testing.T) {
+// TestPrimeNoFallback_SoleActiveRecording verifies that a single alive
+// recording is NOT auto-adopted when no env ID and no PID match.
+// Failure prevented: a concurrent Claude Code session in a sibling worktree
+// silently inheriting another session's agent_id (#528).
+func TestPrimeNoFallback_SoleActiveRecording(t *testing.T) {
 	projectRoot, repoID := setupTestProject(t)
-
-	agentID := "OxSole1"
-	createActiveRecording(t, projectRoot, repoID, agentID)
+	createActiveRecording(t, projectRoot, repoID, "OxSole1")
 
 	states, err := session.LoadAllRecordingStates(projectRoot)
 	require.NoError(t, err)
 
 	resolved := resolveAgentIDFromStates(states, "")
-	assert.Equal(t, agentID, resolved, "sole active recording should be reused when no env ID available")
+	assert.Empty(t, resolved, "sole active recording must not be auto-adopted without correlation (#528)")
 }
 
 // TestPrimeNoFallback_MultipleActiveRecordings verifies that when multiple
@@ -78,6 +77,21 @@ func TestPrimeNoFallback_MultipleActiveRecordings(t *testing.T) {
 
 	resolved := resolveAgentIDFromStates(states, "")
 	assert.Empty(t, resolved, "multiple active recordings should not trigger sole-recording fallback")
+}
+
+// TestResolve_EnvMismatch_DoesNotFallThrough verifies that a non-matching
+// envID does not silently fall through to a sole alive recording.
+// Failure prevented: a stale SAGEOX_AGENT_ID from a different agent process
+// silently coercing to whatever sole recording happens to be alive (#528).
+func TestResolve_EnvMismatch_DoesNotFallThrough(t *testing.T) {
+	projectRoot, repoID := setupTestProject(t)
+	createActiveRecording(t, projectRoot, repoID, "OxLive1")
+
+	states, err := session.LoadAllRecordingStates(projectRoot)
+	require.NoError(t, err)
+
+	resolved := resolveAgentIDFromStates(states, "OxStaleEnv")
+	assert.Empty(t, resolved, "non-matching env ID must not fall through to sole-active (#528)")
 }
 
 // --- C. Session stop on /clear ---
