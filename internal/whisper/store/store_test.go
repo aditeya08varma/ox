@@ -356,6 +356,114 @@ func TestPrincipalFields(t *testing.T) {
 	}
 }
 
+// TestGetWhispers_RecordingReminderRoutedToRecipientOnly verifies that a
+// recording-reminder produced for agent A is not delivered to any other agent.
+// Failure prevented: cross-agent leak surfaces wrong turn count / duration to
+// the user (see #538) — the content is personalized with the recipient's own
+// recording state and is meaningless if rendered by another agent.
+func TestGetWhispers_RecordingReminderRoutedToRecipientOnly(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+
+	reminder := makeEntry("reminder-A", "recording-status", ImportanceNormal, now)
+	reminder.Source = SourceRecordingReminder
+	reminder.AgentID = "OxAAAAAA"
+	s.Add(reminder)
+
+	// Wrong agent queries — must receive nothing.
+	got, err := s.GetWhispers("OxBBBBBB", AttentionAll, nil)
+	if err != nil {
+		t.Fatalf("GetWhispers(other): %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("recording-reminder for OxAAAAAA leaked to OxBBBBBB: got %d entries", len(got))
+	}
+
+	// Intended recipient queries — must still receive it.
+	got, err = s.GetWhispers("OxAAAAAA", AttentionAll, nil)
+	if err != nil {
+		t.Fatalf("GetWhispers(recipient): %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("recipient OxAAAAAA should receive its reminder: got %d entries", len(got))
+	}
+	if got[0].Source != SourceRecordingReminder || got[0].AgentID != "OxAAAAAA" {
+		t.Fatalf("wrong entry returned: source=%q agent_id=%q", got[0].Source, got[0].AgentID)
+	}
+}
+
+// TestGetWhispers_NonReminderWhispersStayBroadcast verifies that whispers
+// whose source is not SourceRecordingReminder continue to fan out regardless
+// of the agent_id column — this is the original design for murmurs and
+// announcements.
+// Failure prevented: an over-broad agent_id filter silences cross-agent
+// murmur delivery (the feature that lets teammates see each other's WIP).
+func TestGetWhispers_NonReminderWhispersStayBroadcast(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+
+	// A murmur tagged with its author in agent_id — any reader must see it.
+	murmur := makeEntry("m1", "wip", ImportanceNormal, now)
+	murmur.Source = "murmur"
+	murmur.AgentID = "OxAuthor"
+	s.Add(murmur)
+
+	got, err := s.GetWhispers("OxReader", AttentionAll, nil)
+	if err != nil {
+		t.Fatalf("GetWhispers: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("author-tagged murmur should fan out: got %d entries for OxReader", len(got))
+	}
+	if got[0].AgentID != "OxAuthor" {
+		t.Fatalf("unexpected agent_id on fanned-out murmur: %q", got[0].AgentID)
+	}
+}
+
+// TestGetWhispersPage_RecordingReminderExcludedFromOtherAgents mirrors the
+// GetWhispers guard for the inspection/admin reader. Even on an unscoped
+// query (agentID=""), recording-reminders targeted at specific agents must
+// not appear — their content embeds per-agent numbers that would mislead
+// anyone rendering them.
+// Failure prevented: inspection UIs surface another agent's personalized
+// reminder and render wrong turn count / duration (see #538).
+func TestGetWhispersPage_RecordingReminderExcludedFromOtherAgents(t *testing.T) {
+	s := mustOpen(t)
+	now := time.Now()
+
+	reminder := makeEntry("reminder-A", "recording-status", ImportanceNormal, now)
+	reminder.Source = SourceRecordingReminder
+	reminder.AgentID = "OxAAAAAA"
+	s.Add(reminder)
+
+	// Another agent inspecting — must not see OxAAAAAA's reminder.
+	page, _, err := s.GetWhispersPage("OxBBBBBB", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("GetWhispersPage(other): %v", err)
+	}
+	if len(page) != 0 {
+		t.Fatalf("recording-reminder leaked to OxBBBBBB via page: got %d entries", len(page))
+	}
+
+	// Unscoped inspection — must also exclude targeted reminders.
+	page, _, err = s.GetWhispersPage("", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("GetWhispersPage(unscoped): %v", err)
+	}
+	if len(page) != 0 {
+		t.Fatalf("unscoped page must exclude targeted recording-reminder: got %d entries", len(page))
+	}
+
+	// Recipient inspecting their own — must receive it.
+	page, _, err = s.GetWhispersPage("OxAAAAAA", time.Time{}, 0)
+	if err != nil {
+		t.Fatalf("GetWhispersPage(recipient): %v", err)
+	}
+	if len(page) != 1 {
+		t.Fatalf("recipient should see own reminder via page: got %d entries", len(page))
+	}
+}
+
 func TestEmptyStore(t *testing.T) {
 	s := mustOpen(t)
 

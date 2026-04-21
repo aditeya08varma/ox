@@ -53,6 +53,21 @@ const (
 	WhisperTrigger    WhisperType = "trigger"
 )
 
+// Whisper source values that are load-bearing for delivery routing.
+//
+// Whisper sources are free-form strings; only sources that the transport
+// layer must identify by name live here. If you add a new personalized
+// (per-recipient) whisper source, add its constant here and extend the
+// guards in GetWhispers and GetWhispersPage.
+const (
+	// SourceRecordingReminder marks whispers produced by the daemon's
+	// periodic recording reminder. Content is personalized with the
+	// recipient agent's own turn count and duration, so GetWhispers and
+	// GetWhispersPage route delivery by agent_id for this source only.
+	// Everything else stays broadcast (see #538).
+	SourceRecordingReminder = "recording-reminder"
+)
+
 // WhisperEntry is a single whisper destined for agent delivery.
 type WhisperEntry struct {
 	ID            string            `json:"id"`
@@ -317,10 +332,24 @@ func (s *Store) GetWhispers(agentID string, attention Attention, topics []string
 	}
 
 	// build query with filters
+	//
+	// Whispers are fan-out by design — murmurs, announcements, and broadcasts
+	// are meant to reach every active agent so teammates can see each other's
+	// work. SourceRecordingReminder is the one exception: its content is
+	// personalized with the recipient agent's own turn count and duration,
+	// so delivering it to the wrong agent surfaces wrong numbers to the user
+	// (see #538). We narrow only that source to its intended recipient via
+	// agent_id; everything else stays broadcast.
+	//
+	// If a new personalized whisper source is added in the future, add its
+	// constant next to SourceRecordingReminder and extend this clause rather
+	// than flipping the default to filter-by-agent.
 	query := `SELECT id, scope, type, source, topic, content, importance, created_at,
 		agent_id, principal_id, principal_type, team_id, metadata
-		FROM whispers WHERE created_at > ?`
-	args := []any{cursor.UTC().Format(time.RFC3339Nano)}
+		FROM whispers
+		WHERE created_at > ?
+		  AND (source != ? OR agent_id = ?)`
+	args := []any{cursor.UTC().Format(time.RFC3339Nano), SourceRecordingReminder, agentID}
 
 	// attention filter
 	allowedImportance := importanceForAttention(attention)
@@ -436,7 +465,13 @@ func (s *Store) MarkRelayed(murmurID, scope string) error {
 
 // GetAllWhispers returns all whisper entries for an agent without advancing the cursor.
 // Used for inspection/debugging — shows both pending and already-delivered whispers.
-// Pass agentID="" to get all whispers across all agents.
+//
+// Pass agentID="" for an unscoped view across all agents. Personalized
+// whispers (SourceRecordingReminder) targeted at a specific agent are
+// still omitted on unscoped queries — their content embeds per-agent
+// numbers and is meaningless when rendered without the recipient. See
+// GetWhispersPage for the predicate, and #538 for the original leak.
+//
 // Iterates pages until all entries are collected.
 func (s *Store) GetAllWhispers(agentID string) ([]WhisperEntry, error) {
 	var all []WhisperEntry
@@ -516,6 +551,13 @@ func (s *Store) GetWhispersPage(agentID string, before time.Time, limit int) ([]
 		conditions = append(conditions, `(agent_id = ? OR agent_id IS NULL OR agent_id = '')`)
 		args = append(args, agentID)
 	}
+	// Recording-reminder whispers are personalized per-recipient (see #538).
+	// Exclude reminders targeted at a different agent from any inspection query,
+	// including unscoped ones (agentID=""), since their content embeds a
+	// specific agent's numbers. Mirrors the guard in GetWhispers — if you add
+	// a new personalized source constant, extend both clauses.
+	conditions = append(conditions, `(source != ? OR agent_id = ?)`)
+	args = append(args, SourceRecordingReminder, agentID)
 	if !before.IsZero() {
 		conditions = append(conditions, `created_at < ?`)
 		args = append(args, before.UTC().Format(time.RFC3339Nano))
