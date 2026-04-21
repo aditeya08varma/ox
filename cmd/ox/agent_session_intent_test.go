@@ -274,22 +274,26 @@ func TestIntent_GhostCleanupRespectsGracePeriod(t *testing.T) {
 	assert.NotNil(t, state, "recording must survive ghost cleanup within grace period")
 }
 
-// TestIntent_PrimeNeverGeneratesNewIDWhenActiveRecordingExists verifies that
-// prime's ID resolution chain always finds an existing active recording before
-// falling through to generate a new ID.
-// Failure prevented: new agent ID orphans active session.
-func TestIntent_PrimeNeverGeneratesNewIDWhenActiveRecordingExists(t *testing.T) {
+// TestIntent_PrimeRequiresCorrelationToReuseAgentID verifies that prime's ID
+// resolution refuses to adopt an alive recording without an explicit correlation
+// signal (marker, parent-PID match, or matching SAGEOX_AGENT_ID).
+// Failure prevented: silent cross-session adoption where a concurrent Claude Code
+// session in a sibling worktree inherits another session's agent_id (#528).
+func TestIntent_PrimeRequiresCorrelationToReuseAgentID(t *testing.T) {
 	projectRoot, repoID := setupTestProject(t)
 
 	agentID := "OxExisting1"
-	createActiveRecording(t, projectRoot, repoID, agentID)
+	// ParentPID=1 (init): alive but not an ancestor of this test process, so the
+	// strict PID-match branch in runAgentPrime would also miss. This keeps the
+	// fixture honest to the test's "no correlation signal" claim.
+	createActiveRecordingWithPID(t, projectRoot, repoID, agentID, 1)
 
-	// simulate prime's fallback chain: marker → parent PID → env → sole-active
-	// with only sole-active available (worst case: no marker, no env, no PID match)
+	// simulate prime's fallback chain: marker → parent PID → env
+	// with none available (worst case: no marker, no env, no PID match)
 	states, err := session.LoadAllRecordingStates(projectRoot)
 	require.NoError(t, err)
 
-	// INVARIANT: when exactly one active recording exists, prime must find it
+	// INVARIANT: with no correlation signal, prime must not reuse an unrelated recording
 	resolved := resolveAgentIDFromStates(states, "")
-	assert.Equal(t, agentID, resolved, "sole active recording must be discoverable by prime")
+	assert.Empty(t, resolved, "prime must not adopt an unrelated active recording without an explicit correlation signal (#528)")
 }
