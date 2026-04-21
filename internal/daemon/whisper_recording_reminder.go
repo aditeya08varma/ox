@@ -44,7 +44,7 @@ func (s *RecordingReminderSource) SetTick(d time.Duration) {
 	s.tick = d
 }
 
-func (s *RecordingReminderSource) Name() string { return "recording-reminder" }
+func (s *RecordingReminderSource) Name() string { return whisperstore.SourceRecordingReminder }
 
 // Interval returns the tick frequency. Defaults to 1 minute — frequent enough
 // to catch new recordings quickly, while only producing entries when the
@@ -96,12 +96,20 @@ func (s *RecordingReminderSource) Produce(_ context.Context) []whisperstore.Whis
 			ID:         id.String(),
 			Scope:      "ledger",
 			Type:       whisperstore.WhisperTimeBased,
-			Source:     "recording-reminder",
+			Source:     whisperstore.SourceRecordingReminder,
 			Topic:      "recording-status",
 			Content:    content,
 			Importance: whisperstore.ImportanceNormal,
 			CreatedAt:  now,
-			AgentID:    agentID,
+			// AgentID is the intended recipient. Unlike murmurs and
+			// announcements (which fan out to every listener), this whisper's
+			// Content embeds this agent's own turn count and duration — it
+			// is meaningless and misleading if rendered by any other agent.
+			// Store.GetWhispers uses Source == whisperstore.SourceRecordingReminder
+			// together with this AgentID to route delivery to the recipient
+			// only (see #538). Keep Source tied to the constant above; the
+			// store's SQL filter is keyed on it.
+			AgentID: agentID,
 		})
 	}
 
