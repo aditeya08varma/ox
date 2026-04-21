@@ -82,3 +82,6 @@ demo/playwright/node_modules/
 *-age-key.txt
 *.age-key
 issues.jsonl
+
+# Beads / Dolt files (added by bd init)
+.beads-credential-key
