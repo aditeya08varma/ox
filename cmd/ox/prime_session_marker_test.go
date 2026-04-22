@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -371,11 +372,18 @@ func TestFindSessionMarkerByPID_MatchesParentPID(t *testing.T) {
 // must not be returned, even if their PID field matches the query. Stale
 // markers from crashed sessions are a primary source of cross-session
 // identity bleed — see code-reviewer round 2 SUGGESTION on #527 PID fallback.
+//
+// Spawns a short-lived child process and records its PID, then Wait()s to
+// reap it so we have a deterministically-dead PID to assert against —
+// strictly safer than a "probably unused" integer which could flake on
+// machines with long-running processes holding that PID.
 func TestFindSessionMarkerByPID_IgnoresDeadParentPID(t *testing.T) {
-	// a PID high enough to be unlikely to reference any live process
-	deadPID := 999901
-	sessionID := "findbyPIDdead_" + time.Now().Format("20060102150405.000")
+	cmd := exec.Command("true")
+	require.NoError(t, cmd.Start())
+	deadPID := cmd.Process.Pid
+	require.NoError(t, cmd.Wait()) // reap — PID is now guaranteed dead
 
+	sessionID := "findbyPIDdead_" + time.Now().Format("20060102150405.000")
 	marker := &SessionMarker{
 		AgentID:        "OxDead",
 		AgentSessionID: sessionID,

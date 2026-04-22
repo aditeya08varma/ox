@@ -140,7 +140,9 @@ func ReadSessionMarker(agentSessionID string) (*SessionMarker, error) {
 
 // WriteSessionMarker writes a session marker to disk.
 // Creates the marker directory if it doesn't exist.
-// Uses atomic write pattern (temp file + rename) for safety.
+// Uses atomic write (temp file + fsync + rename + parent-dir fsync) via
+// the shared fileutil helper for consistency with every other user-touching
+// write path in this file.
 func WriteSessionMarker(marker *SessionMarker) error {
 	if marker.AgentSessionID == "" {
 		return fmt.Errorf("agent session ID is required")
@@ -158,16 +160,9 @@ func WriteSessionMarker(marker *SessionMarker) error {
 		return fmt.Errorf("failed to marshal marker: %w", err)
 	}
 
-	// atomic write: temp file + rename
-	tmpPath := path + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
-		return fmt.Errorf("failed to write marker temp: %w", err)
+	if err := fileutil.AtomicWriteBytes(path, data, 0644); err != nil {
+		return fmt.Errorf("failed to write marker: %w", err)
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath) // clean up on failure
-		return fmt.Errorf("failed to rename marker: %w", err)
-	}
-
 	return nil
 }
 
