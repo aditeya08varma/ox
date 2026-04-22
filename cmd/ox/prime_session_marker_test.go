@@ -344,9 +344,11 @@ func TestWriteToAgentEnvFile_AgentEnvUpsertAfterAdapterMismatch(t *testing.T) {
 // hook-driven prime wrote earlier in the same agent process. Without this,
 // the second prime falls through to fresh-prime, appending a duplicate row
 // to agent_instances.jsonl.
+//
+// Uses the current test process PID so the proc.IsAlive liveness gate
+// passes — a recycled/dead PID is specifically what the gate filters out.
 func TestFindSessionMarkerByPID_MatchesParentPID(t *testing.T) {
-	// use a PID value unlikely to collide with a real marker on the system
-	agentPID := 999901
+	agentPID := os.Getpid()
 	sessionID := "findbyPIDtest_" + time.Now().Format("20060102150405.000")
 
 	marker := &SessionMarker{
@@ -362,6 +364,29 @@ func TestFindSessionMarkerByPID_MatchesParentPID(t *testing.T) {
 	require.NotNil(t, found, "marker with matching ParentPID must be found")
 	assert.Equal(t, "OxFindByPID", found.AgentID)
 	assert.Equal(t, sessionID, found.AgentSessionID)
+}
+
+// TestFindSessionMarkerByPID_IgnoresDeadParentPID is the liveness regression
+// guard: markers whose ParentPID no longer corresponds to a running process
+// must not be returned, even if their PID field matches the query. Stale
+// markers from crashed sessions are a primary source of cross-session
+// identity bleed — see code-reviewer round 2 SUGGESTION on #527 PID fallback.
+func TestFindSessionMarkerByPID_IgnoresDeadParentPID(t *testing.T) {
+	// a PID high enough to be unlikely to reference any live process
+	deadPID := 999901
+	sessionID := "findbyPIDdead_" + time.Now().Format("20060102150405.000")
+
+	marker := &SessionMarker{
+		AgentID:        "OxDead",
+		AgentSessionID: sessionID,
+		PrimedAt:       time.Now().Truncate(time.Second),
+		ParentPID:      deadPID,
+	}
+	require.NoError(t, WriteSessionMarker(marker))
+	t.Cleanup(func() { DeleteSessionMarker(sessionID) })
+
+	got := FindSessionMarkerByPID(deadPID)
+	assert.Nil(t, got, "marker whose ParentPID is not alive must be rejected")
 }
 
 // TestFindSessionMarkerByPID_IgnoresNonMatchingPID confirms the scan is

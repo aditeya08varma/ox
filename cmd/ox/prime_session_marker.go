@@ -13,7 +13,9 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/proc"
 )
 
 // SessionMarkerDir returns the per-user directory for session markers.
@@ -91,9 +93,18 @@ func FindSessionMarkerByPID(agentPID int) *SessionMarker {
 		if err := json.Unmarshal(data, &m); err != nil {
 			continue
 		}
-		if m.ParentPID == agentPID {
-			return &m
+		if m.ParentPID != agentPID {
+			continue
 		}
+		// belt-and-suspenders against PID recycling / stale markers:
+		// require the recorded agent process to still be alive. Without
+		// this, a marker from a crashed prior session whose PID happens
+		// to match the current shell/agent would silently cross-link
+		// identities — the exact class of bug we're fixing.
+		if !proc.IsAlive(m.ParentPID) {
+			continue
+		}
+		return &m
 	}
 	return nil
 }
@@ -216,9 +227,11 @@ func WriteToAgentEnvFile(vars map[string]string) error {
 	// CLAUDE.md BLOCKING re-prime — exactly the #527/#529 scenario) both
 	// read-modify-write this file. Without a lock, last-renamer-wins and
 	// the other prime's keys silently disappear. Serialize via flock on
-	// a sibling .lock file. 2s budget matches agentinstance.Store.
+	// a sibling .lock file. 5s budget matches agentinstance.Store's
+	// lockTimeout so behavior under contention is consistent across the
+	// two file-locked subsystems that prime touches.
 	lock := flock.New(envFilePath + ".lock")
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
 	if err != nil {
@@ -258,14 +271,10 @@ func WriteToAgentEnvFile(vars map[string]string) error {
 		buf.WriteByte('\n')
 	}
 
-	// atomic write: temp file + rename
-	tmpPath := envFilePath + ".tmp"
-	if err := os.WriteFile(tmpPath, []byte(buf.String()), 0644); err != nil {
-		return fmt.Errorf("failed to write agent env temp: %w", err)
-	}
-	if err := os.Rename(tmpPath, envFilePath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("failed to rename agent env file: %w", err)
+	// atomic write with fsync via the shared helper (mirrors every other
+	// instruction-file/env-file write path and gets parent-dir fsync too).
+	if err := fileutil.AtomicWriteBytes(envFilePath, []byte(buf.String()), 0644); err != nil {
+		return fmt.Errorf("failed to write agent env file: %w", err)
 	}
 	return nil
 }

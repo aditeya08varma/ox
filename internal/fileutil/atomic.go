@@ -8,7 +8,8 @@ import (
 )
 
 // AtomicWriteBytes writes raw bytes to filePath atomically using temp+rename,
-// fsync'd before rename for durability. Intended for user-facing files where
+// fsync'd before rename and the parent directory fsync'd after rename so the
+// new inode entry survives a hard crash. Intended for user-facing files where
 // a crash-window partial write would destroy content — instruction files
 // (AGENTS.md / CONVENTIONS.md), env files, etc.
 func AtomicWriteBytes(filePath string, data []byte, perm os.FileMode) error {
@@ -47,6 +48,15 @@ func AtomicWriteBytes(filePath string, data []byte, perm os.FileMode) error {
 
 	if err := os.Rename(tmpPath, filePath); err != nil {
 		return fmt.Errorf("rename: %w", err)
+	}
+
+	// fsync the parent directory so the rename's dirent update is durable
+	// even across a hard crash. Best-effort: directory fsync is not supported
+	// on every platform/filesystem (Windows, some network mounts), so log-and-
+	// continue rather than failing the write.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 
 	success = true
