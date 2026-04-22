@@ -24,8 +24,12 @@ func testAgentID(t *testing.T, prefix string) string {
 // Required because CleanupStaleScores enumerates the entire scores directory —
 // without isolation, real agent scores leak into test assertions (and, worse,
 // get destructively removed by the test).
+//
+// OX_XDG_DISABLE is cleared to defend against an inherited legacy-mode env
+// that would bypass XDG_CACHE_HOME and route CacheDir back to ~/.sageox/cache.
 func sandboxScoresDir(t *testing.T) {
 	t.Helper()
+	t.Setenv("OX_XDG_DISABLE", "")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 }
 
