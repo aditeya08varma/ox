@@ -19,11 +19,26 @@ func testAgentID(t *testing.T, prefix string) string {
 	return prefix + "-" + safe
 }
 
+// sandboxScoresDir redirects paths.CacheDir() to an isolated temp dir so tests
+// do not read from or write to the user's real ~/.cache/sageox/scores/.
+// Required because CleanupStaleScores enumerates the entire scores directory —
+// without isolation, real agent scores leak into test assertions (and, worse,
+// get destructively removed by the test).
+//
+// OX_XDG_DISABLE is cleared to defend against an inherited legacy-mode env
+// that would bypass XDG_CACHE_HOME and route CacheDir back to ~/.sageox/cache.
+func sandboxScoresDir(t *testing.T) {
+	t.Helper()
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+}
+
 // --- A. Round-trip persistence ---
 
 // TestSageoxScore_RoundTrip verifies write then read returns the same score and reason.
 // Failure prevented: silent data corruption or serialization mismatch.
 func TestSageoxScore_RoundTrip(t *testing.T) {
+	sandboxScoresDir(t)
 	agentID := testAgentID(t, "roundtrip")
 	t.Cleanup(func() { _ = CleanupSageoxScore(agentID) })
 
@@ -44,6 +59,7 @@ func TestSageoxScore_RoundTrip(t *testing.T) {
 // TestSageoxScore_ReadMissing verifies that reading a nonexistent score returns nil, nil.
 // Failure prevented: spurious errors on fresh installs or first-boot.
 func TestSageoxScore_ReadMissing(t *testing.T) {
+	sandboxScoresDir(t)
 	sf, err := ReadSageoxScore("nonexistent-agent-id-" + t.Name())
 	assert.NoError(t, err)
 	assert.Nil(t, sf)
@@ -54,6 +70,7 @@ func TestSageoxScore_ReadMissing(t *testing.T) {
 // TestSageoxScore_Validation covers all invalid input rejection paths.
 // Failure prevented: storing garbage data that corrupts downstream consumers.
 func TestSageoxScore_Validation(t *testing.T) {
+	sandboxScoresDir(t)
 	tests := []struct {
 		name    string
 		agentID string
@@ -92,6 +109,7 @@ func TestSageoxScore_Validation(t *testing.T) {
 // TestSageoxScore_ReadEmptyAgentID verifies read also rejects empty agent ID.
 // Failure prevented: reading from a bare directory path instead of a file.
 func TestSageoxScore_ReadEmptyAgentID(t *testing.T) {
+	sandboxScoresDir(t)
 	sf, err := ReadSageoxScore("")
 	assert.Error(t, err)
 	assert.Nil(t, sf)
@@ -102,6 +120,7 @@ func TestSageoxScore_ReadEmptyAgentID(t *testing.T) {
 // with out-of-range values is rejected on read.
 // Failure prevented: tampered or corrupted score files flowing into attribution metadata.
 func TestSageoxScore_ReadRejectsCorruptedScore(t *testing.T) {
+	sandboxScoresDir(t)
 	agentID := testAgentID(t, "corrupt")
 	t.Cleanup(func() { _ = CleanupSageoxScore(agentID) })
 
@@ -123,6 +142,7 @@ func TestSageoxScore_ReadRejectsCorruptedScore(t *testing.T) {
 // TestSageoxScore_BoundaryValues verifies that exactly 0.0 and 1.0 are valid scores.
 // Failure prevented: off-by-one in range check excluding valid extremes.
 func TestSageoxScore_BoundaryValues(t *testing.T) {
+	sandboxScoresDir(t)
 	tests := []struct {
 		name  string
 		score float64
@@ -152,6 +172,7 @@ func TestSageoxScore_BoundaryValues(t *testing.T) {
 // TestSageoxScore_ReasonPersisted verifies the optional reason field round-trips.
 // Failure prevented: reason silently dropped during serialization.
 func TestSageoxScore_ReasonPersisted(t *testing.T) {
+	sandboxScoresDir(t)
 	agentID := testAgentID(t, "reason")
 	t.Cleanup(func() { _ = CleanupSageoxScore(agentID) })
 
@@ -168,6 +189,7 @@ func TestSageoxScore_ReasonPersisted(t *testing.T) {
 // TestSageoxScore_EmptyReason verifies omitempty behavior for empty reason.
 // Failure prevented: "reason":"" appearing in JSON when it should be omitted.
 func TestSageoxScore_EmptyReason(t *testing.T) {
+	sandboxScoresDir(t)
 	agentID := testAgentID(t, "no-reason")
 	t.Cleanup(func() { _ = CleanupSageoxScore(agentID) })
 
@@ -189,6 +211,7 @@ func TestSageoxScore_EmptyReason(t *testing.T) {
 // TestSageoxScore_Cleanup verifies file removal and subsequent read returns nil.
 // Failure prevented: stale score files persisting after agent teardown.
 func TestSageoxScore_Cleanup(t *testing.T) {
+	sandboxScoresDir(t)
 	agentID := testAgentID(t, "cleanup")
 
 	err := WriteSageoxScore(agentID, 0.6, "test")
@@ -205,6 +228,7 @@ func TestSageoxScore_Cleanup(t *testing.T) {
 // TestSageoxScore_CleanupIdempotent verifies cleanup on missing file is a no-op.
 // Failure prevented: error noise when cleaning up already-removed scores.
 func TestSageoxScore_CleanupIdempotent(t *testing.T) {
+	sandboxScoresDir(t)
 	err := CleanupSageoxScore("does-not-exist-" + t.Name())
 	assert.NoError(t, err)
 }
@@ -212,6 +236,7 @@ func TestSageoxScore_CleanupIdempotent(t *testing.T) {
 // TestSageoxScore_CleanupEmptyAgentID verifies cleanup with empty ID is a safe no-op.
 // Failure prevented: accidentally deleting the scores directory itself.
 func TestSageoxScore_CleanupEmptyAgentID(t *testing.T) {
+	sandboxScoresDir(t)
 	err := CleanupSageoxScore("")
 	assert.NoError(t, err)
 }
@@ -221,6 +246,7 @@ func TestSageoxScore_CleanupEmptyAgentID(t *testing.T) {
 // TestSageoxScore_Overwrite verifies that writing twice updates the stored value.
 // Failure prevented: stale scores surviving an update.
 func TestSageoxScore_Overwrite(t *testing.T) {
+	sandboxScoresDir(t)
 	agentID := testAgentID(t, "overwrite")
 	t.Cleanup(func() { _ = CleanupSageoxScore(agentID) })
 
@@ -241,6 +267,7 @@ func TestSageoxScore_Overwrite(t *testing.T) {
 // while active agent scores are preserved.
 // Failure prevented: score files accumulating indefinitely for expired agents.
 func TestCleanupStaleScores_RemovesInactive(t *testing.T) {
+	sandboxScoresDir(t)
 	active := testAgentID(t, "active")
 	stale1 := testAgentID(t, "stale1")
 	stale2 := testAgentID(t, "stale2")
@@ -276,6 +303,7 @@ func TestCleanupStaleScores_RemovesInactive(t *testing.T) {
 // TestCleanupStaleScores_EmptyDir verifies cleanup on nonexistent dir is a no-op.
 // Failure prevented: error on fresh install with no scores directory.
 func TestCleanupStaleScores_EmptyDir(t *testing.T) {
+	sandboxScoresDir(t)
 	removed, err := CleanupStaleScores(map[string]bool{})
 	assert.NoError(t, err)
 	assert.Equal(t, 0, removed)
@@ -286,6 +314,7 @@ func TestCleanupStaleScores_EmptyDir(t *testing.T) {
 // TestWriteSageoxScoreCategory_RoundTrip verifies category-based write/read.
 // Failure prevented: category name not persisted or wrong float mapped.
 func TestWriteSageoxScoreCategory_RoundTrip(t *testing.T) {
+	sandboxScoresDir(t)
 	tests := []struct {
 		cat   ScoreCategory
 		score float64
@@ -317,6 +346,7 @@ func TestWriteSageoxScoreCategory_RoundTrip(t *testing.T) {
 // TestWriteSageoxScoreCategory_InvalidCategory rejects unknown category names.
 // Failure prevented: garbage category names silently accepted.
 func TestWriteSageoxScoreCategory_InvalidCategory(t *testing.T) {
+	sandboxScoresDir(t)
 	err := WriteSageoxScoreCategory("test-agent", "extreme", "reason")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "invalid score category")
@@ -380,6 +410,7 @@ func TestCategoryForScore(t *testing.T) {
 // WriteSageoxScore function auto-maps to the nearest category.
 // Failure prevented: old numeric API producing score files without category field.
 func TestWriteSageoxScore_BackwardCompat_SetsCategory(t *testing.T) {
+	sandboxScoresDir(t)
 	agentID := testAgentID(t, "compat")
 	t.Cleanup(func() { _ = CleanupSageoxScore(agentID) })
 
