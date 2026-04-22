@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -202,16 +201,24 @@ func ReadAgentHookInput() *AgentHookInput {
 // Currently supports CLAUDE_ENV_FILE (Claude Code). Other agents may use different
 // mechanisms for injecting env vars into subsequent tool calls.
 //
-// Semantics: upsert. The file is read, existing `export KEY="VALUE"` lines are
-// parsed into a map, incoming vars are merged (incoming wins), and the result
-// is rewritten atomically via temp-file + rename. Duplicate keys from earlier
-// writes are collapsed. Non-export lines (comments, blanks, unrecognized
-// syntax) are preserved in their original order, appended after the exports.
+// Semantics: surgical upsert of SageOx-owned keys only. Lines unrelated to
+// the keys in `vars` are preserved verbatim — including unrelated exports,
+// comments, blank lines, and shell-expanding values like
+// `export PATH="$HOME/bin:$PATH"` that would break if reformatted through
+// Go's %q. Only keys in `vars` are replaced; the first occurrence of each
+// such key in the file is overwritten in place, later duplicates are
+// removed (dedup), and any key not present is appended at the end.
 //
-// Why upsert instead of O_APPEND: a second prime that claims a different
-// agent_type would otherwise stack `export AGENT_ENV="pi"` after an earlier
+// Why surgical: a second prime that claims a different agent_type would
+// otherwise stack `export AGENT_ENV="pi"` after an earlier
 // `export AGENT_ENV="claude-code"`, poisoning every subsequent subprocess
-// until the next explicit prime. See #527.
+// until the next explicit prime (#527). Earlier revisions re-emitted every
+// export line with %q, which could mangle complex shell syntax in unrelated
+// entries — the CodeRabbit review flagged this as a privacy + correctness
+// regression.
+//
+// Permissions: written with at most 0600. If the file already exists with a
+// more restrictive mode (e.g. 0400), that stricter mode is preserved.
 func WriteToAgentEnvFile(vars map[string]string) error {
 	envFilePath := os.Getenv("CLAUDE_ENV_FILE")
 	if envFilePath == "" {
@@ -237,79 +244,103 @@ func WriteToAgentEnvFile(vars map[string]string) error {
 	}
 	defer func() { _ = lock.Unlock() }()
 
-	// read existing content (may not exist yet)
+	// read existing content + mode (both may be absent)
 	existing, err := os.ReadFile(envFilePath)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to read agent env file: %w", err)
 	}
 
-	exports, preserved := parseEnvFile(string(existing))
-
-	// merge: incoming vars override existing values for same key
-	for k, v := range vars {
-		exports[k] = v
+	// Default to 0600 (owner read/write). If the file already exists with a
+	// stricter mode, keep the stricter mode — we never loosen permissions
+	// because the env file can carry values callers consider private.
+	var perm os.FileMode = 0600
+	if info, statErr := os.Stat(envFilePath); statErr == nil {
+		if existing := info.Mode().Perm(); existing != 0 && existing < perm {
+			perm = existing
+		}
 	}
 
-	// emit: sorted keys for deterministic output, then preserved non-export lines
-	keys := make([]string, 0, len(exports))
-	for k := range exports {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-
-	var buf strings.Builder
-	for _, k := range keys {
-		fmt.Fprintf(&buf, "export %s=%q\n", k, exports[k])
-	}
-	for _, line := range preserved {
-		buf.WriteString(line)
-		buf.WriteByte('\n')
-	}
+	out := upsertEnvFile(string(existing), vars)
 
 	// atomic write with fsync via the shared helper (mirrors every other
 	// instruction-file/env-file write path and gets parent-dir fsync too).
-	if err := fileutil.AtomicWriteBytes(envFilePath, []byte(buf.String()), 0644); err != nil {
+	if err := fileutil.AtomicWriteBytes(envFilePath, []byte(out), perm); err != nil {
 		return fmt.Errorf("failed to write agent env file: %w", err)
 	}
 	return nil
 }
 
-// parseEnvFile splits a CLAUDE_ENV_FILE into a map of export KEY=VALUE pairs
-// plus a slice of preserved non-export lines (comments, blanks, unknown syntax).
-// Duplicate keys in the input are resolved by last-wins — matching how bash
-// source() evaluates the file.
-func parseEnvFile(content string) (map[string]string, []string) {
-	exports := make(map[string]string)
-	var preserved []string
-	for _, line := range strings.Split(content, "\n") {
-		if line == "" {
-			continue
-		}
-		trimmed := strings.TrimSpace(line)
-		if !strings.HasPrefix(trimmed, "export ") {
-			preserved = append(preserved, line)
-			continue
-		}
-		rest := strings.TrimPrefix(trimmed, "export ")
-		eq := strings.IndexByte(rest, '=')
-		if eq < 0 {
-			preserved = append(preserved, line)
-			continue
-		}
-		key := rest[:eq]
-		val := rest[eq+1:]
-		// strip surrounding double quotes if present (matches fmt.Fprintf %q shape)
-		if len(val) >= 2 && val[0] == '"' && val[len(val)-1] == '"' {
-			unquoted, err := strconv.Unquote(val)
-			if err == nil {
-				val = unquoted
-			} else {
-				val = val[1 : len(val)-1]
+// upsertEnvFile rewrites `content` so that each key in `vars` has a single
+// canonical `export KEY="VALUE"` line. Lines matching a key in `vars`
+// are overwritten in place on first occurrence and removed on subsequent
+// occurrences (dedup). All other lines — unrelated exports, comments,
+// blanks, shell expansions — are preserved verbatim, never reformatted.
+// Keys not already present are appended at the end in sorted order for
+// deterministic output.
+func upsertEnvFile(content string, vars map[string]string) string {
+	written := make(map[string]bool, len(vars))
+
+	var out strings.Builder
+	lines := strings.Split(content, "\n")
+	// preserve trailing-newline semantics: splitting "foo\n" yields ["foo",""].
+	// The "" sentinel lets us re-emit a final newline only if the source had one.
+	for i, line := range lines {
+		key, isExport := parseExportKey(line)
+		if isExport {
+			if newVal, owned := vars[key]; owned {
+				if !written[key] {
+					fmt.Fprintf(&out, "export %s=%q", key, newVal)
+					written[key] = true
+					// preserve newline if not the final sentinel
+					if i < len(lines)-1 {
+						out.WriteByte('\n')
+					}
+				}
+				// skip this line (either wrote replacement or deduping)
+				continue
 			}
 		}
-		exports[key] = val
+		out.WriteString(line)
+		if i < len(lines)-1 {
+			out.WriteByte('\n')
+		}
 	}
-	return exports, preserved
+
+	// append any owned keys that weren't already present, in sorted order
+	var missing []string
+	for k := range vars {
+		if !written[k] {
+			missing = append(missing, k)
+		}
+	}
+	sort.Strings(missing)
+	for _, k := range missing {
+		// ensure we start on a fresh line
+		s := out.String()
+		if len(s) > 0 && !strings.HasSuffix(s, "\n") {
+			out.WriteByte('\n')
+		}
+		fmt.Fprintf(&out, "export %s=%q\n", k, vars[k])
+	}
+
+	return out.String()
+}
+
+// parseExportKey returns (key, true) when line is of the shape
+// `export KEY=...`, otherwise ("", false). Only bare `export ` prefix
+// (possibly after leading whitespace) counts — `declare -x`, `readonly`,
+// etc. are left alone as foreign syntax.
+func parseExportKey(line string) (string, bool) {
+	trimmed := strings.TrimLeft(line, " \t")
+	if !strings.HasPrefix(trimmed, "export ") {
+		return "", false
+	}
+	rest := strings.TrimPrefix(trimmed, "export ")
+	eq := strings.IndexByte(rest, '=')
+	if eq <= 0 {
+		return "", false
+	}
+	return rest[:eq], true
 }
 
 // IsAgentHookContext detects if we're running in a coding agent's hook context.

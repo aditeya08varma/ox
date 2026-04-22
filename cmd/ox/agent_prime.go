@@ -481,14 +481,28 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			// stored value; surface the mismatch as a warning + telemetry so
 			// bad adapter configs become visible instead of silently rewriting
 			// the session's identity mid-flight.
+			//
+			// Note on the AgentType == "" case: instances registered by earlier
+			// ox versions may have an empty stored AgentType. We intentionally
+			// do NOT treat this as a mismatch — upgrading an unknown type into
+			// whatever the current prime claims would give silent identity
+			// promotion, exactly what this freeze is designed to prevent.
+			// The claimed type is used for this call's output / User-Agent but
+			// telemetry (via trackInstanceStart below) keeps using inst.AgentType.
 			if agentType != "" && updated.AgentType != "" && agentType != updated.AgentType {
 				slog.Warn("prime: agent_type mismatch on re-prime; keeping stored value",
 					"agent_id", agentID,
 					"stored_agent_type", updated.AgentType,
 					"claimed_agent_type", agentType)
 				trackPrimeTypeMismatch(updated, agentType)
-				// honor the frozen type for the rest of this prime call
+				// Honor the frozen type for the rest of this prime call,
+				// including the outbound User-Agent — an earlier call at
+				// the top of runAgentPrime primed the UA with the claimed
+				// (wrong) value before we knew about the conflict. Re-apply
+				// the authoritative stored type so any API calls this prime
+				// makes from here on carry the correct identity.
 				agentType = updated.AgentType
+				useragent.SetAgentType(agentType)
 			}
 		} else if !errors.Is(err, agentinstance.ErrInstanceNotFound) {
 			return fmt.Errorf("failed to update instance: %w", err)

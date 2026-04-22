@@ -99,6 +99,49 @@ func TestAtomicWriteBytes_ParentDirMissing(t *testing.T) {
 	}
 }
 
+// TestAtomicWriteBytes_PreservesSymlink is the CodeRabbit-review regression
+// for ox#543: when the target path is a symlink (ox init creates
+// CLAUDE.md → AGENTS.md), the atomic write must follow the link and
+// update the real file, not replace the link with a regular file.
+//
+// Failure prevented: a write to CLAUDE.md breaking the symlink to
+// AGENTS.md so the two files drift out of sync on the next write.
+func TestAtomicWriteBytes_PreservesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "AGENTS.md")
+	link := filepath.Join(dir, "CLAUDE.md")
+
+	if err := os.WriteFile(target, []byte("original"), 0644); err != nil {
+		t.Fatalf("seed target: %v", err)
+	}
+	if err := os.Symlink("AGENTS.md", link); err != nil {
+		t.Skipf("symlinks not supported on this platform: %v", err)
+	}
+
+	// write through the symlink — the link must survive, target updates
+	if err := AtomicWriteBytes(link, []byte("updated"), 0644); err != nil {
+		t.Fatalf("AtomicWriteBytes: %v", err)
+	}
+
+	// symlink still exists as a symlink (not replaced with regular file)
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat link: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("symlink was replaced with a regular file; got mode=%v", info.Mode())
+	}
+
+	// target file (the real inode) received the update
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("readback target: %v", err)
+	}
+	if string(got) != "updated" {
+		t.Errorf("target content = %q, want %q", got, "updated")
+	}
+}
+
 func TestAtomicWriteJSON_Success(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.json")

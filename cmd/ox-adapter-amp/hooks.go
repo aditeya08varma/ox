@@ -170,17 +170,24 @@ func resolveAgentsMDPath(repoRoot string) string {
 
 // removePrimeBlock strips one start...end block (inclusive) from content,
 // collapsing surrounding blank lines so no orphan whitespace remains.
-// Returns content unchanged if either marker is absent.
+// Returns content unchanged if either marker is absent, or if no end
+// marker appears AFTER the start marker (which would indicate an orphan
+// end marker earlier in the file — hand-edits, partial pastes, merge
+// accidents can all produce this; we refuse to operate rather than
+// silently delete arbitrary content between an orphan end and a real
+// start). CodeRabbit review on #543.
 func removePrimeBlock(content, startMarker, endMarker string) string {
 	startIdx := strings.Index(content, startMarker)
 	if startIdx == -1 {
 		return content
 	}
-	endIdx := strings.Index(content, endMarker)
-	if endIdx == -1 {
+	// search for endMarker AFTER the start marker so an orphan end marker
+	// earlier in the file can't form an inverted range
+	rel := strings.Index(content[startIdx+len(startMarker):], endMarker)
+	if rel == -1 {
 		return content
 	}
-	endIdx += len(endMarker)
+	endIdx := startIdx + len(startMarker) + rel + len(endMarker)
 
 	before := strings.TrimRight(content[:startIdx], "\n")
 	after := strings.TrimLeft(content[endIdx:], "\n")

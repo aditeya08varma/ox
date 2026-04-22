@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -333,9 +334,89 @@ func TestWriteToAgentEnvFile_AgentEnvUpsertAfterAdapterMismatch(t *testing.T) {
 
 	content, err := os.ReadFile(envFile)
 	require.NoError(t, err)
-	// only the last write should remain in the file
+	// only the last write should remain in the file, and it must be "pi"
+	// — a buggy implementation that kept "claude-code" and silently
+	// dropped the second write would satisfy a bare count check
+	// (CodeRabbit review on #543).
+	assert.Contains(t, string(content), `export AGENT_ENV="pi"`,
+		"last write value must survive")
+	assert.NotContains(t, string(content), `export AGENT_ENV="claude-code"`,
+		"earlier write must be replaced, not retained")
 	assert.Equal(t, 1, strings.Count(string(content), `export AGENT_ENV=`),
 		"AGENT_ENV must not stack across primes")
+}
+
+// TestWriteToAgentEnvFile_PreservesUnrelatedExportsVerbatim confirms the
+// surgical-upsert contract: lines unrelated to the keys being written
+// (including unrelated exports with shell-expansion values, comments,
+// blanks) must pass through byte-for-byte — never reformatted through
+// Go's %q, which would change quoting on constructs like
+// `export PATH="$HOME/bin:$PATH"` and silently break the caller's shell.
+//
+// Failure prevented: CodeRabbit review on #543 flagged this as a
+// privacy + correctness regression in the earlier parseEnvFile-based
+// approach. The env file can carry any export a parent shell injected.
+func TestWriteToAgentEnvFile_PreservesUnrelatedExportsVerbatim(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+
+	// seed the file with content ox did not write: a comment, an
+	// unrelated export with a shell-expansion value, and a blank line.
+	seed := "# caller's settings\nexport PATH=\"$HOME/bin:$PATH\"\n\nexport UNRELATED='don'\\''t touch'\n"
+	require.NoError(t, os.WriteFile(envFile, []byte(seed), 0600))
+
+	t.Setenv("CLAUDE_ENV_FILE", envFile)
+
+	require.NoError(t, WriteToAgentEnvFile(map[string]string{
+		"SAGEOX_AGENT_ID": "OxNew",
+	}))
+
+	got, err := os.ReadFile(envFile)
+	require.NoError(t, err)
+	gotStr := string(got)
+
+	// Every seeded line must be present byte-for-byte.
+	for _, lit := range []string{
+		"# caller's settings",
+		`export PATH="$HOME/bin:$PATH"`,
+		`export UNRELATED='don'\''t touch'`,
+	} {
+		assert.Contains(t, gotStr, lit,
+			"caller's line %q must be preserved verbatim", lit)
+	}
+	// The new SageOx-owned key must be appended exactly once.
+	assert.Equal(t, 1, strings.Count(gotStr, "export SAGEOX_AGENT_ID="))
+	assert.Contains(t, gotStr, `export SAGEOX_AGENT_ID="OxNew"`)
+}
+
+// TestWriteToAgentEnvFile_NeverLoosensPermissions confirms the env
+// file gets written with no looser than 0600 — and if the existing
+// file was already stricter, the stricter mode is preserved.
+// Failure prevented: 0644 exposure of values the caller considers
+// private. CodeRabbit review on #543.
+func TestWriteToAgentEnvFile_NeverLoosensPermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	envFile := filepath.Join(tmpDir, "env")
+
+	t.Setenv("CLAUDE_ENV_FILE", envFile)
+
+	t.Run("new file defaults to 0600", func(t *testing.T) {
+		require.NoError(t, WriteToAgentEnvFile(map[string]string{"AGENT_ENV": "claude-code"}))
+		info, err := os.Stat(envFile)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0600), info.Mode().Perm(),
+			"default permissions should cap at 0600, not 0644")
+		require.NoError(t, os.Remove(envFile))
+	})
+
+	t.Run("preserves stricter existing mode", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(envFile, []byte(""), 0400))
+		require.NoError(t, WriteToAgentEnvFile(map[string]string{"AGENT_ENV": "claude-code"}))
+		info, err := os.Stat(envFile)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0400), info.Mode().Perm(),
+			"existing stricter mode (0400) must not be loosened")
+	})
 }
 
 // TestFindSessionMarkerByPID_MatchesParentPID is the #527/#529 regression
@@ -378,6 +459,14 @@ func TestFindSessionMarkerByPID_MatchesParentPID(t *testing.T) {
 // strictly safer than a "probably unused" integer which could flake on
 // machines with long-running processes holding that PID.
 func TestFindSessionMarkerByPID_IgnoresDeadParentPID(t *testing.T) {
+	// exec.Command("true") is POSIX-only. Windows has no /usr/bin/true,
+	// so on that platform skip rather than fabricate a fake PID that
+	// would defeat the liveness gate under test. The live-PID happy
+	// path is already covered by TestFindSessionMarkerByPID_MatchesParentPID.
+	if runtime.GOOS == "windows" {
+		t.Skip("test requires POSIX `true` to spawn-and-reap a guaranteed-dead PID")
+	}
+
 	cmd := exec.Command("true")
 	require.NoError(t, cmd.Start())
 	deadPID := cmd.Process.Pid

@@ -237,17 +237,24 @@ func summarizeBlockFindings(findings []adapterBlockFinding) string {
 
 // stripBlock removes one start...end block (inclusive) from content,
 // collapsing surrounding blank lines. Returns content unchanged if either
-// marker is absent. Shared with the adapter hook uninstall flows.
+// marker is absent, or if no end marker appears AFTER the start marker —
+// the latter guards against an orphan end marker earlier in the file
+// silently dropping arbitrary text between the orphan and the real start
+// when `ox doctor --fix` runs on corrupted input (the exact scenario this
+// check is built for). Mirrors the guard in scanAdapterBlocks.
+// CodeRabbit review on #543.
 func stripBlock(content, startMarker, endMarker string) string {
 	startIdx := strings.Index(content, startMarker)
 	if startIdx == -1 {
 		return content
 	}
-	endIdx := strings.Index(content, endMarker)
-	if endIdx == -1 {
+	// search for endMarker AFTER the start marker so an orphan end marker
+	// earlier in the file can't form an inverted range
+	rel := strings.Index(content[startIdx+len(startMarker):], endMarker)
+	if rel == -1 {
 		return content
 	}
-	endIdx += len(endMarker)
+	endIdx := startIdx + len(startMarker) + rel + len(endMarker)
 
 	before := strings.TrimRight(content[:startIdx], "\n")
 	after := strings.TrimLeft(content[endIdx:], "\n")

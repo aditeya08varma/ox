@@ -12,8 +12,26 @@ import (
 // new inode entry survives a hard crash. Intended for user-facing files where
 // a crash-window partial write would destroy content — instruction files
 // (AGENTS.md / CONVENTIONS.md), env files, etc.
+//
+// If filePath is a symlink, the rename follows the symlink to its target so
+// the link itself is preserved and the underlying file is updated. The
+// CLAUDE.md → AGENTS.md pattern that ox init creates depends on this — a
+// naive rename would replace the symlink with a regular file and break the
+// link. Ordinary (non-symlink) paths are written directly as before.
 func AtomicWriteBytes(filePath string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(filePath)
+	// Follow symlinks so the link structure survives the write (e.g.
+	// CLAUDE.md → AGENTS.md). Lstat tells us whether filePath is itself a
+	// symlink; if it is, resolve to the real inode and write there.
+	writePath := filePath
+	if info, err := os.Lstat(filePath); err == nil && info.Mode()&os.ModeSymlink != 0 {
+		resolved, resolveErr := filepath.EvalSymlinks(filePath)
+		if resolveErr != nil {
+			return fmt.Errorf("resolve symlink %q: %w", filePath, resolveErr)
+		}
+		writePath = resolved
+	}
+
+	dir := filepath.Dir(writePath)
 
 	tmp, err := os.CreateTemp(dir, ".tmp-*")
 	if err != nil {
@@ -46,7 +64,7 @@ func AtomicWriteBytes(filePath string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("chmod: %w", err)
 	}
 
-	if err := os.Rename(tmpPath, filePath); err != nil {
+	if err := os.Rename(tmpPath, writePath); err != nil {
 		return fmt.Errorf("rename: %w", err)
 	}
 
