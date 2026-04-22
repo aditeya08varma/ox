@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/paths"
 )
@@ -75,10 +77,10 @@ func FindSessionMarkerByPID(agentPID int) *SessionMarker {
 		return nil
 	}
 	for _, entry := range entries {
+		// WriteSessionMarker emits atomic temp files as "<sid>.json.tmp"
+		// and renames to "<sid>.json" — the .json suffix check here also
+		// excludes the .tmp variants, which end in .tmp not .json.
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		if strings.HasSuffix(entry.Name(), ".tmp") {
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(SessionMarkerDir(), entry.Name()))
@@ -209,6 +211,23 @@ func WriteToAgentEnvFile(vars map[string]string) error {
 	if envFilePath == "" {
 		return nil // not in an agent context with env file support
 	}
+
+	// Concurrent primes (e.g. SessionStart hook racing against the
+	// CLAUDE.md BLOCKING re-prime — exactly the #527/#529 scenario) both
+	// read-modify-write this file. Without a lock, last-renamer-wins and
+	// the other prime's keys silently disappear. Serialize via flock on
+	// a sibling .lock file. 2s budget matches agentinstance.Store.
+	lock := flock.New(envFilePath + ".lock")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	locked, err := lock.TryLockContext(ctx, 100*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("failed to acquire agent env file lock: %w", err)
+	}
+	if !locked {
+		return fmt.Errorf("could not acquire agent env file lock within timeout")
+	}
+	defer func() { _ = lock.Unlock() }()
 
 	// read existing content (may not exist yet)
 	existing, err := os.ReadFile(envFilePath)

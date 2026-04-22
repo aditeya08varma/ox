@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
@@ -82,7 +83,7 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		newContent = strings.TrimRight(content, "\n") + "\n\n" + ampPrimeBlock + "\n"
 	}
 
-	if err := os.WriteFile(agentsPath, []byte(newContent), 0644); err != nil {
+	if err := fileutil.AtomicWriteBytes(agentsPath, []byte(newContent), 0644); err != nil {
 		return nil, fmt.Errorf("failed to write AGENTS.md: %w", err)
 	}
 
@@ -148,7 +149,7 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 			return nil, fmt.Errorf("failed to remove empty AGENTS.md: %w", err)
 		}
 	} else {
-		if err := os.WriteFile(agentsPath, []byte(cleaned), 0644); err != nil {
+		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(cleaned), 0644); err != nil {
 			return nil, fmt.Errorf("failed to write AGENTS.md: %w", err)
 		}
 	}

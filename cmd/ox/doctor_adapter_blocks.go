@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // adapterBlockMarkers enumerates every marker pair ever emitted by an
@@ -102,6 +104,15 @@ func checkAdapterPrimeBlocks(fix bool) checkResult {
 	}
 
 	var findings []adapterBlockFinding
+	// fix-mode error accumulator: partial success is reported alongside
+	// failures so users see which files were repaired and which weren't,
+	// instead of aborting at the first bad write.
+	type fixFailure struct {
+		file string
+		err  error
+	}
+	var fixFailures []fixFailure
+	var fixSucceeded []string
 
 	for _, name := range scanOrder {
 		path := filepath.Join(gitRoot, name)
@@ -124,10 +135,10 @@ func checkAdapterPrimeBlocks(fix bool) checkResult {
 				cleaned = stripBlock(cleaned, m.startMarker, m.endMarker)
 			}
 			if cleaned != content {
-				if err := os.WriteFile(path, []byte(cleaned), 0644); err != nil {
-					return FailedCheck("Adapter prime blocks",
-						fmt.Sprintf("failed to write %s during fix", name),
-						err.Error())
+				if err := fileutil.AtomicWriteBytes(path, []byte(cleaned), 0644); err != nil {
+					fixFailures = append(fixFailures, fixFailure{file: name, err: err})
+				} else {
+					fixSucceeded = append(fixSucceeded, name)
 				}
 			}
 		}
@@ -152,14 +163,29 @@ func checkAdapterPrimeBlocks(fix bool) checkResult {
 		}
 		detailLines = append(detailLines, "  "+line)
 	}
-	if !fix {
+	switch {
+	case !fix:
 		detailLines = append(detailLines, "Run `ox doctor --fix` to remove these blocks while preserving the universal ox:prime markers.")
-	} else {
+	case len(fixFailures) == 0:
 		detailLines = append(detailLines, "Blocks were removed. Universal ox:prime markers were preserved.")
+	default:
+		if len(fixSucceeded) > 0 {
+			detailLines = append(detailLines,
+				fmt.Sprintf("Partial success — repaired: %s", strings.Join(fixSucceeded, ", ")))
+		}
+		for _, ff := range fixFailures {
+			detailLines = append(detailLines,
+				fmt.Sprintf("  FAILED to write %s: %v", ff.file, ff.err))
+		}
 	}
 	detail := strings.Join(detailLines, "\n")
 
 	if fix {
+		if len(fixFailures) > 0 {
+			return FailedCheck("Adapter prime blocks",
+				fmt.Sprintf("fix failed for %d of %d file(s)", len(fixFailures), len(fixFailures)+len(fixSucceeded)),
+				detail)
+		}
 		return PassedCheck("Adapter prime blocks", "removed "+msg)
 	}
 	return WarningCheck("Adapter prime blocks", msg, detail)

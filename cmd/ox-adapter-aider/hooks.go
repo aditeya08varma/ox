@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
@@ -84,7 +85,7 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		newContent = strings.TrimRight(content, "\n") + "\n\n" + aiderPrimeBlock + "\n"
 	}
 
-	if err := os.WriteFile(convPath, []byte(newContent), 0644); err != nil {
+	if err := fileutil.AtomicWriteBytes(convPath, []byte(newContent), 0644); err != nil {
 		return nil, fmt.Errorf("failed to write CONVENTIONS.md: %w", err)
 	}
 
@@ -150,7 +151,7 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 			return nil, fmt.Errorf("failed to remove empty CONVENTIONS.md: %w", err)
 		}
 	} else {
-		if err := os.WriteFile(convPath, []byte(cleaned), 0644); err != nil {
+		if err := fileutil.AtomicWriteBytes(convPath, []byte(cleaned), 0644); err != nil {
 			return nil, fmt.Errorf("failed to write CONVENTIONS.md: %w", err)
 		}
 	}

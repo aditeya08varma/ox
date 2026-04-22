@@ -187,7 +187,15 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// hook already primed) typically has no hook stdin JSON, so the
 	// session-id-keyed lookup above misses. Walk to the agent ancestor PID
 	// and find a marker that references it. See #527/#529.
-	if existingMarker == nil {
+	//
+	// SAFETY: only trust the PID when agentx actually detected a coding
+	// agent. proc.FindAgentAncestorPID falls back to os.Getppid() when
+	// no known agent binary is found in the ancestor chain — in a plain
+	// shell that would be the shell PID, which could coincidentally
+	// match a stale marker from an unrelated prior session and silently
+	// cross-link identities. Requiring a live agent detection keeps the
+	// fallback limited to the scenario it was designed for.
+	if existingMarker == nil && agentx.CurrentAgent() != nil {
 		if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
 			existingMarker = FindSessionMarkerByPID(agentPID)
 			if existingMarker != nil && agentSessionID == "" {
@@ -478,6 +486,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 					"agent_id", agentID,
 					"stored_agent_type", updated.AgentType,
 					"claimed_agent_type", agentType)
+				trackPrimeTypeMismatch(updated, agentType)
 				// honor the frozen type for the rest of this prime call
 				agentType = updated.AgentType
 			}
@@ -1609,6 +1618,28 @@ func trackPrimeExcessive(inst *agentinstance.Instance) {
 			Model:          inst.Model,
 			PrimeCallCount: inst.PrimeCallCount,
 			Success:        true,
+		})
+	}
+}
+
+// trackPrimeTypeMismatch tracks when a re-prime claimed a different
+// agent_type than the originally-registered instance. The classic #527
+// signature is a SessionStart hook registering agent_type=claude-code,
+// followed by a CLAUDE.md-driven re-prime that mis-routes as pi/amp/aider
+// via a hardcoded AGENT_ENV in a shared instruction file. Surfacing this
+// in telemetry makes adapter-block mis-routing visible across the fleet.
+func trackPrimeTypeMismatch(inst *agentinstance.Instance, claimedType string) {
+	if cliCtx != nil && cliCtx.TelemetryClient != nil {
+		cliCtx.TelemetryClient.Track(telemetry.Event{
+			Type:      telemetry.EventPrimeTypeMismatch,
+			AgentID:   inst.AgentID,
+			SessionID: inst.ServerSessionID,
+			AgentType: inst.AgentType, // stored / authoritative
+			Model:     inst.Model,
+			Success:   true,
+			Metadata: map[string]string{
+				"claimed_agent_type": claimedType,
+			},
 		})
 	}
 }

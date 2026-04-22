@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/ui"
 )
 
@@ -124,7 +125,7 @@ func installPiHooks(user bool) error {
 		newContent = strings.TrimRight(content, "\n") + "\n\n" + piPrimeBlock + "\n"
 	}
 
-	if err := os.WriteFile(agentsPath, []byte(newContent), sharedSettingsPerm); err != nil {
+	if err := fileutil.AtomicWriteBytes(agentsPath, []byte(newContent), sharedSettingsPerm); err != nil {
 		return fmt.Errorf("failed to write %s: %w", agentsMDFileName, err)
 	}
 
@@ -176,7 +177,7 @@ func uninstallPiHooks(user bool) error {
 		return nil
 	}
 
-	if err := os.WriteFile(agentsPath, []byte(cleaned), sharedSettingsPerm); err != nil {
+	if err := fileutil.AtomicWriteBytes(agentsPath, []byte(cleaned), sharedSettingsPerm); err != nil {
 		return fmt.Errorf("failed to write %s: %w", agentsMDFileName, err)
 	}
 

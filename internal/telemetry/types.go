@@ -47,6 +47,7 @@ const (
 	EventGuidanceFetchError = "guidance_fetch_error" // auth, 404, rate limit errors
 	EventAttributionShown   = "attribution_shown"    // attribution footer displayed
 	EventPrimeExcessive     = "prime_excessive"      // prime called more than threshold times
+	EventPrimeTypeMismatch  = "prime_type_mismatch"  // re-prime claimed a different agent_type than the stored instance (#527)
 
 	// daemon events (sent directly from CLI when daemon unavailable)
 	EventDaemonStartFailure = "daemon:start_failure" // daemon failed to start
