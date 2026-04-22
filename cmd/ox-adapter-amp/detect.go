@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -49,7 +48,9 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 	if p.RepoRoot != "" {
 		agentsPath := filepath.Join(p.RepoRoot, "AGENTS.md")
 		if data, err := os.ReadFile(agentsPath); err == nil {
-			if !strings.Contains(string(data), ampPrimeMarkerStart) {
+			// accept either the current or legacy Amp marker — a pre-#527
+			// install is still considered "installed" for diagnosis purposes
+			if !ampBlockAlreadyPresent(string(data)) {
 				issues = append(issues, adapterprotocol.DiagnoseIssue{
 					Slug:     "amp:hooks-missing",
 					Severity: "warning",

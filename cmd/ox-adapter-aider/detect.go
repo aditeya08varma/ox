@@ -5,7 +5,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
@@ -46,7 +45,9 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 	if p.RepoRoot != "" {
 		convPath := filepath.Join(p.RepoRoot, "CONVENTIONS.md")
 		if data, err := os.ReadFile(convPath); err == nil {
-			if !strings.Contains(string(data), aiderPrimeMarkerStart) {
+			// accept either the current or legacy Aider marker — a pre-#527
+			// install is still considered "installed" for diagnosis purposes
+			if !aiderBlockAlreadyPresent(string(data)) {
 				issues = append(issues, adapterprotocol.DiagnoseIssue{
 					Slug:     "aider:hooks-missing",
 					Severity: "warning",

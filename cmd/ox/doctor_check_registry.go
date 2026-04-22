@@ -337,6 +337,15 @@ func init() {
 		Run:         func(fix bool) checkResult { return checkSessionStartHookBug() },
 	})
 
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugAdapterPrimeBlocks,
+		Name:        "Adapter prime blocks",
+		Category:    "Integration",
+		FixLevel:    FixLevelSuggested,
+		Description: "Detects adapter-specific prime blocks in AGENTS.md/CONVENTIONS.md that can mis-route Claude Code through the wrong adapter (#527); --fix removes them while preserving universal markers",
+		Run:         checkAdapterPrimeBlocks,
+	})
+
 	// ============================================================
 	// SageOx Configuration checks
 	// ============================================================

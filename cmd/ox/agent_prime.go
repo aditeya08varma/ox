@@ -181,11 +181,26 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	var existingMarker *SessionMarker
 	if agentSessionID != "" {
 		existingMarker, _ = ReadSessionMarker(agentSessionID)
-		if existingMarker != nil && idempotent {
-			// idempotent mode: session already primed, output nothing
-			// this saves ~1k tokens on redundant prime calls
-			return nil
+	}
+	// PID-based fallback: a second prime inside the same agent process
+	// (e.g. CLAUDE.md BLOCKING instruction running after the SessionStart
+	// hook already primed) typically has no hook stdin JSON, so the
+	// session-id-keyed lookup above misses. Walk to the agent ancestor PID
+	// and find a marker that references it. See #527/#529.
+	if existingMarker == nil {
+		if agentPID := proc.FindAgentAncestorPID(); agentPID > 0 {
+			existingMarker = FindSessionMarkerByPID(agentPID)
+			if existingMarker != nil && agentSessionID == "" {
+				// promote the marker's native session ID so downstream
+				// marker writes reuse the same key
+				agentSessionID = existingMarker.AgentSessionID
+			}
 		}
+	}
+	if existingMarker != nil && idempotent {
+		// idempotent mode: session already primed, output nothing
+		// this saves ~1k tokens on redundant prime calls
+		return nil
 	}
 
 	// use detected agent as fallback when --agent not provided
@@ -438,9 +453,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	var inst *agentinstance.Instance
 	var primeCallCount int
 
-	if existingMarker != nil && existingMarker.AgentID != "" {
-		// re-prime: increment existing instance's prime call count.
-		// Only fall through to fresh-prime on "not found"; real errors (lock, I/O) are returned.
+	// Try the re-prime path whenever we already have an agent_id from any
+	// source — session marker, PID-based fallback, or SAGEOX_AGENT_ID env.
+	// IncrementPrimeCallCount is the authoritative "is this agent already
+	// registered?" check; it returns ErrInstanceNotFound iff the store has
+	// no row for this agent_id, so using it here avoids duplicate inserts
+	// when marker lookup missed but the agent_id already exists (#527/#529).
+	if agentID != "" {
 		updated, isExcessive, err := store.IncrementPrimeCallCount(agentID)
 		if err == nil {
 			inst = updated
@@ -448,13 +467,27 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			if isExcessive {
 				trackPrimeExcessive(updated)
 			}
+			// agent_type freeze: a re-prime that claims a different agent_type
+			// than the originally-registered one is almost always a bug
+			// (typically #527's symlink-driven adapter mis-routing). Keep the
+			// stored value; surface the mismatch as a warning + telemetry so
+			// bad adapter configs become visible instead of silently rewriting
+			// the session's identity mid-flight.
+			if agentType != "" && updated.AgentType != "" && agentType != updated.AgentType {
+				slog.Warn("prime: agent_type mismatch on re-prime; keeping stored value",
+					"agent_id", agentID,
+					"stored_agent_type", updated.AgentType,
+					"claimed_agent_type", agentType)
+				// honor the frozen type for the rest of this prime call
+				agentType = updated.AgentType
+			}
 		} else if !errors.Is(err, agentinstance.ErrInstanceNotFound) {
 			return fmt.Errorf("failed to update instance: %w", err)
 		}
 	}
 
 	if inst == nil {
-		// fresh prime (or re-prime where instance wasn't found): create new
+		// fresh prime: no prior instance for this agent_id. Create new.
 		serverSessionID := auth.NewServerSessionID()
 		inst = &agentinstance.Instance{
 			AgentID:         agentID,
@@ -478,28 +511,28 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	contentWithAttribution := withAttributionGuidance("", isLoggedIn, attribution)
 
 	output := agentPrimeOutput{
-		Status:           "fresh",
-		AgentID:          agentID,
-		Guidance:         guidance,
-		SessionID:        inst.ServerSessionID,
-		AgentType:        agentType,
-		AgentSupported:   isAgentSupported(agentType),
-		SupportNotice:    getAgentSupportNotice(agentType),
-		Content:          contentWithAttribution,
-		TokenEstimate:    tokens.EstimateTokens(contentWithAttribution),
-		ContentLength:    len(contentWithAttribution),
-		Attribution:      attribution,
-		PlanFooter:       config.DefaultPlanFooterAttribution(),
-		ProjectGuidance:  projectGuidance,
-		TeamInstructions: teamInstructions,
-		CapturePrior:     capturePrior,
-		Session:          sessionStat,
-		Ledger:           ledgerStatus,
-		TeamContext:      teamCtx,
-		PrimeCallCount:   primeCallCount,
-		NeedsDoctorAgent: needsDoctorAgent,
-		DoctorHint:       doctorHint,
-		HooksInstalled:   hooksInstalled,
+		Status:             "fresh",
+		AgentID:            agentID,
+		Guidance:           guidance,
+		SessionID:          inst.ServerSessionID,
+		AgentType:          agentType,
+		AgentSupported:     isAgentSupported(agentType),
+		SupportNotice:      getAgentSupportNotice(agentType),
+		Content:            contentWithAttribution,
+		TokenEstimate:      tokens.EstimateTokens(contentWithAttribution),
+		ContentLength:      len(contentWithAttribution),
+		Attribution:        attribution,
+		PlanFooter:         config.DefaultPlanFooterAttribution(),
+		ProjectGuidance:    projectGuidance,
+		TeamInstructions:   teamInstructions,
+		CapturePrior:       capturePrior,
+		Session:            sessionStat,
+		Ledger:             ledgerStatus,
+		TeamContext:        teamCtx,
+		PrimeCallCount:     primeCallCount,
+		NeedsDoctorAgent:   needsDoctorAgent,
+		DoctorHint:         doctorHint,
+		HooksInstalled:     hooksInstalled,
 		CurrentUserName:    currentUserName,
 		CurrentUserAliases: currentUserAliases,
 	}

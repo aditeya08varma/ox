@@ -10,22 +10,48 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-const aiderPrimeMarkerStart = "<!-- ox:prime:start -->"
-const aiderPrimeMarkerEnd = "<!-- ox:prime:end -->"
+// aiderPrimeMarkerStart / End are the Aider-specific block markers. Each
+// adapter uses a unique pair so installs/uninstalls don't collide across
+// adapters. Aider writes CONVENTIONS.md (not AGENTS.md), so today's risk
+// of collision is low, but the consistency simplifies shared helpers and
+// the #527 doctor repair logic. See #527.
+const aiderPrimeMarkerStart = "<!-- ox:prime:aider:start -->"
+const aiderPrimeMarkerEnd = "<!-- ox:prime:aider:end -->"
+
+// aiderLegacyPrimeMarkerStart / End are the pre-#527 generic markers.
+// Kept for backward-compat detection: check matches both; uninstall
+// removes both. New installs only emit the unique markers.
+const aiderLegacyPrimeMarkerStart = "<!-- ox:prime:start -->"
+const aiderLegacyPrimeMarkerEnd = "<!-- ox:prime:end -->"
 
 // aiderPrimeBlock is the content injected into CONVENTIONS.md for Aider.
 // Aider loads CONVENTIONS.md via the --read flag in .aider.conf.yml.
+//
+// NOTE: the prime command is intentionally adapter-agnostic — no hardcoded
+// AGENT_ENV=<adapter> prefix. Instruction files can leak across agents
+// (e.g. via shared symlinks), and a hardcoded AGENT_ENV in the block
+// poisons sessions running a different coding agent. Runtime detection
+// in agentx.CurrentAgent handles agent identification correctly. See #527.
 var aiderPrimeBlock = aiderPrimeMarkerStart + "\n" +
 	"## SageOx Team Context\n" +
 	"\n" +
 	"This project uses [SageOx](https://sageox.ai) for team context. Run the following command at the start of every session to load team knowledge:\n" +
 	"\n" +
 	"```bash\n" +
-	"AGENT_ENV=aider ox agent prime\n" +
+	"ox agent prime\n" +
 	"```\n" +
 	"\n" +
 	"This provides architectural decisions, coding conventions, and session history from your team.\n" +
 	aiderPrimeMarkerEnd
+
+// aiderBlockAlreadyPresent reports whether CONVENTIONS.md already carries
+// an Aider prime block under either the current or legacy marker pair.
+// Legacy markers are recognized so pre-#527 installations are treated as
+// "installed" and we don't stack a second block on top of them.
+func aiderBlockAlreadyPresent(content string) bool {
+	return strings.Contains(content, aiderPrimeMarkerStart) ||
+		strings.Contains(content, aiderLegacyPrimeMarkerStart)
+}
 
 func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallHooksResponse, error) {
 	if p.Scope == "user" {
@@ -43,8 +69,8 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 
 	content := string(existing)
 
-	// already installed — idempotent
-	if strings.Contains(content, aiderPrimeMarkerStart) {
+	// already installed — idempotent (current or legacy markers)
+	if aiderBlockAlreadyPresent(content) {
 		return &adapterprotocol.InstallHooksResponse{
 			Installed:    true,
 			FilesWritten: []string{convPath},
@@ -85,7 +111,7 @@ func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooks
 		}, nil
 	}
 
-	installed := strings.Contains(string(data), aiderPrimeMarkerStart)
+	installed := aiderBlockAlreadyPresent(string(data))
 	return &adapterprotocol.CheckHooksResponse{
 		Installed: installed,
 		Scope:     p.Scope,
@@ -109,29 +135,14 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 
 	content := string(data)
 
-	startIdx := strings.Index(content, aiderPrimeMarkerStart)
-	if startIdx == -1 {
+	// remove both the current-marker block and any legacy-marker block —
+	// a pre-#527 installation may carry the generic <!-- ox:prime:start -->
+	// pair that we no longer emit.
+	cleaned := removePrimeBlock(content, aiderPrimeMarkerStart, aiderPrimeMarkerEnd)
+	cleaned = removePrimeBlock(cleaned, aiderLegacyPrimeMarkerStart, aiderLegacyPrimeMarkerEnd)
+
+	if cleaned == content {
 		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
-	}
-
-	endIdx := strings.Index(content, aiderPrimeMarkerEnd)
-	if endIdx == -1 {
-		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
-	}
-	endIdx += len(aiderPrimeMarkerEnd)
-
-	before := strings.TrimRight(content[:startIdx], "\n")
-	after := strings.TrimLeft(content[endIdx:], "\n")
-
-	var cleaned string
-	if before == "" && after == "" {
-		cleaned = ""
-	} else if before == "" {
-		cleaned = after + "\n"
-	} else if after == "" {
-		cleaned = before + "\n"
-	} else {
-		cleaned = before + "\n\n" + after + "\n"
 	}
 
 	if strings.TrimSpace(cleaned) == "" {
@@ -148,6 +159,35 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 		Uninstalled:   true,
 		FilesModified: []string{convPath},
 	}, nil
+}
+
+// removePrimeBlock strips one start...end block (inclusive) from content,
+// collapsing surrounding blank lines so no orphan whitespace remains.
+// Returns content unchanged if either marker is absent.
+func removePrimeBlock(content, startMarker, endMarker string) string {
+	startIdx := strings.Index(content, startMarker)
+	if startIdx == -1 {
+		return content
+	}
+	endIdx := strings.Index(content, endMarker)
+	if endIdx == -1 {
+		return content
+	}
+	endIdx += len(endMarker)
+
+	before := strings.TrimRight(content[:startIdx], "\n")
+	after := strings.TrimLeft(content[endIdx:], "\n")
+
+	switch {
+	case before == "" && after == "":
+		return ""
+	case before == "":
+		return after + "\n"
+	case after == "":
+		return before + "\n"
+	default:
+		return before + "\n\n" + after + "\n"
+	}
 }
 
 func resolveConventionsPath(repoRoot string) string {

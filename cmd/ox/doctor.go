@@ -625,6 +625,9 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 	}
 	// git commit hooks (prepare-commit-msg for trailers)
 	integrationChecks = append(integrationChecks, checkGitCommitHooks(opts.shouldFix(CheckSlugGitCommitHooks)))
+	// #527 repair: detect adapter-specific prime blocks that can mis-route
+	// Claude Code sessions through the wrong adapter.
+	integrationChecks = append(integrationChecks, checkAdapterPrimeBlocks(opts.shouldFix(CheckSlugAdapterPrimeBlocks)))
 	categories = append(categories, checkCategory{
 		name:   "Integration",
 		checks: integrationChecks,

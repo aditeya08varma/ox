@@ -10,22 +10,46 @@ import (
 	"github.com/sageox/ox/pkg/adapterprotocol"
 )
 
-const piPrimeMarkerStart = "<!-- ox:prime:start -->"
-const piPrimeMarkerEnd = "<!-- ox:prime:end -->"
+// piPrimeMarkerStart / End are the Pi-specific block markers. Each adapter
+// uses a unique pair so installs/uninstalls don't collide across adapters
+// that share AGENTS.md. See #527.
+const piPrimeMarkerStart = "<!-- ox:prime:pi:start -->"
+const piPrimeMarkerEnd = "<!-- ox:prime:pi:end -->"
+
+// piLegacyPrimeMarkerStart / End are the pre-#527 generic markers. Kept
+// for backward-compat detection: check matches both; uninstall removes
+// both. New installs only emit the unique markers.
+const piLegacyPrimeMarkerStart = "<!-- ox:prime:start -->"
+const piLegacyPrimeMarkerEnd = "<!-- ox:prime:end -->"
 
 // piPrimeBlock is the content injected into AGENTS.md for Pi coding agent.
 // Pi auto-loads AGENTS.md from the project root and parent directories on every session.
+//
+// NOTE: the prime command is intentionally adapter-agnostic — no hardcoded
+// AGENT_ENV=<adapter> prefix. AGENTS.md is often shared across agents (e.g.
+// via a CLAUDE.md symlink), so any block that mis-routes AGENT_ENV poisons
+// sessions running a different coding agent. Runtime detection in
+// agentx.CurrentAgent handles agent identification correctly. See #527.
 var piPrimeBlock = piPrimeMarkerStart + "\n" +
 	"## SageOx Team Context\n" +
 	"\n" +
 	"This project uses [SageOx](https://sageox.ai) for team context. Run the following command at the start of every session to load team knowledge:\n" +
 	"\n" +
 	"```bash\n" +
-	"AGENT_ENV=pi ox agent prime\n" +
+	"ox agent prime\n" +
 	"```\n" +
 	"\n" +
 	"This provides architectural decisions, coding conventions, and session history from your team.\n" +
 	piPrimeMarkerEnd
+
+// piBlockAlreadyPresent reports whether AGENTS.md already carries a Pi
+// prime block under either the current or legacy marker pair. Legacy
+// markers are recognized so pre-#527 installations are treated as
+// "installed" and we don't stack a second block on top of them.
+func piBlockAlreadyPresent(content string) bool {
+	return strings.Contains(content, piPrimeMarkerStart) ||
+		strings.Contains(content, piLegacyPrimeMarkerStart)
+}
 
 func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallHooksResponse, error) {
 	if p.Scope == "user" {
@@ -43,8 +67,8 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 
 	content := string(existing)
 
-	// already installed — idempotent
-	if strings.Contains(content, piPrimeMarkerStart) {
+	// already installed — idempotent (current or legacy markers)
+	if piBlockAlreadyPresent(content) {
 		return &adapterprotocol.InstallHooksResponse{
 			Installed:    true,
 			FilesWritten: []string{agentsPath},
@@ -85,7 +109,7 @@ func handleCheckHooks(p adapterprotocol.HookParams) (*adapterprotocol.CheckHooks
 		}, nil
 	}
 
-	installed := strings.Contains(string(data), piPrimeMarkerStart)
+	installed := piBlockAlreadyPresent(string(data))
 	return &adapterprotocol.CheckHooksResponse{
 		Installed: installed,
 		Scope:     p.Scope,
@@ -109,29 +133,15 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 
 	content := string(data)
 
-	startIdx := strings.Index(content, piPrimeMarkerStart)
-	if startIdx == -1 {
+	// remove both the current-marker block and any legacy-marker block —
+	// a pre-#527 installation may carry the generic <!-- ox:prime:start -->
+	// pair that we no longer emit.
+	cleaned := removePrimeBlock(content, piPrimeMarkerStart, piPrimeMarkerEnd)
+	cleaned = removePrimeBlock(cleaned, piLegacyPrimeMarkerStart, piLegacyPrimeMarkerEnd)
+
+	if cleaned == content {
+		// nothing to uninstall
 		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
-	}
-
-	endIdx := strings.Index(content, piPrimeMarkerEnd)
-	if endIdx == -1 {
-		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
-	}
-	endIdx += len(piPrimeMarkerEnd)
-
-	before := strings.TrimRight(content[:startIdx], "\n")
-	after := strings.TrimLeft(content[endIdx:], "\n")
-
-	var cleaned string
-	if before == "" && after == "" {
-		cleaned = ""
-	} else if before == "" {
-		cleaned = after + "\n"
-	} else if after == "" {
-		cleaned = before + "\n"
-	} else {
-		cleaned = before + "\n\n" + after + "\n"
 	}
 
 	if strings.TrimSpace(cleaned) == "" {
@@ -156,4 +166,33 @@ func resolveAgentsMDPath(repoRoot string) string {
 		repoRoot, _ = os.Getwd()
 	}
 	return filepath.Join(repoRoot, "AGENTS.md")
+}
+
+// removePrimeBlock strips one start...end block (inclusive) from content,
+// collapsing surrounding blank lines so no orphan whitespace remains.
+// Returns content unchanged if either marker is absent.
+func removePrimeBlock(content, startMarker, endMarker string) string {
+	startIdx := strings.Index(content, startMarker)
+	if startIdx == -1 {
+		return content
+	}
+	endIdx := strings.Index(content, endMarker)
+	if endIdx == -1 {
+		return content
+	}
+	endIdx += len(endMarker)
+
+	before := strings.TrimRight(content[:startIdx], "\n")
+	after := strings.TrimLeft(content[endIdx:], "\n")
+
+	switch {
+	case before == "" && after == "":
+		return ""
+	case before == "":
+		return after + "\n"
+	case after == "":
+		return before + "\n"
+	default:
+		return before + "\n\n" + after + "\n"
+	}
 }
