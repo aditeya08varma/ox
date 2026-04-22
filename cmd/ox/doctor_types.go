@@ -131,6 +131,7 @@ const (
 	CheckSlugStaleLocalHooks     = "stale-local-hooks"
 	CheckSlugSessionStartHookBug = "session-start-hook-bug"
 	CheckSlugGitCommitHooks      = "git-commit-hooks"
+	CheckSlugAdapterPrimeBlocks  = "adapter-prime-blocks"
 
 	// Team Context checks
 	CheckSlugTeamRegistration   = "team-registration"

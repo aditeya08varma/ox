@@ -5,21 +5,45 @@ import (
 	"os"
 	"strings"
 
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/ui"
 )
 
-const piPrimeMarkerStart = "<!-- ox:pi-prime:start -->"
-const piPrimeMarkerEnd = "<!-- ox:pi-prime:end -->"
+// piPrimeMarkerStart / End are the Pi-specific block markers. Must match
+// the unique marker the external ox-adapter-pi binary emits so that the
+// in-process install path (ox integrate install --pi) and the external
+// adapter-protocol path (ox init with pi selected) share one block
+// instead of each writing their own. See #527.
+const piPrimeMarkerStart = "<!-- ox:prime:pi:start -->"
+const piPrimeMarkerEnd = "<!-- ox:prime:pi:end -->"
+
+// piLegacyInProcessMarkerStart / End are the pre-#527 in-process markers
+// that only ever appeared in hooks_pi.go (distinct from the generic
+// <!-- ox:prime:start --> pair used by the external adapter before it
+// was also unified). Kept for backward-compat detection.
+const piLegacyInProcessMarkerStart = "<!-- ox:pi-prime:start -->"
+const piLegacyInProcessMarkerEnd = "<!-- ox:pi-prime:end -->"
+
+// piLegacyGenericMarkerStart / End are the pre-#527 generic markers the
+// external adapter used to emit, which may exist in older repos.
+const piLegacyGenericMarkerStart = "<!-- ox:prime:start -->"
+const piLegacyGenericMarkerEnd = "<!-- ox:prime:end -->"
 
 // piPrimeBlock is the content injected into AGENTS.md for Pi.
 // Pi auto-loads AGENTS.md from the project root on every session.
+//
+// NOTE: the prime command is intentionally adapter-agnostic — no hardcoded
+// AGENT_ENV=<adapter> prefix. AGENTS.md is often shared across agents (e.g.
+// via a CLAUDE.md symlink), so any block that mis-routes AGENT_ENV poisons
+// sessions running a different coding agent. Runtime detection in
+// agentx.CurrentAgent handles agent identification correctly. See #527.
 var piPrimeBlock = piPrimeMarkerStart + "\n" +
 	"## SageOx Team Context\n" +
 	"\n" +
 	"This project uses [SageOx](https://sageox.ai) for team context. Run the following command at the start of every session to load team knowledge:\n" +
 	"\n" +
 	"```bash\n" +
-	"AGENT_ENV=pi ox agent prime\n" +
+	"ox agent prime\n" +
 	"```\n" +
 	"\n" +
 	"This provides architectural decisions, coding conventions, and session history from your team.\n" +
@@ -29,6 +53,19 @@ var piPrimeBlock = piPrimeMarkerStart + "\n" +
 	"pi install npm:@sageox/pi-ox\n" +
 	"```\n" +
 	piPrimeMarkerEnd
+
+// piBlockAlreadyPresent reports whether AGENTS.md already carries a Pi
+// prime block under any recognized marker pair: the current
+// <!-- ox:prime:pi:* --> pair, the in-process legacy <!-- ox:pi-prime:* -->
+// pair (that only hooks_pi.go ever emitted), or the generic legacy
+// <!-- ox:prime:* --> pair the external adapter used to emit. All three
+// are accepted so we don't stack a duplicate block on top of any prior
+// installation style.
+func piBlockAlreadyPresent(content string) bool {
+	return strings.Contains(content, piPrimeMarkerStart) ||
+		strings.Contains(content, piLegacyInProcessMarkerStart) ||
+		strings.Contains(content, piLegacyGenericMarkerStart)
+}
 
 // hasPiHooks checks if the Pi ox prime marker exists in AGENTS.md.
 // user=true always returns false (no user-level AGENTS.md for Pi).
@@ -48,7 +85,7 @@ func hasPiHooks(user bool) bool {
 		return false
 	}
 
-	return strings.Contains(string(content), piPrimeMarkerStart)
+	return piBlockAlreadyPresent(string(content))
 }
 
 // installPiHooks installs the ox prime marker block into AGENTS.md for Pi.
@@ -73,8 +110,8 @@ func installPiHooks(user bool) error {
 
 	content := string(existing)
 
-	// already installed
-	if strings.Contains(content, piPrimeMarkerStart) {
+	// already installed (current or legacy markers)
+	if piBlockAlreadyPresent(content) {
 		fmt.Println(ui.PassStyle.Render("✓") + " Pi integration already installed in " + agentsPath)
 		return nil
 	}
@@ -88,7 +125,7 @@ func installPiHooks(user bool) error {
 		newContent = strings.TrimRight(content, "\n") + "\n\n" + piPrimeBlock + "\n"
 	}
 
-	if err := os.WriteFile(agentsPath, []byte(newContent), sharedSettingsPerm); err != nil {
+	if err := fileutil.AtomicWriteBytes(agentsPath, []byte(newContent), sharedSettingsPerm); err != nil {
 		return fmt.Errorf("failed to write %s: %w", agentsMDFileName, err)
 	}
 
@@ -120,36 +157,15 @@ func uninstallPiHooks(user bool) error {
 
 	content := string(data)
 
-	startIdx := strings.Index(content, piPrimeMarkerStart)
-	if startIdx == -1 {
+	// remove every recognized Pi block (current + both legacy forms) so
+	// a single uninstall fully cleans up any install era.
+	cleaned := removePiPrimeBlock(content, piPrimeMarkerStart, piPrimeMarkerEnd)
+	cleaned = removePiPrimeBlock(cleaned, piLegacyInProcessMarkerStart, piLegacyInProcessMarkerEnd)
+	cleaned = removePiPrimeBlock(cleaned, piLegacyGenericMarkerStart, piLegacyGenericMarkerEnd)
+
+	if cleaned == content {
 		fmt.Println("Pi integration not found in " + agentsPath)
 		return nil
-	}
-
-	endIdx := strings.Index(content, piPrimeMarkerEnd)
-	if endIdx == -1 {
-		fmt.Println("Pi integration not found in " + agentsPath)
-		return nil
-	}
-	endIdx += len(piPrimeMarkerEnd)
-
-	// remove the block plus any surrounding blank lines
-	before := content[:startIdx]
-	after := content[endIdx:]
-
-	// trim trailing newlines from before and leading newlines from after
-	before = strings.TrimRight(before, "\n")
-	after = strings.TrimLeft(after, "\n")
-
-	var cleaned string
-	if before == "" && after == "" {
-		cleaned = ""
-	} else if before == "" {
-		cleaned = after + "\n"
-	} else if after == "" {
-		cleaned = before + "\n"
-	} else {
-		cleaned = before + "\n\n" + after + "\n"
 	}
 
 	// if file is empty after removal, delete it
@@ -161,7 +177,7 @@ func uninstallPiHooks(user bool) error {
 		return nil
 	}
 
-	if err := os.WriteFile(agentsPath, []byte(cleaned), sharedSettingsPerm); err != nil {
+	if err := fileutil.AtomicWriteBytes(agentsPath, []byte(cleaned), sharedSettingsPerm); err != nil {
 		return fmt.Errorf("failed to write %s: %w", agentsMDFileName, err)
 	}
 
@@ -174,5 +190,42 @@ func listPiHooks() map[string]bool {
 	return map[string]bool{
 		"Project": hasPiHooks(false),
 		"User":    false,
+	}
+}
+
+// removePiPrimeBlock strips one start...end block (inclusive) from content,
+// collapsing surrounding blank lines so no orphan whitespace remains.
+// Returns content unchanged if either marker is absent, or if no end
+// marker appears AFTER the start marker (which would indicate an orphan
+// end marker earlier in the file — refuses to operate rather than
+// silently delete content between an orphan end and a real start).
+// Named with the pi-prefix to avoid collision with similarly-named
+// helpers in other cmd/ox files; logic matches the external-adapter
+// helpers. CodeRabbit review on #543.
+func removePiPrimeBlock(content, startMarker, endMarker string) string {
+	startIdx := strings.Index(content, startMarker)
+	if startIdx == -1 {
+		return content
+	}
+	// search for endMarker AFTER the start marker so an orphan end marker
+	// earlier in the file can't form an inverted range
+	rel := strings.Index(content[startIdx+len(startMarker):], endMarker)
+	if rel == -1 {
+		return content
+	}
+	endIdx := startIdx + len(startMarker) + rel + len(endMarker)
+
+	before := strings.TrimRight(content[:startIdx], "\n")
+	after := strings.TrimLeft(content[endIdx:], "\n")
+
+	switch {
+	case before == "" && after == "":
+		return ""
+	case before == "":
+		return after + "\n"
+	case after == "":
+		return before + "\n"
+	default:
+		return before + "\n\n" + after + "\n"
 	}
 }

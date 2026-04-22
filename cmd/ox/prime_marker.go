@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // OxPrimeMarker is the grep-able HTML comment marker for verification (footer).
@@ -128,7 +130,7 @@ func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 	_, agentsErr := os.Stat(agentsPath)
 	if os.IsNotExist(agentsErr) {
 		content := OxPrimeCheckBlock + "\n# AI Agent Instructions\n\n" + OxPrimeLine + "\n"
-		if err := os.WriteFile(agentsPath, []byte(content), 0644); err != nil {
+		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(content), 0644); err != nil {
 			return false, err
 		}
 		return true, nil
@@ -230,7 +232,7 @@ func ensureMarkersInFile(filePath, content string, needHeader, needFooter bool) 
 		return false, fmt.Errorf("safety check failed: modified content (%d bytes) is less than half of original (%d bytes), aborting to protect user content", len(cleaned), len(content))
 	}
 
-	if err := os.WriteFile(filePath, []byte(cleaned), 0644); err != nil {
+	if err := fileutil.AtomicWriteBytes(filePath, []byte(cleaned), 0644); err != nil {
 		return false, err
 	}
 

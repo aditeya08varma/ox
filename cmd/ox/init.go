@@ -13,20 +13,21 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
-	"github.com/sageox/ox/internal/session/adapters"
-	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/constants"
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/doctor"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/identity"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/tips"
 	"github.com/sageox/ox/internal/ui"
 	"github.com/sageox/ox/internal/version"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
 
@@ -1298,7 +1299,7 @@ func injectOxPrime(gitRoot string) ([]fileInjectionResult, error) {
 	default:
 		// neither exists - create AGENTS.md with both markers
 		content := OxPrimeCheckBlock + "\n# AI Agent Instructions\n\n" + OxPrimeLine + "\n"
-		if err := os.WriteFile(agentsPath, []byte(content), 0644); err != nil {
+		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(content), 0644); err != nil {
 			return nil, fmt.Errorf("failed to write AGENTS.md: %w", err)
 		}
 		agentsExists = true

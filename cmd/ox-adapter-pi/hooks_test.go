@@ -1,0 +1,102 @@
+package main
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// --- Marker uniqueness ---
+
+// TestPiMarkers_AreUniqueToPi guards the #527 fix: the current Pi marker
+// must not be the generic <!-- ox:prime:* --> pair that used to collide
+// with Amp in shared AGENTS.md.
+// Failure prevented: reintroducing a generic marker that silently no-ops
+// a second adapter's install via shared-marker idempotency.
+func TestPiMarkers_AreUniqueToPi(t *testing.T) {
+	assert.NotEqual(t, "<!-- ox:prime:start -->", piPrimeMarkerStart,
+		"Pi must use a unique marker pair, not the generic legacy pair")
+	assert.Contains(t, piPrimeMarkerStart, "pi",
+		"Pi's unique marker should name pi so cross-adapter collisions are visually obvious")
+}
+
+// --- Install idempotency across marker generations ---
+
+// TestInstall_IdempotentForCurrentMarker confirms a second install no-ops
+// when the current marker pair is already present.
+// Failure prevented: duplicate Pi blocks appearing in AGENTS.md across repeated installs.
+func TestInstall_IdempotentForCurrentMarker(t *testing.T) {
+	dir := t.TempDir()
+
+	// first install
+	_, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
+	require.NoError(t, err)
+
+	// second install — must be a no-op
+	_, err = handleInstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(filepath.Join(dir, "AGENTS.md"))
+	require.NoError(t, err)
+	content := string(data)
+	assert.Equal(t, 1, strings.Count(content, piPrimeMarkerStart),
+		"current Pi start marker must appear exactly once after two installs")
+}
+
+// TestInstall_IdempotentForLegacyInProcessMarker confirms a pre-#527
+// installation that only the in-process hooks_pi.go ever emitted
+// (<!-- ox:pi-prime:start -->) is recognized so a fresh install does
+// not add a duplicate current-marker block alongside it.
+// Failure prevented: repos with legacy markers get two blocks after upgrade.
+func TestInstall_IdempotentForLegacyGenericMarker(t *testing.T) {
+	dir := t.TempDir()
+	agentsPath := filepath.Join(dir, "AGENTS.md")
+
+	// seed with the pre-#527 generic marker pair that the external
+	// adapter used to emit
+	seed := piLegacyPrimeMarkerStart + "\nold block\n" + piLegacyPrimeMarkerEnd + "\n"
+	require.NoError(t, os.WriteFile(agentsPath, []byte(seed), 0644))
+
+	_, err := handleInstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(agentsPath)
+	require.NoError(t, err)
+	content := string(data)
+	assert.Contains(t, content, piLegacyPrimeMarkerStart,
+		"legacy block should be preserved; doctor is responsible for cleanup")
+	assert.NotContains(t, content, piPrimeMarkerStart,
+		"legacy presence must prevent adding a second (current-marker) block")
+}
+
+// --- Uninstall sweeps all generations ---
+
+// TestUninstall_RemovesCurrentAndLegacyBlocks confirms a single uninstall
+// cleans up every recognized marker pair, even ones that pre-date the #527 fix.
+// Failure prevented: orphan legacy blocks surviving uninstall and corrupting
+// subsequent installs.
+func TestUninstall_RemovesCurrentAndLegacyBlocks(t *testing.T) {
+	dir := t.TempDir()
+	agentsPath := filepath.Join(dir, "AGENTS.md")
+
+	// seed with both a current and a legacy block adjacent — simulating
+	// a repo that was installed pre-fix and then again post-fix
+	content := piPrimeMarkerStart + "\ncurrent\n" + piPrimeMarkerEnd + "\n\n" +
+		piLegacyPrimeMarkerStart + "\nlegacy\n" + piLegacyPrimeMarkerEnd + "\n"
+	require.NoError(t, os.WriteFile(agentsPath, []byte(content), 0644))
+
+	_, err := handleUninstallHooks(adapterprotocol.HookParams{RepoRoot: dir, Scope: "project"})
+	require.NoError(t, err)
+
+	// file may be removed entirely since all content was our blocks
+	if data, readErr := os.ReadFile(agentsPath); readErr == nil {
+		got := string(data)
+		assert.NotContains(t, got, piPrimeMarkerStart)
+		assert.NotContains(t, got, piLegacyPrimeMarkerStart)
+	}
+}
