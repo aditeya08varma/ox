@@ -9,15 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+**Critical: Claude Code session recording captured zero turns (#519)**
+- In 0.6.3, every Claude Code session on macOS captured **zero turns** — `raw.jsonl` contained only the session header regardless of how much work happened. 17 consecutive sessions across hours of active use could produce empty recordings with no visible error. Root cause: the one-shot adapter path never wired its `ReadFromOffset` handler, so every `PostToolUse` hook silently returned "not implemented" and appended nothing. **Fixed — Claude Code sessions capture turns in real time again.**
+- Companion observability: silent recording failures are no longer silent. If a recording is active but hooks fire without making progress, the daemon now surfaces an error instead of letting an empty session file masquerade as a successful recording. This is what would have caught #519 immediately instead of after hours of lost sessions.
+- Sessions the LLM scores 0 are now discarded and their cache cleaned up, rather than being uploaded as empty entries to the ledger.
+
 **AI coworker isolation**
 - `AGENTS.md` no longer leaks one coworker's active-recording context into another's view — each coworker sees only its own stamp, preventing accidental cross-agent contamination
 - Recording-reminder whispers now reach only their intended recipient instead of fanning out to every coworker on the team
 - `ox agent prime` no longer falls back to attributing a session to the sole active-recording agent when the real ID can't be resolved, which previously credited the wrong coworker
-
-**Session capture**
-- Silent recording failures now surface as clear errors instead of producing empty session artifacts
-- Sessions that the LLM scores 0 are discarded and their cache cleaned up instead of being uploaded as empty entries to the ledger
-- The Claude Code adapter now wires `ReadFromOffset` correctly in one-shot mode so mid-session captures pick up from the right point
 
 **Daemon correctness**
 - Fixed a data race during scheduler shutdown where an in-flight clone trigger could panic `sync: WaitGroup is reused before previous Wait has returned`
@@ -32,6 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Session-capture architecture documentation
+
+[0.6.4]: https://github.com/sageox/ox/releases/tag/v0.6.4
+
+## [0.6.3] - 2026-04-13
 
 ### Added
 
