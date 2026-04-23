@@ -108,7 +108,7 @@ func TestTeamCtxPush_DataAutoResolve_Succeeds(t *testing.T) {
 	contentStr := string(content)
 	// must be exactly one version — conflict markers or mixed content means broken auto-resolve
 	assert.False(t, strings.Contains(contentStr, "<<<<<<<"), "file must not contain conflict markers")
-	validContent := contentStr == `{"source":"clone1"}`+"\n" || contentStr == `{"source":"clone2"}`+"\n"
+	validContent := contentStr == `{"count":10,"by":"clone1"}` || contentStr == `{"count":20,"by":"clone2"}`
 	assert.True(t, validContent, "file should contain exactly one version (last writer wins), got: %s", contentStr)
 }
 

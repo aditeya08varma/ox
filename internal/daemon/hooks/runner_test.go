@@ -91,7 +91,7 @@ func TestRunnerWildcard(t *testing.T) {
 	}, testLogger())
 
 	runner.Dispatch(context.Background(), hooks.Event{Name: hooks.EventSyncCompleted, Project: "/tmp/test"})
-	time.Sleep(300 * time.Millisecond)
+	runner.Wait()
 
 	data, err := os.ReadFile(tmpFile)
 	if err != nil {
@@ -349,7 +349,7 @@ func TestRunnerContextCancelDoesNotPreventDispatch(t *testing.T) {
 	cancel() // cancel immediately
 
 	runner.Dispatch(ctx, hooks.Event{Name: hooks.EventDaemonStarted})
-	time.Sleep(300 * time.Millisecond)
+	runner.Wait()
 
 	// the runner doesn't check ctx before starting the hook, so it should still fire
 	if _, err := os.Stat(markerFile); err != nil {

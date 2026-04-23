@@ -3,11 +3,16 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -408,6 +413,23 @@ func TestSync_MissingRemoteBranch_HandlesGracefully(t *testing.T) {
 	cmd = exec.Command("git", "-C", tmpClone, "push", "origin", "backup")
 	out, err = cmd.CombinedOutput()
 	require.NoError(t, err, "push backup: %s", string(out))
+
+	// Gitea refuses to delete the default branch. Flip the default to `backup`
+	// via the API before deleting main, so this test models a real "tracked
+	// branch vanished from remote" scenario without tripping Gitea's
+	// default-branch-protection hook.
+	repoName := strings.TrimSuffix(strings.TrimPrefix(cloneURL, fmt.Sprintf("http://%s:%s@localhost:%s/%s/",
+		g.adminUser, g.adminPass, giteaHostPort, g.adminUser)), ".git")
+	patchBody, _ := json.Marshal(map[string]interface{}{"default_branch": "backup"})
+	patchURL := fmt.Sprintf("%s/api/v1/repos/%s/%s", g.httpURL, g.adminUser, repoName)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPatch, patchURL, bytes.NewReader(patchBody))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "token "+g.adminToken)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err, "patch default_branch")
+	resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode, "patch default_branch status")
 
 	cmd = exec.Command("git", "-C", tmpClone, "push", "origin", "--delete", "main")
 	out, err = cmd.CombinedOutput()

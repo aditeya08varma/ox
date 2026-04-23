@@ -67,24 +67,39 @@ func requireDocker(t *testing.T) {
 
 // getSharedGitea returns the Gitea digital twin, starting it on first call.
 // Skips the test if Docker is unavailable or container startup fails.
+//
+// All init steps log a `gitea-fixture:` prefix so failures leave a trail in the
+// test log — otherwise a silent container-startup failure would cascade as N
+// downstream "connection refused to localhost:13719" errors with no clue why.
 func getSharedGitea(t *testing.T) *giteaFixture {
 	t.Helper()
 	requireDocker(t)
 
 	giteaOnce.Do(func() {
-		// fast-fail if port is already in use
+		t.Logf("gitea-fixture: starting shared Gitea digital twin on port %s", giteaHostPort)
+
+		// fast-fail if port is already in use — likely a stranded container
+		// from a previous interrupted run. Try to reap it before giving up.
 		ln, err := net.Listen("tcp", "127.0.0.1:"+giteaHostPort)
 		if err != nil {
-			giteaInitErr = fmt.Errorf("port %s already in use (parallel test run?): %w", giteaHostPort, err)
-			return
+			t.Logf("gitea-fixture: port %s busy (%v), attempting to reap stray containers", giteaHostPort, err)
+			reapStrayGiteaContainers(t)
+			// one more try
+			ln, err = net.Listen("tcp", "127.0.0.1:"+giteaHostPort)
+			if err != nil {
+				giteaInitErr = fmt.Errorf("port %s already in use after reap (parallel test run or stuck container?): %w", giteaHostPort, err)
+				return
+			}
 		}
 		ln.Close()
 
 		g, err := createGiteaFixture()
 		if err != nil {
 			giteaInitErr = fmt.Errorf("start Gitea digital twin: %w", err)
+			t.Logf("gitea-fixture: ERROR starting container: %v", err)
 			return
 		}
+		t.Logf("gitea-fixture: ready at %s (user=%s)", g.httpURL, g.adminUser)
 		sharedGitea = g
 	})
 
@@ -99,6 +114,35 @@ func getSharedGitea(t *testing.T) *giteaFixture {
 	// when the test process exits — no t.Cleanup needed for the shared container.
 
 	return sharedGitea
+}
+
+// reapStrayGiteaContainers force-removes any container bound to giteaHostPort
+// or any testcontainers ryuk reaper still alive. This handles the case where a
+// previous `go test` was interrupted (SIGKILL / panic) before Ryuk could clean up.
+func reapStrayGiteaContainers(t *testing.T) {
+	t.Helper()
+	// Find containers bound to the host port.
+	out, err := exec.Command("docker", "ps", "-aq",
+		"--filter", "publish="+giteaHostPort).CombinedOutput()
+	if err != nil {
+		t.Logf("gitea-fixture: docker ps failed while reaping: %v", err)
+		return
+	}
+	ids := bytes.Fields(bytes.TrimSpace(out))
+	if len(ids) == 0 {
+		t.Logf("gitea-fixture: no stray containers found on port %s", giteaHostPort)
+		return
+	}
+	args := []string{"rm", "-f"}
+	for _, id := range ids {
+		args = append(args, string(id))
+	}
+	rmOut, err := exec.Command("docker", args...).CombinedOutput()
+	if err != nil {
+		t.Logf("gitea-fixture: docker rm -f failed: %v: %s", err, rmOut)
+		return
+	}
+	t.Logf("gitea-fixture: reaped %d stray container(s) on port %s", len(ids), giteaHostPort)
 }
 
 type giteaFixture struct {
@@ -140,7 +184,21 @@ func createGiteaFixture() (*giteaFixture, error) {
 		Started:          true,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("start container: %w", err)
+		// If the container started but wait-strategy timed out, ctr may be
+		// non-nil — try to surface its logs so failures aren't opaque.
+		logTail := ""
+		if ctr != nil {
+			if r, logErr := ctr.Logs(context.Background()); logErr == nil {
+				if b, _ := io.ReadAll(r); len(b) > 0 {
+					if len(b) > 4000 {
+						b = b[len(b)-4000:]
+					}
+					logTail = "\n--- gitea container log tail ---\n" + string(b)
+				}
+			}
+			_ = ctr.Terminate(context.Background())
+		}
+		return nil, fmt.Errorf("start container: %w%s", err, logTail)
 	}
 
 	// create admin user (exec as git user to avoid root check)

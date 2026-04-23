@@ -125,9 +125,11 @@ func TestIncrementalE2E_MultiAgent(t *testing.T) {
 	sessionA := "conductor-session-A"
 	sessionB := "conductor-session-B"
 
-	// create separate source files for each agent
-	sourceA := createClaudeSourceFile(t, env)
-	sourceB := createClaudeSourceFileNamed(t, env, "agent-b-session.jsonl")
+	// create separate source files for each agent, named after the session ID
+	// so the claude-code adapter picks the correct file per agent instead of
+	// falling back to mtime-based selection (which would cross-contaminate).
+	sourceA := createClaudeSourceFileNamed(t, env, sessionA+".jsonl")
+	sourceB := createClaudeSourceFileNamed(t, env, sessionB+".jsonl")
 
 	writeE2ESessionMarker(t, env, agentA, sessionA)
 	writeE2ESessionMarker(t, env, agentB, sessionB)
@@ -135,10 +137,13 @@ func TestIncrementalE2E_MultiAgent(t *testing.T) {
 	createE2EAgentInstance(t, env.workspace, agentA)
 	createE2EAgentInstance(t, env.workspace, agentB)
 
-	// write initial entries before session start (will be filtered out)
+	// write initial entries before session start (will be filtered out).
+	// Include the agent ID in the content so the claude-code adapter's
+	// sessionContainsAgentID scan can route each session's file correctly
+	// (otherwise mtime fallback picks the most-recently-touched file for both).
 	past := time.Now().Add(-1 * time.Minute).UTC().Format(time.RFC3339Nano)
-	writeClaudeEntry(t, sourceA, claudeUserEntry(past, "Agent A task"))
-	writeClaudeEntry(t, sourceB, claudeUserEntry(past, "Agent B task"))
+	writeClaudeEntry(t, sourceA, claudeUserEntry(past, "Agent "+agentA+" task"))
+	writeClaudeEntry(t, sourceB, claudeUserEntry(past, "Agent "+agentB+" task"))
 
 	// start both agents
 	outA := runOx(t, oxBin, env, agentA, "session", "start")
@@ -264,8 +269,12 @@ func TestIncrementalE2E_CtrlC_AntiEntropy(t *testing.T) {
 	assert.NotContains(t, string(rawData), `"type":"footer"`,
 		"raw.jsonl should NOT have a footer since stop never ran")
 
-	// Verify .recording.json still exists (stop didn't clean it up)
-	recordingFiles := findFilesRecursive(env.cacheDir, ".recording.json")
+	// Verify .recording.json still exists (stop didn't clean it up).
+	// Recording state lives in the ledger data dir, not the XDG cache.
+	var recordingFiles []string
+	for _, root := range rawJSONLSearchRoots(env) {
+		recordingFiles = append(recordingFiles, findFilesRecursive(root, ".recording.json")...)
+	}
 	assert.NotEmpty(t, recordingFiles, ".recording.json should still exist after Ctrl-C")
 
 	// --- Anti-entropy: daemon detects and finalizes the orphaned session ---
@@ -315,8 +324,10 @@ func TestIncrementalE2E_CtrlC_AntiEntropy(t *testing.T) {
 	require.NoError(t, buildErr)
 	assert.NotEmpty(t, req.Prompt, "prompt should be non-empty")
 
-	// ProcessResult with simulated LLM output
-	summaryJSON := `{"title":"Config Fix and Validation","summary":"Fixed validation logic and ran tests.","key_actions":["read config","fixed validation","ran tests"],"outcome":"success","topics_found":["validation","testing"]}`
+	// ProcessResult with simulated LLM output. quality_score must be above the
+	// discard threshold (#525) — a missing score means 0.0 and the session dir
+	// is removed before artifacts are written.
+	summaryJSON := `{"title":"Config Fix and Validation","summary":"Fixed validation logic and ran tests.","key_actions":["read config","fixed validation","ran tests"],"outcome":"success","topics_found":["validation","testing"],"quality_score":0.8,"score_reason":"clear plan and verification steps"}`
 	processErr := handler.ProcessResult(items[0], &agentwork.RunResult{
 		Output:   summaryJSON,
 		Duration: 5 * time.Second,
@@ -392,6 +403,17 @@ func buildOxBinary(t *testing.T) string {
 	cmd.Dir = dir
 	output, err := cmd.CombinedOutput()
 	require.NoError(t, err, "failed to build ox: %s", output)
+
+	// Also build the claude-code adapter binary next to ox so adapter
+	// discovery (AdapterDirs() includes filepath.Dir(exe)) finds it.
+	// Without this the deep adapter detect fails silently, the session
+	// falls through to the generic adapter, and PostToolUse hooks never
+	// parse the fake Claude JSONL source file.
+	adapterBin := filepath.Join(binDir, "ox-adapter-claude-code")
+	adapterCmd := exec.Command("go", "build", "-o", adapterBin, "./cmd/ox-adapter-claude-code")
+	adapterCmd.Dir = dir
+	adapterOut, adapterErr := adapterCmd.CombinedOutput()
+	require.NoError(t, adapterErr, "failed to build ox-adapter-claude-code: %s", adapterOut)
 
 	return oxBin
 }
@@ -565,25 +587,23 @@ func claudeAssistantEntry(ts, text, toolName, toolInput string) string {
 		ts, text, toolName, toolInput)
 }
 
+// rawJSONLSearchRoots returns the directories that may contain raw.jsonl files.
+// Session recordings live in the ledger data dir (XDG_DATA_HOME/sageox/.../ledgers/...)
+// per paths.LedgerSessionCacheBase. Older fallback paths live under XDG_CACHE_HOME
+// and inside the workspace itself — include both for robustness.
+func rawJSONLSearchRoots(env e2eEnv) []string {
+	return []string{
+		filepath.Join(env.home, ".local", "share", "sageox"),
+		filepath.Join(env.cacheDir, "sageox"),
+		env.workspace,
+	}
+}
+
 func findRawJSONL(t *testing.T, env e2eEnv) string {
 	t.Helper()
-
-	// search in XDG cache for raw.jsonl
-	cacheRoot := filepath.Join(env.cacheDir, "sageox")
 	var found string
-	filepath.Walk(cacheRoot, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.Name() == "raw.jsonl" {
-			found = path
-		}
-		return nil
-	})
-
-	if found == "" {
-		// also check the workspace sessions dir
-		filepath.Walk(env.workspace, func(path string, info os.FileInfo, err error) error {
+	for _, root := range rawJSONLSearchRoots(env) {
+		filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return nil
 			}
@@ -592,34 +612,27 @@ func findRawJSONL(t *testing.T, env e2eEnv) string {
 			}
 			return nil
 		})
+		if found != "" {
+			return found
+		}
 	}
-
 	return found
 }
 
 func findAllRawJSONL(t *testing.T, env e2eEnv) []string {
 	t.Helper()
 	var found []string
-	cacheRoot := filepath.Join(env.cacheDir, "sageox")
-	filepath.Walk(cacheRoot, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
+	for _, root := range rawJSONLSearchRoots(env) {
+		filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return nil
+			}
+			if info.Name() == "raw.jsonl" {
+				found = append(found, path)
+			}
 			return nil
-		}
-		if info.Name() == "raw.jsonl" {
-			found = append(found, path)
-		}
-		return nil
-	})
-	// also check workspace
-	filepath.Walk(env.workspace, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return nil
-		}
-		if info.Name() == "raw.jsonl" {
-			found = append(found, path)
-		}
-		return nil
-	})
+		})
+	}
 	return found
 }
 

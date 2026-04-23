@@ -278,8 +278,20 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 		wsLabel = ws.ID
 	}
 
-	// clean up leftover artifacts from a previous failed GC
-	leftovers := []string{newPath, diffFile, untrackedDir, lockPath, cacheBackupDir}
+	// acquire the GC lock up front (before cloning, not just around the swap)
+	// so concurrent GC attempts on the same workspace don't race on .new/.old
+	// or erase each other's in-flight artifacts. Stale locks (>5min) are
+	// reclaimed by acquireGCLock itself.
+	gcLock, lockErr := acquireGCLock(lockPath)
+	if lockErr != nil {
+		s.logger.Info("gc: another GC holds the lock for this workspace, skipping",
+			"path", ws.Path, "workspace", wsLabel, "lock", lockPath)
+		return gcSkippedDirty
+	}
+	defer releaseGCLock(gcLock, lockPath)
+
+	// clean up leftover artifacts from a previous failed GC (safe under the lock)
+	leftovers := []string{newPath, diffFile, untrackedDir, cacheBackupDir}
 	for _, leftover := range leftovers {
 		if _, err := os.Stat(leftover); err == nil {
 			s.logger.Info("gc: cleaning up leftover artifact", "path", leftover)
@@ -380,21 +392,11 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 		s.logger.Warn("gc: failed to ensure checkout .gitignore on new clone", "error", err)
 	}
 
-	// step 3: atomic swap — protected by filesystem lock so concurrent daemons
-	// don't see the directory disappear between the two renames.
-	// For ledger repos, also acquire ledgerMu to prevent concurrent pull/push conflicts.
+	// step 3: atomic swap — the GC lock (held since entry) serializes against
+	// concurrent GCs on this same workspace. For ledger repos, also acquire
+	// ledgerMu to prevent concurrent pull/push conflicts during the swap.
 	if isLedger {
 		s.ledgerMu.Lock()
-	}
-
-	lockFile, lockErr := acquireGCLock(lockPath)
-	if lockErr != nil {
-		if isLedger {
-			s.ledgerMu.Unlock()
-		}
-		s.logger.Warn("gc: another process holds the GC lock, skipping swap", "lock", lockPath, "error", lockErr)
-		_ = os.RemoveAll(newPath)
-		return gcFailed
 	}
 
 	if _, err := os.Stat(oldPath); err == nil {
@@ -402,7 +404,6 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 	}
 
 	if err := os.Rename(ws.Path, oldPath); err != nil {
-		releaseGCLock(lockFile, lockPath)
 		if isLedger {
 			s.ledgerMu.Unlock()
 		}
@@ -416,14 +417,12 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 		if restoreErr := os.Rename(oldPath, ws.Path); restoreErr != nil {
 			s.logger.Error("gc: CRITICAL failed to restore old repo", "error", restoreErr)
 		}
-		releaseGCLock(lockFile, lockPath)
 		if isLedger {
 			s.ledgerMu.Unlock()
 		}
 		return gcFailed
 	}
 
-	releaseGCLock(lockFile, lockPath)
 	if isLedger {
 		s.ledgerMu.Unlock()
 	}
@@ -543,11 +542,38 @@ func (s *SyncScheduler) gcPushUnpushedCommits(ctx context.Context, ws WorkspaceS
 // committing and then modifying a huge binary.
 const maxGCDiffSize = 50 * 1024 * 1024
 
+// workingTreeEmpty reports whether the repo's working tree contains only .git
+// (nothing else — no tracked files, no untracked files, no directories). This
+// is the "rogue agent nuked the working tree" signal: treat it as corruption,
+// not as a diff to preserve.
+func workingTreeEmpty(repoPath string) (bool, error) {
+	entries, err := os.ReadDir(repoPath)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.Name() == ".git" {
+			continue
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
 // gcCaptureDiff captures all uncommitted tracked changes (staged + unstaged)
 // as a binary-safe patch file. Returns (hasDiff, error).
 // Streams diff directly to disk (not into memory) to avoid OOM on large diffs.
 // Diffs exceeding maxGCDiffSize are skipped with a warning.
+//
+// If the working tree is empty (only .git remains), treat this as corruption
+// rather than an intentional mass-delete and skip diff capture so the reclone
+// restores the committed content from remote.
 func (s *SyncScheduler) gcCaptureDiff(ctx context.Context, repoPath, diffFile string) (bool, error) {
+	if empty, err := workingTreeEmpty(repoPath); err == nil && empty {
+		s.logger.Info("gc: working tree empty, skipping diff capture (will restore from remote)", "path", repoPath)
+		return false, nil
+	}
+
 	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "diff", "--binary", "HEAD")
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {

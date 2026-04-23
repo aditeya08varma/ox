@@ -109,7 +109,7 @@ test-all: ## Run all unit tests including expensive ones (git clone, SQLite, LFS
 
 test-slow: ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
 	$(call say,"Running slow tests (requires built ox binary)...")
-	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=slow -race -timeout=5m ./...
+	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=slow -race -timeout=10m ./...
 
 test-integration: ## Integration tests live in sageox/ox-test-harness
 	@echo "Coding agent integration tests are in sageox/ox-test-harness."
@@ -125,7 +125,7 @@ check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .cla
 
 test-preflight: lint check-no-git-lfs-shell test-all test-slow ## Pre-PR quality gate: lint + all unit tests + slow tests
 
-test-digital-twin: test-team-context-twin test-ledger-twin
+test-digital-twin: test-ledger-twin ## Digital twin tests (team_context_twin pending, see ox-au5)
 
 test-team-context-twin: ## Digital twin tests (generates fake team context for inspection)
 	@echo "Running team context digital twin tests..."

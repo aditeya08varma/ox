@@ -201,8 +201,9 @@ func (s *SyncScheduler) triggerMissingClones() {
 	if ledger != nil && !ledger.Exists && ledger.CloneURL != "" {
 		if s.workspaceRegistry.ShouldRetryClone(ledger.ID) {
 			s.logger.Info("triggering immediate ledger clone (self-healing)", "path", ledger.Path)
-			s.cloneWg.Add(1)
-			go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
+			if s.addClone() {
+				go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID)
+			}
 		}
 	}
 
@@ -212,8 +213,9 @@ func (s *SyncScheduler) triggerMissingClones() {
 			if s.workspaceRegistry.ShouldRetryClone(ws.ID) {
 				s.logger.Info("triggering immediate team context clone (self-healing)",
 					"team", ws.TeamName, "path", ws.Path)
-				s.cloneWg.Add(1)
-				go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID)
+				if s.addClone() {
+					go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID)
+				}
 			}
 		}
 	}

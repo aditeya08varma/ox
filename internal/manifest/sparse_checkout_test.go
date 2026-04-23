@@ -119,7 +119,12 @@ func TestSparseCheckout_DataExcludedFromWorkingTree(t *testing.T) {
 		"data/raw.txt":               "raw data content",
 		"memory/daily/2026-01-01.md": "daily memory",
 		".sageox/config.json":        `{"version": 1}`,
-		".gitattributes":             "data/** filter=lfs\n",
+		// Plain root-level file to verify /* pattern includes root files.
+		// Intentionally NOT a filter=lfs entry — ox never writes LFS filters
+		// (see .claude/rules/lfs-no-git-lfs-binary.md). An LFS filter here
+		// would trip git's smudge filter on `git add` on machines without
+		// git-lfs installed.
+		".gitattributes": "* text=auto\n",
 	})
 
 	// compute sparse set from a manifest that denies data/
@@ -165,7 +170,10 @@ func TestSparseCheckout_FreshCloneExcludesData(t *testing.T) {
 		"data/file.txt":    "should be excluded",
 		"memory/obs.jsonl": `{"observation": "test"}`,
 		".sageox/soul.md":  "team soul",
-		".gitattributes":   "data/** filter=lfs\n",
+		// Plain root-level file to verify /* pattern includes root files.
+		// See note in TestSparseCheckout_DataExcludedFromWorkingTree — no
+		// filter=lfs entries in ox test fixtures.
+		".gitattributes": "* text=auto\n",
 	})
 	runGit(t, srcDir, "remote", "add", "origin", bareDir)
 	runGit(t, srcDir, "push", "origin", "HEAD:main")

@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/gitserver"
 )
 
 // Mode represents the execution mode for tests.
@@ -114,6 +115,13 @@ func RunDualMode(t *testing.T, tests []DualModeTest) {
 //	// ... run tests that interact with daemon ...
 func StartTestDaemon(t *testing.T, tmpDir string) (cleanup func()) {
 	t.Helper()
+
+	// Force credential loading to use file storage (not OS keychain) so tests
+	// don't pick up the developer's real credentials — otherwise the daemon
+	// discovers real team contexts and spawns background git-clone goroutines
+	// that outlive test cleanup and race with t.TempDir() removal.
+	prevForceFile := gitserver.TestSetForceFileStorage(true)
+	t.Cleanup(func() { gitserver.TestSetForceFileStorage(prevForceFile) })
 
 	// configure daemon with test-specific settings
 	cfg := daemon.DefaultConfig()
@@ -526,7 +534,9 @@ func WaitForDaemon(t *testing.T, timeout time.Duration) error {
 }
 
 // NewTestClient creates a daemon client with test-appropriate timeout.
-// Uses 500ms (vs 50ms production default) for test stability under load.
+// Uses 5s (vs 50ms production default) for test stability under heavy
+// parallel load (-p 8 -parallel 32), where socket round-trips routinely
+// exceed shorter budgets and produce spurious i/o timeout failures.
 func NewTestClient() *daemon.Client {
-	return daemon.NewClientForCurrentRepoWithTimeout(500 * time.Millisecond)
+	return daemon.NewClientForCurrentRepoWithTimeout(5 * time.Second)
 }
