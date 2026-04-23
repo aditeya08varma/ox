@@ -9,10 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-**Critical: Claude Code session recording captured zero turns (#519)**
-- In 0.6.3, every Claude Code session on macOS captured **zero turns** — `raw.jsonl` contained only the session header regardless of how much work happened. 17 consecutive sessions across hours of active use could produce empty recordings with no visible error. Root cause: the one-shot adapter path never wired its `ReadFromOffset` handler, so every `PostToolUse` hook silently returned "not implemented" and appended nothing. **Fixed — Claude Code sessions capture turns in real time again.**
-- Companion observability: silent recording failures are no longer silent. If a recording is active but hooks fire without making progress, the daemon now surfaces an error instead of letting an empty session file masquerade as a successful recording. This is what would have caught #519 immediately instead of after hours of lost sessions.
-- Sessions the LLM scores 0 are now discarded and their cache cleaned up, rather than being uploaded as empty entries to the ledger.
+**Session recording**
+- Claude Code session recording was producing header-only `raw.jsonl` files with no turn entries — the one-shot adapter path didn't wire its `ReadFromOffset` handler, so every `PostToolUse` hook no-op'd. Turns are captured again.
+- Silent recording failures now surface as errors instead of producing an empty session file.
+- Sessions the LLM scores 0 are discarded rather than uploaded as empty entries.
 
 **AI coworker isolation**
 - `AGENTS.md` no longer leaks one coworker's active-recording context into another's view — each coworker sees only its own stamp, preventing accidental cross-agent contamination
