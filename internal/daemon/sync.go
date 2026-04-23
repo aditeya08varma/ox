@@ -39,10 +39,10 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon/hooks"
 	"github.com/sageox/ox/internal/flags"
-	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/version"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -135,6 +135,12 @@ type SyncScheduler struct {
 	cloneSem      chan struct{}  // semaphore limiting concurrent clones
 	cloneInFlight sync.Map       // tracks workspace IDs with clone in progress (dedup)
 	cloneWg       sync.WaitGroup // tracks in-flight background clone goroutines
+
+	// cloneMu guards cloneWg.Add against a concurrent Wait during shutdown.
+	// Without this, a pullChanges goroutine still running after ctx cancel
+	// can race Add(1) with Wait() and trip WaitGroup's reuse panic.
+	cloneMu       sync.Mutex
+	cloneShutdown bool
 
 	// lifecycle context — canceled when scheduler stops
 	ctx context.Context
@@ -551,6 +557,35 @@ func (s *SyncScheduler) LastError() (string, time.Time) {
 	return last.Message, last.Time
 }
 
+// addClone is a race-free replacement for cloneWg.Add(1). Returns false if
+// the scheduler is shutting down, in which case the caller must NOT spawn
+// the background goroutine. Callers must not touch cloneWg.Add directly.
+func (s *SyncScheduler) addClone() bool {
+	s.cloneMu.Lock()
+	defer s.cloneMu.Unlock()
+	if s.cloneShutdown {
+		return false
+	}
+	s.cloneWg.Add(1)
+	return true
+}
+
+// waitClones signals shutdown (blocking further Adds) and waits up to
+// timeout for in-flight clone goroutines to finish.
+func (s *SyncScheduler) waitClones(timeout time.Duration) {
+	s.cloneMu.Lock()
+	s.cloneShutdown = true
+	s.cloneMu.Unlock()
+
+	done := make(chan struct{})
+	go func() { s.cloneWg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(timeout):
+		s.logger.Warn("timed out waiting for background clones")
+	}
+}
+
 // Start starts the sync scheduler.
 func (s *SyncScheduler) Start(ctx context.Context) {
 	s.ctx = ctx
@@ -695,14 +730,9 @@ func (s *SyncScheduler) Start(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			// wait briefly for in-flight background clones to finish
-			cloneDone := make(chan struct{})
-			go func() { s.cloneWg.Wait(); close(cloneDone) }()
-			select {
-			case <-cloneDone:
-			case <-time.After(3 * time.Second):
-				s.logger.Warn("timed out waiting for background clones")
-			}
+			// wait briefly for in-flight background clones to finish,
+			// blocking any further clone spawns from still-running sync goroutines
+			s.waitClones(3 * time.Second)
 			s.logger.Info("sync scheduler stopped")
 			return
 
@@ -1028,8 +1058,9 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 						_ = progress.WriteStage("cloning", "Cloning ledger in background...")
 					}
 					// clone in background goroutine - don't block sync loop
-					s.cloneWg.Add(1)
-					go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID) //nolint:gosec // G118 - intentionally uses background context; goroutine outlives request scope
+					if s.addClone() {
+						go s.cloneInBackground(ledger.CloneURL, ledger.Path, "ledger", ledger.ID) //nolint:gosec // G118 - intentionally uses background context; goroutine outlives request scope
+					}
 				}
 			}
 		}
@@ -1095,13 +1126,13 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		// ledger repos don't have a sync.manifest — use the manifest defaults
 		// (data/) which cover all idempotent import paths (github, linear, murmurs).
 		return s.pullManagedRepo(ctx, ManagedRepoPullOpts{
-			RepoPath:            s.config.LedgerPath,
-			RepoName:            "ledger",
-			ProjectRoot:         s.config.ProjectRoot,
-			SyncInterval:        s.config.SyncIntervalRead,
-			DetectDivergence:    true,
-			ResolveRules:        ledger.DefaultResolveRules,
-			Logger:              s.logger,
+			RepoPath:         s.config.LedgerPath,
+			RepoName:         "ledger",
+			ProjectRoot:      s.config.ProjectRoot,
+			SyncInterval:     s.config.SyncIntervalRead,
+			DetectDivergence: true,
+			ResolveRules:     ledger.DefaultResolveRules,
+			Logger:           s.logger,
 		})
 	}()
 

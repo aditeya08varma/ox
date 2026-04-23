@@ -69,7 +69,10 @@ func TestServerClient_Integration(t *testing.T) {
 		client := newDirectClient()
 		err := client.RequestSync()
 		assert.NoError(t, err)
-		assert.Equal(t, 1, syncCount)
+		// handler runs asynchronously in the server; wait deterministically
+		// instead of asserting immediately (racy under -p 8 -parallel 32)
+		assert.Eventually(t, func() bool { return syncCount == 1 },
+			2*time.Second, 5*time.Millisecond, "sync handler should run exactly once")
 	})
 
 	// test stop

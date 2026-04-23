@@ -120,9 +120,10 @@ func (s *SyncScheduler) doTeamSync(ctx context.Context, progress *ProgressWriter
 				if progress != nil {
 					_ = progress.WriteStage("cloning", fmt.Sprintf("Cloning team %s in background...", ws.TeamName))
 				}
-				s.cloneWg.Add(1)
-				go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID) //nolint:gosec // G118 - intentionally uses background context; goroutine outlives request scope
-				cloningCount++
+				if s.addClone() {
+					go s.cloneInBackground(ws.CloneURL, ws.Path, "team-context", ws.ID) //nolint:gosec // G118 - intentionally uses background context; goroutine outlives request scope
+					cloningCount++
+				}
 			} else {
 				s.workspaceRegistry.SetWorkspaceError(ws.ID, "path does not exist and no clone URL available")
 				s.logger.Debug("team context path not found and no clone URL", "team", ws.TeamName, "path", ws.Path)
@@ -304,15 +305,15 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 	mCfg := manifest.ParseFile(manifestPath)
 
 	result := s.pullManagedRepo(ctx, ManagedRepoPullOpts{
-		RepoPath:            path,
-		RepoName:            repoName,
-		ProjectRoot:         s.config.ProjectRoot,
-		SyncInterval:        s.config.TeamContextSyncInterval,
-		MinFetchAge:         minFetchAge,
-		ValidateIntegrity:   true,
-		DetectDivergence:    true,
-		ResolveRules:        mCfg.ResolveRules,
-		Logger:              s.logger,
+		RepoPath:          path,
+		RepoName:          repoName,
+		ProjectRoot:       s.config.ProjectRoot,
+		SyncInterval:      s.config.TeamContextSyncInterval,
+		MinFetchAge:       minFetchAge,
+		ValidateIntegrity: true,
+		DetectDivergence:  true,
+		ResolveRules:      mCfg.ResolveRules,
+		Logger:            s.logger,
 	})
 
 	// corrupt repo: move aside so background clone picks it up next cycle

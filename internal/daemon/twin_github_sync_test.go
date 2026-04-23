@@ -672,6 +672,17 @@ func TestTwinGitHubSync_RealLedgerData(t *testing.T) {
 		t.Skipf("real ledger not found at %s (CI environment)", realLedgerPath)
 	}
 
+	// This test targets a specific historical corruption: PR 409 with git merge
+	// conflict markers, stored at data/github/2026/04/01/pr/409.json. Once the
+	// ledger is repaired (conflict cleared, files re-written with hash-suffixed
+	// names), the precondition no longer holds and this scenario becomes
+	// unreproducible from the live ledger. Skip rather than fail to keep the
+	// suite green on healthy ledgers.
+	const pr409LegacyPath = "data/github/2026/04/01/pr/409.json"
+	if _, err := os.Stat(filepath.Join(realLedgerPath, pr409LegacyPath)); os.IsNotExist(err) {
+		t.Skipf("real ledger no longer contains legacy corrupted fixture %s (already repaired)", pr409LegacyPath)
+	}
+
 	requireDocker(t)
 
 	g := getSharedGitea(t)

@@ -139,7 +139,7 @@ func TestPushWithRetry_ConcurrentPushers_SameFile_AutoResolve(t *testing.T) {
 	contentStr := string(content)
 	// must be exactly one version — conflict markers or mixed content means broken auto-resolve
 	assert.False(t, strings.Contains(contentStr, "<<<<<<<"), "file must not contain conflict markers")
-	validContent := contentStr == `{"source":"clone1"}`+"\n" || contentStr == `{"source":"clone2"}`+"\n"
+	validContent := contentStr == `{"version":1,"by":"clone1"}` || contentStr == `{"version":2,"by":"clone2"}`
 	require.True(t, validContent, "file should contain exactly one version (last writer wins), got: %s", contentStr)
 }
 
