@@ -5,7 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.3] - 2026-04-13
+## [0.6.4] - 2026-04-22
+
+### Fixed
+
+**AI coworker isolation**
+- `AGENTS.md` no longer leaks one coworker's active-recording context into another's view — each coworker sees only its own stamp, preventing accidental cross-agent contamination
+- Recording-reminder whispers now reach only their intended recipient instead of fanning out to every coworker on the team
+- `ox agent prime` no longer falls back to attributing a session to the sole active-recording agent when the real ID can't be resolved, which previously credited the wrong coworker
+
+**Session capture**
+- Silent recording failures now surface as clear errors instead of producing empty session artifacts
+- Sessions that the LLM scores 0 are discarded and their cache cleaned up instead of being uploaded as empty entries to the ledger
+- The Claude Code adapter now wires `ReadFromOffset` correctly in one-shot mode so mid-session captures pick up from the right point
+
+**Daemon correctness**
+- Fixed a data race during scheduler shutdown where an in-flight clone trigger could panic `sync: WaitGroup is reused before previous Wait has returned`
+- Fixed a race between two concurrent GC reclones on the same workspace that could destroy each other's in-flight artifacts
+- Fixed GC reclone of a repo with an empty working tree — previously the captured diff deleted all restored files; now the empty tree is treated as corruption and the remote content is restored cleanly
+- Added a 30-second lock-mtime heartbeat during GC so long reclones don't have their lock reclaimed by the stale-lock watchdog
+
+### Changed
+- Claude Code stamp prefix and rewrite rules updated with team-first framing in team-aware repos
+- `ox init` and related installers now require the `claude` binary (the `primaryEnv` fallback has been removed from SageOx ClawHub skills)
+- ClawHub ox install is now pinned to a specific tarball with an embedded sha256 instead of a floating reference
+
+### Added
+- Session-capture architecture documentation
 
 ### Added
 
