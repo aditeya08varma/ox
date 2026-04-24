@@ -158,6 +158,21 @@ The score_reason should be a single sentence explaining the rating.
 // avoiding a server-side API call.
 // If ledgerSessionDir is non-empty, a step is added instructing the agent to push the
 // summary to the ledger via `ox session push-summary`.
+//
+// # Contract mismatch with ValidateSummaryContent
+//
+// The prompt below REQUESTS a rich schema: title, summary, key_actions,
+// aha_moments, sageox_insights, diagrams, chapter_titles, agent_summary,
+// quality_score. The validator in validate.go only REQUIRES the first
+// three plus outcome. The gap means agents can (and do) ship minimal
+// summaries that pass validation but lack the fields that make session
+// recordings useful to coworkers.
+//
+// Since output-token cost is negligible compared to input-token cost
+// (the LLM already processed the whole session to understand it),
+// enforcing richness in the validator would meaningfully improve
+// downstream usefulness at essentially zero incremental cost. Tracked
+// separately — see ValidateSummaryContent's doc comment.
 func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) string {
 	var sb strings.Builder
 
