@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -10,8 +12,30 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/telemetry"
+	"github.com/sageox/ox/pkg/sessionpipeline"
 	"github.com/sageox/ox/pkg/tokenopt"
 )
+
+// tokenoptStage adapts pkg/tokenopt to the sessionpipeline.Stage shape.
+// Today this is the only pipeline stage; it runs as a one-element stage
+// list. When a streaming redactor (e.g. REDACT.md-driven LLM redactor)
+// lands, it implements the same Stage interface and joins the slice with
+// no changes to the runner or the call site below.
+type tokenoptStage struct{}
+
+func (tokenoptStage) Name() string { return "tokenopt" }
+
+func (tokenoptStage) Apply(ctx context.Context, r io.Reader, w io.Writer) (sessionpipeline.Stats, error) {
+	// Context is accepted for interface conformance; tokenopt.Compress is
+	// short-lived and I/O-bound, so we don't plumb ctx through today. If a
+	// future stage needs cancellation mid-stream, wrap r in a ctx-aware
+	// reader at this boundary rather than pushing ctx into pkg/tokenopt.
+	_ = ctx
+	stats, err := tokenopt.Compress(r, w)
+	// tokenopt.Stats already implements slog.LogValuer, so it satisfies
+	// sessionpipeline.Stats directly.
+	return stats, err
+}
 
 // Cache-budget knobs. Exceeding either triggers LRU pruning by mtime.
 // Conservative defaults: a healthy long-running install averages <1 MiB
@@ -88,13 +112,29 @@ func writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName string) stri
 		emitTokenoptTelemetry(rawPath, tokenopt.Stats{}, "create_failed")
 		return ""
 	}
-	// Close explicitly so the file is flushed before any subsequent reads.
-	stats, compressErr := tokenopt.Compress(in, out)
-	if cerr := out.Close(); cerr != nil && compressErr == nil {
-		compressErr = cerr
+
+	// Pipeline: one stage today (tokenopt), ordered slice tomorrow. Running
+	// even the single-stage case through sessionpipeline.Run exercises the
+	// composition seam, so the second stage (planned: REDACT.md-driven LLM
+	// redactor — bead ox-xtwf) lands as a slice append rather than a
+	// structural refactor.
+	stages := []sessionpipeline.Stage{tokenoptStage{}}
+	stageResults, runErr := sessionpipeline.Run(context.Background(), in, out, stages)
+	if cerr := out.Close(); cerr != nil && runErr == nil {
+		runErr = cerr
 	}
-	if compressErr != nil {
-		slog.Warn("tokenopt: compress failed, summary will use raw.jsonl", "error", compressErr)
+
+	// Recover tokenopt.Stats from the stage result for the sanity gate and
+	// telemetry. Today one stage == one stats struct.
+	var stats tokenopt.Stats
+	if len(stageResults) > 0 && stageResults[0].Stats != nil {
+		if ts, ok := stageResults[0].Stats.(tokenopt.Stats); ok {
+			stats = ts
+		}
+	}
+
+	if runErr != nil {
+		slog.Warn("tokenopt: compress failed, summary will use raw.jsonl", "error", runErr)
 		_ = os.Remove(optPath)
 		emitTokenoptTelemetry(rawPath, stats, "compress_failed")
 		return ""
