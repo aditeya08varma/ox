@@ -382,7 +382,7 @@ func TestCompress_ReturnsFlushError(t *testing.T) {
 }
 
 // TestCompressLossless_PreservesUnknownTopLevelFields locks in the contract
-// that ModeLossless is actually lossless. Previously, re-marshalling through
+// that ModeLossless is actually lossless. Previously, re-marshaling through
 // the fixed entry struct silently dropped keys (like "seq") not on the struct.
 func TestCompressLossless_PreservesUnknownTopLevelFields(t *testing.T) {
 	// An assistant entry with a "seq" field (written by cmd/ox/agent_session).
