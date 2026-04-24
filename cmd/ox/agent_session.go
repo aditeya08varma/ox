@@ -1052,7 +1052,15 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		result.LedgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
 	}
 
-	result.SummaryPrompt = session.BuildSummaryPrompt(entries, result.RawPath, result.LedgerSessionDir)
+	// Compress raw.jsonl → raw.optimized.jsonl before the summarizer reads it.
+	// Keeps user+assistant turns verbatim, tool entries become compact markers,
+	// system entries are dropped. Typically 50-80% smaller on real sessions.
+	// Falls back to raw.jsonl if compression fails.
+	summaryInputPath := writeOptimizedJSONLForSummary(result.RawPath)
+	if summaryInputPath == "" {
+		summaryInputPath = result.RawPath
+	}
+	result.SummaryPrompt = session.BuildSummaryPrompt(entries, summaryInputPath, result.LedgerSessionDir)
 
 	// mark that this session needs summary generation (cleared when push-summary succeeds)
 	sessionCacheDir := filepath.Dir(result.RawPath)
