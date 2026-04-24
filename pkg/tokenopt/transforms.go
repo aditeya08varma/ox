@@ -1,0 +1,284 @@
+package tokenopt
+
+import (
+	"container/list"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// state holds streaming dedup bookkeeping for a single Compress invocation.
+type state struct {
+	opts        Options
+	reminders   map[string]int // sha → first seq
+	toolResults *lruMap        // sha → first seq (bounded)
+	reminderRe  *regexp.Regexp // matches <system-reminder> ... </system-reminder>
+	ansiRe      *regexp.Regexp // matches ANSI CSI/SGR sequences
+	base64ImgRe *regexp.Regexp // matches data:image/...;base64,<payload>
+}
+
+func newState(opts Options) *state {
+	return &state{
+		opts:        opts,
+		reminders:   make(map[string]int),
+		toolResults: newLRU(opts.ToolResultLRUSize),
+		// <system-reminder>...</system-reminder> — inline or multi-line (non-greedy)
+		reminderRe: regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`),
+		// Standard ANSI escapes: ESC [ ... letter. Covers SGR, cursor ops, etc.
+		ansiRe: regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]`),
+		// data URI image payloads (the high-value case — screenshots in tool_results)
+		base64ImgRe: regexp.MustCompile(`data:image/[a-zA-Z.+-]+;base64,[A-Za-z0-9+/=\s]+`),
+	}
+}
+
+// transform applies the streaming pipeline to a single jsonl line and returns
+// the rewritten bytes ready to emit. On parse failure the line is returned as-is.
+func (s *state) transform(line []byte, seq int, stats *Stats) ([]byte, error) {
+	var e entry
+	if err := json.Unmarshal(line, &e); err != nil {
+		// Malformed jsonl — pass through untouched rather than break the stream.
+		return line, nil
+	}
+
+	// Never touch user turns (intent signal) or the header.
+	if e.Type == "user" || e.Type == "header" {
+		return line, nil
+	}
+
+	// Normalize text fields in-place.
+	if e.Content != "" {
+		e.Content, stats.ANSIStripped, stats.ProgressCollapsed = s.normalizeText(e.Content, stats.ANSIStripped, stats.ProgressCollapsed)
+	}
+	if e.ToolOutput != "" {
+		e.ToolOutput, stats.ANSIStripped, stats.ProgressCollapsed = s.normalizeText(e.ToolOutput, stats.ANSIStripped, stats.ProgressCollapsed)
+	}
+
+	// Elide base64 image payloads anywhere they appear (content or tool_output).
+	if e.Content != "" {
+		before := e.Content
+		e.Content = s.elideBase64Images(e.Content)
+		if before != e.Content {
+			stats.ImagesElided++
+		}
+	}
+	if e.ToolOutput != "" {
+		before := e.ToolOutput
+		e.ToolOutput = s.elideBase64Images(e.ToolOutput)
+		if before != e.ToolOutput {
+			stats.ImagesElided++
+		}
+	}
+
+	// System-reminder dedup: replace repeated blocks with a compact ref.
+	if e.Content != "" && strings.Contains(e.Content, "<system-reminder>") {
+		newContent, deduped := s.dedupReminders(e.Content, seq)
+		e.Content = newContent
+		stats.RemindersDeduped += deduped
+	}
+
+	// Read tool_result body truncation. Applies to either ToolOutput (newer)
+	// or Content (older format where Read results landed in content).
+	if e.ToolName == "Read" {
+		if e.ToolOutput != "" && len(e.ToolOutput) > 0 {
+			if truncated, ok := s.truncateLargeBody(e.ToolOutput, "Read"); ok {
+				e.ToolOutput = truncated
+				stats.LargeReadsElided++
+			}
+		} else if e.Content != "" {
+			if truncated, ok := s.truncateLargeBody(e.Content, "Read"); ok {
+				e.Content = truncated
+				stats.LargeReadsElided++
+			}
+		}
+	}
+
+	// Tool-result content dedup via bounded LRU.
+	if body := toolResultBody(&e); body != "" && len(body) >= s.opts.ToolResultMinBytes {
+		h := hashContent([]byte(body))
+		if firstSeq, hit := s.toolResults.get(h); hit {
+			stats.ToolResultsRefd++
+			return emitToolRef(&e, h, firstSeq, body), nil
+		}
+		s.toolResults.put(h, seq)
+	}
+
+	out, err := json.Marshal(&e)
+	if err != nil {
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	return out, nil
+}
+
+// normalizeText strips ANSI sequences and collapses \r-based progress frames.
+// Returns updated counters.
+func (s *state) normalizeText(in string, ansiCount, progCount int) (string, int, int) {
+	out := in
+	if strings.IndexByte(out, 0x1b) >= 0 {
+		stripped := s.ansiRe.ReplaceAllString(out, "")
+		if stripped != out {
+			ansiCount++
+			out = stripped
+		}
+	}
+	if strings.IndexByte(out, '\r') >= 0 {
+		collapsed := collapseCarriageReturns(out)
+		if collapsed != out {
+			progCount++
+			out = collapsed
+		}
+	}
+	return out, ansiCount, progCount
+}
+
+// collapseCarriageReturns keeps only the final segment per line after \r.
+// Common in progress bars: "downloading [=  ] 10%\rdownloading [==] 20%\r...".
+func collapseCarriageReturns(s string) string {
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if idx := strings.LastIndexByte(line, '\r'); idx >= 0 {
+			lines[i] = line[idx+1:]
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// elideBase64Images replaces data: URIs and bare long base64 blobs with a
+// compact placeholder. No MIME sniffing on bare blobs — we just note the size.
+func (s *state) elideBase64Images(in string) string {
+	return s.base64ImgRe.ReplaceAllStringFunc(in, func(match string) string {
+		idx := strings.Index(match, ";base64,")
+		if idx < 0 {
+			return match
+		}
+		mime := strings.TrimPrefix(match[:idx], "data:")
+		payload := match[idx+len(";base64,"):]
+		return fmt.Sprintf("[image: %s, %d b64 chars elided]", mime, len(payload))
+	})
+}
+
+// dedupReminders replaces repeated <system-reminder> blocks with compact refs.
+// First occurrence stays verbatim; subsequent identical blocks become a ref.
+func (s *state) dedupReminders(content string, seq int) (string, int) {
+	count := 0
+	out := s.reminderRe.ReplaceAllStringFunc(content, func(match string) string {
+		h := hashContent([]byte(match))
+		if firstSeq, seen := s.reminders[h]; seen {
+			count++
+			return fmt.Sprintf("<system-reminder ref=%q first_seq=%d elided />", h, firstSeq)
+		}
+		s.reminders[h] = seq
+		return match
+	})
+	return out, count
+}
+
+// truncateLargeBody replaces the middle of oversized tool_result bodies with an
+// elision marker, keeping head and tail lines. Returns (new, true) if truncated.
+func (s *state) truncateLargeBody(body, tool string) (string, bool) {
+	lines := strings.Split(body, "\n")
+	if len(lines) <= s.opts.LargeReadMaxLines {
+		return body, false
+	}
+	keep := s.opts.LargeReadKeepLines
+	head := lines[:keep]
+	tail := lines[len(lines)-keep:]
+	elided := len(lines) - 2*keep
+	marker := fmt.Sprintf("...[%d lines elided from %s output]...", elided, tool)
+	var sb strings.Builder
+	sb.WriteString(strings.Join(head, "\n"))
+	sb.WriteString("\n")
+	sb.WriteString(marker)
+	sb.WriteString("\n")
+	sb.WriteString(strings.Join(tail, "\n"))
+	return sb.String(), true
+}
+
+// toolResultBody returns whichever field of the entry carries a tool result
+// body, or "" if this isn't a tool-result-bearing entry.
+func toolResultBody(e *entry) string {
+	if e.Type != "tool" {
+		return ""
+	}
+	if e.ToolOutput != "" {
+		return e.ToolOutput
+	}
+	// Older format: tool results sometimes land in Content.
+	if e.Content != "" {
+		return e.Content
+	}
+	return ""
+}
+
+// emitToolRef replaces a tool entry's body with a self-describing ref entry.
+// Preserves tool_name, timestamp, and is_error so the summarizer still knows
+// this was (e.g.) a Grep call — just a repeated one.
+func emitToolRef(e *entry, hash string, firstSeq int, originalBody string) []byte {
+	sample := originalBody
+	if len(sample) > 80 {
+		sample = sample[:80]
+	}
+	ref := entry{
+		Type:      "tool_ref",
+		Timestamp: e.Timestamp,
+		ToolName:  e.ToolName,
+		IsError:   e.IsError,
+		RefType:   "tool_result",
+		RefKind:   e.ToolName,
+		RefHash:   hash,
+		RefFirst:  firstSeq,
+		RefSample: sample,
+	}
+	out, err := json.Marshal(&ref)
+	if err != nil {
+		// This cannot happen for our struct; fall back to original body.
+		b, _ := json.Marshal(e)
+		return b
+	}
+	return out
+}
+
+// lruMap is a minimal string→int LRU cache. Bounded by capacity.
+type lruMap struct {
+	cap   int
+	m     map[string]*list.Element
+	order *list.List
+}
+
+type lruEntry struct {
+	key string
+	val int
+}
+
+func newLRU(capacity int) *lruMap {
+	if capacity < 1 {
+		capacity = 1
+	}
+	return &lruMap{cap: capacity, m: make(map[string]*list.Element, capacity), order: list.New()}
+}
+
+func (l *lruMap) get(k string) (int, bool) {
+	el, ok := l.m[k]
+	if !ok {
+		return 0, false
+	}
+	l.order.MoveToFront(el)
+	return el.Value.(*lruEntry).val, true
+}
+
+func (l *lruMap) put(k string, v int) {
+	if el, ok := l.m[k]; ok {
+		el.Value.(*lruEntry).val = v
+		l.order.MoveToFront(el)
+		return
+	}
+	el := l.order.PushFront(&lruEntry{key: k, val: v})
+	l.m[k] = el
+	if l.order.Len() > l.cap {
+		oldest := l.order.Back()
+		if oldest != nil {
+			l.order.Remove(oldest)
+			delete(l.m, oldest.Value.(*lruEntry).key)
+		}
+	}
+}
