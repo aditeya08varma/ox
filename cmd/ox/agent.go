@@ -165,6 +165,15 @@ func init() {
 		"explicit adapter name, overrides auto-detection (session capture-prior)")
 	_ = agentCmd.PersistentFlags().MarkHidden("adapter")
 
+	// Session-stop escape hatch: skip the summary-input optimization pass
+	// entirely and hand raw.jsonl directly to the summarizer. Useful as a
+	// per-session opt-out while the optimized path is still being proven,
+	// or for debugging summary quality regressions. Equivalent to setting
+	// OX_SUMMARY_INPUT_OPTIMIZE=off in the environment.
+	agentCmd.PersistentFlags().Bool("no-optimize", false,
+		"skip summary-input optimization; summarizer reads raw.jsonl directly (session stop)")
+	_ = agentCmd.PersistentFlags().MarkHidden("no-optimize")
+
 	// initialize prime command flags
 	initAgentPrimeCmd()
 
@@ -477,6 +486,14 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		// tokens. This preserves the manual-parser call pattern without a
 		// wider refactor of every session handler signature.
 		sessionArgs = reinjectSessionFlags(cmd, sessionArgs)
+		// --no-optimize on session stop is plumbed via env var so the deep
+		// writeOptimizedJSONLForSummary call site can read it without a
+		// signature refactor. Same variable serves as a raw env override.
+		if sessionCmd == "stop" {
+			if noOpt, _ := cmd.Flags().GetBool("no-optimize"); noOpt {
+				_ = os.Setenv("OX_SUMMARY_INPUT_OPTIMIZE", "off")
+			}
+		}
 		switch sessionCmd {
 		case "start":
 			return runAgentSessionStart(inst, sessionArgs)

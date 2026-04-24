@@ -807,9 +807,12 @@ func TestBuildSummaryPrompt(t *testing.T) {
 	if !strings.Contains(prompt, "/tmp/raw.jsonl") {
 		t.Error("prompt should contain the raw file path")
 	}
-	// prompt should mention the entry count
-	if !strings.Contains(prompt, "2 entries") {
-		t.Error("prompt should include entry count")
+	// prompt should describe the on-disk format so the summarizer can parse
+	// both raw.jsonl and tokenopt-optimized summary-input files. The hardcoded
+	// entry count was removed because it would mislead the summarizer when
+	// tokenopt drops entries.
+	if !strings.Contains(prompt, "tool_mark") {
+		t.Error("prompt should describe tool_mark entries (optimized file shape)")
 	}
 	// prompt should reference the ledger session dir for push-summary
 	if !strings.Contains(prompt, "/ledger/session-1") {

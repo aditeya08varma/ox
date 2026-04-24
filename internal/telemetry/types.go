@@ -57,6 +57,9 @@ const (
 
 	// coworker events
 	EventCoworkerLoad = "coworker_load" // coworker/subagent loaded into context
+
+	// summarization preprocessing events
+	EventTokenoptRun = "tokenopt_run" // summary-input optimization pass (cmd/ox/session_optimize_for_summary.go)
 )
 
 // Batch represents a batch of events for efficient transmission

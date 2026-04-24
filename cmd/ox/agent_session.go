@@ -1052,7 +1052,17 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		result.LedgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
 	}
 
-	result.SummaryPrompt = session.BuildSummaryPrompt(entries, result.RawPath, result.LedgerSessionDir)
+	// Compress raw.jsonl into the ledger cache (.sageox/cache/summary-input/)
+	// before the summarizer reads it. ConversationOnly mode keeps user+assistant
+	// turns verbatim, tool entries become compact markers, system entries are
+	// dropped. Typically 50-80% smaller on real sessions. Local-only derived
+	// data per .claude/rules/ledger-cache.md; never committed, never LFS-uploaded.
+	// Falls back to raw.jsonl if compression (or ledger path resolution) fails.
+	summaryInputPath := writeOptimizedJSONLForSummary(result.RawPath, ledgerPath, sessionName)
+	if summaryInputPath == "" {
+		summaryInputPath = result.RawPath
+	}
+	result.SummaryPrompt = session.BuildSummaryPrompt(entries, summaryInputPath, result.LedgerSessionDir)
 
 	// mark that this session needs summary generation (cleared when push-summary succeeds)
 	sessionCacheDir := filepath.Dir(result.RawPath)

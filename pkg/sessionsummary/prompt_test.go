@@ -13,10 +13,20 @@ func TestBuildSummaryPrompt(t *testing.T) {
 		{Type: EntryTypeAssistant, Content: "hi"},
 	}
 
-	t.Run("includes raw path and entry count", func(t *testing.T) {
+	t.Run("includes session file path", func(t *testing.T) {
 		result := BuildSummaryPrompt(entries, "/tmp/raw.jsonl", "")
 		assert.Contains(t, result, "/tmp/raw.jsonl")
-		assert.Contains(t, result, "2 entries")
+	})
+
+	t.Run("describes both raw and summary-input entry shapes", func(t *testing.T) {
+		// Prompt must stay agnostic to which file it points at, because
+		// callers pass either raw.jsonl or the tokenopt-optimized file.
+		// Summarizer needs to recognize tool_mark + brief in the optimized case.
+		result := BuildSummaryPrompt(entries, "/tmp/raw.jsonl", "")
+		assert.Contains(t, result, `"tool_mark"`)
+		assert.Contains(t, result, "brief")
+		assert.Contains(t, result, `"user"`)
+		assert.Contains(t, result, `"assistant"`)
 	})
 
 	t.Run("includes push step when ledger dir provided", func(t *testing.T) {
@@ -30,9 +40,14 @@ func TestBuildSummaryPrompt(t *testing.T) {
 		assert.NotContains(t, result, "ox session push-summary")
 	})
 
-	t.Run("empty entries", func(t *testing.T) {
+	t.Run("empty entries still produces a usable prompt", func(t *testing.T) {
+		// Prompt no longer states a hardcoded entry count — that count was
+		// unreliable once tokenopt started dropping system entries and
+		// collapsing tools. The prompt should still reference the file and
+		// describe the format.
 		result := BuildSummaryPrompt(nil, "/tmp/raw.jsonl", "")
-		assert.Contains(t, result, "0 entries")
+		assert.Contains(t, result, "/tmp/raw.jsonl")
+		assert.Contains(t, result, "JSONL format")
 	})
 
 	t.Run("path with spaces", func(t *testing.T) {
