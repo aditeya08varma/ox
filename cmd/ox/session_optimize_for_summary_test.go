@@ -97,7 +97,7 @@ func TestWriteOptimizedJSONLForSummary_WritesToLedgerCache(t *testing.T) {
 		t.Fatal("expected non-empty optPath")
 	}
 
-	wantDir := filepath.Join(ledgerDir, ".sageox", "cache", "tokenopt")
+	wantDir := filepath.Join(ledgerDir, ".sageox", "cache", "summary-input")
 	if filepath.Dir(optPath) != wantDir {
 		t.Errorf("optimized path %q not in expected cache dir %q", optPath, wantDir)
 	}

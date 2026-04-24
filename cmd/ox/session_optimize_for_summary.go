@@ -9,12 +9,14 @@ import (
 	"github.com/sageox/ox/pkg/tokenopt"
 )
 
-// writeOptimizedJSONLForSummary compresses raw.jsonl via tokenopt.ModeConversationOnly
-// and writes the result to the ledger's .sageox/cache/tokenopt/ directory. Per
-// .claude/rules/ledger-cache.md, this is the canonical location for local-only
+// writeOptimizedJSONLForSummary compresses raw.jsonl into a summarizer-ready
+// stream at <ledger>/.sageox/cache/summary-input/<session>.jsonl. Per
+// .claude/rules/ledger-cache.md this is the canonical location for local-only
 // derived data: gitignored, per-machine, persists across worktrees, never
-// synced or committed. See also internal/lfs.ContentFiles — optimized files
-// are deliberately NOT on that allowlist, so they never become LFS blobs.
+// synced or committed. The directory name describes the file's *purpose*
+// (input prepared for the session summarizer), not which package produced it.
+// See internal/lfs.ContentFiles — summary-input files are deliberately NOT on
+// that allowlist, so they never become LFS blobs.
 //
 // On any error this returns "" and the caller should fall back to rawPath.
 // The original raw.jsonl is never modified; this is purely additive.
@@ -29,7 +31,7 @@ func writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName string) stri
 	}
 	defer in.Close()
 
-	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "tokenopt")
+	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "summary-input")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		slog.Debug("tokenopt: mkdir cache dir failed", "path", cacheDir, "error", err)
 		return ""
