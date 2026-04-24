@@ -22,6 +22,7 @@ import (
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/pkg/sessionsummary"
+	"github.com/sageox/ox/pkg/summaryeval"
 )
 
 const (
@@ -86,6 +87,15 @@ type SessionFinalizeHandler struct {
 	// quality thresholds (configurable via AgentWorkerConfig)
 	qualityUploadThreshold  float64
 	qualityDiscardThreshold float64
+	// judgeCompleter, when non-nil and OX_SUMMARY_JUDGE=on is set, runs
+	// a post-summary LLM-as-judge evaluation. Nil disables judging.
+	judgeCompleter summaryeval.Completer
+	// daemonCtx is the daemon's root context. Derivative deadlines for
+	// judge work and other long-running subtasks are layered on top so
+	// daemon shutdown (Stop()) cancels them promptly instead of forcing
+	// ErrShutdownTimeout. Defaults to context.Background() when unset,
+	// which preserves behavior for tests that don't call SetDaemonContext.
+	daemonCtx context.Context
 }
 
 // NewSessionFinalizeHandler creates a handler with the given logger.
@@ -121,6 +131,28 @@ func (h *SessionFinalizeHandler) SetLedgerMu(mu *sync.Mutex) {
 // Required for LFS upload during session finalization.
 func (h *SessionFinalizeHandler) SetProjectRoot(root string) {
 	h.projectRoot = root
+}
+
+// SetJudgeCompleter installs the optional LLM-as-judge completer. When
+// non-nil AND OX_SUMMARY_JUDGE=on is set in the environment, the
+// finalize handler runs a judgment pass after every successful summary
+// and writes the verdict to <ledger>/.sageox/cache/summary-judge/.
+//
+// Nil disables judging entirely. The env var gate is intentional: the
+// daemon may be configured with a judge completer in advance, but
+// operators may not want to pay the LLM cost on every anti-entropy run
+// until they flip the switch deliberately.
+func (h *SessionFinalizeHandler) SetJudgeCompleter(c summaryeval.Completer) {
+	h.judgeCompleter = c
+}
+
+// SetDaemonContext provides the daemon's root context. The handler uses
+// it as the parent for any long-running subtasks (currently the judge
+// call) so daemon shutdown can cancel them promptly. Without this, such
+// tasks use context.Background() and block shutdown up to their own
+// deadlines — triggering ErrShutdownTimeout that operators see as hangs.
+func (h *SessionFinalizeHandler) SetDaemonContext(ctx context.Context) {
+	h.daemonCtx = ctx
 }
 
 // NewSessionFinalizeHandlerForTest creates a handler with git and LFS operations disabled.
@@ -652,18 +684,66 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		summaryResp = parsed
 	}
 
-	// validate summary content for agent meta-output contamination
+	// validate summary content for agent meta-output contamination.
+	// On failure we REPLACE the parsed response with a stub — not merely
+	// flip a flag — because downstream code writes summary.json /
+	// summary.md and uploads to the ledger. If we kept the original
+	// invalid summary in summaryResp, its contaminated text would leak
+	// onto the ledger as the teammate-visible artifact even though the
+	// quality score reported it as failed.
 	if valErr := sessionsummary.ValidateSummaryContent(summaryResp); valErr != nil {
 		h.logger.Warn("summary content validation failed, using fallback stub",
 			"session", filepath.Base(payload.SessionDir),
 			"error", valErr,
 		)
-		summaryResp.QualityScore = 0.0
-		summaryResp.ScoreReason = fmt.Sprintf("content validation failed: %v", valErr)
+		summaryResp = &session.SummarizeResponse{
+			Summary:      fmt.Sprintf("Summary failed content validation: %v", valErr),
+			QualityScore: 0.0,
+			ScoreReason:  fmt.Sprintf("content validation failed: %v", valErr),
+		}
 		scored = false
 	}
 
+	// Enforce richness schema on non-trivial sessions. The prompt asks for
+	// key_actions / aha_moments; rejecting summaries that omit them is
+	// essentially free — output tokens are negligible vs. the input tokens
+	// already paid to ingest the session. Anti-entropy path mirrors the
+	// CLI push-summary path (cmd/ox/session_push_summary.go).
+	//
+	// Same replace-don't-just-flag pattern as content validation above: a
+	// thin summary whose title / key_actions are missing must not survive
+	// on the ledger as the visible artifact for teammates.
+	entryCount := 0
+	if payload.storedSession != nil {
+		entryCount = len(payload.storedSession.Entries)
+	}
+	if scored {
+		if richErr := sessionsummary.ValidateSummaryRichness(summaryResp, entryCount); richErr != nil {
+			h.logger.Warn("summary richness validation failed, replacing with fallback stub",
+				"session", filepath.Base(payload.SessionDir),
+				"entry_count", entryCount,
+				"error", richErr,
+			)
+			summaryResp = &session.SummarizeResponse{
+				Summary:      fmt.Sprintf("Summary failed richness validation: %v", richErr),
+				QualityScore: 0.0,
+				ScoreReason:  fmt.Sprintf("richness validation failed: %v", richErr),
+			}
+			scored = false
+		}
+	}
+
 	sessionName := filepath.Base(payload.SessionDir)
+
+	// Optional LLM-as-judge quality scoring. Runs only when
+	// OX_SUMMARY_JUDGE=on is set AND a judge completer is configured on
+	// the handler. Diagnostic-only: writes the judge's verdict to the
+	// ledger cache at .sageox/cache/summary-judge/<session>.json and
+	// logs the path. Failures are swallowed — never block finalization
+	// on a judgment run.
+	if scored {
+		h.maybeRunJudge(sessionName, payload.LedgerPath, summaryResp)
+	}
 
 	// unscored fallbacks default to upload (preserve stub for teammates / doctor).
 	// Only real LLM-scored summaries are gated by the quality thresholds.
@@ -1380,4 +1460,137 @@ func isPIDAlive(pid int) bool {
 		return false
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+// maybeRunJudge runs the LLM-as-judge scorer against a validated
+// summary and writes the verdict to the ledger cache when enabled. See
+// SetJudgeCompleter for the activation contract.
+//
+// Design rationale (nuanced bits worth preserving inline):
+//
+//   - Absolute mode (nil reference). The daemon doesn't have a curated
+//     golden corpus to compare against; judging on-merits is what's
+//     actionable in the anti-entropy context.
+//
+//   - Cache location under ledger/.sageox/cache/summary-judge/. Follows
+//     the local-only-derived-data convention documented in
+//     .claude/rules/ledger-cache.md. Deliberately outside the LFS
+//     allowlist (internal/lfs.ContentFiles) so it never uploads.
+//
+//   - Failures never block finalization. A judge timeout or malformed
+//     LLM response is diagnostic noise, not a correctness issue; swallow
+//     with a warn-level log so operators see it but sessions still ship.
+//
+//   - Uses context.Background rather than inheriting a request-scoped
+//     context. The judge is fire-and-forget diagnostic work after the
+//     summary has already been validated; attaching it to a ctx that
+//     might get canceled when the parent work item completes would
+//     cause spurious cancellations.
+func (h *SessionFinalizeHandler) maybeRunJudge(sessionName, ledgerPath string, summaryResp *session.SummarizeResponse) {
+	if h.judgeCompleter == nil {
+		return
+	}
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("OX_SUMMARY_JUDGE"))); v != "on" && v != "1" && v != "true" && v != "yes" {
+		return
+	}
+	if summaryResp == nil {
+		return
+	}
+
+	// Construct the eval-facing Summary shape from the richer
+	// SummarizeResponse. summaryeval.Summary is intentionally narrower;
+	// it only scores fields the rubric covers.
+	cand := summaryeval.Summary{
+		Title:       summaryResp.Title,
+		Summary:     summaryResp.Summary,
+		KeyActions:  summaryResp.KeyActions,
+		Outcome:     summaryResp.Outcome,
+		TopicsFound: summaryResp.TopicsFound,
+	}
+	for _, a := range summaryResp.AhaMoments {
+		cand.AhaMoments = append(cand.AhaMoments, summaryeval.AhaMoment{
+			Seq:  a.Seq,
+			Type: a.Type,
+		})
+	}
+
+	j := summaryeval.NewJudge(h.judgeCompleter, summaryeval.JudgeOptions{
+		ModelHint:          "haiku",
+		IncludeSuggestions: true,
+	})
+
+	// Use the daemon's root context as the parent so shutdown cancels
+	// judge work promptly. Without this, context.Background would
+	// block daemon shutdown up to 3 minutes and trigger
+	// ErrShutdownTimeout. Falls back to Background when no daemon
+	// context has been installed (e.g., in tests).
+	parent := h.daemonCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	// 3-minute hard ceiling — the Runner adapter already caps, but a
+	// context deadline is a second layer of defense against a runner
+	// that ignores its own timeout.
+	ctx, cancel := context.WithTimeout(parent, 3*time.Minute)
+	defer cancel()
+
+	result, err := j.Score(ctx, sessionName, nil, cand)
+	if err != nil {
+		h.logger.Warn("summary judge failed, continuing without verdict",
+			"session", sessionName,
+			"error", err,
+		)
+		return
+	}
+
+	// Write verdict to cache. Errors here are operator-visible but
+	// don't affect the session finalize outcome.
+	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "summary-judge")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		h.logger.Warn("summary judge: mkdir cache failed",
+			"session", sessionName,
+			"path", cacheDir,
+			"error", err,
+		)
+		return
+	}
+	cachePath := filepath.Join(cacheDir, sessionName+".json")
+	body, err := json.MarshalIndent(result, "", "  ")
+	if err != nil {
+		h.logger.Warn("summary judge: marshal verdict failed",
+			"session", sessionName,
+			"error", err,
+		)
+		return
+	}
+	if err := os.WriteFile(cachePath, body, 0o644); err != nil {
+		h.logger.Warn("summary judge: write verdict failed",
+			"session", sessionName,
+			"path", cachePath,
+			"error", err,
+		)
+		return
+	}
+
+	// One-line key=value log so operators can grep for judge verdicts
+	// and pull the cache path to read the rationale + suggestions.
+	//
+	// IMPORTANT: emit ONLY scalar, non-session-derived fields here.
+	// result.Rationale and result.Suggestions are LLM-generated text that
+	// can paraphrase session content — potentially including fragments
+	// of secrets that escaped redaction, proprietary code, or user PII.
+	// Those stay in the cache file (local, gitignored) where operators
+	// who need the narrative can read them. The logs, which may flow to
+	// aggregators / dashboards / remote observability, get only numeric
+	// scores and model attribution.
+	h.logger.Info("summary_judge",
+		"session", sessionName,
+		"cache_path", cachePath,
+		"overall", result.Overall,
+		"model", result.ModelUsed,
+		"duration_ms", result.DurationMs,
+		"prompt_tokens", result.PromptTokens,
+		"completion_tokens", result.CompletionTokens,
+		"suggestion_count", len(result.Suggestions),
+	)
 }

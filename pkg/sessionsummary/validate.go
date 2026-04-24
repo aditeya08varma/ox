@@ -5,6 +5,22 @@ import (
 	"strings"
 )
 
+// Richness thresholds — a summary missing these on a non-trivial session
+// should be rejected rather than silently shipped. Output tokens cost
+// nothing compared to the input tokens the LLM already paid to ingest
+// the whole session, so there's no reason to accept skeletal summaries.
+//
+// Non-trivial session = entry_count > RichnessMinEntries. Below that
+// threshold (e.g., a 10-entry session that was just a quick question),
+// richness is optional because there genuinely may not be aha_moments
+// or multiple key_actions to capture.
+const (
+	RichnessMinEntries       = 20 // sessions below this are "trivial" — only structural checks apply
+	RichnessMinKeyActions    = 3  // minimum key_actions bullets on a non-trivial session
+	RichnessAhaMinEntries    = 50 // sessions above this must have aha_moments (long-enough for pivotal turns)
+	RichnessMinSummaryChars  = 80 // one paragraph ~= 80+ chars of actual content, catches "Session ended." stubs
+)
+
 // summaryRedFlags are substrings that indicate agent meta-output contamination
 // in a session summary. These patterns match permission requests, tool call
 // artifacts, sandbox errors, and self-referential agent text that should never
@@ -64,6 +80,29 @@ var titleRedFlags = []struct {
 //
 // Returns nil if the summary looks valid, or a descriptive error if
 // contamination is detected.
+//
+// # Known gap: richness is asked for but not required
+//
+// This validator only enforces the MINIMUM viable summary:
+//   - Title (3–200 chars, no red flags)
+//   - Summary (≥20 chars, no red flags)
+//   - Outcome ∈ {success, partial, failed}
+//
+// The prompt in BuildSummaryPrompt asks agents for a MUCH richer shape:
+// key_actions, aha_moments, sageox_insights, diagrams, chapter_titles,
+// topics_found, agent_summary. The validator does NOT require any of
+// these, so a summary consisting only of {title, summary, outcome}
+// passes the gate. Consequence: agents/LLMs (especially when pressed
+// for tokens or misparsing the request) frequently ship minimal
+// summaries that lack the fields coworkers most want.
+//
+// Filed as ox-jxn6 — a follow-up should either (a) fail validation
+// when aha_moments/key_actions are empty on a non-trivial session
+// (entry_count > N), or (b) introduce a separate ValidateSummaryRichness
+// that returns non-fatal warnings surfaced to the caller. Anti-entropy
+// (internal/daemon/agentwork/session_finalize.go) uses this same
+// validator, so the fix applies to both the ox-session-stop path and
+// the daemon-driven background finalization.
 func ValidateSummaryContent(resp *SummarizeResponse) error {
 	if resp == nil {
 		return fmt.Errorf("nil summary response")
@@ -108,6 +147,57 @@ func ValidateSummaryContent(resp *SummarizeResponse) error {
 		if strings.Contains(summaryLower, rf.pattern) {
 			return fmt.Errorf("summary contains %s: %q", rf.reason, truncateStr(summary, 120))
 		}
+	}
+
+	return nil
+}
+
+// ValidateSummaryRichness rejects summaries that lack the rich fields
+// BuildSummaryPrompt explicitly requests. Applied IN ADDITION TO
+// ValidateSummaryContent on non-trivial sessions (entry_count >
+// RichnessMinEntries).
+//
+// Rationale: input-token cost is already paid when the LLM ingests the
+// session; output tokens for a few bullets and aha_moments are effectively
+// free. A summary consisting of {title, summary, outcome} and nothing
+// else is a regression from the prompt's own schema — reject it so the
+// caller can retry instead of silently shipping a degraded artifact.
+//
+// Trivial sessions (short conversations, one-turn questions) skip
+// richness checks because there genuinely may not be 3 key_actions or
+// pivotal moments to capture.
+//
+// Returns nil if rich enough, or a descriptive error naming the missing
+// field(s) so callers can route to retry / tune / alert.
+func ValidateSummaryRichness(resp *SummarizeResponse, entryCount int) error {
+	if resp == nil {
+		return fmt.Errorf("nil summary response")
+	}
+	if entryCount <= RichnessMinEntries {
+		return nil // trivial session — no richness requirement
+	}
+
+	// Summary body should be a real paragraph, not "Session stopped."
+	if len(strings.TrimSpace(resp.Summary)) < RichnessMinSummaryChars {
+		return fmt.Errorf("summary too short for a session with %d entries (got %d chars, need %d)",
+			entryCount, len(strings.TrimSpace(resp.Summary)), RichnessMinSummaryChars)
+	}
+
+	// Key actions spine — any real work produces 3+ discrete actions.
+	nonEmptyActions := 0
+	for _, a := range resp.KeyActions {
+		if strings.TrimSpace(a) != "" {
+			nonEmptyActions++
+		}
+	}
+	if nonEmptyActions < RichnessMinKeyActions {
+		return fmt.Errorf("key_actions missing or under-populated (got %d non-empty bullets, need ≥%d on a %d-entry session)",
+			nonEmptyActions, RichnessMinKeyActions, entryCount)
+	}
+
+	// Aha moments on longer sessions — pivotal turns happen in extended work.
+	if entryCount > RichnessAhaMinEntries && len(resp.AhaMoments) == 0 {
+		return fmt.Errorf("aha_moments missing on a %d-entry session (need ≥1; pivotal decisions always happen in extended work)", entryCount)
 	}
 
 	return nil
