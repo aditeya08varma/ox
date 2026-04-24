@@ -9,16 +9,17 @@ import (
 	"github.com/sageox/ox/pkg/tokenopt"
 )
 
-// writeOptimizedJSONLForSummary compresses raw.jsonl into a sibling
-// raw.optimized.jsonl using tokenopt.ModeConversationOnly. The optimized
-// stream keeps user + assistant turns verbatim, replaces tool entries with
-// compact markers, and drops system entries — the shape a summarizer LLM
-// actually needs. Reduces input tokens typically 50-80% on real sessions.
+// writeOptimizedJSONLForSummary compresses raw.jsonl via tokenopt.ModeConversationOnly
+// and writes the result to the ledger's .sageox/cache/tokenopt/ directory. Per
+// .claude/rules/ledger-cache.md, this is the canonical location for local-only
+// derived data: gitignored, per-machine, persists across worktrees, never
+// synced or committed. See also internal/lfs.ContentFiles — optimized files
+// are deliberately NOT on that allowlist, so they never become LFS blobs.
 //
-// On any error this returns "" (and the caller should fall back to the raw
-// path). The original raw.jsonl is never modified; this is purely additive.
-func writeOptimizedJSONLForSummary(rawPath string) string {
-	if rawPath == "" {
+// On any error this returns "" and the caller should fall back to rawPath.
+// The original raw.jsonl is never modified; this is purely additive.
+func writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName string) string {
+	if rawPath == "" || ledgerPath == "" || sessionName == "" {
 		return ""
 	}
 	in, err := os.Open(rawPath)
@@ -28,7 +29,13 @@ func writeOptimizedJSONLForSummary(rawPath string) string {
 	}
 	defer in.Close()
 
-	optPath := filepath.Join(filepath.Dir(rawPath), "raw.optimized.jsonl")
+	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "tokenopt")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		slog.Debug("tokenopt: mkdir cache dir failed", "path", cacheDir, "error", err)
+		return ""
+	}
+	optPath := filepath.Join(cacheDir, sessionName+".jsonl")
+
 	out, err := os.Create(optPath)
 	if err != nil {
 		slog.Debug("tokenopt: create optimized file failed", "path", optPath, "error", err)

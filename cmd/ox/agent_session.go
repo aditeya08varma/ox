@@ -1052,11 +1052,13 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		result.LedgerSessionDir = filepath.Join(ledgerPath, "sessions", sessionName)
 	}
 
-	// Compress raw.jsonl → raw.optimized.jsonl before the summarizer reads it.
-	// Keeps user+assistant turns verbatim, tool entries become compact markers,
-	// system entries are dropped. Typically 50-80% smaller on real sessions.
-	// Falls back to raw.jsonl if compression fails.
-	summaryInputPath := writeOptimizedJSONLForSummary(result.RawPath)
+	// Compress raw.jsonl into the ledger cache (.sageox/cache/tokenopt/) before
+	// the summarizer reads it. ConversationOnly mode keeps user+assistant turns
+	// verbatim, tool entries become compact markers, system entries are dropped.
+	// Typically 50-80% smaller on real sessions. Local-only derived data per
+	// .claude/rules/ledger-cache.md; never committed, never LFS-uploaded.
+	// Falls back to raw.jsonl if compression (or ledger path resolution) fails.
+	summaryInputPath := writeOptimizedJSONLForSummary(result.RawPath, ledgerPath, sessionName)
 	if summaryInputPath == "" {
 		summaryInputPath = result.RawPath
 	}
