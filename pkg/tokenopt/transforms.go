@@ -32,19 +32,57 @@ func newState(opts Options) *state {
 	}
 }
 
-// transform applies the streaming pipeline to a single jsonl line and returns
-// the rewritten bytes ready to emit. On parse failure the line is returned as-is.
-func (s *state) transform(line []byte, seq int, stats *Stats) ([]byte, error) {
+// transform applies the streaming pipeline to a single jsonl line. Returns the
+// bytes to emit (if emit=true) or signals the entry should be dropped.
+// On parse failure the line passes through untouched.
+func (s *state) transform(line []byte, seq int, stats *Stats) ([]byte, bool, error) {
 	var e entry
 	if err := json.Unmarshal(line, &e); err != nil {
-		// Malformed jsonl — pass through untouched rather than break the stream.
-		return line, nil
+		return line, true, nil
 	}
 
-	// Never touch user turns (intent signal) or the header.
+	// Header and user turns are always preserved verbatim in every mode.
 	if e.Type == "user" || e.Type == "header" {
-		return line, nil
+		return line, true, nil
 	}
+
+	if s.opts.Mode == ModeConversationOnly {
+		return s.transformConversationOnly(&e, line, stats)
+	}
+	return s.transformLossless(&e, seq, stats)
+}
+
+// transformConversationOnly keeps assistant turns verbatim, replaces tool
+// entries with compact markers, and drops system entries.
+func (s *state) transformConversationOnly(e *entry, line []byte, stats *Stats) ([]byte, bool, error) {
+	switch e.Type {
+	case "assistant":
+		// Pass through verbatim — assistant prose IS the narrative.
+		return line, true, nil
+	case "tool":
+		marker := entry{
+			Type:     "tool_mark",
+			ToolName: e.ToolName,
+			Brief:    briefForTool(e.ToolName, e.ToolInput),
+			IsError:  e.IsError,
+		}
+		out, err := json.Marshal(&marker)
+		if err != nil {
+			return line, true, nil
+		}
+		stats.ToolsMarked++
+		return out, true, nil
+	case "system":
+		stats.SystemDropped++
+		return nil, false, nil
+	default:
+		// Unknown types: preserve to stay safe.
+		return line, true, nil
+	}
+}
+
+// transformLossless is the original content-preserving pipeline.
+func (s *state) transformLossless(e *entry, seq int, stats *Stats) ([]byte, bool, error) {
 
 	// Normalize text fields in-place.
 	if e.Content != "" {
@@ -94,20 +132,20 @@ func (s *state) transform(line []byte, seq int, stats *Stats) ([]byte, error) {
 	}
 
 	// Tool-result content dedup via bounded LRU.
-	if body := toolResultBody(&e); body != "" && len(body) >= s.opts.ToolResultMinBytes {
+	if body := toolResultBody(e); body != "" && len(body) >= s.opts.ToolResultMinBytes {
 		h := hashContent([]byte(body))
 		if firstSeq, hit := s.toolResults.get(h); hit {
 			stats.ToolResultsRefd++
-			return emitToolRef(&e, h, firstSeq, body), nil
+			return emitToolRef(e, h, firstSeq, body), true, nil
 		}
 		s.toolResults.put(h, seq)
 	}
 
-	out, err := json.Marshal(&e)
+	out, err := json.Marshal(e)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, false, fmt.Errorf("marshal: %w", err)
 	}
-	return out, nil
+	return out, true, nil
 }
 
 // normalizeText strips ANSI sequences and collapses \r-based progress frames.
@@ -192,6 +230,60 @@ func (s *state) truncateLargeBody(body, tool string) (string, bool) {
 	sb.WriteString("\n")
 	sb.WriteString(strings.Join(tail, "\n"))
 	return sb.String(), true
+}
+
+// briefForTool extracts a short human-readable gist from a tool_input payload.
+// Used by ModeConversationOnly to give the summarizer narrative scaffolding
+// (what the agent DID between messages) without the full I/O.
+//
+// tool_input is itself a JSON string, so we parse it and pick the field most
+// representative of the action. Falls back to a truncated view.
+func briefForTool(toolName, toolInput string) string {
+	const maxBrief = 120
+	if toolInput == "" {
+		return ""
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(toolInput), &raw); err != nil {
+		return truncate(toolInput, maxBrief)
+	}
+
+	primary := map[string]string{
+		"Bash":         "command",
+		"Read":         "file_path",
+		"Write":        "file_path",
+		"Edit":         "file_path",
+		"MultiEdit":    "file_path",
+		"NotebookEdit": "notebook_path",
+		"Glob":         "pattern",
+		"Grep":         "pattern",
+		"Agent":        "description",
+		"Task":         "description",
+		"WebFetch":     "url",
+		"WebSearch":    "query",
+	}
+	if field, ok := primary[toolName]; ok {
+		if v, ok := raw[field]; ok {
+			if s, ok := v.(string); ok {
+				return truncate(s, maxBrief)
+			}
+		}
+	}
+
+	// Unknown tool: pick the first string field, or fall back to the raw input.
+	for _, v := range raw {
+		if s, ok := v.(string); ok && s != "" {
+			return truncate(s, maxBrief)
+		}
+	}
+	return truncate(toolInput, maxBrief)
+}
+
+func truncate(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max-1] + "…"
 }
 
 // toolResultBody returns whichever field of the entry carries a tool result

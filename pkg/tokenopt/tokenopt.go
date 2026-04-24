@@ -27,15 +27,17 @@ import (
 // Stats reports what Compress did. Zero values are meaningful (no matches).
 type Stats struct {
 	EntriesIn         int
-	EntriesOut        int // always equals EntriesIn; nothing is dropped, only rewritten
+	EntriesOut        int // differs from EntriesIn in ModeConversationOnly where tool entries collapse to markers
 	BytesIn           int64
 	BytesOut          int64
-	ANSIStripped      int // count of entries where ANSI sequences were removed
-	ProgressCollapsed int // count of entries where \r progress frames were collapsed
-	ImagesElided      int // count of base64 image payloads replaced
-	LargeReadsElided  int // count of large Read tool_result bodies truncated
-	RemindersDeduped  int // count of <system-reminder> blocks replaced with a ref
-	ToolResultsRefd   int // count of tool_result bodies replaced with a tool_ref
+	ToolsMarked       int // ModeConversationOnly: count of tool entries replaced with compact markers
+	SystemDropped     int // ModeConversationOnly: count of system entries dropped
+	ANSIStripped      int // ModeLossless: entries with ANSI sequences removed
+	ProgressCollapsed int // ModeLossless: entries with \r progress frames collapsed
+	ImagesElided      int // ModeLossless: base64 image payloads replaced
+	LargeReadsElided  int // ModeLossless: large Read tool_result bodies truncated
+	RemindersDeduped  int // ModeLossless: <system-reminder> blocks replaced with a ref
+	ToolResultsRefd   int // ModeLossless: tool_result bodies replaced with a tool_ref
 }
 
 // Reduction returns bytes saved and percentage. Safe to call when BytesIn is 0.
@@ -54,6 +56,8 @@ func (s *Stats) Add(other Stats) {
 	s.EntriesOut += other.EntriesOut
 	s.BytesIn += other.BytesIn
 	s.BytesOut += other.BytesOut
+	s.ToolsMarked += other.ToolsMarked
+	s.SystemDropped += other.SystemDropped
 	s.ANSIStripped += other.ANSIStripped
 	s.ProgressCollapsed += other.ProgressCollapsed
 	s.ImagesElided += other.ImagesElided
@@ -69,10 +73,13 @@ func (s *Stats) Add(other Stats) {
 func (s Stats) LogValue() slog.Value {
 	_, pct := s.Reduction()
 	return slog.GroupValue(
-		slog.Int("entries", s.EntriesIn),
+		slog.Int("entries_in", s.EntriesIn),
+		slog.Int("entries_out", s.EntriesOut),
 		slog.Int64("bytes_in", s.BytesIn),
 		slog.Int64("bytes_out", s.BytesOut),
 		slog.Float64("reduction_pct", pct),
+		slog.Int("tools_marked", s.ToolsMarked),
+		slog.Int("system_dropped", s.SystemDropped),
 		slog.Int("ansi_stripped", s.ANSIStripped),
 		slog.Int("progress_collapsed", s.ProgressCollapsed),
 		slog.Int("images_elided", s.ImagesElided),
@@ -82,22 +89,43 @@ func (s Stats) LogValue() slog.Value {
 	)
 }
 
-// Options configures a Compress run. Zero value is a reasonable default.
+// Mode controls how aggressively Compress reduces the stream.
+type Mode int
+
+const (
+	// ModeConversationOnly (default) emits header + user + assistant entries
+	// verbatim and replaces every tool/system entry with a compact marker
+	// (name + brief gist of the input). Optimal for downstream summarization:
+	// the summarizer needs the conversation arc, not tool I/O.
+	ModeConversationOnly Mode = 0
+
+	// ModeLossless keeps every entry but applies content-level transforms
+	// (ANSI strip, progress collapse, image elision, large-Read truncation,
+	// system-reminder + tool_result dedup). Use when a downstream consumer
+	// still needs tool details (replay, debugging, contract-testing).
+	ModeLossless Mode = 1
+)
+
+// Options configures a Compress run. Zero value is a reasonable default
+// (ModeConversationOnly).
 type Options struct {
+	// Mode selects the compression strategy. Defaults to ModeConversationOnly.
+	Mode Mode
+
 	// LargeReadMaxLines is the line threshold above which a Read tool_result
-	// body is truncated to head+tail. Defaults to 120.
+	// body is truncated to head+tail. ModeLossless only. Defaults to 120.
 	LargeReadMaxLines int
 
 	// LargeReadKeepLines is how many lines to keep from the start and end when
-	// a large Read body is truncated. Defaults to 40 (so 80 lines retained).
+	// a large Read body is truncated. ModeLossless only. Defaults to 40.
 	LargeReadKeepLines int
 
 	// ToolResultLRUSize caps the content-hash LRU for tool_result dedup.
-	// Defaults to 1024 unique payloads (~32KB of state).
+	// ModeLossless only. Defaults to 1024 unique payloads.
 	ToolResultLRUSize int
 
-	// ToolResultMinBytes is the minimum content size worth deduping. Small
-	// payloads aren't worth the ref overhead. Defaults to 512.
+	// ToolResultMinBytes is the minimum content size worth deduping.
+	// ModeLossless only. Defaults to 512.
 	ToolResultMinBytes int
 }
 
@@ -119,12 +147,17 @@ func (o *Options) withDefaults() {
 // Compress reads raw.jsonl entries from r, applies streaming transforms, and
 // writes compressed jsonl to w. Returns Stats describing what was done.
 //
-// Guarantees:
-//   - Single pass over r. Entries emit in order.
-//   - Constant memory relative to session size (bounded by dedup LRU).
-//   - User turns are always preserved verbatim.
-//   - Header entries are always preserved verbatim.
-//   - No entry is dropped; entries are rewritten in place.
+// Guarantees (both modes):
+//   - Single pass over r. Surviving entries emit in original order.
+//   - Constant memory relative to session size.
+//   - User turns and header entries are preserved verbatim, always.
+//
+// Mode-specific behavior:
+//   - ModeConversationOnly (default): assistant turns verbatim; tool entries
+//     collapse to compact tool_mark entries with a brief gist; system entries
+//     are dropped. Typical reduction 50–80% on real sessions.
+//   - ModeLossless: every entry preserved; content-level transforms only
+//     (ANSI strip, image elision, dedup, etc.).
 func Compress(r io.Reader, w io.Writer) (Stats, error) {
 	return CompressWith(r, w, Options{})
 }
@@ -151,11 +184,13 @@ func CompressWith(r io.Reader, w io.Writer, opts Options) (Stats, error) {
 		stats.EntriesIn++
 		stats.BytesIn += int64(len(line)) + 1 // +1 for newline
 
-		out, err := state.transform(line, seq, &stats)
+		out, emit, err := state.transform(line, seq, &stats)
 		if err != nil {
 			return stats, fmt.Errorf("entry %d: %w", seq, err)
 		}
-
+		if !emit {
+			continue // dropped entry (ModeConversationOnly system drops)
+		}
 		if _, err := bw.Write(out); err != nil {
 			return stats, err
 		}
@@ -171,7 +206,7 @@ func CompressWith(r io.Reader, w io.Writer, opts Options) (Stats, error) {
 	return stats, nil
 }
 
-// entry mirrors the jsonl shape loosely. Unknown fields round-trip via Extra.
+// entry mirrors the jsonl shape loosely. Unknown fields round-trip via Metadata.
 type entry struct {
 	Type       string          `json:"type,omitempty"`
 	Content    string          `json:"content,omitempty"`
@@ -182,8 +217,11 @@ type entry struct {
 	IsError    bool            `json:"is_error,omitempty"`
 	Metadata   json.RawMessage `json:"metadata,omitempty"`
 
-	// ref fields emitted when we replace a payload with a pointer to an
-	// earlier occurrence. Only one of FirstSeq/RefHash is nonzero per entry.
+	// Brief is emitted in ModeConversationOnly on tool_mark entries: a compact
+	// gist of the tool input (e.g., the bash command, file path, grep pattern).
+	Brief string `json:"brief,omitempty"`
+
+	// ref fields for ModeLossless tool_ref entries.
 	RefType   string `json:"ref_type,omitempty"`
 	RefKind   string `json:"ref_kind,omitempty"`
 	RefHash   string `json:"ref_hash,omitempty"`

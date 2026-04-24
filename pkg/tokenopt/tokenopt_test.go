@@ -16,7 +16,7 @@ func TestCompress_PassesThroughUserAndHeader(t *testing.T) {
 	input := `{"metadata":{"version":"1.0"},"type":"header"}` + "\n" + string(userLine) + "\n"
 
 	var out bytes.Buffer
-	stats, err := Compress(strings.NewReader(input), &out)
+	stats, err := CompressWith(strings.NewReader(input), &out, Options{Mode: ModeLossless})
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestCompress_StripsANSIFromAssistant(t *testing.T) {
 	input := string(raw) + "\n"
 
 	var out bytes.Buffer
-	stats, err := Compress(strings.NewReader(input), &out)
+	stats, err := CompressWith(strings.NewReader(input), &out, Options{Mode: ModeLossless})
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestCompress_CollapsesProgressBars(t *testing.T) {
 	input := `{"type":"tool","tool_name":"Bash","content":"downloading [    ]\rdownloading [====]\rdownloading [========] done"}` + "\n"
 
 	var out bytes.Buffer
-	stats, err := Compress(strings.NewReader(input), &out)
+	stats, err := CompressWith(strings.NewReader(input), &out, Options{Mode: ModeLossless})
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestCompress_ElidesBase64DataURIs(t *testing.T) {
 	input := `{"type":"tool","tool_name":"Read","content":"![img](data:image/png;base64,` + payload + `)"}` + "\n"
 
 	var out bytes.Buffer
-	stats, err := Compress(strings.NewReader(input), &out)
+	stats, err := CompressWith(strings.NewReader(input), &out, Options{Mode: ModeLossless})
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestCompress_TruncatesLargeReadBodies(t *testing.T) {
 	input := `{"type":"tool","tool_name":"Read","tool_output":` + string(body) + `}` + "\n"
 
 	var out bytes.Buffer
-	stats, err := Compress(strings.NewReader(input), &out)
+	stats, err := CompressWith(strings.NewReader(input), &out, Options{Mode: ModeLossless})
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
 	}
@@ -149,7 +149,7 @@ func TestCompress_DedupsSystemReminders(t *testing.T) {
 	input := string(line1) + "\n" + string(line2) + "\n"
 
 	var out bytes.Buffer
-	stats, err := Compress(strings.NewReader(input), &out)
+	stats, err := CompressWith(strings.NewReader(input), &out, Options{Mode: ModeLossless})
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
 	}
@@ -181,7 +181,7 @@ func TestCompress_DedupsToolResults(t *testing.T) {
 	}, "\n") + "\n"
 
 	var out bytes.Buffer
-	stats, err := Compress(strings.NewReader(input), &out)
+	stats, err := CompressWith(strings.NewReader(input), &out, Options{Mode: ModeLossless})
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestCompress_SmallToolResultsNotDeduped(t *testing.T) {
 	}, "\n") + "\n"
 
 	var out bytes.Buffer
-	stats, err := Compress(strings.NewReader(input), &out)
+	stats, err := CompressWith(strings.NewReader(input), &out, Options{Mode: ModeLossless})
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestCompress_MalformedJSONLinesPassThrough(t *testing.T) {
 		`{"type":"user","content":"ok"}` + "\n"
 
 	var out bytes.Buffer
-	stats, err := Compress(strings.NewReader(input), &out)
+	stats, err := CompressWith(strings.NewReader(input), &out, Options{Mode: ModeLossless})
 	if err != nil {
 		t.Fatalf("Compress: %v", err)
 	}
@@ -230,6 +230,116 @@ func TestCompress_MalformedJSONLinesPassThrough(t *testing.T) {
 		t.Errorf("expected both entries emitted, got %d", stats.EntriesOut)
 	}
 }
+
+// ---- ConversationOnly mode (default) ----
+
+func TestConversationOnly_KeepsUserAndAssistantDropsToolsAndSystem(t *testing.T) {
+	userLine, _ := json.Marshal(map[string]any{"type": "user", "content": "fix the lint errors"})
+	asstLine, _ := json.Marshal(map[string]any{"type": "assistant", "content": "I'll run make lint first"})
+	toolInput, _ := json.Marshal(map[string]any{"command": "make lint", "description": "run lint"})
+	toolLine, _ := json.Marshal(map[string]any{"type": "tool", "tool_name": "Bash", "tool_input": string(toolInput)})
+	sysLine, _ := json.Marshal(map[string]any{"type": "system", "content": "reminder: commit soon"})
+	input := `{"metadata":{"v":"1"},"type":"header"}` + "\n" +
+		string(userLine) + "\n" + string(asstLine) + "\n" +
+		string(toolLine) + "\n" + string(sysLine) + "\n"
+
+	var out bytes.Buffer
+	stats, err := Compress(strings.NewReader(input), &out)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	// header + user + assistant + tool_mark (system dropped) = 4
+	if len(lines) != 4 {
+		t.Fatalf("expected 4 output lines, got %d: %v", len(lines), lines)
+	}
+	if stats.ToolsMarked != 1 {
+		t.Errorf("expected ToolsMarked=1, got %d", stats.ToolsMarked)
+	}
+	if stats.SystemDropped != 1 {
+		t.Errorf("expected SystemDropped=1, got %d", stats.SystemDropped)
+	}
+	if stats.EntriesOut != 4 {
+		t.Errorf("expected EntriesOut=4, got %d", stats.EntriesOut)
+	}
+
+	// Assistant passes through verbatim.
+	var asst entry
+	_ = json.Unmarshal([]byte(lines[2]), &asst)
+	if asst.Content != "I'll run make lint first" {
+		t.Errorf("assistant content not verbatim: %q", asst.Content)
+	}
+
+	// Tool entry becomes tool_mark with a brief.
+	var mark entry
+	_ = json.Unmarshal([]byte(lines[3]), &mark)
+	if mark.Type != "tool_mark" || mark.ToolName != "Bash" || mark.Brief != "make lint" {
+		t.Errorf("tool_mark mismatch: %+v", mark)
+	}
+}
+
+func TestConversationOnly_ReducesBytesSubstantially(t *testing.T) {
+	// Build a session where tool entries dominate (realistic).
+	var b strings.Builder
+	b.WriteString(`{"metadata":{"v":"1"},"type":"header"}` + "\n")
+	userLine, _ := json.Marshal(map[string]any{"type": "user", "content": "do the thing"})
+	b.Write(userLine)
+	b.WriteString("\n")
+	asstLine, _ := json.Marshal(map[string]any{"type": "assistant", "content": "working on it"})
+	b.Write(asstLine)
+	b.WriteString("\n")
+	// 20 tool entries, each with ~1KB of tool_input (plausible for Agent/Edit calls).
+	bigInput, _ := json.Marshal(map[string]any{"command": strings.Repeat("echo x; ", 200)})
+	for i := 0; i < 20; i++ {
+		toolLine, _ := json.Marshal(map[string]any{
+			"type":       "tool",
+			"tool_name":  "Bash",
+			"tool_input": string(bigInput),
+		})
+		b.Write(toolLine)
+		b.WriteString("\n")
+	}
+
+	var out bytes.Buffer
+	stats, err := Compress(strings.NewReader(b.String()), &out)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	_, pct := stats.Reduction()
+	if pct < 80 {
+		t.Errorf("expected >80%% reduction in ConversationOnly mode, got %.1f%%", pct)
+	}
+	if stats.ToolsMarked != 20 {
+		t.Errorf("expected ToolsMarked=20, got %d", stats.ToolsMarked)
+	}
+}
+
+func TestBriefForTool(t *testing.T) {
+	cases := []struct {
+		name       string
+		tool       string
+		input      string
+		wantSubstr string
+	}{
+		{"bash command", "Bash", `{"command":"make lint","description":"x"}`, "make lint"},
+		{"read file_path", "Read", `{"file_path":"/a/b.go","limit":50}`, "/a/b.go"},
+		{"grep pattern", "Grep", `{"pattern":"foo.*bar","path":"."}`, "foo.*bar"},
+		{"agent description", "Agent", `{"description":"fix bugs","prompt":"long..."}`, "fix bugs"},
+		{"unknown tool falls back to first string", "WeirdTool", `{"x":"hello","y":1}`, "hello"},
+		{"truncates long briefs", "Bash", `{"command":"` + strings.Repeat("x", 200) + `"}`, "…"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := briefForTool(c.tool, c.input)
+			if !strings.Contains(got, c.wantSubstr) {
+				t.Errorf("got %q, want substring %q", got, c.wantSubstr)
+			}
+		})
+	}
+}
+
+// ---- Stats helpers ----
 
 func TestStats_Reduction(t *testing.T) {
 	s := Stats{BytesIn: 1000, BytesOut: 250}

@@ -30,6 +30,7 @@ The original raw.jsonl is never modified — this is a read-only transform.`,
 func init() {
 	sessionTokenOptimizeCmd.Flags().StringP("out", "o", "", "write compressed jsonl to this file (default: stdout)")
 	sessionTokenOptimizeCmd.Flags().Bool("stats", false, "emit detailed per-transform counts on stderr")
+	sessionTokenOptimizeCmd.Flags().String("mode", "conversation", "compression mode: conversation (default, keeps user+assistant+tool_marks) or lossless (content-preserving)")
 	sessionCmd.AddCommand(sessionTokenOptimizeCmd)
 }
 
@@ -68,7 +69,18 @@ func runSessionTokenOptimize(cmd *cobra.Command, args []string) error {
 		out = f
 	}
 
-	stats, err := tokenopt.Compress(in, out)
+	modeStr, _ := cmd.Flags().GetString("mode")
+	var mode tokenopt.Mode
+	switch modeStr {
+	case "conversation":
+		mode = tokenopt.ModeConversationOnly
+	case "lossless":
+		mode = tokenopt.ModeLossless
+	default:
+		return fmt.Errorf("invalid --mode %q (expected conversation or lossless)", modeStr)
+	}
+
+	stats, err := tokenopt.CompressWith(in, out, tokenopt.Options{Mode: mode})
 	if err != nil {
 		return fmt.Errorf("compress: %w", err)
 	}
@@ -76,13 +88,14 @@ func runSessionTokenOptimize(cmd *cobra.Command, args []string) error {
 	wantStats, _ := cmd.Flags().GetBool("stats")
 	saved, pct := stats.Reduction()
 	if wantStats {
-		fmt.Fprintf(os.Stderr, "session=%s entries=%d bytes_in=%d bytes_out=%d saved=%d reduction_pct=%.1f ansi_stripped=%d progress_collapsed=%d images_elided=%d large_reads_elided=%d reminders_deduped=%d tool_results_refd=%d\n",
-			sessionName, stats.EntriesIn, stats.BytesIn, stats.BytesOut, saved, pct,
+		fmt.Fprintf(os.Stderr, "session=%s mode=%s entries_in=%d entries_out=%d bytes_in=%d bytes_out=%d saved=%d reduction_pct=%.1f tools_marked=%d system_dropped=%d ansi_stripped=%d progress_collapsed=%d images_elided=%d large_reads_elided=%d reminders_deduped=%d tool_results_refd=%d\n",
+			sessionName, modeStr, stats.EntriesIn, stats.EntriesOut, stats.BytesIn, stats.BytesOut, saved, pct,
+			stats.ToolsMarked, stats.SystemDropped,
 			stats.ANSIStripped, stats.ProgressCollapsed, stats.ImagesElided,
 			stats.LargeReadsElided, stats.RemindersDeduped, stats.ToolResultsRefd)
 	} else {
-		fmt.Fprintf(os.Stderr, "token_optimize: %d entries, %d→%d bytes (%.1f%% saved)\n",
-			stats.EntriesIn, stats.BytesIn, stats.BytesOut, pct)
+		fmt.Fprintf(os.Stderr, "token_optimize: mode=%s %d→%d entries, %d→%d bytes (%.1f%% saved)\n",
+			modeStr, stats.EntriesIn, stats.EntriesOut, stats.BytesIn, stats.BytesOut, pct)
 	}
 	return nil
 }
