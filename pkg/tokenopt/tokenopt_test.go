@@ -3,6 +3,7 @@ package tokenopt
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -336,6 +337,122 @@ func TestBriefForTool(t *testing.T) {
 				t.Errorf("got %q, want substring %q", got, c.wantSubstr)
 			}
 		})
+	}
+}
+
+// ---- Regression tests for review fixes ----
+
+// TestCompress_HandlesOversizedLine guards against the previous 8 MiB
+// bufio.Scanner token limit. A single entry > 8 MiB would previously have
+// failed the whole stream; now it streams through via bufio.Reader.ReadBytes.
+func TestCompress_HandlesOversizedLine(t *testing.T) {
+	bigContent := strings.Repeat("x", 10*1024*1024) // 10 MiB
+	entryJSON, _ := json.Marshal(map[string]any{"type": "assistant", "content": bigContent})
+	input := string(entryJSON) + "\n"
+
+	var out bytes.Buffer
+	stats, err := Compress(strings.NewReader(input), &out)
+	if err != nil {
+		t.Fatalf("Compress on 10 MiB line failed: %v", err)
+	}
+	if stats.EntriesIn != 1 || stats.EntriesOut != 1 {
+		t.Errorf("expected 1/1 entries, got in=%d out=%d", stats.EntriesIn, stats.EntriesOut)
+	}
+}
+
+// TestCompress_ReturnsFlushError catches a bug where deferred bw.Flush()
+// silently swallowed write failures and made a truncated optimized file look
+// like a success.
+type failWriter struct{}
+
+func (failWriter) Write(p []byte) (int, error) { return 0, fmt.Errorf("disk full") }
+
+func TestCompress_ReturnsFlushError(t *testing.T) {
+	// Write enough data that bufio.Writer won't flush until the final call.
+	var b strings.Builder
+	for i := 0; i < 10; i++ {
+		line, _ := json.Marshal(map[string]any{"type": "assistant", "content": strings.Repeat("y", 100)})
+		b.Write(line)
+		b.WriteString("\n")
+	}
+	_, err := Compress(strings.NewReader(b.String()), failWriter{})
+	if err == nil {
+		t.Fatal("expected error when writer fails, got nil")
+	}
+}
+
+// TestCompressLossless_PreservesUnknownTopLevelFields locks in the contract
+// that ModeLossless is actually lossless. Previously, re-marshalling through
+// the fixed entry struct silently dropped keys (like "seq") not on the struct.
+func TestCompressLossless_PreservesUnknownTopLevelFields(t *testing.T) {
+	// An assistant entry with a "seq" field (written by cmd/ox/agent_session).
+	raw, _ := json.Marshal(map[string]any{
+		"type":    "assistant",
+		"content": "hello \x1b[31mred\x1b[0m world", // force a content mutation so lossless re-encodes
+		"seq":     42,
+		"extra":   map[string]any{"nested": true},
+	})
+	input := string(raw) + "\n"
+
+	var out bytes.Buffer
+	_, err := CompressWith(strings.NewReader(input), &out, Options{Mode: ModeLossless})
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(out.Bytes()), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := got["seq"]; !ok {
+		t.Errorf("lossless dropped unknown top-level field 'seq'; got: %v", got)
+	}
+	if _, ok := got["extra"]; !ok {
+		t.Errorf("lossless dropped unknown top-level field 'extra'; got: %v", got)
+	}
+	// Content was mutated (ANSI stripped), so that field should reflect change.
+	if s, _ := got["content"].(string); strings.Contains(s, "\x1b") {
+		t.Errorf("expected ANSI stripped from content, got: %q", s)
+	}
+}
+
+// TestBriefForTool_DeterministicForUnknownTool verifies unknown-tool briefs
+// don't flip based on Go's randomized map iteration.
+func TestBriefForTool_DeterministicForUnknownTool(t *testing.T) {
+	input := `{"z_last":"zeta","a_first":"alpha","m_mid":"mu"}`
+	// Many invocations — same input must produce same brief every time.
+	first := briefForTool("UnknownTool", input)
+	for i := 0; i < 50; i++ {
+		got := briefForTool("UnknownTool", input)
+		if got != first {
+			t.Fatalf("non-deterministic: iter %d got %q, first was %q", i, got, first)
+		}
+	}
+	// Sorted-key order means "a_first" wins.
+	if first != "alpha" {
+		t.Errorf("expected sorted-key 'alpha' to be selected, got %q", first)
+	}
+}
+
+// TestTruncateLargeBody_ClampsHugeKeepLines guards against a panic when a
+// caller provides a LargeReadKeepLines larger than half the body.
+func TestTruncateLargeBody_ClampsHugeKeepLines(t *testing.T) {
+	// 50 lines, Options.LargeReadKeepLines = 1000 (absurd).
+	lines := make([]string, 50)
+	for i := range lines {
+		lines[i] = "row"
+	}
+	body, _ := json.Marshal(strings.Join(lines, "\n"))
+	input := `{"type":"tool","tool_name":"Read","tool_output":` + string(body) + `}` + "\n"
+
+	var out bytes.Buffer
+	// This MUST NOT panic.
+	_, err := CompressWith(strings.NewReader(input), &out, Options{
+		Mode:               ModeLossless,
+		LargeReadMaxLines:  10,
+		LargeReadKeepLines: 1000,
+	})
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
 	}
 }
 

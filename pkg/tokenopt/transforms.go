@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -49,7 +50,7 @@ func (s *state) transform(line []byte, seq int, stats *Stats) ([]byte, bool, err
 	if s.opts.Mode == ModeConversationOnly {
 		return s.transformConversationOnly(&e, line, stats)
 	}
-	return s.transformLossless(&e, seq, stats)
+	return s.transformLossless(line, &e, seq, stats)
 }
 
 // transformConversationOnly keeps assistant turns verbatim, replaces tool
@@ -81,10 +82,17 @@ func (s *state) transformConversationOnly(e *entry, line []byte, stats *Stats) (
 	}
 }
 
-// transformLossless is the original content-preserving pipeline.
-func (s *state) transformLossless(e *entry, seq int, stats *Stats) ([]byte, bool, error) {
+// transformLossless is the content-preserving pipeline. Preserves unknown
+// top-level fields on the entry by round-tripping through map[string]any,
+// mutating only the specific fields we know how to transform.
+func (s *state) transformLossless(line []byte, e *entry, seq int, stats *Stats) ([]byte, bool, error) {
+	// Mutate local copies on the typed struct so we can reuse the existing
+	// transform helpers, then write the mutations back into a generic map
+	// that preserves any top-level keys we don't know about (e.g. "seq",
+	// future schema extensions).
+	origContent := e.Content
+	origToolOutput := e.ToolOutput
 
-	// Normalize text fields in-place.
 	if e.Content != "" {
 		e.Content, stats.ANSIStripped, stats.ProgressCollapsed = s.normalizeText(e.Content, stats.ANSIStripped, stats.ProgressCollapsed)
 	}
@@ -92,7 +100,6 @@ func (s *state) transformLossless(e *entry, seq int, stats *Stats) ([]byte, bool
 		e.ToolOutput, stats.ANSIStripped, stats.ProgressCollapsed = s.normalizeText(e.ToolOutput, stats.ANSIStripped, stats.ProgressCollapsed)
 	}
 
-	// Elide base64 image payloads anywhere they appear (content or tool_output).
 	if e.Content != "" {
 		before := e.Content
 		e.Content = s.elideBase64Images(e.Content)
@@ -108,17 +115,14 @@ func (s *state) transformLossless(e *entry, seq int, stats *Stats) ([]byte, bool
 		}
 	}
 
-	// System-reminder dedup: replace repeated blocks with a compact ref.
 	if e.Content != "" && strings.Contains(e.Content, "<system-reminder>") {
 		newContent, deduped := s.dedupReminders(e.Content, seq)
 		e.Content = newContent
 		stats.RemindersDeduped += deduped
 	}
 
-	// Read tool_result body truncation. Applies to either ToolOutput (newer)
-	// or Content (older format where Read results landed in content).
 	if e.ToolName == "Read" {
-		if e.ToolOutput != "" && len(e.ToolOutput) > 0 {
+		if e.ToolOutput != "" {
 			if truncated, ok := s.truncateLargeBody(e.ToolOutput, "Read"); ok {
 				e.ToolOutput = truncated
 				stats.LargeReadsElided++
@@ -131,7 +135,9 @@ func (s *state) transformLossless(e *entry, seq int, stats *Stats) ([]byte, bool
 		}
 	}
 
-	// Tool-result content dedup via bounded LRU.
+	// Tool-result content dedup via bounded LRU. When a hit occurs we replace
+	// the entry wholesale with a compact tool_ref, so unknown-field
+	// preservation doesn't apply (the output shape changes by design).
 	if body := toolResultBody(e); body != "" && len(body) >= s.opts.ToolResultMinBytes {
 		h := hashContent([]byte(body))
 		if firstSeq, hit := s.toolResults.get(h); hit {
@@ -141,7 +147,35 @@ func (s *state) transformLossless(e *entry, seq int, stats *Stats) ([]byte, bool
 		s.toolResults.put(h, seq)
 	}
 
-	out, err := json.Marshal(e)
+	// No mutations? Return the original bytes verbatim — avoids the tiny
+	// JSON round-trip diff (key reordering, whitespace) that otherwise noise-
+	// inflates stats.BytesOut.
+	if e.Content == origContent && e.ToolOutput == origToolOutput {
+		return line, true, nil
+	}
+
+	// Decode the original line into a generic map, overwrite only the fields
+	// we mutated, re-encode. Keys we didn't touch (including unknown ones
+	// like "seq" or future schema additions) survive untouched.
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(line, &raw); err != nil {
+		// Malformed after earlier successful struct-decode shouldn't happen,
+		// but if it does, fall through to struct-based re-encode.
+		out, err := json.Marshal(e)
+		if err != nil {
+			return nil, false, fmt.Errorf("marshal: %w", err)
+		}
+		return out, true, nil
+	}
+	if e.Content != origContent {
+		b, _ := json.Marshal(e.Content)
+		raw["content"] = b
+	}
+	if e.ToolOutput != origToolOutput {
+		b, _ := json.Marshal(e.ToolOutput)
+		raw["tool_output"] = b
+	}
+	out, err := json.Marshal(raw)
 	if err != nil {
 		return nil, false, fmt.Errorf("marshal: %w", err)
 	}
@@ -219,6 +253,18 @@ func (s *state) truncateLargeBody(body, tool string) (string, bool) {
 		return body, false
 	}
 	keep := s.opts.LargeReadKeepLines
+	if keep < 1 {
+		return body, false
+	}
+	// Clamp: Options is public, and a caller-provided LargeReadKeepLines
+	// larger than half the body would cause head+tail to overlap and produce
+	// a negative elided count. Cap it at len(lines)/2 to degrade gracefully.
+	if maxKeep := len(lines) / 2; keep > maxKeep {
+		if maxKeep < 1 {
+			return body, false
+		}
+		keep = maxKeep
+	}
 	head := lines[:keep]
 	tail := lines[len(lines)-keep:]
 	elided := len(lines) - 2*keep
@@ -270,9 +316,18 @@ func briefForTool(toolName, toolInput string) string {
 		}
 	}
 
-	// Unknown tool: pick the first string field, or fall back to the raw input.
-	for _, v := range raw {
+	// Unknown tool: pick the first string field in sorted-key order.
+	// Sorting makes the brief deterministic; Go map iteration is randomized
+	// and this package advertises deterministic output.
+	keys := make([]string, 0, len(raw))
+	for k, v := range raw {
 		if s, ok := v.(string); ok && s != "" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if s, ok := raw[k].(string); ok {
 			return truncate(s, maxBrief)
 		}
 	}

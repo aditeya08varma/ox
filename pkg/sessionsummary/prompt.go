@@ -158,6 +158,16 @@ The score_reason should be a single sentence explaining the rating.
 // avoiding a server-side API call.
 // If ledgerSessionDir is non-empty, a step is added instructing the agent to push the
 // summary to the ledger via `ox session push-summary`.
+//
+// The prompt describes both possible on-disk shapes the agent may encounter:
+//   - raw.jsonl: every entry captured during the session (user, assistant, tool,
+//     system, header).
+//   - summary-input jsonl (produced by pkg/tokenopt in ConversationOnly mode):
+//     user + assistant + header kept verbatim, tool entries collapsed to
+//     `{type:"tool_mark", tool_name, brief}`, system entries dropped. May have
+//     fewer lines than len(entries).
+//
+// Callers pick the path; the prompt stays agnostic.
 func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) string {
 	var sb strings.Builder
 
@@ -168,11 +178,17 @@ func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) strin
 	sb.WriteString(SummaryPromptGuidelines)
 	sb.WriteString("\n")
 
-	// reference the raw session file on disk instead of embedding all entries
+	// reference the session file on disk instead of embedding all entries
 	sb.WriteString("## Session to Analyze\n\n")
 	fmt.Fprintf(&sb, "Read the session recording at: `%s`\n\n", rawPath)
-	fmt.Fprintf(&sb, "The file is JSONL format with %d entries. Each line is a JSON object with `type`, `content`, and optional `tool_name` fields.\n", len(entries))
-	sb.WriteString("Focus on user/assistant dialog and write/edit tool calls. Skip read/glob/grep tool entries — they are exploratory noise.\n\n")
+	sb.WriteString("The file is JSONL format — one JSON object per line. Possible entry shapes:\n\n")
+	sb.WriteString("- `{type:\"header\", metadata:{...}}` — session metadata, one per file\n")
+	sb.WriteString("- `{type:\"user\", content:\"...\", timestamp:\"...\"}` — human input\n")
+	sb.WriteString("- `{type:\"assistant\", content:\"...\", timestamp:\"...\"}` — AI response prose\n")
+	sb.WriteString("- `{type:\"tool\", tool_name:\"...\", tool_input:\"...\", tool_output:\"...\"}` — full tool invocation (only in unoptimized files)\n")
+	sb.WriteString("- `{type:\"tool_mark\", tool_name:\"...\", brief:\"...\"}` — compact tool marker (in summary-input files: carries the tool name + a short gist of what was invoked; full tool I/O is not preserved)\n")
+	sb.WriteString("- `{type:\"system\", content:\"...\"}` — system reminder (may be absent in summary-input files; they are dropped by the pre-summarize pass)\n\n")
+	sb.WriteString("Focus on user/assistant dialog to recover the session narrative; use tool and tool_mark entries as scaffolding for what the agent did between messages. Line count may be smaller than the original entry_count if the file has been pre-processed.\n\n")
 
 	sb.WriteString("## Instructions\n\n")
 	sb.WriteString("1. Read the session recording file at the path above\n")
@@ -186,6 +202,12 @@ func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) strin
 		fmt.Fprintf(&sb, "6. Push summary to ledger by running: `ox session push-summary --file <path-to-summary-file> --session-dir %s`\n", ledgerSessionDir)
 		sb.WriteString("   Replace `<path-to-summary-file>` with the actual path where you saved the summary in step 5\n")
 	}
+
+	// Suppress unused-param warning for `entries` without changing the API;
+	// counting is no longer injected into the prompt because summary-input
+	// files have fewer entries than len(entries) and stating a wrong number
+	// misleads the summarizer.
+	_ = entries
 
 	return sb.String()
 }

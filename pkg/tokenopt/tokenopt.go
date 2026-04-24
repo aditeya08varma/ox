@@ -169,39 +169,57 @@ func CompressWith(r io.Reader, w io.Writer, opts Options) (Stats, error) {
 	var stats Stats
 	state := newState(opts)
 
-	scanner := bufio.NewScanner(r)
-	// Session entries can carry large tool_result bodies (~MB). Raise the
-	// per-line buffer ceiling to 8MB — still bounded, still streaming.
-	scanner.Buffer(make([]byte, 64*1024), 8*1024*1024)
-
+	// bufio.Reader.ReadBytes('\n') instead of bufio.Scanner — scanner has a
+	// token size ceiling (default 64KB, raised at most to some limit) that
+	// would fail the whole stream on a single oversized entry. Oversized
+	// entries (large Read bodies, base64 images) are exactly what this
+	// package is designed to compress, so we must tolerate them at input.
+	br := bufio.NewReader(r)
 	bw := bufio.NewWriter(w)
-	defer bw.Flush()
 
 	seq := 0
-	for scanner.Scan() {
-		seq++
-		line := scanner.Bytes()
-		stats.EntriesIn++
-		stats.BytesIn += int64(len(line)) + 1 // +1 for newline
+	for {
+		line, err := br.ReadBytes('\n')
+		if len(line) > 0 {
+			seq++
+			// Strip the trailing newline from the entry we feed to transform,
+			// but keep byte accounting honest (BytesIn/BytesOut include it).
+			hadNL := line[len(line)-1] == '\n'
+			entryBytes := line
+			if hadNL {
+				entryBytes = line[:len(line)-1]
+			}
+			stats.EntriesIn++
+			stats.BytesIn += int64(len(line))
 
-		out, emit, err := state.transform(line, seq, &stats)
+			out, emit, terr := state.transform(entryBytes, seq, &stats)
+			if terr != nil {
+				return stats, fmt.Errorf("entry %d: %w", seq, terr)
+			}
+			if emit {
+				if _, werr := bw.Write(out); werr != nil {
+					return stats, werr
+				}
+				if _, werr := bw.Write([]byte{'\n'}); werr != nil {
+					return stats, werr
+				}
+				stats.EntriesOut++
+				stats.BytesOut += int64(len(out)) + 1
+			}
+		}
 		if err != nil {
-			return stats, fmt.Errorf("entry %d: %w", seq, err)
-		}
-		if !emit {
-			continue // dropped entry (ModeConversationOnly system drops)
-		}
-		if _, err := bw.Write(out); err != nil {
+			if err == io.EOF {
+				break
+			}
 			return stats, err
 		}
-		if _, err := bw.Write([]byte{'\n'}); err != nil {
-			return stats, err
-		}
-		stats.EntriesOut++
-		stats.BytesOut += int64(len(out)) + 1
 	}
-	if err := scanner.Err(); err != nil {
-		return stats, err
+
+	// Propagate any buffered-write failure. A deferred bw.Flush() would
+	// silently swallow this and let callers believe the compressed file
+	// was fully written when it wasn't.
+	if err := bw.Flush(); err != nil {
+		return stats, fmt.Errorf("flush output: %w", err)
 	}
 	return stats, nil
 }

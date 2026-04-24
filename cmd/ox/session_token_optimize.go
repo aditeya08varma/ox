@@ -61,6 +61,14 @@ func runSessionTokenOptimize(cmd *cobra.Command, args []string) error {
 	var out io.Writer = os.Stdout
 	outPath, _ := cmd.Flags().GetString("out")
 	if outPath != "" {
+		// Refuse to let --out clobber the source raw.jsonl. os.Create truncates
+		// the target before the compressor finishes reading, which would yield
+		// an empty/corrupt file and destroy the session.
+		if rawAbs, err1 := filepath.Abs(rawPath); err1 == nil {
+			if outAbs, err2 := filepath.Abs(outPath); err2 == nil && rawAbs == outAbs {
+				return fmt.Errorf("--out must differ from the session raw.jsonl path (%s)", rawPath)
+			}
+		}
 		f, err := os.Create(outPath)
 		if err != nil {
 			return fmt.Errorf("create output: %w", err)
