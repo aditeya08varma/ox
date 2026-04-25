@@ -222,6 +222,53 @@ func syncRegeneratedSession(projectRoot, sessionPath, sessionName string) error 
 	return nil
 }
 
+// needsHydration reports whether the file at rawPath is missing OR is an
+// LFS pointer stub rather than the real session bytes. Both cases require
+// a Batch API fetch before the file can be read as session content.
+//
+// The os.Stat-only check this replaced silently passed for LFS stubs:
+// pointer files exist on disk (~140 bytes of "version https://..." text)
+// so existence-only gating skipped the download and the next
+// ReadSessionFromPath failed parsing pointer bytes as JSONL. This was
+// the bug that blocked Phase 2 of the 71-session richness regen.
+func needsHydration(rawPath string) bool {
+	if _, err := os.Stat(rawPath); err != nil {
+		return true
+	}
+	return lfs.IsPointerFile(rawPath)
+}
+
+// applyValidationGates runs ValidateSummaryContent then ValidateSummaryRichness.
+// On any failure it REPLACES the response with a failure-marker stub
+// (ScoreReason set, so internal/session.IsStubSummary recognizes it as
+// a deliberate failure artifact that DOES get persisted, distinct from a
+// silent LocalSummary stub which doesn't).
+//
+// This mirrors the daemon's session-finalize path so regenerate produces
+// the same teammate-visible failure semantics — no silent regression to
+// thin summaries when the LLM under-fills the prompt schema.
+//
+// Returns the (possibly replaced) response and a short human-readable
+// message ("" when validation passed). The caller decides what to do
+// with the message — log, print, or ignore.
+func applyValidationGates(resp *sessionsummary.SummarizeResponse, entryCount int) (*sessionsummary.SummarizeResponse, string) {
+	if valErr := sessionsummary.ValidateSummaryContent(resp); valErr != nil {
+		return &sessionsummary.SummarizeResponse{
+			Summary:      fmt.Sprintf("Summary failed content validation: %v", valErr),
+			QualityScore: 0.0,
+			ScoreReason:  fmt.Sprintf("content validation failed: %v", valErr),
+		}, fmt.Sprintf("content validation failed: %v", valErr)
+	}
+	if richErr := sessionsummary.ValidateSummaryRichness(resp, entryCount); richErr != nil {
+		return &sessionsummary.SummarizeResponse{
+			Summary:      fmt.Sprintf("Summary failed richness validation: %v", richErr),
+			QualityScore: 0.0,
+			ScoreReason:  fmt.Sprintf("richness validation failed: %v", richErr),
+		}, fmt.Sprintf("richness validation failed: %v", richErr)
+	}
+	return resp, ""
+}
+
 // --- Summary regeneration (--summary) ---
 
 // regenerateSingleSessionSummary re-generates summary.json for a session by
@@ -249,8 +296,9 @@ func regenerateSingleSessionSummary(nameArg string) error {
 	sessionPath := filepath.Join(sessionsDir, sessionName)
 	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
 
-	// ensure raw.jsonl is available locally (download from LFS if stub)
-	if _, statErr := os.Stat(rawPath); statErr != nil {
+	// ensure raw.jsonl is hydrated locally — missing OR an LFS stub means
+	// we need to fetch the real bytes via the Batch API.
+	if needsHydration(rawPath) {
 		meta, metaErr := lfs.ReadSessionMeta(sessionPath)
 		if metaErr != nil {
 			return fmt.Errorf("read meta.json for %s: %w", sessionName, metaErr)
@@ -269,9 +317,20 @@ func regenerateSingleSessionSummary(nameArg string) error {
 		return fmt.Errorf("session %s has no entries", sessionName)
 	}
 
+	// Mirror the live `ox session stop` path: tokenopt-compress raw.jsonl
+	// into the ledger cache before building the prompt. ConversationOnly
+	// keeps user+assistant turns verbatim, compacts tool entries, drops
+	// system entries — typically 50-80% smaller. Without this, large
+	// sessions (>100k tokens) can blow Claude's context on regenerate.
+	// Falls back to rawPath on any failure (helper returns "").
+	summaryInputPath := writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName)
+	if summaryInputPath == "" {
+		summaryInputPath = rawPath
+	}
+
 	// build summary prompt using shared template
 	entries := sessionsummary.EntriesFromRaw(rawSession.Entries)
-	prompt := sessionsummary.BuildSummaryPrompt(entries, rawPath, "")
+	prompt := sessionsummary.BuildSummaryPrompt(entries, summaryInputPath, "")
 
 	cli.PrintInfo(fmt.Sprintf("Generating summary for %s...", sessionName))
 
@@ -284,6 +343,13 @@ func regenerateSingleSessionSummary(nameArg string) error {
 	if err != nil {
 		return fmt.Errorf("parse summary from claude output: %w", err)
 	}
+
+	// Mirror the daemon path's content + richness gates.
+	gated, gateMsg := applyValidationGates(summaryResp, len(rawSession.Entries))
+	if gateMsg != "" {
+		cli.PrintWarning(fmt.Sprintf("%s for %s", gateMsg, sessionName))
+	}
+	summaryResp = gated
 
 	// enrich with computed fields (files_changed, chapters) before writing
 	session.EnrichSummary(rawSession, summaryResp)
@@ -511,9 +577,9 @@ func regenerateSessionRedact(projectRoot, ledgerPath, sessionsDir, nameArg strin
 		return nil, fmt.Errorf("read meta.json for %s: %w", sessionName, err)
 	}
 
-	// ensure raw.jsonl is available locally
+	// ensure raw.jsonl is hydrated locally
 	rawPath := filepath.Join(sessionPath, ledgerFileRaw)
-	if _, err := os.Stat(rawPath); err != nil {
+	if needsHydration(rawPath) {
 		if err := downloadFileFromLFS(projectRoot, sessionPath, meta, ledgerFileRaw); err != nil {
 			return nil, fmt.Errorf("download %s for %s: %w", ledgerFileRaw, sessionName, err)
 		}
