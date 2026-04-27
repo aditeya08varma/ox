@@ -14,23 +14,36 @@ import (
 // WriteSessionMeta also writes LFS pointer files (standard git-lfs naming)
 // to replace content files, preventing LFS garbage collection.
 type SessionMeta struct {
-	Version             string             `json:"version"` // "1.0"
-	SessionName         string             `json:"session_name"`
-	Username            string             `json:"username"` // privacy-safe display name — via identity.AttributionDisplayName(). Shared in ledger. NOT an email.
-	UserID              string             `json:"user_id,omitempty"`
-	AgentID             string             `json:"agent_id"`
-	AgentType           string             `json:"agent_type"` // "claude-code", "cursor", etc.
-	Model               string             `json:"model,omitempty"`
-	Title               string             `json:"title,omitempty"`
-	CreatedAt           time.Time          `json:"created_at"`
-	EntryCount          int                `json:"entry_count,omitempty"`
-	Summary             string             `json:"summary,omitempty"`
-	StopReason          string             `json:"stop_reason,omitempty"` // how session ended: "stopped", "aborted", "recovered", ""
-	RepoID              string             `json:"repo_id,omitempty"`
-	SageoxScore         *float64           `json:"sageox_score,omitempty"`          // agent's self-reported contribution score (0.0-1.0)
-	SageoxScoreCategory string             `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
-	SageoxScoreReason   string             `json:"sageox_score_reason,omitempty"`   // detailed explanation of SageOx influence
-	Files               map[string]FileRef `json:"files"`                           // OID manifest: filename -> ref
+	Version             string    `json:"version"` // "1.0"
+	SessionName         string    `json:"session_name"`
+	Username            string    `json:"username"` // privacy-safe display name — via identity.AttributionDisplayName(). Shared in ledger. NOT an email.
+	UserID              string    `json:"user_id,omitempty"`
+	AgentID             string    `json:"agent_id"`
+	AgentType           string    `json:"agent_type"` // "claude-code", "cursor", etc.
+	Model               string    `json:"model,omitempty"`
+	Title               string    `json:"title,omitempty"`
+	CreatedAt           time.Time `json:"created_at"`
+	EntryCount          int       `json:"entry_count,omitempty"`
+	Summary             string    `json:"summary,omitempty"`
+	StopReason          string    `json:"stop_reason,omitempty"` // how session ended: "stopped", "aborted", "recovered", ""
+	RepoID              string    `json:"repo_id,omitempty"`
+	SageoxScore         *float64  `json:"sageox_score,omitempty"`          // agent's self-reported contribution score (0.0-1.0)
+	SageoxScoreCategory string    `json:"sageox_score_category,omitempty"` // named category: none, minor, moderate, significant, critical
+	SageoxScoreReason   string    `json:"sageox_score_reason,omitempty"`   // detailed explanation of SageOx influence
+
+	// SummaryStatus and ValidationError mirror the same-named fields on
+	// pkg/sessionsummary.SummarizeResponse. SummaryStatus is the
+	// structured signal — readers should prefer it over sniffing
+	// Summary for sentinel error strings. ValidationError is ops-only;
+	// it MUST NEVER be rendered as a user-visible session title or
+	// summary. See ox-qqka for the leak this prevents.
+	//
+	// Both are omitempty so older readers and older on-disk meta.json
+	// files keep working unchanged.
+	SummaryStatus   string `json:"summary_status,omitempty"`
+	ValidationError string `json:"validation_error,omitempty"`
+
+	Files map[string]FileRef `json:"files"` // OID manifest: filename -> ref
 }
 
 // FileRef identifies a session content file by storage backend, OID
@@ -168,6 +181,22 @@ func (b *SessionMetaBuilder) SageoxScore(score float64, category, reason string)
 	return b
 }
 
+// SummaryStatus stamps the lifecycle status (ok / pending /
+// failed_validation / unrecoverable). Use the SummaryStatus* constants
+// from pkg/sessionsummary, mirrored here.
+func (b *SessionMetaBuilder) SummaryStatus(status string) *SessionMetaBuilder {
+	b.meta.SummaryStatus = status
+	return b
+}
+
+// ValidationError records the ops-facing validator diagnostic. Callers
+// must never put this string into Title or Summary — it is engineer-
+// visible only. See ox-qqka for the leak this prevents.
+func (b *SessionMetaBuilder) ValidationError(msg string) *SessionMetaBuilder {
+	b.meta.ValidationError = msg
+	return b
+}
+
 // Build returns the constructed SessionMeta.
 func (b *SessionMetaBuilder) Build() *SessionMeta {
 	return &b.meta
@@ -207,6 +236,15 @@ func WriteSessionMetaOnly(sessionPath string, meta *SessionMeta) error {
 		return fmt.Errorf("nil session meta")
 	}
 
+	// Boundary guard: refuse to persist a meta.json whose user-visible
+	// Title or Summary carries a known validator/error string. This is
+	// the cross-layer invariant from ox-4ggw — even if a producer-side
+	// fix regresses (ox-qqka, ox-wstd), the writer rejects the leak so
+	// it never reaches consumers.
+	if err := meta.Validate(); err != nil {
+		return fmt.Errorf("session meta failed invariant: %w", err)
+	}
+
 	data, err := json.MarshalIndent(meta, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal session meta: %w", err)
@@ -234,7 +272,13 @@ func ReadSessionMeta(sessionPath string) (*SessionMeta, error) {
 	data, err := os.ReadFile(metaPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("meta.json not found in %s", sessionPath)
+			// Wrap with %w so callers can use errors.Is(err, fs.ErrNotExist)
+			// or os.IsNotExist(err). Pre-fix this returned a plain
+			// fmt.Errorf("meta.json not found...") which broke the
+			// IsNotExist check at every caller (e.g. the repair tool's
+			// "skip unfinished sessions" path silently flagged them as
+			// errors instead).
+			return nil, fmt.Errorf("meta.json not found in %s: %w", sessionPath, err)
 		}
 		return nil, fmt.Errorf("read session meta: %w", err)
 	}
@@ -417,6 +461,18 @@ func UpdateMetaSummary(sessionPath, title string) error {
 	}
 	meta.Title = title
 	meta.Summary = title
+
+	// If a non-empty title is being written, the session HAS a successful
+	// summary now — stamp SummaryStatus=ok and clear any stale failure
+	// signals from a previous failed attempt (ox-wstd: sticky tombstones).
+	// We hard-code "ok" here rather than importing pkg/sessionsummary
+	// because internal/lfs is below it in the dep graph; both sides agree
+	// on the literal "ok".
+	if title != "" {
+		meta.SummaryStatus = "ok"
+		meta.ValidationError = ""
+	}
+
 	return WriteSessionMeta(sessionPath, meta)
 }
 

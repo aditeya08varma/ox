@@ -718,14 +718,31 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 			"output_len", len(llmOutput),
 			"output_preview", preview,
 		)
+		// Failure stub — see ox-qqka. User-visible Title and Summary
+		// stay empty so the UI never displays the diagnostic as if it
+		// were the session's title. The ops-facing message moves into
+		// ValidationError; SummaryStatus communicates the lifecycle
+		// state explicitly so consumers don't have to sniff sentinel
+		// strings. ScoreReason still carries the diagnostic for
+		// existing log-based tooling.
 		summaryResp = &session.SummarizeResponse{
-			Summary:      "Summary generation failed: LLM output was not valid JSON",
-			QualityScore: 0.0,
-			ScoreReason:  "unparsable LLM output",
+			QualityScore:    0.0,
+			ScoreReason:     "unparsable LLM output",
+			SummaryStatus:   sessionsummary.SummaryStatusFailedValidation,
+			ValidationError: fmt.Sprintf("LLM output was not valid JSON: %v", parseErr),
 		}
 		scored = false
 	} else {
 		summaryResp = parsed
+		// SummaryStatus and ValidationError are daemon-owned lifecycle
+		// fields. The model could echo stale values in its output (a
+		// previous failed_validation status, a leftover diagnostic, or
+		// adversarial input). Discard whatever the parse step picked
+		// up — the validator pipeline below is the only authority on
+		// these fields. Stamp OK only if all subsequent validators pass
+		// (see the `if scored` block after richness validation).
+		summaryResp.SummaryStatus = ""
+		summaryResp.ValidationError = ""
 	}
 
 	// validate summary content for agent meta-output contamination.
@@ -740,10 +757,19 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 			"session", filepath.Base(payload.SessionDir),
 			"error", valErr,
 		)
+		// Failure stub — see ox-qqka. Critical: leave Title and Summary
+		// empty. Pre-fix, the validator's diagnostic was assigned to
+		// Summary and propagated through writeMetaAndUploadLFS into
+		// meta.json.summary, where the api-go list handler returned it
+		// and the web UI rendered it as the session row title. 14
+		// sessions on the SageOx Internal ledger were affected.
+		// ValidationError carries the diagnostic for ops; SummaryStatus
+		// signals the lifecycle state structurally.
 		summaryResp = &session.SummarizeResponse{
-			Summary:      fmt.Sprintf("Summary failed content validation: %v", valErr),
-			QualityScore: 0.0,
-			ScoreReason:  fmt.Sprintf("content validation failed: %v", valErr),
+			QualityScore:    0.0,
+			ScoreReason:     fmt.Sprintf("content validation failed: %v", valErr),
+			SummaryStatus:   sessionsummary.SummaryStatusFailedValidation,
+			ValidationError: fmt.Sprintf("content validation failed: %v", valErr),
 		}
 		scored = false
 	}
@@ -768,10 +794,14 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 				"entry_count", entryCount,
 				"error", richErr,
 			)
+			// Same shape as the content-validation failure above (ox-qqka):
+			// no diagnostic in user-visible fields; ValidationError carries
+			// the ops-facing reason; SummaryStatus signals the lifecycle.
 			summaryResp = &session.SummarizeResponse{
-				Summary:      fmt.Sprintf("Summary failed richness validation: %v", richErr),
-				QualityScore: 0.0,
-				ScoreReason:  fmt.Sprintf("richness validation failed: %v", richErr),
+				QualityScore:    0.0,
+				ScoreReason:     fmt.Sprintf("richness validation failed: %v", richErr),
+				SummaryStatus:   sessionsummary.SummaryStatusFailedValidation,
+				ValidationError: fmt.Sprintf("richness validation failed: %v", richErr),
 			}
 			scored = false
 		}
@@ -786,6 +816,12 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// logs the path. Failures are swallowed — never block finalization
 	// on a judgment run.
 	if scored {
+		// All validators (parse + content + richness) passed. Daemon
+		// is the sole authority on lifecycle metadata — stamp OK and
+		// ensure no stale ValidationError leaked through from earlier
+		// states or from the parsed model output.
+		summaryResp.SummaryStatus = sessionsummary.SummaryStatusOK
+		summaryResp.ValidationError = ""
 		h.maybeRunJudge(sessionName, payload.LedgerPath, summaryResp)
 	}
 
@@ -921,11 +957,19 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		}
 	}
 
+	// User-visible fields — meta.Summary and meta.Title — must mirror
+	// summaryResp.Summary and summaryResp.Title verbatim, INCLUDING when
+	// they are empty. Pre-ox-qqka this code copied the validator-error
+	// stub into meta.Summary; post-fix, an empty summaryResp.Summary
+	// stays empty here and the writer's invariant guard (ValidateUserVisible)
+	// rejects any future regression that tries to put a leaky string in.
 	metaBuilder := lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
 		Title(summaryResp.Title).
 		Summary(summaryResp.Summary).
 		EntryCount(len(stored.Entries)).
-		StopReason(session.StopReasonRecovered)
+		StopReason(session.StopReasonRecovered).
+		SummaryStatus(summaryResp.SummaryStatus).
+		ValidationError(summaryResp.ValidationError)
 
 	// inject sageox contribution score from cache file (matches synchronous path),
 	// then clean up to prevent stale scores leaking into future sessions

@@ -15,6 +15,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/identity"
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -272,14 +273,19 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 				name = t.Filename
 			}
 			entries = append(entries, sessionListEntry{
-				Name:            name,
-				Date:            t.CreatedAt.Format("2006-01-02"),
-				Time:            t.CreatedAt.Format("15:04"),
-				User:            user,
-				Status:          status,
-				Recording:       t.Recording,
-				Title:           sanitizeSessionText(t.Title),
-				Summary:         sanitizeSessionText(t.Summary),
+				Name:      name,
+				Date:      t.CreatedAt.Format("2006-01-02"),
+				Time:      t.CreatedAt.Format("15:04"),
+				User:      user,
+				Status:    status,
+				Recording: t.Recording,
+				// Filter leaky strings out of JSON output too — agents
+				// (claude-code, codex, etc.) consume this as context and
+				// would otherwise see "Summary failed content validation:..."
+				// as if it were the session's real title. Same invariant the
+				// human-readable sessionBlurb enforces.
+				Title:           sanitizedNonLeakySessionText(t.Title),
+				Summary:         sanitizedNonLeakySessionText(t.Summary),
 				EntryCount:      t.EntryCount,
 				IsSubagent:      t.IsSubagent,
 				Origin:          t.Origin,
@@ -473,11 +479,17 @@ func sessionBlurb(s session.SessionInfo) string {
 	// Title/Summary come verbatim from meta.json written by other coworkers —
 	// strip ANSI and control bytes before rendering so a shared ledger can't
 	// spoof the terminal.
-	if t := sanitizeSessionText(strings.TrimSpace(s.Title)); t != "" {
+	//
+	// Belt-and-suspenders against the ox-qqka leak: producer-side fixes
+	// (session_finalize.go) and the writer guard (lfs.ValidateUserVisible)
+	// prevent new leaks, but EXISTING ledgers may still carry validator-
+	// error stubs in either meta.title OR meta.summary until ox-l4mj
+	// runs. Render nothing rather than the diagnostic in either case.
+	if t := sanitizeSessionText(strings.TrimSpace(s.Title)); t != "" && !lfs.IsLeakySummaryString(t) {
 		return truncateSingleLine(t, maxLen)
 	}
 	sum := sanitizeSessionText(strings.TrimSpace(s.Summary))
-	if sum == "" || strings.HasPrefix(sum, "Summary generation failed") {
+	if sum == "" || lfs.IsLeakySummaryString(sum) {
 		return ""
 	}
 	// skip markdown structure (headings, bullets, tables, metadata lines) and
@@ -493,6 +505,23 @@ func sessionBlurb(s session.SessionInfo) string {
 		return truncateSingleLine(line, maxLen)
 	}
 	return ""
+}
+
+// sanitizedNonLeakySessionText returns the sanitized text unless it
+// matches a known leak shape (validator-error sentinel string), in
+// which case it returns "". Use this anywhere a value from meta.title
+// or meta.summary is going to be displayed or returned to a consumer
+// that doesn't already filter — JSON output, agent prompts, blurbs.
+//
+// This is the renderer-side belt-and-suspenders against the ox-qqka
+// leak: producer-side fixes prevent NEW leaks; this prevents existing
+// pre-fix ledgers from surfacing the diagnostic until ox-l4mj has run.
+func sanitizedNonLeakySessionText(s string) string {
+	clean := sanitizeSessionText(strings.TrimSpace(s))
+	if clean == "" || lfs.IsLeakySummaryString(clean) {
+		return ""
+	}
+	return clean
 }
 
 // sanitizeSessionText strips ANSI CSI/OSC escape sequences and other C0/C1
