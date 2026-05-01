@@ -21,6 +21,7 @@ import (
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
+	"github.com/sageox/ox/internal/sessionid"
 	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/sageox/ox/pkg/summaryeval"
 )
@@ -890,8 +891,15 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	}
 
 	// write meta.json and attempt LFS upload before git commit; returns file refs
-	// so we can write pointer files only after a successful push
-	fileRefs := h.writeMetaAndUploadLFS(payload, stored, summaryResp)
+	// so we can write pointer files only after a successful push.
+	// Non-nil error means a fatal precondition failed (e.g., corrupt
+	// existing meta.json that would force a SessionID rotation if we
+	// continued); abort the entire finalize flow rather than stage/commit.
+	fileRefs, err := h.writeMetaAndUploadLFS(payload, stored, summaryResp)
+	if err != nil {
+		h.logger.Warn("session finalize aborted to preserve existing meta.json invariants", "session", sessionName, "err", err)
+		return nil
+	}
 
 	// save original cache path before stageSessionInLedger may update payload.SessionDir
 	origCacheDir := payload.SessionDir
@@ -937,7 +945,14 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 // writeMetaAndUploadLFS writes meta.json and attempts LFS upload for a finalized session.
 // LFS upload is best-effort: on failure, content files remain as regular blobs.
 // Returns the LFS file refs so the caller can write pointer files after a successful push.
-func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizePayload, stored *session.StoredSession, summaryResp *session.SummarizeResponse) map[string]lfs.FileRef {
+//
+// The error return is reserved for fatal conditions where finalization MUST
+// abort before staging/committing — currently only when PreservedSessionID
+// fails on a corrupt/unreadable existing meta.json (proceeding would
+// silently rotate a SessionID we cannot verify). All other failures (LFS
+// client, upload, write) are best-effort — the function returns
+// (nil, nil) and the caller proceeds with the raw-content commit fallback.
+func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizePayload, stored *session.StoredSession, summaryResp *session.SummarizeResponse) (map[string]lfs.FileRef, error) {
 	sessionName := filepath.Base(payload.SessionDir)
 
 	// extract identity from raw.jsonl header
@@ -963,7 +978,25 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	// stub into meta.Summary; post-fix, an empty summaryResp.Summary
 	// stays empty here and the writer's invariant guard (ValidateUserVisible)
 	// rejects any future regression that tries to put a leaky string in.
+	//
+	// SessionID: if a meta.json already exists on disk (e.g., the CLI
+	// stamped one at session start and the daemon is recovering a partial
+	// finalize), preserve it. Otherwise stamp a fresh ses_<UUIDv7> here so
+	// daemon-recovered sessions still get an identifier. Non-NotExist
+	// read errors are fatal — see PreservedSessionID doc.
+	preservedSessionID, err := lfs.PreservedSessionID(payload.SessionDir)
+	if err != nil {
+		// fatal: caller must abort the entire finalize flow rather than
+		// stage/commit a session whose existing SessionID we couldn't
+		// read.
+		return nil, fmt.Errorf("preserve existing SessionID for %s: %w", sessionName, err)
+	}
+	sessionIDForMeta := preservedSessionID
+	if sessionIDForMeta == "" {
+		sessionIDForMeta = sessionid.GenerateSessionID()
+	}
 	metaBuilder := lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).
+		SessionID(sessionIDForMeta).
 		Title(summaryResp.Title).
 		Summary(summaryResp.Summary).
 		EntryCount(len(stored.Entries)).
@@ -985,25 +1018,25 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	// write meta.json (without LFS refs initially)
 	if err := lfs.WriteSessionMetaOnly(payload.SessionDir, meta); err != nil {
 		h.logger.Warn("meta.json write failed", "session", sessionName, "err", err)
-		return nil
+		return nil, nil
 	}
 
 	// attempt LFS upload (best-effort)
 	if h.skipLFS || h.projectRoot == "" {
-		return nil
+		return nil, nil
 	}
 
 	ep := endpoint.GetForProject(h.projectRoot)
 	client, err := lfs.NewClientFromLedger(payload.LedgerPath, ep)
 	if err != nil {
 		h.logger.Warn("LFS client creation failed, committing raw content as fallback", "session", sessionName, "err", err)
-		return nil
+		return nil, nil
 	}
 
 	fileRefs, err := lfs.UploadSessionFiles(client, payload.SessionDir, h.logger)
 	if err != nil {
 		h.logger.Warn("LFS upload failed, committing raw content as fallback", "session", sessionName, "err", err)
-		return nil
+		return nil, nil
 	}
 
 	// update meta.json with LFS file references under the shared advisory
@@ -1046,10 +1079,10 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		return base, nil
 	}); err != nil {
 		h.logger.Warn("meta.json update with LFS refs failed", "session", sessionName, "err", err)
-		return nil
+		return nil, nil
 	}
 
-	return fileRefs
+	return fileRefs, nil
 }
 
 // isInLedgerCacheDir reports whether sessionDir is inside the ledger's

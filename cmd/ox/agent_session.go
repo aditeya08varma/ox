@@ -1270,6 +1270,18 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 	_ = session.CleanupSageoxScore(state.AgentID)
 
+	// preserve any pre-existing ses_<UUIDv7> on republish: if a prior stop
+	// attempt already wrote meta.json (e.g., LFS upload failed and we're
+	// retrying), reuse that SessionID rather than minting a fresh one.
+	// Non-NotExist read errors are fatal — see PreservedSessionID doc.
+	preservedID, err := lfs.PreservedSessionID(sessionDir)
+	if err != nil {
+		return err
+	}
+	if preservedID != "" {
+		metaBuilder = metaBuilder.SessionID(preservedID)
+	}
+
 	meta := metaBuilder.Build()
 	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
