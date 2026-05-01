@@ -27,6 +27,7 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/repotools"
 )
@@ -364,6 +365,16 @@ func Init(path string, remoteURL string) (*Ledger, error) {
 	// clone with sparse checkout from cloud-provisioned URL
 	if err := CloneWithSparseCheckout(path, remoteURL); err != nil {
 		return nil, fmt.Errorf("clone: %w", err)
+	}
+
+	// declare merge=union for KB root metadata files so concurrent
+	// writes from server seed, CLI seed, and coworkers don't wedge the
+	// ledger on first push. Stored in per-clone .git/info/attributes so
+	// nothing enters the working tree. Best-effort: failure here is a
+	// degraded mode (rebases may wedge), not a clone failure.
+	if _, err := kb.EnsureMergeAttributes(path); err != nil {
+		// log via fmt.Fprintln to stderr — slog is not wired into this package
+		fmt.Fprintf(os.Stderr, "warning: ledger init: ensure merge attributes: %v\n", err)
 	}
 
 	return &Ledger{Path: path}, nil
