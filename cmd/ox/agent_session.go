@@ -1306,10 +1306,13 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 
 	// push succeeded — now safe to replace content files with LFS pointer stubs
 	if len(meta.Files) > 0 {
-		written, err := lfs.WritePointerFiles(sessionDir, meta.Files)
-		if err != nil {
-			slog.Warn("LFS pointer file write failed after push", "error", err, "session", sessionName)
-		} else if len(written) > 0 {
+		// WritePointerFiles can return both a partial `written` slice AND a
+		// non-nil error (internal/lfs/pointer.go:100 returns paths-so-far on
+		// the first failure). Always commit whatever pointers DID land — any
+		// rewritten pointer left uncommitted re-opens the autostash race for
+		// that file, even if other files in the same call failed.
+		written, writeErr := lfs.WritePointerFiles(sessionDir, meta.Files)
+		if len(written) > 0 {
 			// Commit the pointer rewrite so it doesn't sit dirty in the worktree.
 			// A dirty worktree here races against the daemon's sync-timer pull:
 			// `git pull --rebase --autostash` would stash the pointer, and if a
@@ -1320,6 +1323,9 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 			if err := commitPointerRewriteAndPush(ledgerPath, sessionName, written); err != nil {
 				slog.Warn("LFS pointer rewrite commit failed", "error", err, "session", sessionName)
 			}
+		}
+		if writeErr != nil {
+			slog.Warn("LFS pointer file write failed after push", "error", writeErr, "session", sessionName)
 		}
 	}
 
