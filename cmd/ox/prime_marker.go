@@ -87,6 +87,22 @@ func HasBothPrimeMarkers(gitRoot string) bool {
 // EnsureOxPrimeMarker adds both header and footer markers if missing from AGENTS.md or CLAUDE.md.
 // It also handles upgrade from legacy SageOxPrimeLine block to the new format.
 // Returns (injected bool, error) where injected is true if any marker was added or upgraded.
+//
+// Concurrency: deliberately lock-free. The realistic contended writer
+// here is the user's editor (vim, VS Code) saving the file out from
+// under us; flock between two ox processes does nothing about that
+// case because the editor doesn't participate in advisory locks.
+// What flock WOULD protect — two ox processes both seeing "missing"
+// between read and write — produces at worst one duplicate marker
+// line, which the next caller's strings.Contains check makes
+// idempotent on the very next pass. The cost of a lock outweighs the
+// benefit. See ox-l07b for the original analysis.
+//
+// Defense in depth: we recompute marker presence after each read so a
+// concurrent ox process injecting the same markers doesn't cause us
+// to double-inject. The atomic write inside ensureMarkersInFile
+// guarantees readers always see either the pre-write or post-write
+// state, never a torn intermediate.
 func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 	if gitRoot == "" {
 		return false, nil
@@ -95,40 +111,27 @@ func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 	agentsPath := filepath.Join(gitRoot, "AGENTS.md")
 	claudePath := filepath.Join(gitRoot, "CLAUDE.md")
 
-	// check which markers are missing
-	hasFooter := HasOxPrimeMarker(gitRoot)
-	hasHeader := HasOxPrimeCheckMarker(gitRoot)
-
-	// if both exist, nothing to do
-	if hasFooter && hasHeader {
+	// fast path: both markers already present in either file → nothing to do.
+	if HasOxPrimeMarker(gitRoot) && HasOxPrimeCheckMarker(gitRoot) {
 		return false, nil
 	}
 
 	// try AGENTS.md first (primary file)
-	if content, err := os.ReadFile(agentsPath); err == nil {
-		injected, err := ensureMarkersInFile(agentsPath, string(content), !hasHeader, !hasFooter)
-		if err != nil {
-			return false, err
-		}
-		if injected {
-			return true, nil
-		}
+	if injected, err := ensureMarkersInExistingFile(agentsPath); err != nil {
+		return false, err
+	} else if injected {
+		return true, nil
 	}
 
 	// try CLAUDE.md
-	if content, err := os.ReadFile(claudePath); err == nil {
-		injected, err := ensureMarkersInFile(claudePath, string(content), !hasHeader, !hasFooter)
-		if err != nil {
-			return false, err
-		}
-		if injected {
-			return true, nil
-		}
+	if injected, err := ensureMarkersInExistingFile(claudePath); err != nil {
+		return false, err
+	} else if injected {
+		return true, nil
 	}
 
-	// neither file exists or both failed - try to create AGENTS.md with both markers
-	_, agentsErr := os.Stat(agentsPath)
-	if os.IsNotExist(agentsErr) {
+	// neither file exists — seed AGENTS.md with both markers.
+	if _, err := os.Stat(agentsPath); os.IsNotExist(err) {
 		content := OxPrimeCheckBlock + "\n# AI Agent Instructions\n\n" + OxPrimeLine + "\n"
 		if err := fileutil.AtomicWriteBytes(agentsPath, []byte(content), 0644); err != nil {
 			return false, err
@@ -137,6 +140,25 @@ func EnsureOxPrimeMarker(gitRoot string) (bool, error) {
 	}
 
 	return false, nil
+}
+
+// ensureMarkersInExistingFile reads filePath, computes marker presence,
+// and only invokes the rewrite path when injection is genuinely needed.
+// Idempotent — repeated calls converge.
+func ensureMarkersInExistingFile(filePath string) (bool, error) {
+	content, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil // caller will try the other file or seed
+		}
+		return false, err
+	}
+	needHeader := !strings.Contains(string(content), OxPrimeCheckMarker)
+	needFooter := !strings.Contains(string(content), OxPrimeMarker)
+	if !needHeader && !needFooter {
+		return false, nil
+	}
+	return ensureMarkersInFile(filePath, string(content), needHeader, needFooter)
 }
 
 // ensureMarkersInFile adds header and/or footer markers to a file.

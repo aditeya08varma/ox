@@ -1,12 +1,17 @@
 package lfs
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/sageox/ox/internal/fileutil"
 )
 
 // SessionMeta is the git-tracked metadata + OID manifest for a session.
@@ -231,6 +236,17 @@ func WriteSessionMeta(sessionPath string, meta *SessionMeta) error {
 // LFS pointer stubs. Use this when content files must remain intact until a
 // successful git push — call WritePointerFiles separately after the push so that
 // push failure never leaves a session with pointer stubs but no remote copy.
+//
+// The on-disk write is atomic via fileutil.AtomicWriteBytes (random temp +
+// fsync + rename + parent dir fsync). The previous implementation used the
+// literal "meta.json.tmp" as the temp path, which raced with concurrent
+// writers — both rename'd the same temp inode and one writer saw ENOENT.
+// Random suffix per write closes that loophole.
+//
+// Callers that mutate meta.json (read → modify → write) MUST do the entire
+// RMW under MutateSessionMeta so the daemon and CLI don't lose each other's
+// fields. WriteSessionMetaOnly itself is unlocked for backwards compat;
+// MutateSessionMeta is the safe path.
 func WriteSessionMetaOnly(sessionPath string, meta *SessionMeta) error {
 	if meta == nil {
 		return fmt.Errorf("nil session meta")
@@ -251,18 +267,43 @@ func WriteSessionMetaOnly(sessionPath string, meta *SessionMeta) error {
 	}
 
 	metaPath := filepath.Join(sessionPath, metaFilename)
-
-	// atomic write
-	tmpPath := metaPath + ".tmp"
-	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+	if err := fileutil.AtomicWriteBytes(metaPath, data, 0o644); err != nil {
 		return fmt.Errorf("write session meta: %w", err)
 	}
-	if err := os.Rename(tmpPath, metaPath); err != nil {
-		os.Remove(tmpPath)
-		return fmt.Errorf("rename session meta: %w", err)
-	}
-
 	return nil
+}
+
+// MutateSessionMeta runs an exclusive read-modify-write under an advisory
+// flock on meta.json. Any code path where the daemon and CLI both mutate
+// the manifest (session_finalize summary write, session_upload artifact
+// registration) MUST go through this so they serialize at the FS level.
+//
+// The mutator is given a fresh copy of the on-disk SessionMeta to mutate
+// in place. If the file does not exist, mutator receives nil and may
+// return a freshly-constructed *SessionMeta to write; returning nil
+// without writing is a no-op (useful for "only update if exists"
+// guards). Returning an error aborts the write.
+func MutateSessionMeta(ctx context.Context, sessionPath string, mutate func(*SessionMeta) (*SessionMeta, error)) error {
+	metaPath := filepath.Join(sessionPath, metaFilename)
+	return fileutil.WithFileLock(ctx, metaPath, func() error {
+		meta, readErr := ReadSessionMeta(sessionPath)
+		if readErr != nil && !errors.Is(readErr, fs.ErrNotExist) {
+			return readErr
+		}
+		// pass nil if file truly missing; mutator decides whether to seed
+		var arg *SessionMeta
+		if readErr == nil {
+			arg = meta
+		}
+		out, mutErr := mutate(arg)
+		if mutErr != nil {
+			return mutErr
+		}
+		if out == nil {
+			return nil // mutator chose not to write
+		}
+		return WriteSessionMetaOnly(sessionPath, out)
+	})
 }
 
 // ReadSessionMeta reads meta.json from the given session directory.
@@ -455,25 +496,57 @@ func NewGitFileRef(size int64) FileRef {
 // add a distinct UpdateMetaSummaryOnly function; don't reintroduce the
 // single-field ambiguity.
 func UpdateMetaSummary(sessionPath, title string) error {
-	meta, err := ReadSessionMeta(sessionPath)
-	if err != nil {
-		return fmt.Errorf("read meta for title update: %w", err)
-	}
-	meta.Title = title
-	meta.Summary = title
+	// Runs the entire read-modify-write under MutateSessionMeta's flock
+	// so a daemon finalize concurrently writing Files / Summary doesn't
+	// clobber this Title write (and vice versa). Without this the
+	// title-write path — which is hit on every session push — was the
+	// single most frequent unlocked RMW on meta.json. See ox-e1ot.
+	//
+	// We also need the LFS-pointer side of WriteSessionMeta to fire so
+	// content files get replaced with pointers post-write; do it
+	// outside the lock since pointer writes don't race with the
+	// manifest mutation.
+	var pointerFiles map[string]FileRef
+	if err := MutateSessionMeta(context.Background(), sessionPath, func(meta *SessionMeta) (*SessionMeta, error) {
+		if meta == nil {
+			return nil, fmt.Errorf("meta.json not found in %s: cannot update title", sessionPath)
+		}
+		meta.Title = title
+		meta.Summary = title
 
-	// If a non-empty title is being written, the session HAS a successful
-	// summary now — stamp SummaryStatus=ok and clear any stale failure
-	// signals from a previous failed attempt (ox-wstd: sticky tombstones).
-	// We hard-code "ok" here rather than importing pkg/sessionsummary
-	// because internal/lfs is below it in the dep graph; both sides agree
-	// on the literal "ok".
-	if title != "" {
-		meta.SummaryStatus = "ok"
-		meta.ValidationError = ""
+		// If a non-empty title is being written, the session HAS a successful
+		// summary now — stamp SummaryStatus=ok and clear any stale failure
+		// signals from a previous failed attempt (ox-wstd: sticky tombstones).
+		// We hard-code "ok" here rather than importing pkg/sessionsummary
+		// because internal/lfs is below it in the dep graph; both sides agree
+		// on the literal "ok".
+		if title != "" {
+			meta.SummaryStatus = "ok"
+			meta.ValidationError = ""
+		}
+		// Capture the snapshot of Files we want pointer-replaced after
+		// the lock releases. Copy the map so the post-lock work can't
+		// see a concurrent mutation.
+		if len(meta.Files) > 0 {
+			pointerFiles = make(map[string]FileRef, len(meta.Files))
+			for k, v := range meta.Files {
+				pointerFiles[k] = v
+			}
+		}
+		return meta, nil
+	}); err != nil {
+		return err
 	}
 
-	return WriteSessionMeta(sessionPath, meta)
+	// Replace content files with LFS pointer files for GC protection.
+	// Best-effort, matches WriteSessionMeta's prior behavior; pointer
+	// write failures don't invalidate the meta.json update.
+	if len(pointerFiles) > 0 {
+		if _, err := WritePointerFiles(sessionPath, pointerFiles); err != nil {
+			slog.Warn("LFS pointer file write failed", "error", err, "path", sessionPath)
+		}
+	}
+	return nil
 }
 
 // BareOID returns the hex digest without the "sha256:" prefix.

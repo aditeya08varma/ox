@@ -1006,10 +1006,45 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		return nil
 	}
 
-	// update meta.json with LFS file references; use WriteSessionMetaOnly so content
-	// files remain intact until after the push (caller writes pointer files post-push)
-	meta.Files = fileRefs
-	if err := lfs.WriteSessionMetaOnly(payload.SessionDir, meta); err != nil {
+	// update meta.json with LFS file references under the shared advisory
+	// flock. The CLI may concurrently register a git-stored artifact
+	// (session_upload.go::backfillGitArtifactInMeta); without serialization,
+	// whichever process writes second clobbers the other's mutation. See
+	// ox-e1ot for the failure mode this prevents.
+	if err := lfs.MutateSessionMeta(context.Background(), payload.SessionDir, func(current *lfs.SessionMeta) (*lfs.SessionMeta, error) {
+		// Prefer the just-written meta as the base; if a CLI writer has
+		// added entries to Files between our first write and now, merge
+		// rather than replace so we don't drop their git-stored refs.
+		base := meta
+		if current != nil && len(current.Files) > 0 {
+			merged := make(map[string]lfs.FileRef, len(current.Files)+len(fileRefs))
+			for k, v := range current.Files {
+				merged[k] = v
+			}
+			for k, v := range fileRefs {
+				// LFS-safety guard: never demote a Storage=git entry
+				// to Storage=lfs. The CLI's session_upload registers
+				// small JSON artifacts (summary.json) as Storage=git
+				// because their bytes live directly in the git tree;
+				// if a daemon-side merge replaced that with an LFS
+				// pointer, WritePointerFiles would overwrite the
+				// real summary.json with a 130-byte pointer stub —
+				// silent data loss the user has explicitly flagged
+				// as a worry. Storage=git wins for shared keys.
+				if existing, ok := merged[k]; ok && existing.IsGit() && v.IsLFS() {
+					h.logger.Warn("rejecting LFS overwrite of git-stored entry",
+						"session", sessionName, "file", k,
+						"existing_size", existing.Size, "incoming_oid", v.OID)
+					continue
+				}
+				merged[k] = v
+			}
+			base.Files = merged
+		} else {
+			base.Files = fileRefs
+		}
+		return base, nil
+	}); err != nil {
 		h.logger.Warn("meta.json update with LFS refs failed", "session", sessionName, "err", err)
 		return nil
 	}
