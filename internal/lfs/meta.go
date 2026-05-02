@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -182,6 +183,31 @@ const (
 	// HydrationStatusPartial means some content files are present.
 	HydrationStatusPartial HydrationStatus = "partial"
 )
+
+// ValidateRelativePath rejects filenames that could escape a directory boundary.
+// Call this on any filename from meta.json, import manifests, or other
+// trust-boundary-crossing paths before using it in filepath.Join.
+func ValidateRelativePath(name string) error {
+	if name == "" {
+		return fmt.Errorf("empty path")
+	}
+	if filepath.IsAbs(name) {
+		return fmt.Errorf("absolute path not allowed: %s", name)
+	}
+	if strings.Contains(name, `\`) {
+		return fmt.Errorf("backslash not allowed in path: %s", name)
+	}
+	cleaned := filepath.Clean(name)
+	if cleaned != name {
+		return fmt.Errorf("path must be clean (got %q, cleaned to %q)", name, cleaned)
+	}
+	for _, part := range strings.Split(name, "/") {
+		if part == ".." {
+			return fmt.Errorf("path traversal not allowed: %s", name)
+		}
+	}
+	return nil
+}
 
 // SessionMetaBuilder constructs SessionMeta with required fields and optional setters.
 type SessionMetaBuilder struct {
@@ -411,6 +437,11 @@ func ReadSessionMeta(sessionPath string) (*SessionMeta, error) {
 		return nil, fmt.Errorf("parse session meta: %w", err)
 	}
 
+	for filename := range meta.Files {
+		if err := ValidateRelativePath(filename); err != nil {
+			return nil, fmt.Errorf("unsafe filename in meta.json: %w", err)
+		}
+	}
 	return &meta, nil
 }
 
@@ -426,6 +457,9 @@ func CheckHydrationStatus(sessionPath string, meta *SessionMeta) HydrationStatus
 	total := len(meta.Files)
 
 	for filename := range meta.Files {
+		if err := ValidateRelativePath(filename); err != nil {
+			continue // skip unsafe filenames
+		}
 		filePath := filepath.Join(sessionPath, filename)
 		if _, err := os.Stat(filePath); err != nil {
 			continue // missing = dehydrated
@@ -457,6 +491,9 @@ func CheckHydrationStatusWithCache(sessionPath, cachePath string, meta *SessionM
 	total := len(meta.Files)
 
 	for filename := range meta.Files {
+		if err := ValidateRelativePath(filename); err != nil {
+			continue
+		}
 		// check primary path
 		filePath := filepath.Join(sessionPath, filename)
 		if info, err := os.Stat(filePath); err == nil && info.Size() > 0 && !IsPointerFile(filePath) {
@@ -522,6 +559,9 @@ func CheckHydrationStatusWithCache(sessionPath, cachePath string, meta *SessionM
 // resolver. Hydration paths (downloadFileFromLFS, hydrateFromLedger) MUST
 // write only to cacheDir.
 func ResolveContentPath(sessionDir, cacheDir, filename string) string {
+	if err := ValidateRelativePath(filename); err != nil {
+		return ""
+	}
 	if cacheDir != "" {
 		cachePath := filepath.Join(cacheDir, filename)
 		if info, err := os.Stat(cachePath); err == nil && info.Size() > 0 {
