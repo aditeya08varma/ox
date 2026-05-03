@@ -9,9 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-**Security hardening (#579)**
-- Closed several boundary issues in path handling, LFS size bounds, credential sanitization in logs, and authentication checks. Recommended upgrade for any team running ox in shared infrastructure.
-
 **Daemon reliability**
 - File watchers no longer leak a file descriptor per project file under long uptimes — the per-file handles in `ProjectWatcher` (fsnotify userspace mirror) are now released on directory teardown (#580).
 - `ox murmur` file-change notifications now respect `.gitignore`, so build artifacts and editor temp files no longer spam teammates (#581).
