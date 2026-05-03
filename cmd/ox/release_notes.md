@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-05-03
+
+### Fixed
+
+**Security hardening (#579)**
+- Closed several boundary issues in path handling, LFS size bounds, credential sanitization in logs, and authentication checks. Recommended upgrade for any team running ox in shared infrastructure.
+
+**Daemon reliability**
+- File watchers no longer leak a file descriptor per project file under long uptimes — the per-file handles in `ProjectWatcher` (fsnotify userspace mirror) are now released on directory teardown (#580).
+- `ox murmur` file-change notifications now respect `.gitignore`, so build artifacts and editor temp files no longer spam teammates (#581).
+
+**Session UX**
+- Sessions whose meta entry was missing a title (rendered as "Summary unavailable" in the UI) are now repaired automatically by the daemon (#578).
+
+[0.7.1]: https://github.com/sageox/ox/releases/tag/v0.7.1
+
 ## [0.7.0] - 2026-05-01
 
 ### Added
