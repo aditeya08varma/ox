@@ -2076,7 +2076,8 @@ func (h *SessionFinalizeHandler) emitSummarizationTelemetry(sessionName, mode st
 	}
 	if summaryResp != nil {
 		props["quality_score"] = summaryResp.QualityScore
-		props["summary_status"] = string(summaryResp.SummaryStatus)
+		// SummaryStatus is already a string-typed alias, no conversion needed.
+		props["summary_status"] = summaryResp.SummaryStatus
 	}
 
 	// piggyback judge fields on the same event when the judge ran during

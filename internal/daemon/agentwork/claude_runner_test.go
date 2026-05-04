@@ -210,9 +210,19 @@ func TestClaudeRunner_Run_ModelFlag(t *testing.T) {
 	script := filepath.Join(tmp, "claude")
 	// Fake claude: dump argv (one arg per line) to argsFile, then emit a
 	// minimal valid stream-json result so Run() succeeds normally.
+	//
+	// The trailing `sleep 0.1` exists to defuse a CI-only race in
+	// claude_runner.go between cmd.Wait() and the parse goroutine
+	// reading stdout. When the fake script exits within microseconds,
+	// the kernel can close the stdout pipe before the goroutine's
+	// scanner.Scan() runs, producing "file already closed" instead of
+	// the expected EOF. Real claude takes seconds so the race never
+	// manifests in production. We slow the fake just enough to give
+	// the goroutine time to drain the pipe before exit.
 	body := `#!/bin/sh
 for a in "$@"; do printf '%s\n' "$a" >> "` + argsFile + `"; done
 printf '%s\n' '{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}'
+sleep 0.1
 `
 	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
 
