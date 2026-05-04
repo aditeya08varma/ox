@@ -65,6 +65,20 @@ type SessionFinalizePayload struct {
 	// storedSession is populated by BuildPrompt and reused by ProcessResult
 	// to avoid reading raw.jsonl twice.
 	storedSession *session.StoredSession `json:"-"`
+
+	// prefilterSummary holds a deterministic summary built by
+	// sessionsummary.MaybeBuildSkipSummary when BuildPrompt determined
+	// the session was too thin for an LLM-generated summary to be
+	// meaningful. When non-nil, BuildPrompt returned RunRequest{SkipLLM:
+	// true} and ProcessResult uses this struct directly instead of
+	// parsing LLM output. Saves the entire claude -p call (input prompt
+	// guidelines + tokens, validation pass, retry potential) for
+	// sessions that would have been quality-gated to discard anyway.
+	//
+	// See pkg/sessionsummary/prefilter.go for the heuristics and
+	// rationale; the trigger conditions are intentionally conservative
+	// to avoid skipping real sessions.
+	prefilterSummary *session.SummarizeResponse `json:"-"`
 }
 
 // SessionFinalizeHandler detects and finalizes incomplete sessions in the ledger.
@@ -664,6 +678,62 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 	payload.storedSession = stored
 
 	entries := sessionsummary.EntriesFromRaw(stored.Entries)
+
+	// Pre-LLM low-value short-circuit. Sessions whose entries are too thin
+	// for a meaningful LLM-generated summary (very few entries, no
+	// assistant response, near-empty user content) get a deterministic
+	// stub built from user prompts — no claude -p invocation, no input
+	// prompt-guidelines tokens, no Haiku call. The stub's QualityScore
+	// is set low so the existing quality gate routes it to discard and
+	// it never reaches the team ledger. Saves the entire LLM round-trip
+	// on the long tail of exploratory pings that quality-gate to discard
+	// anyway.
+	//
+	// Implementation: when MaybeBuildSkipSummary returns ok=true, we
+	// stash the stub on the payload and signal SkipLLM=true so the
+	// manager skips runner.Run() entirely. ProcessResult then detects
+	// payload.prefilterSummary and uses it directly. See:
+	//   - pkg/sessionsummary/prefilter.go for heuristics + thresholds
+	//   - ProcessResult above for the consumption path
+	if skip, ok := sessionsummary.MaybeBuildSkipSummary(entries); ok {
+		payload.prefilterSummary = skip
+		sessionName := filepath.Base(payload.SessionDir)
+		h.logger.Info("session_finalize prefilter triggered, will skip LLM",
+			"session", sessionName,
+			"entry_count", len(entries),
+			"reason", skip.ScoreReason,
+		)
+
+		// Emit a `summarization_skipped` event so dashboards can count
+		// prefilter skips directly instead of inferring them from missing
+		// `summarization` events. Absent events are ambiguous (telemetry
+		// off, daemon restart, network drop) — an explicit marker is the
+		// only reliable signal for a per-window prefilter-skip rate.
+		//
+		// Privacy: scalars + categoricals only, plus the session_hash
+		// correlator (sha256 of the session name; see SessionHash). The
+		// `reason` field carries the prefilter's structured ScoreReason
+		// which names the heuristic that fired ("fewer than N entries",
+		// "no assistant response", "user content under N chars") — no
+		// content, no paths, no quoted prompt text.
+		if h.telemetry != nil {
+			userPromptCount := 0
+			for _, e := range entries {
+				if e.Type == sessionsummary.EntryTypeUser {
+					userPromptCount++
+				}
+			}
+			h.telemetry.Record("summarization_skipped", map[string]any{
+				"session_hash":      sessionsummary.SessionHash(sessionName),
+				"reason":            skip.ScoreReason,
+				"entry_count":       len(entries),
+				"user_prompt_count": userPromptCount,
+			})
+		}
+
+		return RunRequest{SkipLLM: true}, nil
+	}
+
 	// Daemon owns persistence (ProcessResult writes summary.json + meta.json
 	// and gitCommitAndPush commits). Pass empty ledgerSessionDir so the prompt
 	// drops the "save to file + run ox session push-summary" steps and the LLM
@@ -727,7 +797,43 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 
 	llmOutput := result.Output
 
-	// non-zero exit = summarization failed; don't trust the output at all
+	var summaryResp *session.SummarizeResponse
+	// scored gates whether EvaluateQuality runs against summaryResp.QualityScore.
+	// True when the score is meaningful — i.e. a real LLM evaluation OR the
+	// deterministic prefilter (which intentionally scores low to route to
+	// discard). Fallback stubs from validation failures stay scored=false
+	// so the quality gate doesn't double-penalize them.
+	scored := true
+
+	// Prefilter short-circuit. BuildPrompt called
+	// sessionsummary.MaybeBuildSkipSummary and decided this session was too
+	// thin for a meaningful LLM-generated summary. The synthesized stub it
+	// produced (echoing user prompts with quality_score 0.05, status OK) is
+	// what we use here directly — no LLM call happened, so result.Output is
+	// empty and the parse/validate pipeline below would only fail.
+	//
+	// Why injection at this point: artifact writing, LFS upload, git commit,
+	// and quality gating below this block are identical regardless of how
+	// summaryResp got populated. Wrapping the LLM-output handling in
+	// `if payload.prefilterSummary == nil { ... }` is the smallest invasive
+	// change that re-uses every downstream step.
+	//
+	// scored=true so EvaluateQuality runs and routes the 0.05 score to
+	// QualityDiscard (default discard threshold 0.1). Skipping the LLM AND
+	// uploading the stub would defeat the entire optimization.
+	//
+	// See pkg/sessionsummary/prefilter.go for the heuristics and rationale.
+	if payload.prefilterSummary != nil {
+		summaryResp = payload.prefilterSummary
+		scored = true
+		h.logger.Info("session prefilter skipped LLM summarization",
+			"session", filepath.Base(payload.SessionDir),
+			"reason", summaryResp.ScoreReason,
+			"quality_score", summaryResp.QualityScore,
+		)
+	} else {
+
+	// non-zero exit = summarization failed; don't trust the output at all.
 	if result.ExitCode != 0 {
 		h.logger.Warn("summarization agent exited with error, discarding output",
 			"session", filepath.Base(payload.SessionDir),
@@ -741,8 +847,6 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// summary or a fallback stub so the quality gate only runs on real scores
 	// — a fallback with QualityScore=0 must NOT flow through EvaluateQuality
 	// and get discarded, otherwise transient LLM failures lose sessions (#525).
-	var summaryResp *session.SummarizeResponse
-	scored := true
 	parsed, parseErr := sessionsummary.ParseSummaryJSON(llmOutput)
 	if parseErr != nil {
 		preview := llmOutput
@@ -860,6 +964,8 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		summaryResp.ValidationError = ""
 		h.maybeRunJudge(sessionName, payload.LedgerPath, summaryResp)
 	}
+
+	} // end of else — LLM-output handling. Prefilter path skips here directly.
 
 	// unscored fallbacks default to upload (preserve stub for teammates / doctor).
 	// Only real LLM-scored summaries are gated by the quality thresholds.
@@ -1916,6 +2022,12 @@ func (h *SessionFinalizeHandler) emitSummarizationTelemetry(sessionName, mode st
 		"duration_ms":   result.Duration.Milliseconds(),
 		"exit_code":     result.ExitCode,
 		"scored":        scored,
+		// session_hash correlates this event with the EventTokenoptRun
+		// emitted by cmd/ox/session_optimize_for_summary.go. Same hash
+		// algorithm (sha256 of session name, first 8 bytes hex) so server-
+		// side joins between compression metrics and LLM cost shape are
+		// possible without exposing names or paths.
+		"session_hash": sessionsummary.SessionHash(sessionName),
 	}
 	if summaryResp != nil {
 		props["quality_score"] = summaryResp.QualityScore

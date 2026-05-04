@@ -1,6 +1,9 @@
 package agentwork
 
 import (
+	"log/slog"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -114,6 +117,101 @@ func TestEmitSummarizationTelemetry_NilSummaryResp(t *testing.T) {
 		"quality_score must be omitted when summaryResp is nil")
 	assert.NotContains(t, got.props, "summary_status",
 		"summary_status must be omitted when summaryResp is nil")
+}
+
+// TestBuildPrompt_PrefilterEmitsSkippedEvent verifies that when the
+// prefilter triggers (low-value session), BuildPrompt emits a
+// `summarization_skipped` telemetry event with the expected fields.
+//
+// Failure prevented: the prefilter quietly skips the LLM call but no
+// event is recorded, so dashboards measuring "we saved tokens" can
+// only infer skips from absent `summarization` events — which is
+// indistinguishable from any other emission failure (telemetry off,
+// daemon restart, network drop). An explicit marker keeps the
+// skip-rate signal honest.
+func TestBuildPrompt_PrefilterEmitsSkippedEvent(t *testing.T) {
+	tel := &fakeTelemetry{}
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.SetTelemetry(tel)
+
+	// Build a thin session that's guaranteed to trip the prefilter:
+	// short user content (< 80 chars) and only 2 entries (header + user)
+	// — no assistant, no tool. Hits all three prefilter heuristics.
+	ledgerPath := t.TempDir()
+	sessionName := "2026-05-04T15-00-testuser-OxThIN"
+	sessionsDir := filepath.Join(ledgerPath, "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(sessionsDir, 0755))
+	rawContent := `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}
+{"type":"user","content":"hi","seq":1}
+`
+	rawPath := filepath.Join(sessionsDir, "raw.jsonl")
+	require.NoError(t, os.WriteFile(rawPath, []byte(rawContent), 0644))
+
+	item := &WorkItem{
+		ID:   "test-prefilter",
+		Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionsDir,
+			RawPath:    rawPath,
+			Missing:    requiredArtifacts,
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	req, err := handler.BuildPrompt(item)
+	require.NoError(t, err)
+	require.True(t, req.SkipLLM, "prefilter must short-circuit via SkipLLM")
+
+	got := tel.lastByName("summarization_skipped")
+	require.NotNil(t, got, "summarization_skipped event must be emitted on prefilter trigger")
+
+	// Fields the dashboard needs to compute prefilter-skip rate and segment
+	// by reason. Pinning their presence here so a future refactor that
+	// drops one is caught at test-time, not when the dashboard goes silent.
+	assert.Equal(t, sessionsummary.SessionHash(sessionName), got.props["session_hash"],
+		"session_hash must match the same hash emitted by EventTokenoptRun, so server-side joins work")
+	assert.NotEmpty(t, got.props["reason"], "reason must carry the prefilter's ScoreReason")
+	// entry_count is the count of post-EntriesFromRaw entries handed to
+	// the prefilter — the _meta header is consumed by ReadSessionFromPath
+	// into stored.Meta, not surfaced as a regular entry, so a session
+	// with just a header + 1 user line produces 1 entry here.
+	assert.Equal(t, 1, got.props["entry_count"])
+	assert.Equal(t, 1, got.props["user_prompt_count"])
+}
+
+// TestBuildPrompt_NormalSession_NoSkippedEvent verifies the inverse:
+// real sessions that pass the prefilter do NOT emit a
+// summarization_skipped event. Failure prevented: prefilter starts
+// over-firing on real sessions and we don't notice because the event
+// fires for everything.
+func TestBuildPrompt_NormalSession_NoSkippedEvent(t *testing.T) {
+	tel := &fakeTelemetry{}
+	handler := NewSessionFinalizeHandler(slog.Default())
+	handler.SetTelemetry(tel)
+
+	// createTestSession produces a session intentionally above all prefilter
+	// thresholds (substantive user prompt + assistant response). See its
+	// docstring for the invariant.
+	ledgerPath := createTestSession(t, "2026-05-04T15-00-testuser-OxRealS", nil)
+	sessionDir := filepath.Join(ledgerPath, "sessions", "2026-05-04T15-00-testuser-OxRealS")
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+
+	item := &WorkItem{
+		ID:   "test-normal",
+		Type: sessionFinalizeType,
+		Payload: &SessionFinalizePayload{
+			SessionDir: sessionDir,
+			RawPath:    rawPath,
+			Missing:    requiredArtifacts,
+			LedgerPath: ledgerPath,
+		},
+	}
+
+	req, err := handler.BuildPrompt(item)
+	require.NoError(t, err)
+	assert.False(t, req.SkipLLM, "normal session should not trigger SkipLLM")
+	assert.Nil(t, tel.lastByName("summarization_skipped"),
+		"summarization_skipped event must NOT fire on a real session")
 }
 
 // TestEmitSummarizationTelemetry_JudgePiggyback verifies that a stashed

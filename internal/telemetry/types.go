@@ -78,6 +78,26 @@ const (
 	// piggyback on the same event when the judge ran (judge_input_tokens,
 	// judge_output_tokens, judge_model, judge_overall).
 	EventSummarization = "summarization"
+
+	// EventSummarizationSkipped is emitted by the daemon when the
+	// prefilter (pkg/sessionsummary.MaybeBuildSkipSummary) determined a
+	// session was too thin for the LLM to produce a meaningful summary
+	// and synthesized a deterministic stub from user prompts instead.
+	// No claude -p call was made.
+	//
+	// Why a separate event instead of inferring from absent
+	// EventSummarization: absent events are an indistinguishable signal
+	// from any other emission failure (telemetry off, network drop,
+	// daemon restart mid-run). An explicit skip event lets dashboards
+	// compute a real prefilter-skip rate, segment skipped sessions by
+	// reason, and watch for regressions where the prefilter starts
+	// over-firing on real sessions.
+	//
+	// Standard props: session_hash (joins to EventTokenoptRun for the
+	// same session), reason (free-form ScoreReason from the prefilter
+	// — names which heuristic fired), entry_count, user_prompt_count.
+	// No content fields, no paths.
+	EventSummarizationSkipped = "summarization_skipped"
 )
 
 // Batch represents a batch of events for efficient transmission

@@ -141,33 +141,57 @@ func (s *state) transform(line []byte, stats *Stats) ([]byte, error) {
 		newContent = canon
 	}
 
-	// Thinking-block-only transforms. Apply stop-word removal and
-	// (optionally) synonym substitution only to the captured inner text.
+	// Thinking-block-only transforms. The transform applied depends on
+	// DropThinkingMode:
+	//   - None (default): stop-word + synonym strip on inner text;
+	//     block structure preserved.
+	//   - FirstSentence: keep just the first sentence of inner text;
+	//     elide the rest. Token savings without losing reasoning framing.
+	//   - All: drop the whole block (including tags). Maximum savings.
+	//
+	// The summary schema doesn't require thinking content, but on long
+	// Sonnet/Opus sessions thinking blocks can be 30–50% of assistant
+	// prose. The first-sentence variant is the conservative middle:
+	// keeps the hint of what reasoning was happening without the cost.
 	newContent = s.thinkingRe.ReplaceAllStringFunc(newContent, func(block string) string {
 		m := s.thinkingRe.FindStringSubmatch(block)
 		if len(m) < 2 {
 			return block
 		}
 		inner := m[1]
-		before := inner
 
-		stripped := stopwords.CleanString(inner, s.opts.StopWordLanguage, false)
-		if stripped != inner {
-			stats.StopWordsRemoved++
-			inner = stripped
-		}
-
-		if s.opts.EnableSynonymSub {
-			subbed := s.applySynonyms(inner)
-			if subbed != inner {
-				stats.SynonymsSubstituted++
-				inner = subbed
+		switch s.opts.DropThinkingMode {
+		case DropThinkingAll:
+			stats.ThinkingBlocksDropped++
+			return ""
+		case DropThinkingFirstSentence:
+			trimmed := firstSentence(inner)
+			if trimmed != inner {
+				stats.ThinkingBlocksTrimmed++
+				return "<thinking>" + trimmed + " ...[reasoning elided]</thinking>"
 			}
+			// Single-sentence thinking block — fall through to stop-word
+			// strip so the entry still benefits from baseline reduction.
+			fallthrough
+		default:
+			before := inner
+			stripped := stopwords.CleanString(inner, s.opts.StopWordLanguage, false)
+			if stripped != inner {
+				stats.StopWordsRemoved++
+				inner = stripped
+			}
+			if s.opts.EnableSynonymSub {
+				subbed := s.applySynonyms(inner)
+				if subbed != inner {
+					stats.SynonymsSubstituted++
+					inner = subbed
+				}
+			}
+			if inner == before {
+				return block
+			}
+			return "<thinking>" + inner + "</thinking>"
 		}
-		if inner == before {
-			return block
-		}
-		return "<thinking>" + inner + "</thinking>"
 	})
 
 	if newContent == origContent {
@@ -239,6 +263,36 @@ func (s *state) applySynonyms(in string) string {
 		out = rule.re.ReplaceAllString(out, rule.replace)
 	}
 	return out
+}
+
+// firstSentence returns the first sentence of s, defined as everything
+// up to and including the first ".", "!", or "?" followed by whitespace
+// or end-of-string. Returns s unchanged if no sentence boundary is found
+// (caller should fall through to the per-sentence transforms).
+//
+// Why a custom function instead of a sentence-boundary library: thinking
+// blocks are short (rarely > a few sentences), the heuristic is good
+// enough for "keep the framing line," and pulling in NLP dependencies
+// would violate this package's stdlib-mostly contract.
+func firstSentence(s string) string {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c != '.' && c != '!' && c != '?' {
+			continue
+		}
+		// Sentence boundary requires whitespace or EOS after the punct.
+		// Catches "I'll do X. Then Y." (split after first period) but
+		// not "version 1.0" (no whitespace after the dot, stays together).
+		next := i + 1
+		if next >= len(s) {
+			return s[:next] // punct at end is its own sentence
+		}
+		nc := s[next]
+		if nc == ' ' || nc == '\t' || nc == '\n' || nc == '\r' {
+			return s[:next]
+		}
+	}
+	return s
 }
 
 // estimateTokens is a coarse "~4 chars per token" heuristic. Anthropic's
