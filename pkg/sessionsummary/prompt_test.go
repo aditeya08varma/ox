@@ -58,9 +58,12 @@ func TestBuildSummaryPrompt(t *testing.T) {
 		assert.Contains(t, result, "/tmp/my session/raw.jsonl")
 	})
 
-	t.Run("includes agent_summary guidelines", func(t *testing.T) {
+	t.Run("includes agent_summary and quality_category guidelines", func(t *testing.T) {
 		result := BuildSummaryPrompt(entries, "/tmp/raw.jsonl", "")
 		assert.True(t, strings.Contains(result, "agent_summary"))
-		assert.True(t, strings.Contains(result, "quality_score"))
+		// quality_category replaced quality_score as of 2026-05; numeric LLM
+		// rubric scoring clusters on round numbers and ignores fine
+		// distinctions (April 2026 best practices).
+		assert.True(t, strings.Contains(result, "quality_category"))
 	})
 }

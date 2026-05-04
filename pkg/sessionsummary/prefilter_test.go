@@ -51,8 +51,9 @@ func TestPrefilter_TooFewEntries(t *testing.T) {
 	if !strings.Contains(resp.Summary, "JWT signature validation") {
 		t.Errorf("expected user prompt echoed in summary, got: %q", resp.Summary)
 	}
-	if resp.QualityScore >= 0.1 {
-		t.Errorf("QualityScore=%.2f should route this to discard via the quality gate; want <0.1", resp.QualityScore)
+	if resp.QualityCategory != QualityCategorySkip {
+		t.Errorf("QualityCategory=%q, want %q so EvaluateQualityCategory routes this to discard",
+			resp.QualityCategory, QualityCategorySkip)
 	}
 	if resp.SummaryStatus != SummaryStatusOK {
 		t.Errorf("SummaryStatus=%q, want %q (deterministic summary IS valid)", resp.SummaryStatus, SummaryStatusOK)
@@ -157,20 +158,23 @@ func TestPrefilter_EmptySession(t *testing.T) {
 	}
 }
 
-// TestPrefilter_QualityScoreBelowDiscardGate verifies the synthesized
-// summary's quality_score is below the default discard threshold (0.1)
-// so the existing EvaluateQuality path routes it to QualityDiscard.
-// Failure prevented: prefilter-generated stubs leak onto the team
-// ledger because their score is high enough to pass the upload gate.
-// This test pins the contract: prefilter outputs are local-only at best.
-func TestPrefilter_QualityScoreBelowDiscardGate(t *testing.T) {
+// TestPrefilter_QualityCategorySkip verifies the synthesized summary's
+// quality_category is "skip" so EvaluateQualityCategory routes it to
+// QualityDiscard. Failure prevented: prefilter-generated stubs leak
+// onto the team ledger because their category is treated as upload-
+// worthy. This test pins the contract: prefilter outputs always
+// flag as skip.
+func TestPrefilter_QualityCategorySkip(t *testing.T) {
 	entries := []Entry{mkEntry("user", "hi")}
 	resp, skip := MaybeBuildSkipSummary(entries)
 	if !skip {
 		t.Fatal("expected skip")
 	}
-	const defaultDiscardThreshold = 0.1
-	if resp.QualityScore >= defaultDiscardThreshold {
-		t.Errorf("QualityScore=%.3f >= discard threshold %.3f; would leak to ledger", resp.QualityScore, defaultDiscardThreshold)
+	if resp.QualityCategory != QualityCategorySkip {
+		t.Errorf("QualityCategory=%q, want %q so it routes to QualityDiscard",
+			resp.QualityCategory, QualityCategorySkip)
+	}
+	if !IsSkipCategory(resp) {
+		t.Error("IsSkipCategory(resp) returned false on a prefilter-generated stub")
 	}
 }

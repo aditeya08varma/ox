@@ -203,12 +203,22 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		discardThreshold = awCfg.GetQualityDiscardThreshold()
 	}
 
-	// unscored summaries (field absent from JSON) default to upload; scored
-	// summaries flow through the quality thresholds.
+	// Disposition routing — three-way precedence:
+	//   1. QualityCategory (canonical, categorical) — used when present.
+	//      LLMs emitting the new schema set this; deterministic prefilter
+	//      sets it to "skip" on local-only stub generation.
+	//   2. QualityScore (legacy numeric) — used when category is absent
+	//      and the score field was present in the JSON. Reads existing
+	//      summary.json files written before categorical scoring shipped.
+	//   3. Unscored fallback — default to upload so teammates / doctor
+	//      see the artifact and can act on it.
 	var disposition session.QualityDisposition
-	if qualityScorePresent {
+	switch {
+	case summaryParsed.QualityCategory != "":
+		disposition = session.EvaluateQualityCategory(summaryParsed.QualityCategory)
+	case qualityScorePresent:
 		disposition = session.EvaluateQuality(summaryParsed.QualityScore, uploadThreshold, discardThreshold)
-	} else {
+	default:
 		disposition = session.QualityUpload
 	}
 

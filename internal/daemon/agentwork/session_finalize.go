@@ -728,6 +728,11 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 				"reason":            skip.ScoreReason,
 				"entry_count":       len(entries),
 				"user_prompt_count": userPromptCount,
+				// skip_kind segments deterministic-prefilter skips (this path)
+				// from LLM-judged skips (when the LLM emits quality_category=skip
+				// from the summarization call itself). Lets dashboards measure
+				// each rate independently and alert if either drifts.
+				"skip_kind": "deterministic",
 			})
 		}
 
@@ -967,12 +972,52 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 
 	} // end of else — LLM-output handling. Prefilter path skips here directly.
 
-	// unscored fallbacks default to upload (preserve stub for teammates / doctor).
-	// Only real LLM-scored summaries are gated by the quality thresholds.
+	// LLM-judged skip event. When the LLM ran (delegated path) and itself
+	// returned QualityCategory == "skip", emit summarization_skipped with
+	// skip_kind=llm_judged. The deterministic prefilter emits the same
+	// event from BuildPrompt with skip_kind=deterministic. Dashboards
+	// segment by skip_kind to monitor each path independently — a
+	// regression in either (LLM over-skipping, prefilter under-firing)
+	// surfaces as a divergence in those two rates.
+	//
+	// We don't emit on the prefilter path here because BuildPrompt
+	// already did — payload.prefilterSummary != nil means the
+	// deterministic event fired earlier in the lifecycle.
+	if h.telemetry != nil &&
+		payload.prefilterSummary == nil &&
+		sessionsummary.IsSkipCategory(summaryResp) {
+
+		entryCount := 0
+		if payload.storedSession != nil {
+			entryCount = len(payload.storedSession.Entries)
+		}
+		h.telemetry.Record("summarization_skipped", map[string]any{
+			"session_hash": sessionsummary.SessionHash(sessionName),
+			"reason":       summaryResp.ScoreReason,
+			"entry_count":  entryCount,
+			"skip_kind":    "llm_judged",
+		})
+	}
+
+	// Disposition routing.
+	//
+	// Three-way precedence:
+	//   1. QualityCategory (canonical, categorical) — used when present.
+	//      Maps cleanly to QualityDiscard/LocalOnly/Upload via
+	//      EvaluateQualityCategory. This is how new summaries flow.
+	//   2. QualityScore (legacy numeric) — used when category is absent
+	//      and the summary was scored. Reads existing summary.json files
+	//      written before categorical scoring shipped.
+	//   3. Unscored fallback (validation failure stubs) — default to
+	//      upload so teammates/doctor see the stub and can act on it.
+	//      Only real LLM-scored summaries are gated by thresholds.
 	var disposition session.QualityDisposition
-	if scored {
+	switch {
+	case summaryResp.QualityCategory != "":
+		disposition = session.EvaluateQualityCategory(summaryResp.QualityCategory)
+	case scored:
 		disposition = session.EvaluateQuality(summaryResp.QualityScore, h.qualityUploadThreshold, h.qualityDiscardThreshold)
-	} else {
+	default:
 		disposition = session.QualityUpload
 	}
 

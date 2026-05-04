@@ -135,14 +135,14 @@ func MaybeBuildSkipSummary(entries []Entry) (*SummarizeResponse, bool) {
 	scoreReason := buildSkipReason(thin, silent, terseUser, len(userPrompts))
 
 	return &SummarizeResponse{
-		Title:         "Brief session",
-		Summary:       summary,
-		KeyActions:    nil,    // intentionally empty — no LLM means no inferred actions
-		Outcome:       "",     // unknown without LLM analysis
-		TopicsFound:   nil,    // see KeyActions
-		QualityScore:  0.05,   // below default discard threshold (0.1)
-		ScoreReason:   scoreReason,
-		SummaryStatus: SummaryStatusOK, // the deterministic summary IS valid; it's just not LLM-generated
+		Title:           "Brief session",
+		Summary:         summary,
+		KeyActions:      nil, // intentionally empty — no LLM means no inferred actions
+		Outcome:         "",  // unknown without LLM analysis
+		TopicsFound:     nil, // see KeyActions
+		QualityCategory: QualityCategorySkip,
+		ScoreReason:     scoreReason,
+		SummaryStatus:   SummaryStatusOK, // the deterministic summary IS valid; it's just not LLM-generated
 	}, true
 }
 

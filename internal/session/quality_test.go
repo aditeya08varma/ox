@@ -36,3 +36,35 @@ func TestEvaluateQuality(t *testing.T) {
 		})
 	}
 }
+
+// TestEvaluateQualityCategory pins the categorical → disposition mapping.
+// Failure prevented: a future change to category names or to the
+// disposition mapping would silently misroute sessions (e.g. skip
+// being treated as upload would leak useless stubs onto the team
+// ledger; share being treated as discard would lose real work).
+func TestEvaluateQualityCategory(t *testing.T) {
+	tests := []struct {
+		category string
+		want     QualityDisposition
+	}{
+		{"skip", QualityDiscard},
+		{"local_only", QualityLocalOnly},
+		{"share", QualityUpload},
+		// Defensive defaults — unknown / future / empty categories must
+		// preserve the artifact (upload) rather than silently discard.
+		// "Don't lose work" beats "be strict about labels."
+		{"", QualityUpload},
+		{"unknown_future_category", QualityUpload},
+		{"SHARE", QualityUpload}, // case-sensitive on purpose; LLM was instructed to emit lowercase
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.category, func(t *testing.T) {
+			got := EvaluateQualityCategory(tt.category)
+			if got != tt.want {
+				t.Errorf("EvaluateQualityCategory(%q) = %q, want %q",
+					tt.category, got, tt.want)
+			}
+		})
+	}
+}

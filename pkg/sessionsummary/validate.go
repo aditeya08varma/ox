@@ -108,6 +108,21 @@ func ValidateSummaryContent(resp *SummarizeResponse) error {
 		return fmt.Errorf("nil summary response")
 	}
 
+	// Skip-shape contract: when QualityCategory == "skip", the LLM is
+	// explicitly allowed to emit a minimal response without title/summary/
+	// outcome content. Validating those structural floors here would force
+	// the LLM to fabricate placeholder text just to pass the gate, which
+	// defeats the whole point of the skip path (saving output tokens).
+	// The skip route still gets disposed via EvaluateQualityCategory →
+	// QualityDiscard, so nothing leaks onto the ledger. Red-flag scans
+	// below still apply on whatever fields are present.
+	if IsSkipCategory(resp) {
+		// Run the red-flag scan defensively in case the skip-shape
+		// title/summary contains adversarial or contaminated content
+		// (rare but possible). Structural floors are skipped.
+		return validateRedFlags(resp)
+	}
+
 	// structural: title required
 	title := strings.TrimSpace(resp.Title)
 	if len(title) < 3 {
@@ -133,7 +148,21 @@ func ValidateSummaryContent(resp *SummarizeResponse) error {
 		return fmt.Errorf("invalid outcome %q (must be success, partial, or failed)", resp.Outcome)
 	}
 
-	// heuristic: check title for red flags
+	if err := validateRedFlags(resp); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateRedFlags applies the title/summary contamination patterns
+// (permission requests, tool-call artifacts, self-referential agent
+// text) without enforcing structural minimums. Used by both the
+// full-shape ValidateSummaryContent path and the skip-shape relaxed
+// path so contamination is still caught when the LLM emits skip-shape
+// output that includes a title or summary.
+func validateRedFlags(resp *SummarizeResponse) error {
+	title := strings.TrimSpace(resp.Title)
 	titleLower := strings.ToLower(title)
 	for _, rf := range titleRedFlags {
 		if strings.Contains(titleLower, rf.pattern) {
@@ -141,14 +170,13 @@ func ValidateSummaryContent(resp *SummarizeResponse) error {
 		}
 	}
 
-	// heuristic: check summary for red flags
+	summary := strings.TrimSpace(resp.Summary)
 	summaryLower := strings.ToLower(summary)
 	for _, rf := range summaryRedFlags {
 		if strings.Contains(summaryLower, rf.pattern) {
 			return fmt.Errorf("summary contains %s: %q", rf.reason, truncateStr(summary, 120))
 		}
 	}
-
 	return nil
 }
 
@@ -172,6 +200,12 @@ func ValidateSummaryContent(resp *SummarizeResponse) error {
 func ValidateSummaryRichness(resp *SummarizeResponse, entryCount int) error {
 	if resp == nil {
 		return fmt.Errorf("nil summary response")
+	}
+	// Skip-shape sessions are exempt from richness — the LLM (or the
+	// deterministic prefilter) explicitly decided this session shouldn't
+	// be summarized. Demanding key_actions on a skip is a contradiction.
+	if IsSkipCategory(resp) {
+		return nil
 	}
 	if entryCount <= RichnessMinEntries {
 		return nil // trivial session — no richness requirement

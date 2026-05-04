@@ -40,6 +40,51 @@ const (
 	SummaryStatusUnrecoverable = "unrecoverable"
 )
 
+// QualityCategory values describe the LLM-judged team-value of a session.
+// Categorical (not numeric) because as of April 2026 best practices on LLM
+// rubric scoring: numeric scales cluster on round numbers and ignore the
+// fine-grained distinctions they pretend to capture; LLMs are far more
+// reliable at picking from a small named set with anchored examples.
+//
+// Three categories matching session.QualityDisposition 1:1 — adding more
+// categories invites the same fine-distinction problem numeric had. The
+// rubric in the summarization prompt anchors each category with concrete
+// examples so the LLM can place a session unambiguously.
+//
+// Older summaries on the ledger may have empty QualityCategory and
+// non-zero QualityScore. Readers MUST treat empty as "category unknown,
+// fall back to numeric score via session.EvaluateQuality" — see
+// EvaluateQualityCategory for the canonical mapping.
+const (
+	// QualityCategorySkip — the session has no content worth recording
+	// at all. Routine maintenance, abandoned attempts, single-Q&A
+	// pings with no decisions or learnings. Maps to QualityDiscard.
+	// When the LLM emits this category it MAY also emit a minimal
+	// skip-shape (no title/summary/key_actions/...) — saves output
+	// tokens that would otherwise produce a stub teammates can't use.
+	QualityCategorySkip = "skip"
+
+	// QualityCategoryLocalOnly — there was real work, but it's primarily
+	// individual: routine feature implementation, bug fixes without
+	// broader insight, configuration that isn't team-level. Useful to
+	// the coworker who did it; not worth pushing to the team ledger.
+	// Maps to QualityLocalOnly.
+	QualityCategoryLocalOnly = "local_only"
+
+	// QualityCategoryShare — contains content a teammate would benefit
+	// from: architectural decisions, root-cause analyses, novel
+	// approaches, reusable patterns, important context for ongoing
+	// work. Maps to QualityUpload.
+	QualityCategoryShare = "share"
+)
+
+// IsSkipCategory reports whether resp's quality category indicates the
+// LLM (or prefilter) decided this session should not be summarized.
+// Centralized so callers don't sniff the literal string in five places.
+func IsSkipCategory(resp *SummarizeResponse) bool {
+	return resp != nil && resp.QualityCategory == QualityCategorySkip
+}
+
 // Entry is a minimal session entry for summarization.
 // Uses plain strings for the Type field (not an enum) so this package
 // has no dependency on internal/session.
@@ -85,8 +130,19 @@ type SummarizeResponse struct {
 	SageoxInsights []SageoxInsight  `json:"sageox_insights,omitempty"` // moments where SageOx guidance provided value
 
 	// Quality gate
-	QualityScore float64 `json:"quality_score"`          // 0.0-1.0 session value for team sharing
-	ScoreReason  string  `json:"score_reason,omitempty"` // brief explanation of the quality score
+	//
+	// QualityCategory is the canonical quality signal as of 2026-05.
+	// Values: QualityCategorySkip, QualityCategoryLocalOnly,
+	// QualityCategoryShare. See those constants for rubric.
+	// Empty on legacy summaries — readers fall back to QualityScore.
+	QualityCategory string `json:"quality_category,omitempty"`
+	// QualityScore is the legacy 0.0-1.0 numeric value. Retained for
+	// backward compatibility with existing summary.json files on the
+	// ledger; new summaries do NOT populate this. Numeric scoring is
+	// against April 2026 best practices for LLM rubric evaluation —
+	// see QualityCategory.
+	QualityScore float64 `json:"quality_score,omitempty"`
+	ScoreReason  string  `json:"score_reason,omitempty"` // brief explanation of the quality decision
 
 	// SageOx contribution (injected from cache file, not LLM-generated)
 	SageoxScore         *float64 `json:"sageox_score,omitempty"`          // 0.0-1.0 self-reported contribution score

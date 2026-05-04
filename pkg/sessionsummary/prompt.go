@@ -68,7 +68,7 @@ Create a JSON object with this structure:
     "constraints": ["Technical or business constraints identified"],
     "non_goals": ["Things explicitly decided NOT to do"]
   },
-  "quality_score": 0.75,
+  "quality_category": "share",
   "score_reason": "New feature with architectural decision and test coverage"
 }
 
@@ -128,29 +128,59 @@ and cross-session knowledge aggregation.
 
 Only include fields with actual content. Omit empty arrays.
 
-## Quality Score Guidelines
+## Quality Category Guidelines (read this BEFORE writing any other field)
 
-Rate the session's value to the team on a 0.0-1.0 scale. This determines whether the session
-is shared with the team (uploaded to ledger) or kept locally/discarded.
+Pick exactly one category for ` + "`quality_category`" + `. This is the most
+important field — it determines whether the session is shared with the team,
+kept locally, or discarded entirely. Categorical (not numeric) because
+fine-grained 0.0-1.0 scores cluster on round numbers and ignore real
+distinctions; LLM-based rubric scoring works better with a small named set.
+Pick the category whose anchor examples best match the session.
 
-**Score high (0.7-1.0):**
+**share** — A teammate would benefit from reading this. Examples:
 - Architectural decisions or design rationale documented
-- Bugs found with root cause analysis
+- Bugs found with root cause analysis (not just the fix)
 - Reusable patterns or approaches discovered
-- Knowledge that would save a future coworker time
+- Novel debugging techniques or non-obvious gotchas
+- Important context for ongoing initiatives
 
-**Score medium (0.3-0.7):**
-- Routine feature implementation with some decisions
-- Bug fixes without broader insights
-- Configuration or setup with team-relevant details
+**local_only** — Real work, but primarily individual. Examples:
+- Routine feature implementation following an existing pattern
+- Bug fixes without broader insight (the fix is in the diff)
+- Configuration or environment setup
+- Refactoring with no architectural shift
 
-**Score low (0.0-0.3):**
-- Routine maintenance (version bumps, formatting, rebasing)
-- Abandoned sessions (started, backed out, no real work)
+**skip** — Not worth recording at all. Examples:
+- Routine maintenance (version bumps, formatting, mechanical rebases)
+- Abandoned sessions (started, backed out, no real work happened)
 - Boilerplate-only (just ran prime, asked one question, left)
 - Repetitive work already captured in a prior session
+- Single Q&A with a one-shot answer; no decisions, no work performed
 
-The score_reason should be a single sentence explaining the rating.
+## Skip-Shape Output (saves tokens when the answer is obvious)
+
+When ` + "`quality_category`" + ` is **skip**, you MAY emit a minimal JSON object
+instead of the full schema:
+
+` + "```" + `json
+{
+  "quality_category": "skip",
+  "score_reason": "<one sentence: why this session is not worth a real summary>",
+  "title": "<optional 5-10 word descriptor of what was attempted>"
+}
+` + "```" + `
+
+The full schema fields (key_actions, aha_moments, decisions, ...) cost
+output tokens and produce nothing teammates can use on a session that's
+being skipped. Don't write them. The downstream pipeline recognizes the
+skip-shape and routes it the same place a deterministic prefilter skip
+would (discarded, not shared).
+
+For ` + "`local_only`" + ` and ` + "`share`" + ` categories, emit the full schema above.
+
+` + "`score_reason`" + ` is a single sentence explaining the category choice —
+useful for telemetry and ops investigation when reviewing skipped or
+local-only sessions.
 `
 
 // BuildSummaryPrompt builds a prompt for the calling agent to generate a session summary.
