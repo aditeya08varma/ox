@@ -18,6 +18,11 @@ type RunRequest struct {
 	Prompt          string
 	WorkDir         string
 	TimeoutOverride time.Duration
+	// Model pins a specific model for the runner (e.g., "claude-haiku-4-5").
+	// Empty means defer to the runner's default — for ClaudeRunner that's
+	// whatever the local Claude Code CLI selects, typically Sonnet. Set
+	// explicitly for cost-sensitive workloads like summarization.
+	Model string
 	// SkipLLM bypasses the LLM runner entirely. The manager calls
 	// ProcessResult directly with an empty RunResult. Use this when
 	// the work item has all the information it needs to proceed without

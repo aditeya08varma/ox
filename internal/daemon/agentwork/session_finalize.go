@@ -660,6 +660,7 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 	return RunRequest{
 		Prompt:  prompt,
 		WorkDir: payload.LedgerPath,
+		Model:   sessionsummary.DefaultSummaryModel(),
 	}, nil
 }
 

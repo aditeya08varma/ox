@@ -88,7 +88,11 @@ func (r *ClaudeRunner) Run(ctx context.Context, req RunRequest) (*RunResult, err
 	// permission prompt and produces narration that fails validation,
 	// resulting in the failure-marker-stub output that clobbered 31
 	// Phase 2 sessions on 2026-04-25 (bd ox-5cc9, ox-91sl).
-	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions", "-p", req.Prompt}
+	args := []string{"--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"}
+	if req.Model != "" {
+		args = append(args, "--model", req.Model)
+	}
+	args = append(args, "-p", req.Prompt)
 
 	cmd := exec.CommandContext(ctx, r.binaryPath, args...)
 	if req.WorkDir != "" {

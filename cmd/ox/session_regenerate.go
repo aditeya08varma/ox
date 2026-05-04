@@ -374,7 +374,7 @@ func regenerateSingleSessionSummary(nameArg string) error {
 
 	cli.PrintInfo(fmt.Sprintf("Generating summary for %s...", sessionName))
 
-	if _, err := sessionsummary.InvokeClaude(context.Background(), prompt, sessionPath); err != nil {
+	if _, err := sessionsummary.InvokeClaude(context.Background(), prompt, sessionPath, sessionsummary.DefaultSummaryModel()); err != nil {
 		return fmt.Errorf("claude invocation: %w", err)
 	}
 
