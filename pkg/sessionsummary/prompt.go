@@ -169,6 +169,14 @@ The score_reason should be a single sentence explaining the rating.
 //
 // Callers pick the path; the prompt stays agnostic.
 //
+// # Cost note: inline vs delegated
+//
+// In `inline` mode, this prompt runs against an agent that already has the
+// conversation in its prompt cache, so input tokens are predominantly
+// cached reads — the calling agent's warm cache is the primary cost
+// mitigation. In `delegated` mode the daemon spawns a fresh subprocess,
+// the prompt cache is cold, and every call pays the full input cost.
+//
 // # Contract mismatch with ValidateSummaryContent (historical note)
 //
 // The prompt below REQUESTS a rich schema: title, summary, key_actions,

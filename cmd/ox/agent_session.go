@@ -1133,31 +1133,34 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// This is best-effort -- session processing already succeeded.
 	// No spinner here -- bubbletea conflicts with Claude Code's own epoll on stdin.
 	//
-	// SESSION SUMMARIZATION DELEGATION — see ADR-016 for full rationale.
+	// SESSION SUMMARIZATION — see ADR-016 for full rationale.
 	//
-	// Two paths produce summary.json:
+	// Three modes are recognized; only the first two are implemented:
 	//
-	//   1. Inline (default today): SummaryPrompt is returned to the calling
-	//      agent. The agent runs the LLM on its existing conversation context
-	//      and pipes the result to `ox session push-summary`. Free in input
-	//      tokens, agent-agnostic, no extra binary required — but blocks the
-	//      user in the foreground for 30–120s at exactly the moment they
-	//      signaled "I'm done" and wanted to /clear or close the agent.
+	//   inline    — the CLI drives summarization. SummaryPrompt is returned
+	//               to the calling agent, which runs the LLM in its existing
+	//               warm conversation context and pipes the result to
+	//               `ox session push-summary`. Cheap (input tokens are mostly
+	//               cache-reads from the agent's existing context); blocks
+	//               the user in the foreground for 30–120s. **Default.**
 	//
-	//   2. Daemon-delegated (this branch when asyncUpload is true): CLI
-	//      uploads raw.jsonl + meta.json synchronously (small, durability-
-	//      critical), then signals the daemon and returns immediately.
-	//      `internal/daemon/agentwork/session_finalize.go` spawns the user's
-	//      configured LLM CLI (claude/codex/gemini), generates the summary,
-	//      and calls back into the shared pushSummaryToLedger flow.
+	//   delegated — the daemon drives summarization. CLI uploads raw.jsonl +
+	//               meta.json synchronously (small, durability-critical),
+	//               signals the daemon, and returns immediately. The daemon
+	//               (`internal/daemon/agentwork/session_finalize.go`) spawns
+	//               the user's configured LLM CLI (claude/codex/gemini)
+	//               against the cached raw.jsonl — every call is a *fresh*
+	//               cold prompt, ~10× more expensive than inline on the same
+	//               session. The only thing this buys the user is getting
+	//               their terminal back immediately at session-stop.
 	//
-	// Delegating to the calling agent is the right default *technically*, but
-	// only when the user has not specified an LLM agent for daemon callouts.
-	// When the user *has* a usable runner configured (or auto-detectable on
-	// PATH), forcing the inline path is pure user-visible latency for no
-	// architectural benefit. The plan is to lift this env var to a first-class
-	// `agent.summarizer` config key with `auto` (PATH detection) as the
-	// default. The current env var stays as a compatibility alias.
+	//   cloud     — RESERVED. SageOx cloud-side summarization. Not implemented.
+	//
+	// Default is `inline` because the cost asymmetry is too large to default
+	// to the expensive path. Users who want non-blocking session-stop and are
+	// OK paying the token cost can opt into `delegated`. The dispatch is
+	// gated behind `SAGEOX_ASYNC_SESSION_UPLOAD=1` until the `agent.summarizer`
+	// config key lands; the env var will stay as a deprecated alias.
 	asyncUpload := os.Getenv("SAGEOX_ASYNC_SESSION_UPLOAD") == "1"
 
 	if ledgerErr != nil {
