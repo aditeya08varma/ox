@@ -1158,10 +1158,12 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	//
 	// Default is `inline` because the cost asymmetry is too large to default
 	// to the expensive path. Users who want non-blocking session-stop and are
-	// OK paying the token cost can opt into `delegated`. The dispatch is
-	// gated behind `SAGEOX_ASYNC_SESSION_UPLOAD=1` until the `agent.summarizer`
-	// config key lands; the env var will stay as a deprecated alias.
-	asyncUpload := os.Getenv("SAGEOX_ASYNC_SESSION_UPLOAD") == "1"
+	// OK paying the token cost can opt into `delegated`. ResolveAgentSummarizer
+	// honors (in priority order): the legacy SAGEOX_ASYNC_SESSION_UPLOAD /
+	// OX_SESSION_INLINE_SUMMARY env vars (deprecated, one-release shim), the
+	// `agent.summarizer` user-config key, and finally the inline default.
+	summarizerMode := config.GetAgentSummarizer(projectRoot)
+	asyncUpload := summarizerMode == config.AgentSummarizerDelegated
 
 	if ledgerErr != nil {
 		// couldn't resolve ledger path - skip upload
