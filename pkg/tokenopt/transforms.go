@@ -91,49 +91,58 @@ func (s *state) transform(line []byte, seq int, stats *Stats) ([]byte, emitActio
 	return out, actEmit, err
 }
 
-// transformConversationOnly keeps assistant turns verbatim, replaces tool
-// entries with bare-marker placeholders, and drops system entries.
+// transformConversationOnly keeps assistant turns verbatim, selectively
+// replaces tool entries with description-bearing tool_marks, and drops
+// system entries.
 //
-// tool_mark shape today is intentionally minimal: just `{type:"tool_mark"}`,
-// optionally `{type:"tool_mark", count:N}` when adjacent calls collapse.
-// No tool_name, no brief, no is_error.
+// Tool entries with a non-empty `description` in tool_input (Bash, Agent,
+// Task, WebFetch, ...) emit `{type:"tool_mark", description:"..."}` — the
+// agent-authored intent string is high-signal narrative scaffolding that's
+// already a one-line summary of WHY the tool was invoked. Adjacent calls
+// with the same description collapse via the count field (e.g., a polling
+// loop that keeps re-running the same probe).
 //
-// Reasoning: the brief was a 120-char-per-call tax (6–11K input tokens on
-// real sessions) that paid back unevenly. Most of what the brief carried —
-// the bash command, the file path, the grep pattern — is also in the
-// surrounding assistant prose ("I'll edit foo.go and run tests"). What the
-// summarizer actually needs from these entries is *narrative scaffolding*:
-// "the agent paused and acted between these two messages, N times." A bare
-// `tool_mark` (with `count` when batched) preserves that signal at <1% of
-// the previous cost. If `quality_score` / `judge_overall` regresses on
-// tool-heavy sessions when this lands, the next step is option 3 from the
-// design discussion: a single tail digest of tool_name → count.
+// Tool entries WITHOUT a description (Edit, Read, Write, Glob, Grep, ...)
+// produce no tool_mark at all. Those tools' actions are reliably narrated
+// in surrounding assistant prose ("I'll edit foo.go and run tests"), so a
+// content-free marker would just be noise.
+//
+// The previous shape (bare `{type:"tool_mark"}` for every tool, no detail)
+// was maximally aggressive but threw away free narrative — descriptions
+// cost very little and recover meaningful key_actions signal that pure
+// assistant prose can miss (e.g., when the agent runs commands silently).
+// If `quality_score` / `judge_overall` regresses on description-heavy
+// sessions, the next step is a single tail digest of description → count
+// rather than per-call entries.
 func (s *state) transformConversationOnly(e *entry, line []byte, stats *Stats) ([]byte, emitAction, error) {
 	switch e.Type {
 	case "assistant":
 		// Pass through verbatim — assistant prose IS the narrative.
 		return line, actEmit, nil
 	case "tool":
-		// Always the same shape — no per-call detail. Every tool entry
-		// produces an identical mark, which means adjacency batching
-		// collapses every contiguous run of tool calls between assistant
-		// turns into a single `{type:"tool_mark", count:N}` entry.
-		mark := entry{Type: "tool_mark"}
 		stats.ToolsMarked++
+		desc := descriptionForTool(e.ToolInput)
+		if desc == "" {
+			// No description — drop the entry entirely. Most editor /
+			// reader tools fall here (Edit, Read, Write, Glob, Grep);
+			// their actions are recovered from assistant prose, so a
+			// content-free tool_mark would only inflate token cost.
+			stats.SystemDropped++ // reuse the "dropped without replacement" counter
+			return nil, actDrop, nil
+		}
+		mark := entry{Type: "tool_mark", Description: desc}
 
 		if s.pending != nil {
-			// All marks are identical now, so every continuation is a
-			// batchable duplicate. The pendingMatches check is kept as a
-			// no-op call site for symmetry with other modes / future
-			// variants that may reintroduce per-call distinctions.
+			// Batch only when the description matches exactly (e.g., a
+			// retry loop running the same probe). Different descriptions
+			// stay separate — they represent distinct intents and the
+			// summarizer should see them as such.
 			if pendingMatches(s.pending, &mark) {
 				s.pendingCount++
 				stats.ToolsBatched++
 				return nil, actHold, nil
 			}
-			// Unreachable today (all marks match), but kept for safety:
-			// flush old pending, hold new one. Same shape as the original
-			// implementation so future modes can reintroduce a distinction.
+			// Different description — flush old pending, hold new one.
 			oldFlushed := s.marshalPending()
 			s.pending = &mark
 			s.pendingCount = 1
@@ -152,13 +161,56 @@ func (s *state) transformConversationOnly(e *entry, line []byte, stats *Stats) (
 	}
 }
 
-// pendingMatches reports whether two tool_marks are batchable. Today every
-// tool_mark has the same shape (`{type:"tool_mark"}`), so this returns true
-// for any two tool→tool transitions. Kept as a function (rather than inlined
-// `true`) to make the batching policy explicit and to leave a single place
-// to reintroduce per-call distinctions if the digest experiment regresses.
+// pendingMatches reports whether two tool_marks are batchable. With the
+// description-bearing tool_mark shape, two marks are batchable iff their
+// descriptions match exactly (typically: a polling loop or retry running
+// the same probe).
 func pendingMatches(a, b *entry) bool {
-	return a.Type == b.Type
+	return a.Type == b.Type && a.Description == b.Description
+}
+
+// descriptionForTool extracts the agent-authored `description` field from
+// a tool_input JSON payload. Returns "" if tool_input is missing,
+// unparseable, or has no non-empty description — signaling the caller to
+// drop the tool_mark entirely.
+//
+// We intentionally check ONLY the literal "description" key. We do not
+// derive descriptions for tools that don't carry one (Edit, Read, Write,
+// etc.) — those are dropped, on the policy that assistant prose already
+// names their concrete actions. Adding heuristic derivations would
+// reintroduce the lossy 120-char brief shape this design replaced.
+//
+// The 200-char ceiling is a safety bound against pathological agent output
+// (paragraph-long descriptions). Real Claude Code descriptions are
+// typically 5–15 words.
+func descriptionForTool(toolInput string) string {
+	const maxDescription = 200
+	if toolInput == "" {
+		return ""
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(toolInput), &raw); err != nil {
+		return ""
+	}
+	v, ok := raw["description"]
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Account for the 3-byte UTF-8 ellipsis when truncating: 197 bytes of
+	// content + "…" (3 bytes) = 200 bytes total.
+	const ellipsis = "…"
+	if len(s) > maxDescription {
+		s = s[:maxDescription-len(ellipsis)] + ellipsis
+	}
+	return s
 }
 
 // marshalPending serializes state.pending with its accumulated count into

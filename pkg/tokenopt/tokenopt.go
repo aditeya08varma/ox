@@ -126,13 +126,21 @@ type Mode int
 
 const (
 	// ModeConversationOnly (default) emits user + assistant entries verbatim,
-	// drops header and system entries, and replaces every tool entry with a
-	// bare `{type:"tool_mark"}` marker (or `{type:"tool_mark", count:N}`
-	// when adjacent tool entries collapse). The marker's only job is to tell
-	// the summarizer "the agent acted between these two messages, N times" —
-	// no tool_name, no input gist, no output. Optimal for downstream
-	// summarization: the summarizer needs the conversation arc, not tool I/O,
-	// and assistant prose already names the concrete actions ("I'll edit X").
+	// drops header and system entries, and selectively replaces tool entries:
+	//
+	//   - Tool calls with a non-empty `description` field in tool_input
+	//     (Bash, Agent, Task, WebFetch, ...) emit
+	//     `{type:"tool_mark", description:"..."}`. Adjacent calls with the
+	//     same description collapse via the count field.
+	//
+	//   - Tool calls without a description (Edit, Read, Write, Glob, Grep, ...)
+	//     produce NO tool_mark at all. Their actions are recoverable from
+	//     surrounding assistant prose ("I'll edit foo.go and run tests"),
+	//     so the marker would only be redundant noise.
+	//
+	// The descriptions are agent-authored intent strings — high
+	// signal-per-byte, and far cheaper than the previous 120-char brief
+	// extracted heuristically from the most-meaningful input field.
 	ModeConversationOnly Mode = 0
 
 	// ModeLossless keeps every entry but applies content-level transforms
@@ -314,10 +322,17 @@ type entry struct {
 	IsError    bool            `json:"is_error,omitempty"`
 	Metadata   json.RawMessage `json:"metadata,omitempty"`
 
-	// Count is set on tool_mark entries when adjacent tool_marks were
-	// collapsed into one entry. A missing/zero count means 1 (single
-	// occurrence). Lets the summarizer see "agent did N tool things
-	// between these messages" without N redundant entries.
+	// Description is the agent-authored intent string for a tool call,
+	// emitted only on tool_mark entries when the source tool_input had a
+	// non-empty `description` field. Tools that don't carry a description
+	// (Edit, Read, Write, Glob, Grep, etc.) produce no tool_mark at all —
+	// their actions are recoverable from surrounding assistant prose.
+	Description string `json:"description,omitempty"`
+
+	// Count is set on tool_mark entries when adjacent tool_marks with the
+	// same description were collapsed into one entry. A missing/zero count
+	// means 1 (single occurrence). Lets the summarizer see "agent did
+	// $description ×N" without N redundant entries.
 	Count int `json:"count,omitempty"`
 
 	// ref fields for ModeLossless tool_ref entries.
