@@ -174,6 +174,44 @@ Override per-invocation with --html, --text, or --json flags.`,
 		Levels:      []ConfigLevel{ConfigLevelUser},
 	},
 	{
+		Key:         "agent.summarizer",
+		Description: "Who runs the session-stop summarization (inline/delegated)",
+		LongDescription: `Selects who runs the LLM call that summarizes a session at stop.
+
+  inline    — The calling agent (Claude Code, Cursor, etc.) runs the LLM
+              in its already-warm prompt cache. Cheap (input tokens are
+              mostly cache reads). Blocks the user in the foreground for
+              ~30–120s while the agent finishes. **Default.**
+
+  delegated — The daemon runs the LLM in a fresh subprocess against the
+              cached raw.jsonl. Every call is a *cold* prompt — input
+              tokens are paid in full, roughly 10× the cost of inline on
+              the same session. The only thing this buys you is getting
+              your terminal back immediately at session-stop.
+
+  off       — Skip LLM summarization entirely. Sessions are still uploaded
+              to the ledger, but team-context surfacing and search will
+              be degraded for these recordings.
+
+  cloud     — Reserved for future SageOx cloud-side summarization. Not
+              yet implemented; rejected by 'ox config set'.
+
+Default is 'inline' because the cost asymmetry is too large to default
+to 'delegated'. Switch to 'delegated' only if you want session-stop to
+return immediately and you're OK paying the token cost on every close.
+
+When the SessionEnd hook fires (Claude Code exit), summarization always
+goes through 'delegated' regardless of this setting — at that moment the
+calling agent process is being torn down, so 'inline' has no agent to
+whisper back to.
+
+See ADR-016 for full rationale.`,
+		Category:    "Sessions",
+		ValidValues: []string{"inline", "delegated", "off"}, // "cloud" intentionally absent — reserved
+		Default:     "inline",
+		Levels:      []ConfigLevel{ConfigLevelUser},
+	},
+	{
 		Key:         "agent_worker",
 		Description: "Daemon AI coworker for background tasks",
 		LongDescription: `Selects which agent CLI the daemon uses for background tasks like
@@ -409,6 +447,11 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			}
 		}
 
+	case "agent.summarizer":
+		if userCfg != nil && userCfg.AgentSummarizer != "" {
+			cv.UserVal = config.NormalizeAgentSummarizer(userCfg.AgentSummarizer)
+		}
+
 	case "attribution.commit":
 		if userCfg != nil && userCfg.Attribution != nil && userCfg.Attribution.IsCommitSet() {
 			if v := userCfg.Attribution.GetCommit(); v == "" {
@@ -604,6 +647,16 @@ func setUserConfig(key, value string) error {
 			cfg.SetAgentWorkerAgent(value)
 		}
 
+	case "agent.summarizer":
+		// `cloud` is the future SageOx cloud-side path; rejected here so users
+		// don't silently set a value that won't take effect. ValidValues in
+		// AllSettings already prevents this for fresh users, but the explicit
+		// guard catches scripts and direct YAML edits.
+		if value == config.AgentSummarizerCloud {
+			return fmt.Errorf("agent.summarizer=cloud is reserved for future SageOx cloud-side summarization and is not yet implemented; pick inline, delegated, or off")
+		}
+		cfg.AgentSummarizer = value
+
 	case "attribution.commit":
 		if cfg.Attribution == nil {
 			cfg.Attribution = &config.Attribution{}
@@ -777,6 +830,9 @@ func unsetUserConfig(key string) error {
 
 	case "agent_worker":
 		cfg.AgentWorker = nil
+
+	case "agent.summarizer":
+		cfg.AgentSummarizer = ""
 
 	case "attribution.commit":
 		if cfg.Attribution != nil {

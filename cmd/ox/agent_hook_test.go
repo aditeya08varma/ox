@@ -46,15 +46,17 @@ func TestResolvePhase(t *testing.T) {
 }
 
 func TestActivePhaseBehavior(t *testing.T) {
-	// phases with behavior
+	// phases with behavior. phaseEnd was added when SessionEnd hook
+	// auto-finalization was wired up — see cmd/ox/agent_hook.go:handleEnd
+	// and the regression test TestPhaseEnd_HasActiveBehavior.
 	assert.True(t, activePhaseBehavior[phaseStart])
 	assert.True(t, activePhaseBehavior[phaseCompact])
 	assert.True(t, activePhaseBehavior[phaseAfterTool])
 	assert.True(t, activePhaseBehavior[phaseStop])
 	assert.True(t, activePhaseBehavior[phasePrompt])
+	assert.True(t, activePhaseBehavior[phaseEnd])
 
 	// noop phases
-	assert.False(t, activePhaseBehavior[phaseEnd])
 	assert.False(t, activePhaseBehavior[phaseBeforeTool])
 }
 
@@ -65,7 +67,7 @@ func TestDispatchPhase_NoopPhases(t *testing.T) {
 	}
 
 	// noop phases should return nil
-	for _, phase := range []string{phaseEnd, phaseBeforeTool} {
+	for _, phase := range []string{phaseBeforeTool} {
 		ctx.Phase = phase
 		err := dispatchPhase(ctx)
 		assert.NoError(t, err, "phase %s should be noop", phase)

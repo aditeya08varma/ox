@@ -768,8 +768,8 @@ func TestProcessResult_WritesMetaJSON(t *testing.T) {
 	if meta.Summary != "Testing meta.json generation" {
 		t.Errorf("summary mismatch: got %q", meta.Summary)
 	}
-	if meta.EntryCount != 2 { // 2 entries in createTestSession raw.jsonl
-		t.Errorf("entry_count mismatch: got %d, want 2", meta.EntryCount)
+	if meta.EntryCount != 3 { // 3 entries in createTestSession raw.jsonl (user + 2 assistant)
+		t.Errorf("entry_count mismatch: got %d, want 3", meta.EntryCount)
 	}
 }
 
@@ -944,10 +944,19 @@ func createTestSession(t *testing.T, sessionName string, includeArtifacts []stri
 		t.Fatal(err)
 	}
 
-	// always create raw.jsonl with minimal content
+	// raw.jsonl with substantive content. Two important properties:
+	//
+	//   1. User content is long enough (> 80 chars) that
+	//      sessionsummary.MaybeBuildSkipSummary does NOT trigger — these
+	//      tests exercise the LLM-output path, not the prefilter path.
+	//      Tests targeting the prefilter use createThinTestSession below.
+	//
+	//   2. At least 3 entries (header + user + assistant) so the
+	//      entry-count floor in the prefilter is also cleared.
 	rawContent := `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}
-{"type":"user","content":"hello","seq":1}
-{"type":"assistant","content":"hi there","seq":2}
+{"type":"user","content":"Walk me through how the daemon's session-finalize loop interacts with the manager's queue and ProcessResult callback","seq":1}
+{"type":"assistant","content":"Sure — the daemon polls for orphaned sessions, BuildPrompt constructs a RunRequest, the manager runs it through claude, and ProcessResult parses the output and writes artifacts.","seq":2}
+{"type":"assistant","content":"Want me to walk through the queue invariants too, or just the happy path?","seq":3}
 `
 	if err := os.WriteFile(filepath.Join(sessionsDir, "raw.jsonl"), []byte(rawContent), 0644); err != nil {
 		t.Fatal(err)
@@ -982,9 +991,12 @@ func createTestSessionInGitRepo(t *testing.T, sessionName string) (string, strin
 	sessionsDir := filepath.Join(ledgerPath, "sessions", sessionName)
 	require.NoError(t, os.MkdirAll(sessionsDir, 0755))
 
+	// Same substantive content as createTestSession — keeps the LLM
+	// path active rather than triggering the pre-LLM prefilter.
 	rawContent := `{"_meta":{"schema_version":"1","agent_type":"claude-code"}}
-{"type":"user","content":"hello","seq":1}
-{"type":"assistant","content":"hi there","seq":2}
+{"type":"user","content":"Walk me through how the daemon's session-finalize loop interacts with the manager's queue and ProcessResult callback","seq":1}
+{"type":"assistant","content":"Sure — the daemon polls for orphaned sessions, BuildPrompt constructs a RunRequest, the manager runs it through claude, and ProcessResult parses the output and writes artifacts.","seq":2}
+{"type":"assistant","content":"Want me to walk through the queue invariants too, or just the happy path?","seq":3}
 `
 	require.NoError(t, os.WriteFile(filepath.Join(sessionsDir, "raw.jsonl"), []byte(rawContent), 0644))
 

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/telemetry"
 	"github.com/sageox/ox/pkg/sessionpipeline"
+	"github.com/sageox/ox/pkg/sessionsummary"
 	"github.com/sageox/ox/pkg/tokenopt"
 	"github.com/sageox/ox/pkg/tokenstrip"
 )
@@ -44,14 +45,43 @@ func (tokenoptStage) Apply(ctx context.Context, r io.Reader, w io.Writer) (sessi
 //
 // Enabled by default; opt-out via OX_SUMMARY_INPUT_TOKEN_STRIP=off. See
 // summaryInputTokenStripDisabled() for the gate.
+//
+// DropThinkingMode is selected from OX_SUMMARY_INPUT_DROP_THINKING:
+//
+//	(unset|none): preserve thinking blocks (current default).
+//	first|first_sentence: keep first sentence, elide rest. Conservative.
+//	all|drop: remove blocks entirely. Aggressive.
+//
+// Recommended rollout: keep the default at none for one release while
+// the EventTokenoptRun + EventSummarization correlation lets us A/B
+// quality_score against compression-ratio. Flip to first_sentence as
+// the default once telemetry shows quality is unaffected.
 type tokenstripStage struct{}
 
 func (tokenstripStage) Name() string { return "tokenstrip" }
 
 func (tokenstripStage) Apply(ctx context.Context, r io.Reader, w io.Writer) (sessionpipeline.Stats, error) {
 	_ = ctx
-	stats, err := tokenstrip.Compress(r, w)
+	stats, err := tokenstrip.CompressWith(r, w, tokenstrip.Options{
+		DropThinkingMode: dropThinkingModeFromEnv(),
+	})
 	return stats, err
+}
+
+// summaryInputDropThinkingEnvVar selects how aggressively <thinking>
+// blocks in assistant content are reduced before the LLM sees them.
+// See tokenstripStage docstring for values + rollout guidance.
+const summaryInputDropThinkingEnvVar = "OX_SUMMARY_INPUT_DROP_THINKING"
+
+func dropThinkingModeFromEnv() tokenstrip.DropThinkingMode {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(summaryInputDropThinkingEnvVar))) {
+	case "first", "first_sentence", "firstsentence":
+		return tokenstrip.DropThinkingFirstSentence
+	case "all", "drop":
+		return tokenstrip.DropThinkingAll
+	default:
+		return tokenstrip.DropThinkingNone
+	}
 }
 
 // Cache-budget knobs. Exceeding either triggers LRU pruning by mtime.
@@ -133,7 +163,7 @@ func writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName string) stri
 	}
 	if summaryInputOptimizeDisabled() {
 		slog.Info("tokenopt: disabled via env, using raw.jsonl", "env", summaryInputOptimizeEnvVar)
-		emitTokenoptTelemetry(rawPath, tokenopt.Stats{}, "disabled")
+		emitTokenoptTelemetry(rawPath, tokenopt.Stats{}, tokenstrip.Stats{}, false, "disabled")
 		return ""
 	}
 	in, err := os.Open(rawPath)
@@ -153,7 +183,7 @@ func writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName string) stri
 	out, err := os.Create(optPath)
 	if err != nil {
 		slog.Debug("tokenopt: create optimized file failed", "path", optPath, "error", err)
-		emitTokenoptTelemetry(rawPath, tokenopt.Stats{}, "create_failed")
+		emitTokenoptTelemetry(rawPath, tokenopt.Stats{}, tokenstrip.Stats{}, false, "create_failed")
 		return ""
 	}
 
@@ -176,21 +206,35 @@ func writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName string) stri
 	}
 
 	// Recover tokenopt.Stats from the first stage result for the sanity
-	// gate and telemetry. The sanity gate checks invariants produced by
-	// tokenopt (EntriesIn - SystemDropped == EntriesOut); subsequent
-	// stages don't modify those invariants, so scoring from stage[0] is
-	// sufficient.
+	// gate. The sanity gate checks invariants produced by tokenopt
+	// (EntriesIn - SystemDropped - HeaderDropped - ToolsBatched ==
+	// EntriesOut); subsequent stages don't change those invariants, so
+	// stage[0] is sufficient for sanity.
 	var stats tokenopt.Stats
 	if len(stageResults) > 0 && stageResults[0].Stats != nil {
 		if ts, ok := stageResults[0].Stats.(tokenopt.Stats); ok {
 			stats = ts
 		}
 	}
+	// Recover tokenstrip.Stats from stage[1] when present, so telemetry
+	// can report the FINAL bytes/tokens that reached the LLM — not the
+	// intermediate bytes after tokenopt but before tokenstrip's NFC /
+	// zero-width / whitespace / thinking-block transforms. Without this
+	// the tokenopt_run event understates compression effectiveness by
+	// however much tokenstrip removed.
+	var stripStats tokenstrip.Stats
+	var stripStatsValid bool
+	if len(stageResults) > 1 && stageResults[1].Stats != nil {
+		if ts, ok := stageResults[1].Stats.(tokenstrip.Stats); ok {
+			stripStats = ts
+			stripStatsValid = true
+		}
+	}
 
 	if runErr != nil {
 		slog.Warn("tokenopt: compress failed, summary will use raw.jsonl", "error", runErr)
 		_ = os.Remove(optPath)
-		emitTokenoptTelemetry(rawPath, stats, "compress_failed")
+		emitTokenoptTelemetry(rawPath, stats, stripStats, stripStatsValid, "compress_failed")
 		return ""
 	}
 
@@ -201,7 +245,7 @@ func writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName string) stri
 		slog.Warn("tokenopt: sanity gate rejected optimized file, falling back to raw.jsonl",
 			"reason", reason, "path", optPath, "stats", stats)
 		_ = os.Remove(optPath)
-		emitTokenoptTelemetry(rawPath, stats, "sanity_rejected:"+reason)
+		emitTokenoptTelemetry(rawPath, stats, stripStats, stripStatsValid, "sanity_rejected:"+reason)
 		return ""
 	}
 
@@ -213,7 +257,10 @@ func writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName string) stri
 	}
 
 	slog.Info("tokenopt", "path", optPath, "stats", stats)
-	emitTokenoptTelemetry(rawPath, stats, "ok")
+	if stripStatsValid {
+		slog.Info("tokenstrip", "path", optPath, "stats", stripStats)
+	}
+	emitTokenoptTelemetry(rawPath, stats, stripStats, stripStatsValid, "ok")
 	_, pct := stats.Reduction()
 	fmt.Fprintf(os.Stderr, "session summary input optimized: %d→%d entries, %d→%d bytes (%.1f%% smaller)\n",
 		stats.EntriesIn, stats.EntriesOut, stats.BytesIn, stats.BytesOut, pct)
@@ -226,27 +273,60 @@ func writeOptimizedJSONLForSummary(rawPath, ledgerPath, sessionName string) stri
 // gives us compression-rate distribution, error rate, and fallback rate
 // across the user base. Best-effort: no-op when telemetry client not available
 // (offline, opted-out, etc.).
-func emitTokenoptTelemetry(rawPath string, stats tokenopt.Stats, outcome string) {
+func emitTokenoptTelemetry(rawPath string, stats tokenopt.Stats, stripStats tokenstrip.Stats, stripValid bool, outcome string) {
 	if cliCtx == nil || cliCtx.TelemetryClient == nil {
 		return
 	}
-	_, pct := stats.Reduction()
+	_, bytePct := stats.Reduction()
+	_, tokPct := stats.TokenReduction()
 	success := outcome == "ok"
 	meta := map[string]string{
-		"outcome":            outcome,
-		"entries_in":         strconv.Itoa(stats.EntriesIn),
-		"entries_out":        strconv.Itoa(stats.EntriesOut),
-		"bytes_in":           strconv.FormatInt(stats.BytesIn, 10),
-		"bytes_out":          strconv.FormatInt(stats.BytesOut, 10),
-		"reduction_pct":      strconv.FormatFloat(pct, 'f', 1, 64),
-		"tools_marked":       strconv.Itoa(stats.ToolsMarked),
-		"system_dropped":     strconv.Itoa(stats.SystemDropped),
-		"ansi_stripped":      strconv.Itoa(stats.ANSIStripped),
-		"images_elided":      strconv.Itoa(stats.ImagesElided),
-		"large_reads_elided": strconv.Itoa(stats.LargeReadsElided),
-		"reminders_deduped":  strconv.Itoa(stats.RemindersDeduped),
-		"tool_results_refd":  strconv.Itoa(stats.ToolResultsRefd),
+		"outcome":             outcome,
+		"entries_in":          strconv.Itoa(stats.EntriesIn),
+		"entries_out":         strconv.Itoa(stats.EntriesOut),
+		"bytes_in":            strconv.FormatInt(stats.BytesIn, 10),
+		"bytes_out":           strconv.FormatInt(stats.BytesOut, 10),
+		"byte_reduction_pct":  strconv.FormatFloat(bytePct, 'f', 1, 64),
+		"tokens_in_est":       strconv.FormatInt(stats.TokensInEstimate, 10),
+		"tokens_out_est":      strconv.FormatInt(stats.TokensOutEstimate, 10),
+		"token_reduction_pct": strconv.FormatFloat(tokPct, 'f', 1, 64),
+		"tools_marked":        strconv.Itoa(stats.ToolsMarked),
+		"tools_batched":       strconv.Itoa(stats.ToolsBatched),
+		"system_dropped":      strconv.Itoa(stats.SystemDropped),
+		"header_dropped":      strconv.Itoa(stats.HeaderDropped),
+		"ansi_stripped":       strconv.Itoa(stats.ANSIStripped),
+		"images_elided":       strconv.Itoa(stats.ImagesElided),
+		"large_reads_elided":  strconv.Itoa(stats.LargeReadsElided),
+		"reminders_deduped":   strconv.Itoa(stats.RemindersDeduped),
+		"tool_results_refd":   strconv.Itoa(stats.ToolResultsRefd),
+		// session_hash correlates this event with the summarization event
+		// emitted by the daemon's session_finalize handler. Hash of the
+		// session NAME (not content, not path), so privacy is preserved
+		// while server-side joins become possible.
+		"session_hash": sessionsummary.SessionHashFromRawPath(rawPath),
 	}
+	// Backwards-compat: keep the historical "reduction_pct" key as an
+	// alias for byte_reduction_pct so dashboards built before tokens
+	// existed don't blank out. Drop after one release.
+	meta["reduction_pct"] = meta["byte_reduction_pct"]
+
+	// Final-stage stats: bytes/tokens AFTER the tokenstrip pass, which
+	// is what the LLM actually receives. Without these, the dashboard
+	// understates compression effectiveness by however much tokenstrip
+	// removed (NFC, zero-width, whitespace canon, thinking-block trim).
+	// Only emitted when tokenstrip ran (skipped if env opt-out is set).
+	if stripValid {
+		_, finalBytePct := stripStats.Reduction()
+		_, finalTokPct := stripStats.TokenReduction()
+		meta["final_bytes_out"] = strconv.FormatInt(stripStats.BytesOut, 10)
+		meta["final_tokens_out_est"] = strconv.FormatInt(stripStats.TokensOutEstimate, 10)
+		meta["tokenstrip_byte_reduction_pct"] = strconv.FormatFloat(finalBytePct, 'f', 1, 64)
+		meta["tokenstrip_token_reduction_pct"] = strconv.FormatFloat(finalTokPct, 'f', 1, 64)
+		meta["thinking_blocks_trimmed"] = strconv.Itoa(stripStats.ThinkingBlocksTrimmed)
+		meta["thinking_blocks_dropped"] = strconv.Itoa(stripStats.ThinkingBlocksDropped)
+		meta["stop_words_removed"] = strconv.Itoa(stripStats.StopWordsRemoved)
+	}
+
 	cliCtx.TelemetryClient.TrackAsync(telemetry.Event{
 		Type:     telemetry.EventTokenoptRun,
 		Command:  "session_stop",
@@ -255,15 +335,21 @@ func emitTokenoptTelemetry(rawPath string, stats tokenopt.Stats, outcome string)
 	})
 }
 
+
 // sanityCheckOptimized returns a non-empty reason string when the compressed
 // file looks wrong and should not be trusted. Empty string = pass.
 //
 // Invariants checked:
 //   - file exists and is non-empty
 //   - entries were actually emitted (non-zero EntriesOut)
-//   - EntriesOut matches EntriesIn - SystemDropped. ConversationOnly drops
-//     only system entries; anything else disappearing means a regression is
-//     silently eating user or assistant turns.
+//   - EntriesOut == EntriesIn - SystemDropped - HeaderDropped - ToolsBatched.
+//     ConversationOnly's accounted reductions are: system entries dropped,
+//     header entries dropped (the LLM doesn't need them; daemon stamps
+//     them into meta.json directly from stored.Meta), and adjacent
+//     identical tool_marks collapsed via batching. Anything else
+//     disappearing means a regression is silently eating user or assistant
+//     turns — which would corrupt the summary in a way the LLM can't
+//     recover from.
 func sanityCheckOptimized(path string, stats tokenopt.Stats) string {
 	if stats.EntriesIn == 0 {
 		// Empty input → empty output is legitimate.
@@ -279,10 +365,10 @@ func sanityCheckOptimized(path string, stats tokenopt.Stats) string {
 	if stats.EntriesOut == 0 {
 		return "zero entries emitted from a non-empty input"
 	}
-	expected := stats.EntriesIn - stats.SystemDropped
+	expected := stats.EntriesIn - stats.SystemDropped - stats.HeaderDropped - stats.ToolsBatched
 	if stats.EntriesOut != expected {
-		return fmt.Sprintf("entry-count mismatch: got %d, want %d (EntriesIn=%d - SystemDropped=%d)",
-			stats.EntriesOut, expected, stats.EntriesIn, stats.SystemDropped)
+		return fmt.Sprintf("entry-count mismatch: got %d, want %d (EntriesIn=%d - SystemDropped=%d - HeaderDropped=%d - ToolsBatched=%d)",
+			stats.EntriesOut, expected, stats.EntriesIn, stats.SystemDropped, stats.HeaderDropped, stats.ToolsBatched)
 	}
 	return ""
 }

@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.2] - 2026-05-04
+
+### Added
+
+**Session summarization is now configurable and observable**
+- New `agent.summarizer` setting picks who runs the LLM that summarizes a session at stop. `inline` (default) runs it in the calling agent's already-warm prompt cache — cheap, but blocks the user for ~30–120s. `delegated` runs it in the daemon as a background subprocess — non-blocking, but pays the full input-token cost on every stop. `off` skips LLM summarization. `cloud` is reserved for future SageOx cloud-side summarization.
+- The legacy `SAGEOX_ASYNC_SESSION_UPLOAD` and `OX_SESSION_INLINE_SUMMARY` env vars still work for one release as deprecation aliases, with a warning pointing at `ox config set agent.summarizer`.
+- `ox session stop` now finalizes automatically when you exit Claude Code. Previously the SessionEnd hook fired but had no handler, leaving recordings stranded in the cache for up to 24 hours until the daemon's anti-entropy sweep noticed.
+- New `summarization` telemetry event captures input/output tokens, model, duration, and quality score for every delegated summarization call. When the LLM-as-judge runs, its tokens piggyback on the same event.
+
+### Changed
+
+**Cheaper session summarization on the delegated path**
+- Delegated summarization now defaults to Claude Haiku 4.5 instead of inheriting the user's local default (typically Sonnet). The summarization task is structured JSON extraction over a fixed schema — well within Haiku's capabilities and 5–15× cheaper. `OX_SUMMARY_MODEL` overrides the default.
+- The summary-input optimizer now strips tool entries down to bare `{type:"tool_mark"}` markers (with `count:N` when adjacent runs collapse). Tool name, brief, and I/O are no longer carried — assistant prose already names concrete actions, and the marker only needs to signal "the agent acted between these two messages." On a realistic 300-entry session this is an 87% byte/token reduction over the previous shape.
+
+[0.7.2]: https://github.com/sageox/ox/releases/tag/v0.7.2
+
 ## [0.7.1] - 2026-05-03
 
 ### Fixed

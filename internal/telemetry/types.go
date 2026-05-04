@@ -60,6 +60,44 @@ const (
 
 	// summarization preprocessing events
 	EventTokenoptRun = "tokenopt_run" // summary-input optimization pass (cmd/ox/session_optimize_for_summary.go)
+
+	// EventSummarization is emitted once per LLM summarization call (delegated path
+	// today; inline coverage is a follow-up). It captures the cost shape of every
+	// session-stop summary so we can:
+	//
+	//   1. quantify the inline-vs-delegated cost gap in production (currently
+	//      asserted in ADR-016 from theory; this turns it into a measurement)
+	//   2. detect quality regressions if the Haiku-4.5 default drifts
+	//   3. catch model-ID mismatches between what the daemon thinks it's using
+	//      and what the local CLI actually picked
+	//
+	// Standard daemon-event props: app_type, app_version (auto-attached by
+	// TelemetryCollector.Record). Summarization-specific props live in the
+	// metadata payload and include at minimum: mode (inline|delegated|off|cloud),
+	// model, input_tokens, output_tokens, duration_ms, quality_score. Judge tokens
+	// piggyback on the same event when the judge ran (judge_input_tokens,
+	// judge_output_tokens, judge_model, judge_overall).
+	EventSummarization = "summarization"
+
+	// EventSummarizationSkipped is emitted by the daemon when the
+	// prefilter (pkg/sessionsummary.MaybeBuildSkipSummary) determined a
+	// session was too thin for the LLM to produce a meaningful summary
+	// and synthesized a deterministic stub from user prompts instead.
+	// No claude -p call was made.
+	//
+	// Why a separate event instead of inferring from absent
+	// EventSummarization: absent events are an indistinguishable signal
+	// from any other emission failure (telemetry off, network drop,
+	// daemon restart mid-run). An explicit skip event lets dashboards
+	// compute a real prefilter-skip rate, segment skipped sessions by
+	// reason, and watch for regressions where the prefilter starts
+	// over-firing on real sessions.
+	//
+	// Standard props: session_hash (joins to EventTokenoptRun for the
+	// same session), reason (free-form ScoreReason from the prefilter
+	// — names which heuristic fired), entry_count, user_prompt_count.
+	// No content fields, no paths.
+	EventSummarizationSkipped = "summarization_skipped"
 )
 
 // Batch represents a batch of events for efficient transmission

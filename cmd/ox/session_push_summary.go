@@ -1,28 +1,34 @@
-// session_push_summary.go is the inline-summarization endpoint: it accepts a
+// session_push_summary.go is the `inline` summarization endpoint: it accepts a
 // summary JSON produced by the calling agent (in response to the summary_prompt
 // returned by `ox session stop`), validates and enriches it, then commits and
 // pushes summary.json to the ledger.
 //
 // # Why two execution sites exist for summarization
 //
-// Delegating summarization back to the calling agent is the right default
-// *technically*: the agent already has the conversation in context (so input
-// tokens are effectively free), no extra binary is required, and it works for
-// every supported agent (Claude Code, Cursor, Aider, Codex CLI, …).
+// `inline` (this file) — the CLI hands the SummaryPrompt back to the calling
+// agent. The agent runs the LLM with the conversation already cached, so
+// input tokens are mostly cache reads. Cheap (~1/10th the cost of the
+// `delegated` path on the same session) and agent-agnostic. Tradeoff: it
+// blocks the user in the foreground for 30–120s while the agent finishes,
+// at the moment they have just signaled "I'm done."
 //
-// But it blocks the user at exactly the wrong moment. They have just signaled
-// "I'm done" and want to close the agent or `/clear` and move on; an inline
-// LLM call holds them in the foreground for 30–120s for a ~1–4KB JSON output.
-// We should only force the inline path when the user has not specified (and
-// ox cannot auto-detect) an LLM agent for daemon callouts.
+// `delegated` — the daemon drives summarization out-of-process. Its
+// implementation lives in `internal/daemon/agentwork/session_finalize.go`
+// and calls back into the shared `pushSummaryToLedger` flow below — so
+// prompt construction and validation live in exactly one place. The
+// daemon spawns a fresh `claude`/`codex`/`gemini` CLI subprocess against
+// the cached raw.jsonl, which means every call is a *cold* prompt with
+// no agent cache to amortize against. Roughly 10× more expensive on
+// large sessions; the only thing it buys the user is getting their
+// terminal back immediately at session-stop.
 //
-// The daemon-side equivalent lives in
-// `internal/daemon/agentwork/session_finalize.go` and calls back into the
-// shared `pushSummaryToLedger` flow below — so prompt construction and
-// validation live in exactly one place. Today the dispatch is gated behind
-// `SAGEOX_ASYNC_SESSION_UPLOAD=1` (see `cmd/ox/agent_session.go`); the plan
-// is to lift that to a first-class `agent.summarizer` user-config key with
-// `auto` as the default.
+// `cloud` is reserved for future SageOx cloud-side summarization and is
+// not implemented today.
+//
+// `inline` is the default. The dispatch is currently gated behind
+// `SAGEOX_ASYNC_SESSION_UPLOAD=1` (see `cmd/ox/agent_session.go`); the
+// plan is to lift that to a first-class `agent.summarizer` user-config
+// key (`inline` | `delegated` | `cloud` (reserved) | `off`).
 //
 // See ADR-016 (docs/adr/ADR-016-session-summarization-delegation.md) for the
 // full rationale, behavior matrix, and tradeoffs.
@@ -197,12 +203,22 @@ func pushSummaryToLedger(filePath, sessionDir string) *pushSummaryOutput {
 		discardThreshold = awCfg.GetQualityDiscardThreshold()
 	}
 
-	// unscored summaries (field absent from JSON) default to upload; scored
-	// summaries flow through the quality thresholds.
+	// Disposition routing — three-way precedence:
+	//   1. QualityCategory (canonical, categorical) — used when present.
+	//      LLMs emitting the new schema set this; deterministic prefilter
+	//      sets it to "skip" on local-only stub generation.
+	//   2. QualityScore (legacy numeric) — used when category is absent
+	//      and the score field was present in the JSON. Reads existing
+	//      summary.json files written before categorical scoring shipped.
+	//   3. Unscored fallback — default to upload so teammates / doctor
+	//      see the artifact and can act on it.
 	var disposition session.QualityDisposition
-	if qualityScorePresent {
+	switch {
+	case summaryParsed.QualityCategory != "":
+		disposition = session.EvaluateQualityCategory(summaryParsed.QualityCategory)
+	case qualityScorePresent:
 		disposition = session.EvaluateQuality(summaryParsed.QualityScore, uploadThreshold, discardThreshold)
-	} else {
+	default:
 		disposition = session.QualityUpload
 	}
 

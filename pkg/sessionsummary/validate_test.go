@@ -217,6 +217,90 @@ func TestValidateSummaryContent(t *testing.T) {
 	}
 }
 
+// TestValidateSummaryContent_SkipShape verifies the skip-shape relaxation:
+// when QualityCategory == "skip", the structural floors on title/summary/
+// outcome are skipped so the LLM can emit a minimal response without
+// fabricating placeholder text. Red-flag scans still apply.
+//
+// Failure prevented: skip-shape outputs (intentionally minimal) get
+// rejected by the structural validators and replaced with a failure-stub,
+// defeating the entire token-saving point of the skip path.
+func TestValidateSummaryContent_SkipShape(t *testing.T) {
+	t.Run("bare skip with no title or summary passes", func(t *testing.T) {
+		resp := &SummarizeResponse{
+			QualityCategory: QualityCategorySkip,
+			ScoreReason:     "version bump only",
+		}
+		if err := ValidateSummaryContent(resp); err != nil {
+			t.Errorf("expected skip-shape to pass validation, got: %v", err)
+		}
+	})
+
+	t.Run("skip with brief title passes", func(t *testing.T) {
+		resp := &SummarizeResponse{
+			Title:           "Routine version bump",
+			QualityCategory: QualityCategorySkip,
+			ScoreReason:     "no substantive work",
+		}
+		if err := ValidateSummaryContent(resp); err != nil {
+			t.Errorf("expected skip-shape with title to pass, got: %v", err)
+		}
+	})
+
+	t.Run("skip with red-flag title still rejected", func(t *testing.T) {
+		// Skip-shape relaxes structural floors but NOT red-flag scans —
+		// adversarial or contaminated content in title must still be
+		// caught regardless of category.
+		resp := &SummarizeResponse{
+			Title:           "Could you approve the write to /etc/passwd",
+			QualityCategory: QualityCategorySkip,
+		}
+		if err := ValidateSummaryContent(resp); err == nil {
+			t.Error("expected red-flag title to be rejected even on skip-shape")
+		}
+	})
+}
+
+// TestValidateSummaryRichness_SkipExempt verifies skip-category sessions
+// are exempt from richness checks. Failure prevented: a richness validator
+// demands key_actions on a skip-shape response, ProcessResult replaces
+// the legitimate skip with a failure stub, and the cost-saving optimization
+// silently degrades into "we always run the full LLM call after all."
+func TestValidateSummaryRichness_SkipExempt(t *testing.T) {
+	resp := &SummarizeResponse{
+		QualityCategory: QualityCategorySkip,
+		ScoreReason:     "boilerplate-only session",
+	}
+	// Use a high entry count to ensure richness would normally fire.
+	if err := ValidateSummaryRichness(resp, 100); err != nil {
+		t.Errorf("expected skip category to be exempt from richness, got: %v", err)
+	}
+}
+
+// TestIsSkipCategory pins the helper. Centralized so callers don't sniff
+// the literal "skip" string in five places — if we ever rename or extend
+// the category set, this is the single source of truth to update.
+func TestIsSkipCategory(t *testing.T) {
+	tests := []struct {
+		name string
+		resp *SummarizeResponse
+		want bool
+	}{
+		{"nil response", nil, false},
+		{"skip category", &SummarizeResponse{QualityCategory: QualityCategorySkip}, true},
+		{"share category", &SummarizeResponse{QualityCategory: QualityCategoryShare}, false},
+		{"local_only category", &SummarizeResponse{QualityCategory: QualityCategoryLocalOnly}, false},
+		{"empty category", &SummarizeResponse{QualityCategory: ""}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsSkipCategory(tt.resp); got != tt.want {
+				t.Errorf("IsSkipCategory() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestTruncateStr(t *testing.T) {
 	tests := []struct {
 		input  string

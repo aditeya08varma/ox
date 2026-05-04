@@ -68,7 +68,7 @@ Create a JSON object with this structure:
     "constraints": ["Technical or business constraints identified"],
     "non_goals": ["Things explicitly decided NOT to do"]
   },
-  "quality_score": 0.75,
+  "quality_category": "share",
   "score_reason": "New feature with architectural decision and test coverage"
 }
 
@@ -128,29 +128,59 @@ and cross-session knowledge aggregation.
 
 Only include fields with actual content. Omit empty arrays.
 
-## Quality Score Guidelines
+## Quality Category Guidelines (read this BEFORE writing any other field)
 
-Rate the session's value to the team on a 0.0-1.0 scale. This determines whether the session
-is shared with the team (uploaded to ledger) or kept locally/discarded.
+Pick exactly one category for ` + "`quality_category`" + `. This is the most
+important field — it determines whether the session is shared with the team,
+kept locally, or discarded entirely. Categorical (not numeric) because
+fine-grained 0.0-1.0 scores cluster on round numbers and ignore real
+distinctions; LLM-based rubric scoring works better with a small named set.
+Pick the category whose anchor examples best match the session.
 
-**Score high (0.7-1.0):**
+**share** — A teammate would benefit from reading this. Examples:
 - Architectural decisions or design rationale documented
-- Bugs found with root cause analysis
+- Bugs found with root cause analysis (not just the fix)
 - Reusable patterns or approaches discovered
-- Knowledge that would save a future coworker time
+- Novel debugging techniques or non-obvious gotchas
+- Important context for ongoing initiatives
 
-**Score medium (0.3-0.7):**
-- Routine feature implementation with some decisions
-- Bug fixes without broader insights
-- Configuration or setup with team-relevant details
+**local_only** — Real work, but primarily individual. Examples:
+- Routine feature implementation following an existing pattern
+- Bug fixes without broader insight (the fix is in the diff)
+- Configuration or environment setup
+- Refactoring with no architectural shift
 
-**Score low (0.0-0.3):**
-- Routine maintenance (version bumps, formatting, rebasing)
-- Abandoned sessions (started, backed out, no real work)
+**skip** — Not worth recording at all. Examples:
+- Routine maintenance (version bumps, formatting, mechanical rebases)
+- Abandoned sessions (started, backed out, no real work happened)
 - Boilerplate-only (just ran prime, asked one question, left)
 - Repetitive work already captured in a prior session
+- Single Q&A with a one-shot answer; no decisions, no work performed
 
-The score_reason should be a single sentence explaining the rating.
+## Skip-Shape Output (saves tokens when the answer is obvious)
+
+When ` + "`quality_category`" + ` is **skip**, you MAY emit a minimal JSON object
+instead of the full schema:
+
+` + "```" + `json
+{
+  "quality_category": "skip",
+  "score_reason": "<one sentence: why this session is not worth a real summary>",
+  "title": "<optional 5-10 word descriptor of what was attempted>"
+}
+` + "```" + `
+
+The full schema fields (key_actions, aha_moments, decisions, ...) cost
+output tokens and produce nothing teammates can use on a session that's
+being skipped. Don't write them. The downstream pipeline recognizes the
+skip-shape and routes it the same place a deterministic prefilter skip
+would (discarded, not shared).
+
+For ` + "`local_only`" + ` and ` + "`share`" + ` categories, emit the full schema above.
+
+` + "`score_reason`" + ` is a single sentence explaining the category choice —
+useful for telemetry and ops investigation when reviewing skipped or
+local-only sessions.
 `
 
 // BuildSummaryPrompt builds a prompt for the calling agent to generate a session summary.
@@ -163,11 +193,26 @@ The score_reason should be a single sentence explaining the rating.
 //   - raw.jsonl: every entry captured during the session (user, assistant, tool,
 //     system, header).
 //   - summary-input jsonl (produced by pkg/tokenopt in ConversationOnly mode):
-//     user + assistant + header kept verbatim, tool entries collapsed to
-//     `{type:"tool_mark", tool_name, brief}`, system entries dropped. May have
-//     fewer lines than len(entries).
+//     user + assistant kept verbatim; every tool entry replaced with a bare
+//     `{type:"tool_mark"}` marker (or `{type:"tool_mark", count:N}` when
+//     adjacent runs of tool entries collapse). The marker carries no
+//     tool_name, brief, or output — its only job is to tell the summarizer
+//     "the agent acted between these two messages, N times." BOTH system
+//     and header entries are dropped. The header is gone because the
+//     schema fields it carries (agent_type, model, ox_version, created_at,
+//     ...) are stamped into meta.json by the daemon directly and don't
+//     need a round-trip through the LLM. The optimized stream is
+//     typically much shorter than the original entry count.
 //
 // Callers pick the path; the prompt stays agnostic.
+//
+// # Cost note: inline vs delegated
+//
+// In `inline` mode, this prompt runs against an agent that already has the
+// conversation in its prompt cache, so input tokens are predominantly
+// cached reads — the calling agent's warm cache is the primary cost
+// mitigation. In `delegated` mode the daemon spawns a fresh subprocess,
+// the prompt cache is cold, and every call pays the full input cost.
 //
 // # Contract mismatch with ValidateSummaryContent (historical note)
 //
@@ -194,13 +239,13 @@ func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) strin
 	sb.WriteString("## Session to Analyze\n\n")
 	fmt.Fprintf(&sb, "Read the session recording at: `%s`\n\n", rawPath)
 	sb.WriteString("The file is JSONL format — one JSON object per line. Possible entry shapes:\n\n")
-	sb.WriteString("- `{type:\"header\", metadata:{...}}` — session metadata, one per file\n")
 	sb.WriteString("- `{type:\"user\", content:\"...\", timestamp:\"...\"}` — human input\n")
 	sb.WriteString("- `{type:\"assistant\", content:\"...\", timestamp:\"...\"}` — AI response prose\n")
 	sb.WriteString("- `{type:\"tool\", tool_name:\"...\", tool_input:\"...\", tool_output:\"...\"}` — full tool invocation (only in unoptimized files)\n")
-	sb.WriteString("- `{type:\"tool_mark\", tool_name:\"...\", brief:\"...\"}` — compact tool marker (in summary-input files: carries the tool name + a short gist of what was invoked; full tool I/O is not preserved)\n")
+	sb.WriteString("- `{type:\"tool_mark\", count?:N}` — bare tool-activity marker (in summary-input files: signals the agent paused to act between messages). The marker is intentionally minimal: tool name, inputs, and outputs are NOT preserved here. The optional `count` field, when present, means N adjacent tool calls were collapsed into this single entry — read it as \"the agent did N tool things between these two messages.\" Recover concrete actions (file paths, commands, decisions) from surrounding assistant prose, not from these markers.\n")
 	sb.WriteString("- `{type:\"system\", content:\"...\"}` — system reminder (may be absent in summary-input files; they are dropped by the pre-summarize pass)\n\n")
-	sb.WriteString("Focus on user/assistant dialog to recover the session narrative; use tool and tool_mark entries as scaffolding for what the agent did between messages. Line count may be smaller than the original entry_count if the file has been pre-processed.\n\n")
+	sb.WriteString("Note: `header` entries (session metadata) and `system` entries are stripped from summary-input files; you do NOT need to read or echo them. Session metadata (agent type, version, model, username, created_at) is stamped into meta.json by the daemon directly, not by you.\n\n")
+	sb.WriteString("Focus on user/assistant dialog to recover the session narrative; use tool_mark entries as scaffolding for what the agent did between messages. A tool_mark with count=20 says more compactly than 20 separate marks would: \"the agent did this 20 times,\" which often signals an iterative refactor or polling loop worth reflecting in a chapter title. Line count may be smaller than the original entry_count if the file has been pre-processed.\n\n")
 
 	sb.WriteString("## Instructions\n\n")
 	sb.WriteString("1. Read the session recording file at the path above\n")

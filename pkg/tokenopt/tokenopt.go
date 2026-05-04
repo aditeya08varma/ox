@@ -31,13 +31,23 @@ type Stats struct {
 	BytesIn           int64
 	BytesOut          int64
 	ToolsMarked       int // ModeConversationOnly: count of tool entries replaced with compact markers
+	ToolsBatched      int // ModeConversationOnly: count of adjacent identical tool_marks collapsed into prior with count++
 	SystemDropped     int // ModeConversationOnly: count of system entries dropped
+	HeaderDropped     int // ModeConversationOnly: count of header entries dropped (header carries metadata the LLM doesn't need; daemon stamps it from stored.Meta directly)
 	ANSIStripped      int // ModeLossless: entries with ANSI sequences removed
 	ProgressCollapsed int // ModeLossless: entries with \r progress frames collapsed
 	ImagesElided      int // ModeLossless: base64 image payloads replaced
 	LargeReadsElided  int // ModeLossless: large Read tool_result bodies truncated
 	RemindersDeduped  int // ModeLossless: <system-reminder> blocks replaced with a ref
 	ToolResultsRefd   int // ModeLossless: tool_result bodies replaced with a tool_ref
+
+	// Token estimates use a ~4 chars/token heuristic from internal/tokens.
+	// They exist so callers can log a token-reduction number alongside the
+	// byte-reduction one. Tokens are the actual LLM cost driver; bytes are
+	// a proxy. Swap the estimator (or wire in a real BPE tokenizer) without
+	// changing any caller — the field shape stays stable.
+	TokensInEstimate  int64
+	TokensOutEstimate int64
 }
 
 // Reduction returns bytes saved and percentage. Safe to call when BytesIn is 0.
@@ -49,6 +59,18 @@ func (s Stats) Reduction() (saved int64, pct float64) {
 	return saved, float64(saved) / float64(s.BytesIn) * 100
 }
 
+// TokenReduction returns estimated tokens saved and percentage. The cost
+// dashboard wants this — bytes are a proxy, tokens are the actual LLM
+// cost. Code-heavy sessions tokenize at a different ratio than prose-heavy
+// ones, so byte-percentage trends mislead operators on cost.
+func (s Stats) TokenReduction() (saved int64, pct float64) {
+	saved = s.TokensInEstimate - s.TokensOutEstimate
+	if s.TokensInEstimate == 0 {
+		return saved, 0
+	}
+	return saved, float64(saved) / float64(s.TokensInEstimate) * 100
+}
+
 // Add accumulates other into s. Useful for aggregating across many sessions
 // (e.g., a daemon summarizing a nightly batch).
 func (s *Stats) Add(other Stats) {
@@ -57,13 +79,17 @@ func (s *Stats) Add(other Stats) {
 	s.BytesIn += other.BytesIn
 	s.BytesOut += other.BytesOut
 	s.ToolsMarked += other.ToolsMarked
+	s.ToolsBatched += other.ToolsBatched
 	s.SystemDropped += other.SystemDropped
+	s.HeaderDropped += other.HeaderDropped
 	s.ANSIStripped += other.ANSIStripped
 	s.ProgressCollapsed += other.ProgressCollapsed
 	s.ImagesElided += other.ImagesElided
 	s.LargeReadsElided += other.LargeReadsElided
 	s.RemindersDeduped += other.RemindersDeduped
 	s.ToolResultsRefd += other.ToolResultsRefd
+	s.TokensInEstimate += other.TokensInEstimate
+	s.TokensOutEstimate += other.TokensOutEstimate
 }
 
 // LogValue implements slog.LogValuer. Enables callers (CLI, daemon) to emit
@@ -71,15 +97,21 @@ func (s *Stats) Add(other Stats) {
 //
 //	slog.Info("token_optimize", "stats", stats)
 func (s Stats) LogValue() slog.Value {
-	_, pct := s.Reduction()
+	_, bytePct := s.Reduction()
+	_, tokPct := s.TokenReduction()
 	return slog.GroupValue(
 		slog.Int("entries_in", s.EntriesIn),
 		slog.Int("entries_out", s.EntriesOut),
 		slog.Int64("bytes_in", s.BytesIn),
 		slog.Int64("bytes_out", s.BytesOut),
-		slog.Float64("reduction_pct", pct),
+		slog.Float64("byte_reduction_pct", bytePct),
+		slog.Int64("tokens_in_est", s.TokensInEstimate),
+		slog.Int64("tokens_out_est", s.TokensOutEstimate),
+		slog.Float64("token_reduction_pct", tokPct),
 		slog.Int("tools_marked", s.ToolsMarked),
+		slog.Int("tools_batched", s.ToolsBatched),
 		slog.Int("system_dropped", s.SystemDropped),
+		slog.Int("header_dropped", s.HeaderDropped),
 		slog.Int("ansi_stripped", s.ANSIStripped),
 		slog.Int("progress_collapsed", s.ProgressCollapsed),
 		slog.Int("images_elided", s.ImagesElided),
@@ -93,10 +125,22 @@ func (s Stats) LogValue() slog.Value {
 type Mode int
 
 const (
-	// ModeConversationOnly (default) emits header + user + assistant entries
-	// verbatim and replaces every tool/system entry with a compact marker
-	// (name + brief gist of the input). Optimal for downstream summarization:
-	// the summarizer needs the conversation arc, not tool I/O.
+	// ModeConversationOnly (default) emits user + assistant entries verbatim,
+	// drops header and system entries, and selectively replaces tool entries:
+	//
+	//   - Tool calls with a non-empty `description` field in tool_input
+	//     (Bash, Agent, Task, WebFetch, ...) emit
+	//     `{type:"tool_mark", description:"..."}`. Adjacent calls with the
+	//     same description collapse via the count field.
+	//
+	//   - Tool calls without a description (Edit, Read, Write, Glob, Grep, ...)
+	//     produce NO tool_mark at all. Their actions are recoverable from
+	//     surrounding assistant prose ("I'll edit foo.go and run tests"),
+	//     so the marker would only be redundant noise.
+	//
+	// The descriptions are agent-authored intent strings — high
+	// signal-per-byte, and far cheaper than the previous 120-char brief
+	// extracted heuristically from the most-meaningful input field.
 	ModeConversationOnly Mode = 0
 
 	// ModeLossless keeps every entry but applies content-level transforms
@@ -177,6 +221,24 @@ func CompressWith(r io.Reader, w io.Writer, opts Options) (Stats, error) {
 	br := bufio.NewReader(r)
 	bw := bufio.NewWriter(w)
 
+	// emit writes out (followed by a newline) and updates byte/token/entry
+	// stats. Centralized so the four call sites — transform's actEmit,
+	// pending flush before a non-batchable emission, EOF flush, and the
+	// (currently absent) error-recovery path — share one accounting code
+	// path. Drift here is silently corrupted telemetry.
+	emit := func(out []byte) error {
+		if _, werr := bw.Write(out); werr != nil {
+			return werr
+		}
+		if _, werr := bw.Write([]byte{'\n'}); werr != nil {
+			return werr
+		}
+		stats.EntriesOut++
+		stats.BytesOut += int64(len(out)) + 1
+		stats.TokensOutEstimate += estimateTokens(out)
+		return nil
+	}
+
 	seq := 0
 	for {
 		line, err := br.ReadBytes('\n')
@@ -191,20 +253,36 @@ func CompressWith(r io.Reader, w io.Writer, opts Options) (Stats, error) {
 			}
 			stats.EntriesIn++
 			stats.BytesIn += int64(len(line))
+			stats.TokensInEstimate += estimateTokens(line)
 
-			out, emit, terr := state.transform(entryBytes, seq, &stats)
+			out, action, terr := state.transform(entryBytes, seq, &stats)
 			if terr != nil {
 				return stats, fmt.Errorf("entry %d: %w", seq, terr)
 			}
-			if emit {
-				if _, werr := bw.Write(out); werr != nil {
+
+			switch action {
+			case actDrop:
+				// Drop quietly. Pending tool_mark (if any) STAYS pending —
+				// dropping a system or header entry is not a real
+				// interruption between two identical tool calls; the
+				// agent's behavior is what we're modeling, and a system
+				// reminder appearing mid-batch is not a behavior change.
+			case actHold:
+				// transform updated state.pending; nothing to write yet.
+			case actEmit:
+				// Anything that emits flushes any held tool_mark first so
+				// adjacency in the output stream matches adjacency in the
+				// agent's behavior. user/assistant turns are real
+				// interruptions; do not let them appear after a batched
+				// tool_mark that semantically came after them.
+				if pending := state.flushPending(&stats); pending != nil {
+					if werr := emit(pending); werr != nil {
+						return stats, werr
+					}
+				}
+				if werr := emit(out); werr != nil {
 					return stats, werr
 				}
-				if _, werr := bw.Write([]byte{'\n'}); werr != nil {
-					return stats, werr
-				}
-				stats.EntriesOut++
-				stats.BytesOut += int64(len(out)) + 1
 			}
 		}
 		if err != nil {
@@ -212,6 +290,15 @@ func CompressWith(r io.Reader, w io.Writer, opts Options) (Stats, error) {
 				break
 			}
 			return stats, err
+		}
+	}
+
+	// EOF — flush any tool_mark still held in pending. Without this, a
+	// session that ENDS on a run of identical tool calls would silently
+	// drop the entire run from the optimized output.
+	if pending := state.flushPending(&stats); pending != nil {
+		if werr := emit(pending); werr != nil {
+			return stats, werr
 		}
 	}
 
@@ -235,9 +322,18 @@ type entry struct {
 	IsError    bool            `json:"is_error,omitempty"`
 	Metadata   json.RawMessage `json:"metadata,omitempty"`
 
-	// Brief is emitted in ModeConversationOnly on tool_mark entries: a compact
-	// gist of the tool input (e.g., the bash command, file path, grep pattern).
-	Brief string `json:"brief,omitempty"`
+	// Description is the agent-authored intent string for a tool call,
+	// emitted only on tool_mark entries when the source tool_input had a
+	// non-empty `description` field. Tools that don't carry a description
+	// (Edit, Read, Write, Glob, Grep, etc.) produce no tool_mark at all —
+	// their actions are recoverable from surrounding assistant prose.
+	Description string `json:"description,omitempty"`
+
+	// Count is set on tool_mark entries when adjacent tool_marks with the
+	// same description were collapsed into one entry. A missing/zero count
+	// means 1 (single occurrence). Lets the summarizer see "agent did
+	// $description ×N" without N redundant entries.
+	Count int `json:"count,omitempty"`
 
 	// ref fields for ModeLossless tool_ref entries.
 	RefType   string `json:"ref_type,omitempty"`
@@ -251,3 +347,41 @@ func hashContent(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:12]) // 12 bytes = 96 bits, plenty for in-session dedup
 }
+
+// estimateTokens is the same ~4-chars-per-token heuristic pkg/tokenstrip
+// uses (and that internal/tokens.EstimateTokens documents). Vendored here
+// rather than imported because pkg/tokenopt's package doc advertises
+// stdlib-only dependencies. Swap for a real BPE tokenizer in one place
+// when accuracy matters more than dependency hygiene.
+func estimateTokens(b []byte) int64 {
+	if len(b) == 0 {
+		return 0
+	}
+	// Integer division rounds down; any non-empty input deserves at
+	// least 1 token, otherwise non-empty content can produce TokensIn=0
+	// and skew TokenReduction percentages.
+	t := int64(len(b)) / 4
+	if t == 0 {
+		return 1
+	}
+	return t
+}
+
+// emitAction tells the Compress outer loop what to do with a transformed
+// entry. Three states because tool_mark batching needs a way to "hold this
+// entry, see if the next one matches" that isn't either drop or emit.
+type emitAction int
+
+const (
+	// actDrop: this entry is gone from the stream (system/header).
+	// Pending tool_mark (if any) is NOT flushed — see Compress for why.
+	actDrop emitAction = iota
+
+	// actEmit: emit the returned bytes. Compress flushes any pending
+	// tool_mark FIRST so adjacency is preserved.
+	actEmit
+
+	// actHold: state.pending was updated; outer loop should not write
+	// anything this iteration. Used exclusively by tool_mark batching.
+	actHold
+)

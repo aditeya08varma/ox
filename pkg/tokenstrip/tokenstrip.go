@@ -21,6 +21,13 @@ type Stats struct {
 	StopWordsRemoved        int // <thinking> blocks where stop words were removed
 	SynonymsSubstituted     int // <thinking> blocks where synonym substitution fired
 
+	// ThinkingBlocksTrimmed counts <thinking> blocks reduced under
+	// DropThinkingFirstSentence (kept first sentence only).
+	ThinkingBlocksTrimmed int
+	// ThinkingBlocksDropped counts <thinking> blocks removed entirely
+	// under DropThinkingAll.
+	ThinkingBlocksDropped int
+
 	// Token estimates use a ~4 chars/token heuristic (Anthropic's rule of
 	// thumb). They exist so callers can log a rough token-reduction number
 	// without pulling in a BPE-heavy tokenizer. When a real tokenizer is
@@ -59,6 +66,8 @@ func (s *Stats) Add(other Stats) {
 	s.WhitespaceCanonicalized += other.WhitespaceCanonicalized
 	s.StopWordsRemoved += other.StopWordsRemoved
 	s.SynonymsSubstituted += other.SynonymsSubstituted
+	s.ThinkingBlocksTrimmed += other.ThinkingBlocksTrimmed
+	s.ThinkingBlocksDropped += other.ThinkingBlocksDropped
 	s.TokensInEstimate += other.TokensInEstimate
 	s.TokensOutEstimate += other.TokensOutEstimate
 }
@@ -83,17 +92,46 @@ func (s Stats) LogValue() slog.Value {
 		slog.Int("whitespace_canonicalized", s.WhitespaceCanonicalized),
 		slog.Int("stop_words_removed", s.StopWordsRemoved),
 		slog.Int("synonyms_substituted", s.SynonymsSubstituted),
+		slog.Int("thinking_blocks_trimmed", s.ThinkingBlocksTrimmed),
+		slog.Int("thinking_blocks_dropped", s.ThinkingBlocksDropped),
 	)
 }
 
 // Options configures a Compress run. Zero value is a reasonable default
-// (English stop words, synonym substitution OFF).
+// (English stop words, synonym substitution OFF, thinking blocks kept).
 type Options struct {
 	// EnableSynonymSub turns on phrase→synonym substitution inside assistant
 	// <thinking> blocks. Off by default even when tokenstrip itself is on,
 	// because the table is opinionated and can produce awkward reasoning
 	// text; callers should opt in explicitly.
 	EnableSynonymSub bool
+
+	// DropThinkingMode controls whether <thinking>...</thinking> blocks in
+	// assistant content are reduced more aggressively than the default
+	// stop-word strip. Default is DropThinkingNone (preserve current
+	// behavior — full block kept, with stop-word removal applied to its
+	// contents).
+	//
+	// On long Sonnet/Opus sessions, thinking blocks can be 30–50% of
+	// total assistant prose. The summary schema (title, key_actions,
+	// chapter_titles, aha_moments) doesn't require them, but the chain
+	// of reasoning sometimes contains the framing for an aha_moment, so
+	// we offer a conservative middle ground:
+	//
+	//   - DropThinkingNone: keep the entire block (current behavior).
+	//   - DropThinkingFirstSentence: keep only the first sentence of
+	//     each block (typically the framing — "Let me work out X" or
+	//     "I need to figure out Y") and elide the body. Preserves the
+	//     hint of where the reasoning was going without the deliberation
+	//     cost.
+	//   - DropThinkingAll: drop the block entirely. Maximum savings,
+	//     maximum risk.
+	//
+	// Recommended rollout: DropThinkingFirstSentence behind an env-var
+	// flag for a few weeks, A/B against EventSummarization quality_score
+	// distribution, flip to default if there's no measurable quality
+	// drop on the cohort that has it enabled.
+	DropThinkingMode DropThinkingMode
 
 	// SynonymTable overrides the default substitution table. Keys are
 	// matched case-insensitively as whole words. A nil map falls back to
@@ -104,6 +142,26 @@ type Options struct {
 	// Empty string defaults to "en".
 	StopWordLanguage string
 }
+
+// DropThinkingMode controls the aggressive reduction of <thinking> blocks.
+// See Options.DropThinkingMode for the rationale.
+type DropThinkingMode int
+
+const (
+	// DropThinkingNone preserves the entire <thinking> block (default).
+	// Stop-word removal still applies to the inner text.
+	DropThinkingNone DropThinkingMode = 0
+
+	// DropThinkingFirstSentence keeps the first sentence of each block
+	// and replaces the rest with an elision marker. Sentence boundary
+	// is the first ".", "!", or "?" followed by whitespace or end-of-block.
+	DropThinkingFirstSentence DropThinkingMode = 1
+
+	// DropThinkingAll removes the entire block (including the surrounding
+	// <thinking> tags). Maximum aggression — use only with telemetry-
+	// backed evidence that quality_score isn't impacted.
+	DropThinkingAll DropThinkingMode = 2
+)
 
 // DefaultSynonymTable returns the baseline high-token phrase → shorter form
 // mapping. Kept short and conservative; callers wanting more aggressive

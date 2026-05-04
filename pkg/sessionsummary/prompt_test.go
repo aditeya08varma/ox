@@ -21,10 +21,13 @@ func TestBuildSummaryPrompt(t *testing.T) {
 	t.Run("describes both raw and summary-input entry shapes", func(t *testing.T) {
 		// Prompt must stay agnostic to which file it points at, because
 		// callers pass either raw.jsonl or the tokenopt-optimized file.
-		// Summarizer needs to recognize tool_mark + brief in the optimized case.
+		// The summarizer needs to recognize tool_mark in the optimized
+		// case (and the optional `count` field for batched runs); since
+		// the design dropped tool_name/brief/output, the prompt no longer
+		// mentions "brief" — only "tool_mark" and the count semantics.
 		result := BuildSummaryPrompt(entries, "/tmp/raw.jsonl", "")
 		assert.Contains(t, result, `"tool_mark"`)
-		assert.Contains(t, result, "brief")
+		assert.Contains(t, result, "count")
 		assert.Contains(t, result, `"user"`)
 		assert.Contains(t, result, `"assistant"`)
 	})
@@ -55,9 +58,12 @@ func TestBuildSummaryPrompt(t *testing.T) {
 		assert.Contains(t, result, "/tmp/my session/raw.jsonl")
 	})
 
-	t.Run("includes agent_summary guidelines", func(t *testing.T) {
+	t.Run("includes agent_summary and quality_category guidelines", func(t *testing.T) {
 		result := BuildSummaryPrompt(entries, "/tmp/raw.jsonl", "")
 		assert.True(t, strings.Contains(result, "agent_summary"))
-		assert.True(t, strings.Contains(result, "quality_score"))
+		// quality_category replaced quality_score as of 2026-05; numeric LLM
+		// rubric scoring clusters on round numbers and ignores fine
+		// distinctions (April 2026 best practices).
+		assert.True(t, strings.Contains(result, "quality_category"))
 	})
 }

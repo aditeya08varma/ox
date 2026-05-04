@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"sort"
 	"strings"
 )
 
@@ -17,6 +16,17 @@ type state struct {
 	reminderRe  *regexp.Regexp // matches <system-reminder> ... </system-reminder>
 	ansiRe      *regexp.Regexp // matches ANSI CSI/SGR sequences
 	base64ImgRe *regexp.Regexp // matches data:image/...;base64,<payload>
+
+	// pending and pendingCount are the in-flight tool_mark held for
+	// adjacency-batching. When the next entry is another tool_mark with
+	// matching tool_name + brief + is_error, pendingCount increments and
+	// the duplicate is silently absorbed. When the next entry is anything
+	// else (assistant, user, different tool_mark), Compress flushes
+	// pending — emitting it once with `count` set if pendingCount > 1.
+	//
+	// Invariant: pending is non-nil iff pendingCount > 0.
+	pending      *entry
+	pendingCount int
 }
 
 func newState(opts Options) *state {
@@ -33,53 +43,208 @@ func newState(opts Options) *state {
 	}
 }
 
-// transform applies the streaming pipeline to a single jsonl line. Returns the
-// bytes to emit (if emit=true) or signals the entry should be dropped.
-// On parse failure the line passes through untouched.
-func (s *state) transform(line []byte, seq int, stats *Stats) ([]byte, bool, error) {
+// transform applies the streaming pipeline to a single jsonl line. Returns
+// the bytes to emit (when action == actEmit), or signals drop / hold.
+// On JSON parse failure the line passes through unchanged.
+//
+// Pending tool_mark batching: in ModeConversationOnly, transform may set
+// state.pending and return actHold. The Compress outer loop is responsible
+// for flushing pending on actEmit (so adjacency in the output stream matches
+// adjacency in the agent's behavior) and at EOF.
+func (s *state) transform(line []byte, seq int, stats *Stats) ([]byte, emitAction, error) {
 	var e entry
 	if err := json.Unmarshal(line, &e); err != nil {
-		return line, true, nil
+		return line, actEmit, nil
 	}
 
-	// Header and user turns are always preserved verbatim in every mode.
-	if e.Type == "user" || e.Type == "header" {
-		return line, true, nil
+	// User turns are sacred — intent signal, never altered. Always emit
+	// verbatim in every mode.
+	if e.Type == "user" {
+		return line, actEmit, nil
+	}
+
+	// Header was historically preserved verbatim. In ModeConversationOnly
+	// we drop it: the summarizer's schema (title, summary, key_actions,
+	// aha_moments, chapter_titles, agent_summary, ...) needs none of the
+	// header fields (agent_type, agent_version, model, ox_username,
+	// ox_version, created_at). The daemon's writeMetaAndUploadLFS stamps
+	// those into meta.json directly from stored.Meta — the LLM never
+	// reads or writes them. ~50 tokens once per session, free win.
+	//
+	// In ModeLossless we still preserve the header to stay true to the
+	// "every entry survives" contract for replay/debug consumers.
+	if e.Type == "header" {
+		if s.opts.Mode == ModeConversationOnly {
+			stats.HeaderDropped++
+			return nil, actDrop, nil
+		}
+		return line, actEmit, nil
 	}
 
 	if s.opts.Mode == ModeConversationOnly {
 		return s.transformConversationOnly(&e, line, stats)
 	}
-	return s.transformLossless(line, &e, seq, stats)
+	out, emit, err := s.transformLossless(line, &e, seq, stats)
+	if !emit {
+		return nil, actDrop, err
+	}
+	return out, actEmit, err
 }
 
-// transformConversationOnly keeps assistant turns verbatim, replaces tool
-// entries with compact markers, and drops system entries.
-func (s *state) transformConversationOnly(e *entry, line []byte, stats *Stats) ([]byte, bool, error) {
+// transformConversationOnly keeps assistant turns verbatim, selectively
+// replaces tool entries with description-bearing tool_marks, and drops
+// system entries.
+//
+// Tool entries with a non-empty `description` in tool_input (Bash, Agent,
+// Task, WebFetch, ...) emit `{type:"tool_mark", description:"..."}` — the
+// agent-authored intent string is high-signal narrative scaffolding that's
+// already a one-line summary of WHY the tool was invoked. Adjacent calls
+// with the same description collapse via the count field (e.g., a polling
+// loop that keeps re-running the same probe).
+//
+// Tool entries WITHOUT a description (Edit, Read, Write, Glob, Grep, ...)
+// produce no tool_mark at all. Those tools' actions are reliably narrated
+// in surrounding assistant prose ("I'll edit foo.go and run tests"), so a
+// content-free marker would just be noise.
+//
+// The previous shape (bare `{type:"tool_mark"}` for every tool, no detail)
+// was maximally aggressive but threw away free narrative — descriptions
+// cost very little and recover meaningful key_actions signal that pure
+// assistant prose can miss (e.g., when the agent runs commands silently).
+// If `quality_score` / `judge_overall` regresses on description-heavy
+// sessions, the next step is a single tail digest of description → count
+// rather than per-call entries.
+func (s *state) transformConversationOnly(e *entry, line []byte, stats *Stats) ([]byte, emitAction, error) {
 	switch e.Type {
 	case "assistant":
 		// Pass through verbatim — assistant prose IS the narrative.
-		return line, true, nil
+		return line, actEmit, nil
 	case "tool":
-		marker := entry{
-			Type:     "tool_mark",
-			ToolName: e.ToolName,
-			Brief:    briefForTool(e.ToolName, e.ToolInput),
-			IsError:  e.IsError,
-		}
-		out, err := json.Marshal(&marker)
-		if err != nil {
-			return line, true, nil
-		}
 		stats.ToolsMarked++
-		return out, true, nil
+		desc := descriptionForTool(e.ToolInput)
+		if desc == "" {
+			// No description — drop the entry entirely. Most editor /
+			// reader tools fall here (Edit, Read, Write, Glob, Grep);
+			// their actions are recovered from assistant prose, so a
+			// content-free tool_mark would only inflate token cost.
+			stats.SystemDropped++ // reuse the "dropped without replacement" counter
+			return nil, actDrop, nil
+		}
+		mark := entry{Type: "tool_mark", Description: desc}
+
+		if s.pending != nil {
+			// Batch only when the description matches exactly (e.g., a
+			// retry loop running the same probe). Different descriptions
+			// stay separate — they represent distinct intents and the
+			// summarizer should see them as such.
+			if pendingMatches(s.pending, &mark) {
+				s.pendingCount++
+				stats.ToolsBatched++
+				return nil, actHold, nil
+			}
+			// Different description — flush old pending, hold new one.
+			oldFlushed := s.marshalPending()
+			s.pending = &mark
+			s.pendingCount = 1
+			return oldFlushed, actEmit, nil
+		}
+
+		s.pending = &mark
+		s.pendingCount = 1
+		return nil, actHold, nil
 	case "system":
 		stats.SystemDropped++
-		return nil, false, nil
+		return nil, actDrop, nil
 	default:
 		// Unknown types: preserve to stay safe.
-		return line, true, nil
+		return line, actEmit, nil
 	}
+}
+
+// pendingMatches reports whether two tool_marks are batchable. With the
+// description-bearing tool_mark shape, two marks are batchable iff their
+// descriptions match exactly (typically: a polling loop or retry running
+// the same probe).
+func pendingMatches(a, b *entry) bool {
+	return a.Type == b.Type && a.Description == b.Description
+}
+
+// descriptionForTool extracts the agent-authored `description` field from
+// a tool_input JSON payload. Returns "" if tool_input is missing,
+// unparseable, or has no non-empty description — signaling the caller to
+// drop the tool_mark entirely.
+//
+// We intentionally check ONLY the literal "description" key. We do not
+// derive descriptions for tools that don't carry one (Edit, Read, Write,
+// etc.) — those are dropped, on the policy that assistant prose already
+// names their concrete actions. Adding heuristic derivations would
+// reintroduce the lossy 120-char brief shape this design replaced.
+//
+// The 200-char ceiling is a safety bound against pathological agent output
+// (paragraph-long descriptions). Real Claude Code descriptions are
+// typically 5–15 words.
+func descriptionForTool(toolInput string) string {
+	const maxDescription = 200
+	if toolInput == "" {
+		return ""
+	}
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(toolInput), &raw); err != nil {
+		return ""
+	}
+	v, ok := raw["description"]
+	if !ok {
+		return ""
+	}
+	s, ok := v.(string)
+	if !ok {
+		return ""
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Account for the 3-byte UTF-8 ellipsis when truncating: 197 bytes of
+	// content + "…" (3 bytes) = 200 bytes total.
+	const ellipsis = "…"
+	if len(s) > maxDescription {
+		s = s[:maxDescription-len(ellipsis)] + ellipsis
+	}
+	return s
+}
+
+// marshalPending serializes state.pending with its accumulated count into
+// the bytes Compress should write. Caller is responsible for clearing
+// pending afterwards (or via flushPending which does both).
+func (s *state) marshalPending() []byte {
+	if s.pending == nil {
+		return nil
+	}
+	out := *s.pending
+	if s.pendingCount > 1 {
+		out.Count = s.pendingCount
+	}
+	bytes, err := json.Marshal(&out)
+	if err != nil {
+		// Fall back to an unbatched marshal of just the type/name —
+		// losing the count is preferable to losing the entry entirely.
+		return []byte(`{"type":"tool_mark","tool_name":"` + out.ToolName + `"}`)
+	}
+	return bytes
+}
+
+// flushPending returns the bytes for the held tool_mark (if any) and
+// clears state. Returns nil when nothing is pending. Called from Compress
+// at EOF and before any actEmit.
+func (s *state) flushPending(stats *Stats) []byte {
+	if s.pending == nil {
+		return nil
+	}
+	out := s.marshalPending()
+	s.pending = nil
+	s.pendingCount = 0
+	_ = stats // reserved for future per-flush counters
+	return out
 }
 
 // transformLossless is the content-preserving pipeline. Preserves unknown
@@ -276,69 +441,6 @@ func (s *state) truncateLargeBody(body, tool string) (string, bool) {
 	sb.WriteString("\n")
 	sb.WriteString(strings.Join(tail, "\n"))
 	return sb.String(), true
-}
-
-// briefForTool extracts a short human-readable gist from a tool_input payload.
-// Used by ModeConversationOnly to give the summarizer narrative scaffolding
-// (what the agent DID between messages) without the full I/O.
-//
-// tool_input is itself a JSON string, so we parse it and pick the field most
-// representative of the action. Falls back to a truncated view.
-func briefForTool(toolName, toolInput string) string {
-	const maxBrief = 120
-	if toolInput == "" {
-		return ""
-	}
-	var raw map[string]any
-	if err := json.Unmarshal([]byte(toolInput), &raw); err != nil {
-		return truncate(toolInput, maxBrief)
-	}
-
-	primary := map[string]string{
-		"Bash":         "command",
-		"Read":         "file_path",
-		"Write":        "file_path",
-		"Edit":         "file_path",
-		"MultiEdit":    "file_path",
-		"NotebookEdit": "notebook_path",
-		"Glob":         "pattern",
-		"Grep":         "pattern",
-		"Agent":        "description",
-		"Task":         "description",
-		"WebFetch":     "url",
-		"WebSearch":    "query",
-	}
-	if field, ok := primary[toolName]; ok {
-		if v, ok := raw[field]; ok {
-			if s, ok := v.(string); ok {
-				return truncate(s, maxBrief)
-			}
-		}
-	}
-
-	// Unknown tool: pick the first string field in sorted-key order.
-	// Sorting makes the brief deterministic; Go map iteration is randomized
-	// and this package advertises deterministic output.
-	keys := make([]string, 0, len(raw))
-	for k, v := range raw {
-		if s, ok := v.(string); ok && s != "" {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		if s, ok := raw[k].(string); ok {
-			return truncate(s, maxBrief)
-		}
-	}
-	return truncate(toolInput, maxBrief)
-}
-
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-1] + "…"
 }
 
 // toolResultBody returns whichever field of the entry carries a tool result

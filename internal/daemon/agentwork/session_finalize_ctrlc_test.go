@@ -27,11 +27,15 @@ func TestCtrlC_FullFinalizationPipeline(t *testing.T) {
 	}
 
 	// raw.jsonl with multi-turn content (as if PostToolUse hooks wrote entries)
+	// Longer user prompts so the combined user content clears the
+	// prefilter's minUserContentChars floor (80 chars). Without this
+	// the new pre-LLM low-value short-circuit triggers and the test
+	// asserts on artifacts that the LLM path would have produced.
 	rawContent := `{"metadata":{"agent_id":"OxABRT","agent_type":"claude","created_at":"2026-01-10T09:30:00-07:00","version":"1.0"},"type":"header"}
-{"type":"user","content":"Read the README and summarize it","seq":0,"timestamp":"2026-01-10T16:30:01Z"}
+{"type":"user","content":"Read the README and summarize the architecture sections so I understand the framework's main building blocks","seq":0,"timestamp":"2026-01-10T16:30:01Z"}
 {"type":"tool","content":"","seq":1,"timestamp":"2026-01-10T16:30:05Z","tool_name":"Read","tool_input":"{\"file_path\":\"/project/README.md\"}"}
 {"type":"assistant","content":"The README describes a web application framework with REST API support.","seq":2,"timestamp":"2026-01-10T16:30:08Z"}
-{"type":"user","content":"Now add error handling to the main handler","seq":3,"timestamp":"2026-01-10T16:30:15Z"}
+{"type":"user","content":"Now add error handling to the main handler so unexpected panics turn into 500 responses with structured logs","seq":3,"timestamp":"2026-01-10T16:30:15Z"}
 {"type":"tool","content":"","seq":4,"timestamp":"2026-01-10T16:30:20Z","tool_name":"Edit","tool_input":"{\"file_path\":\"/project/handler.go\"}"}
 {"type":"assistant","content":"I've added error handling with proper HTTP status codes.","seq":5,"timestamp":"2026-01-10T16:30:25Z"}
 `
@@ -135,9 +139,13 @@ func TestCtrlC_FullFinalizationPipeline_WritesMetaJSON(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Substantive user content + 3 entries so the new pre-LLM
+	// prefilter (sessionsummary.MaybeBuildSkipSummary) does NOT trigger
+	// — this test exercises the full LLM-output pipeline.
 	rawContent := `{"metadata":{"agent_id":"OxMETA","agent_type":"claude-code","created_at":"2026-01-10T11:00:00Z"},"type":"header"}
-{"type":"user","content":"implement feature X","seq":0}
-{"type":"assistant","content":"done implementing","seq":1}
+{"type":"user","content":"Implement feature X with proper error handling and add unit tests for the failure modes I just described","seq":0}
+{"type":"assistant","content":"Got it — I'll add the feature and write tests covering the error paths.","seq":1}
+{"type":"assistant","content":"Done. Feature X is implemented and tests are passing.","seq":2}
 `
 	rawPath := filepath.Join(sessionDir, "raw.jsonl")
 	if err := os.WriteFile(rawPath, []byte(rawContent), 0644); err != nil {
@@ -199,8 +207,8 @@ func TestCtrlC_FullFinalizationPipeline_WritesMetaJSON(t *testing.T) {
 	if meta.Title != "Feature X Implementation" {
 		t.Errorf("title: got %q, want %q", meta.Title, "Feature X Implementation")
 	}
-	if meta.EntryCount != 2 {
-		t.Errorf("entry_count: got %d, want 2", meta.EntryCount)
+	if meta.EntryCount != 3 {
+		t.Errorf("entry_count: got %d, want 3", meta.EntryCount)
 	}
 	if meta.AgentID != "OxMETA" {
 		t.Errorf("agent_id: got %q, want %q", meta.AgentID, "OxMETA")

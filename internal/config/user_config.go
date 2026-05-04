@@ -330,7 +330,14 @@ type UserConfig struct {
 	LegacyMurmuring   string             `yaml:"murmuring,omitempty"`          // deprecated: read old key on upgrade
 	MurmurReceive     string             `yaml:"murmur_receive,omitempty"`     // "on", "off"
 	RecordingReminder string             `yaml:"recording_reminder,omitempty"` // "on", "off"
-
+	// AgentSummarizer selects who runs the session-stop LLM summarization call.
+	// "inline" (default): the calling agent runs it in its warm prompt cache —
+	// cheap but blocks the user for ~30–120s at session-stop. "delegated": the
+	// daemon runs it in a fresh subprocess — non-blocking but ~10× more expensive.
+	// "off": disable LLM summarization entirely. "cloud" is reserved for future
+	// SageOx cloud-side summarization and is rejected at validation today. See
+	// internal/config/agent_summarizer.go and ADR-016.
+	AgentSummarizer string `yaml:"agent_summarizer,omitempty"`
 }
 
 // BadgeConfig tracks badge suggestion state across all projects.

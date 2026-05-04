@@ -18,6 +18,11 @@ type RunRequest struct {
 	Prompt          string
 	WorkDir         string
 	TimeoutOverride time.Duration
+	// Model pins a specific model for the runner (e.g., "claude-haiku-4-5").
+	// Empty means defer to the runner's default — for ClaudeRunner that's
+	// whatever the local Claude Code CLI selects, typically Sonnet. Set
+	// explicitly for cost-sensitive workloads like summarization.
+	Model string
 	// SkipLLM bypasses the LLM runner entirely. The manager calls
 	// ProcessResult directly with an empty RunResult. Use this when
 	// the work item has all the information it needs to proceed without
@@ -33,4 +38,16 @@ type RunResult struct {
 	TokensIn  int    // input tokens (from structured output if available)
 	TokensOut int    // output tokens
 	ModelUsed string // model identifier the runner reports (for attribution in logs and judge verdicts)
+}
+
+// TelemetryRecorder is the minimal surface agentwork needs to emit telemetry.
+// Implemented by *daemon.TelemetryCollector. The interface lives here so the
+// agentwork package doesn't import daemon (which would create a cycle: daemon
+// already imports agentwork).
+//
+// Record must be safe for concurrent use and non-blocking — handlers fire
+// telemetry from the LLM completion path and cannot afford to wait on a
+// network round-trip.
+type TelemetryRecorder interface {
+	Record(event string, props map[string]any)
 }

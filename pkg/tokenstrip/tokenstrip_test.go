@@ -117,6 +117,103 @@ func TestThinkingBlockStopWordsRemoved(t *testing.T) {
 	}
 }
 
+// TestDropThinkingFirstSentence verifies that with
+// DropThinkingMode=DropThinkingFirstSentence the inner thinking text is
+// trimmed to its first sentence and an elision marker is appended.
+// Failure prevented: the env-gated rollout silently regresses to keeping
+// all thinking content (no token savings) or strips it entirely (loss
+// of reasoning framing for aha_moments).
+func TestDropThinkingFirstSentence(t *testing.T) {
+	content := "Answer: 42.\n<thinking>Let me work out the answer. First I need X. Then Y. Then Z.</thinking>\nDone."
+	asst := map[string]any{"type": "assistant", "content": content}
+	line := mustJSON(t, asst)
+
+	got, stats := runCompress(t, []string{line}, Options{
+		DropThinkingMode: DropThinkingFirstSentence,
+	})
+
+	if stats.ThinkingBlocksTrimmed != 1 {
+		t.Fatalf("ThinkingBlocksTrimmed=%d, want 1", stats.ThinkingBlocksTrimmed)
+	}
+	var e struct {
+		Content string `json:"content"`
+	}
+	_ = json.Unmarshal([]byte(got[0]), &e)
+
+	// First sentence "Let me work out the answer." must survive.
+	if !strings.Contains(e.Content, "Let me work out the answer.") {
+		t.Errorf("first sentence missing from trimmed thinking: %q", e.Content)
+	}
+	// Subsequent sentences must be elided.
+	if strings.Contains(e.Content, "First I need X") {
+		t.Errorf("subsequent sentences should be elided: %q", e.Content)
+	}
+	// Elision marker must be present.
+	if !strings.Contains(e.Content, "[reasoning elided]") {
+		t.Errorf("elision marker missing: %q", e.Content)
+	}
+	// Surrounding prose untouched.
+	if !strings.Contains(e.Content, "Answer: 42.") || !strings.Contains(e.Content, "Done.") {
+		t.Errorf("prose outside thinking altered: %q", e.Content)
+	}
+}
+
+// TestDropThinkingAll verifies the most aggressive variant — block + tags
+// removed entirely. Failure prevented: variant promoted to default-on
+// before telemetry justifies it.
+func TestDropThinkingAll(t *testing.T) {
+	content := "Answer: 42.\n<thinking>any deliberation here</thinking>\nDone."
+	asst := map[string]any{"type": "assistant", "content": content}
+	line := mustJSON(t, asst)
+
+	got, stats := runCompress(t, []string{line}, Options{
+		DropThinkingMode: DropThinkingAll,
+	})
+
+	if stats.ThinkingBlocksDropped != 1 {
+		t.Fatalf("ThinkingBlocksDropped=%d, want 1", stats.ThinkingBlocksDropped)
+	}
+	var e struct {
+		Content string `json:"content"`
+	}
+	_ = json.Unmarshal([]byte(got[0]), &e)
+
+	if strings.Contains(e.Content, "<thinking>") || strings.Contains(e.Content, "</thinking>") {
+		t.Errorf("thinking tags should be gone with DropThinkingAll: %q", e.Content)
+	}
+	if strings.Contains(e.Content, "any deliberation") {
+		t.Errorf("thinking content should be gone: %q", e.Content)
+	}
+	if !strings.Contains(e.Content, "Answer: 42.") || !strings.Contains(e.Content, "Done.") {
+		t.Errorf("surrounding prose altered: %q", e.Content)
+	}
+}
+
+// TestDropThinkingNone_DefaultPreservesBlock verifies the zero value of
+// Options.DropThinkingMode preserves the existing behavior (stop-word
+// strip on the inner text, block kept). Failure prevented: a future
+// change to defaults silently flipping production sessions onto the
+// aggressive path without operator opt-in.
+func TestDropThinkingNone_DefaultPreservesBlock(t *testing.T) {
+	content := "<thinking>I should think about the problem before I respond</thinking>"
+	asst := map[string]any{"type": "assistant", "content": content}
+	line := mustJSON(t, asst)
+
+	got, stats := runCompress(t, []string{line}, Options{}) // zero value
+
+	if stats.ThinkingBlocksDropped != 0 || stats.ThinkingBlocksTrimmed != 0 {
+		t.Errorf("default mode should not drop or trim: dropped=%d trimmed=%d", stats.ThinkingBlocksDropped, stats.ThinkingBlocksTrimmed)
+	}
+	var e struct {
+		Content string `json:"content"`
+	}
+	_ = json.Unmarshal([]byte(got[0]), &e)
+
+	if !strings.Contains(e.Content, "<thinking>") || !strings.Contains(e.Content, "</thinking>") {
+		t.Errorf("default mode must keep thinking tags: %q", e.Content)
+	}
+}
+
 // TestNFCNormalization verifies NFD (decomposed) input becomes NFC.
 func TestNFCNormalization(t *testing.T) {
 	// "café" with combining acute accent (NFD form).

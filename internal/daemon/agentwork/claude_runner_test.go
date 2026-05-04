@@ -198,6 +198,81 @@ func TestClaudeRunner_Run_SuccessfulInvocation(t *testing.T) {
 	assert.True(t, result.Duration > 0)
 }
 
+// TestClaudeRunner_Run_ModelFlag verifies that req.Model becomes a
+// `--model <id>` pair in the argv passed to claude, and that an empty
+// req.Model omits the flag entirely. Failure prevented: the cost-saving
+// Haiku pin silently no-ops because the runner ignored the model field;
+// or the rollback path (empty Model = user's default) regresses by
+// always passing some flag.
+func TestClaudeRunner_Run_ModelFlag(t *testing.T) {
+	tmp := t.TempDir()
+	argsFile := filepath.Join(tmp, "args.txt")
+	script := filepath.Join(tmp, "claude")
+	// Fake claude: dump argv (one arg per line) to argsFile, then emit a
+	// minimal valid stream-json result so Run() succeeds normally.
+	//
+	// The trailing `sleep 0.1` exists to defuse a CI-only race in
+	// claude_runner.go between cmd.Wait() and the parse goroutine
+	// reading stdout. When the fake script exits within microseconds,
+	// the kernel can close the stdout pipe before the goroutine's
+	// scanner.Scan() runs, producing "file already closed" instead of
+	// the expected EOF. Real claude takes seconds so the race never
+	// manifests in production. We slow the fake just enough to give
+	// the goroutine time to drain the pipe before exit.
+	body := `#!/bin/sh
+for a in "$@"; do printf '%s\n' "$a" >> "` + argsFile + `"; done
+printf '%s\n' '{"type":"result","result":"ok","usage":{"input_tokens":1,"output_tokens":1}}'
+sleep 0.1
+`
+	require.NoError(t, os.WriteFile(script, []byte(body), 0o755))
+
+	r := &ClaudeRunner{binaryPath: script, logger: slog.Default()}
+
+	cases := []struct {
+		name      string
+		model     string
+		wantFlag  bool
+		wantValue string
+	}{
+		{"haiku pinned", "claude-haiku-4-5", true, "claude-haiku-4-5"},
+		{"empty defers to local default", "", false, ""},
+		{"sonnet override", "claude-sonnet-4-6", true, "claude-sonnet-4-6"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Truncate (or create) the args file before each subtest run.
+			require.NoError(t, os.WriteFile(argsFile, nil, 0o644))
+
+			_, err := r.Run(context.Background(), RunRequest{
+				Prompt: "x", Model: c.model, TimeoutOverride: 5 * time.Second,
+			})
+			require.NoError(t, err)
+
+			data, err := os.ReadFile(argsFile)
+			require.NoError(t, err)
+			argv := strings.Split(strings.TrimSpace(string(data)), "\n")
+
+			if c.wantFlag {
+				idx := -1
+				for i, a := range argv {
+					if a == "--model" {
+						idx = i
+						break
+					}
+				}
+				require.GreaterOrEqual(t, idx, 0, "--model flag missing; argv=%v", argv)
+				require.Less(t, idx+1, len(argv), "--model has no value; argv=%v", argv)
+				assert.Equal(t, c.wantValue, argv[idx+1])
+			} else {
+				for _, a := range argv {
+					assert.NotEqual(t, "--model", a, "expected no --model flag; argv=%v", argv)
+				}
+			}
+		})
+	}
+}
+
 func TestClaudeRunner_Run_ContextCancellation(t *testing.T) {
 	tmp := t.TempDir()
 	script := filepath.Join(tmp, "claude")

@@ -58,6 +58,7 @@ var activePhaseBehavior = map[string]bool{
 	phaseAfterTool: true,
 	phaseStop:      true,
 	phasePrompt:    true,
+	phaseEnd:       true,
 }
 
 // HookContext carries everything a phase handler needs.
@@ -199,6 +200,8 @@ func dispatchPhase(ctx *HookContext) error {
 		return handleAfterTool(ctx)
 	case phaseStop:
 		return handleStop(ctx)
+	case phaseEnd:
+		return handleEnd(ctx)
 	default:
 		return nil
 	}
@@ -320,6 +323,81 @@ func stopSessionForClear(ctx *HookContext, agentID string) {
 	}
 
 	slog.Debug("hook: stopped session for clear", "agent_id", agentID)
+}
+
+// handleEnd handles the SessionEnd phase — fires when the calling agent
+// (Claude Code, Gemini CLI, etc.) is exiting. Auto-finalizes the active
+// recording so the user doesn't have to remember to run `ox session stop`.
+//
+// Without this handler, sessions only finalize via:
+//   - manual `ox agent <id> session stop` (most users never run it)
+//   - the daemon's 24h stale-recording sweep
+//
+// Most users just close their agent and walk away — leaving the recording
+// stranded in the cache for up to a day. handleEnd closes that gap.
+//
+// SessionEnd MUST use the `delegated` mode regardless of the user's
+// `agent.summarizer` setting: at this point the calling agent process is
+// being torn down, so `inline` (which whispers a prompt back to the agent
+// for it to run the LLM in its warm cache) has no agent left to whisper to.
+// The daemon IPC dispatch below is the only viable path in this window.
+//
+// Idempotency: SessionEnd can fire multiple times (window close, debugger
+// reattach, IDE reload). The handler is safe to call repeatedly — the
+// first call sets StoppedAt and clears recording state; subsequent calls
+// see no state and return immediately.
+func handleEnd(ctx *HookContext) error {
+	agentID := ""
+	if ctx.Marker != nil {
+		agentID = ctx.Marker.AgentID
+	}
+	if agentID == "" {
+		slog.Debug("hook: end skipped, no agent ID")
+		return nil
+	}
+
+	state, err := session.LoadRecordingStateForAgent(ctx.ProjectRoot, agentID)
+	if err != nil || state == nil {
+		slog.Debug("hook: end no recording state", "agent_id", agentID)
+		return nil
+	}
+
+	if state.StoppedAt != nil {
+		slog.Debug("hook: end already finalized", "agent_id", agentID, "stopped_at", *state.StoppedAt)
+		return nil
+	}
+
+	now := time.Now()
+	if updateErr := session.UpdateRecordingStateForAgent(ctx.ProjectRoot, agentID, func(s *session.RecordingState) {
+		s.StoppedAt = &now
+	}); updateErr != nil {
+		slog.Debug("hook: end could not set StoppedAt", "agent_id", agentID, "error", updateErr)
+	}
+
+	// dispatch delegated finalization via daemon IPC. Best-effort: if the
+	// daemon is unreachable, the daemon's anti-entropy sweep will still
+	// pick up the StoppedAt-marked recording within the 24h stale window.
+	if state.SessionPath != "" {
+		if ledgerPath := deriveLedgerPath(state.SessionPath); ledgerPath != "" {
+			client := daemon.NewClientForCurrentRepoWithTimeout(100 * time.Millisecond)
+			sessionName := filepath.Base(state.SessionPath)
+			if ipcErr := client.SessionFinalize(daemon.SessionFinalizeIPCPayload{
+				SessionName: sessionName,
+				LedgerPath:  ledgerPath,
+				CachePath:   state.SessionPath,
+				ProjectRoot: ctx.ProjectRoot,
+			}); ipcErr != nil {
+				slog.Debug("hook: end finalize IPC failed", "error", ipcErr)
+			}
+		}
+	}
+
+	if clearErr := session.ClearRecordingStateForAgent(ctx.ProjectRoot, agentID); clearErr != nil {
+		slog.Debug("hook: end could not remove recording state", "agent_id", agentID, "error", clearErr)
+	}
+
+	slog.Info("hook: finalized session on agent end", "agent_id", agentID)
+	return nil
 }
 
 // handlePrompt handles the user prompt submission phase.

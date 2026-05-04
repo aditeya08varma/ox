@@ -658,16 +658,17 @@ func TestResolvePhase_UnknownEvent(t *testing.T) {
 // --- activePhaseBehavior coverage ---
 
 func TestActivePhaseBehavior_KnownPhases(t *testing.T) {
-	// verify the phases that should have behavior
+	// verify the phases that should have behavior. phaseEnd was added when
+	// SessionEnd hook auto-finalization was wired up.
 	assert.True(t, activePhaseBehavior[phaseStart])
 	assert.True(t, activePhaseBehavior[phaseCompact])
 	assert.True(t, activePhaseBehavior[phaseAfterTool])
 	assert.True(t, activePhaseBehavior[phaseStop])
 	assert.True(t, activePhaseBehavior[phasePrompt])
+	assert.True(t, activePhaseBehavior[phaseEnd])
 
 	// phases without behavior
 	assert.False(t, activePhaseBehavior[phaseBeforeTool])
-	assert.False(t, activePhaseBehavior[phaseEnd])
 }
 
 // --- dispatchPhase noop default ---

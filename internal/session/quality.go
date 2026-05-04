@@ -31,3 +31,29 @@ func EvaluateQuality(score, uploadThreshold, discardThreshold float64) QualityDi
 	}
 	return QualityUpload
 }
+
+// EvaluateQualityCategory maps a categorical quality label to a
+// disposition. Categorical scoring is the canonical signal as of 2026-05
+// — numeric scales cluster on round numbers and ignore fine-grained
+// rubric distinctions, while LLMs are far more reliable picking from a
+// small named set with anchored examples.
+//
+// Unknown / empty category returns QualityUpload by design: an
+// unrecognized string from a legacy or future summary should default to
+// preserving the artifact, not silently discarding it. Callers that have
+// a numeric score on hand should use EvaluateQuality instead — this
+// function refuses to guess. The decision to upload an unknown category
+// matches the existing "unscored fallbacks default to upload" policy in
+// session_finalize.go's ProcessResult.
+func EvaluateQualityCategory(category string) QualityDisposition {
+	switch category {
+	case "skip":
+		return QualityDiscard
+	case "local_only":
+		return QualityLocalOnly
+	case "share":
+		return QualityUpload
+	default:
+		return QualityUpload
+	}
+}

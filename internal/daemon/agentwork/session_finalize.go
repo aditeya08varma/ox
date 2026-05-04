@@ -65,34 +65,55 @@ type SessionFinalizePayload struct {
 	// storedSession is populated by BuildPrompt and reused by ProcessResult
 	// to avoid reading raw.jsonl twice.
 	storedSession *session.StoredSession `json:"-"`
+
+	// prefilterSummary holds a deterministic summary built by
+	// sessionsummary.MaybeBuildSkipSummary when BuildPrompt determined
+	// the session was too thin for an LLM-generated summary to be
+	// meaningful. When non-nil, BuildPrompt returned RunRequest{SkipLLM:
+	// true} and ProcessResult uses this struct directly instead of
+	// parsing LLM output. Saves the entire claude -p call (input prompt
+	// guidelines + tokens, validation pass, retry potential) for
+	// sessions that would have been quality-gated to discard anyway.
+	//
+	// See pkg/sessionsummary/prefilter.go for the heuristics and
+	// rationale; the trigger conditions are intentionally conservative
+	// to avoid skipping real sessions.
+	prefilterSummary *session.SummarizeResponse `json:"-"`
 }
 
 // SessionFinalizeHandler detects and finalizes incomplete sessions in the ledger.
 // It generates missing artifacts: summary.md (via LLM), summary.json,
 // and session.md (deterministic exports).
 //
-// SESSION SUMMARIZATION DELEGATION — see ADR-016.
+// SESSION SUMMARIZATION — see ADR-016. This handler implements the
+// `delegated` mode (the daemon drives summarization, in contrast to `inline`
+// where the CLI hands the prompt back to the calling agent's warm cache —
+// see `cmd/ox/session_push_summary.go`).
 //
-// This handler is the daemon-owned alternative to inline summarization in
-// `cmd/ox/session_push_summary.go`. The motivating problem with inline-only
-// summarization: it forces the calling agent to run a 30–120s LLM call in the
-// foreground at the exact moment the user has just said "I'm done" and wants
-// to close the agent or `/clear` and start something new. Delegating to the
-// calling agent is the right default *technically* (the agent already has
-// context loaded, no extra binary is required, every agent type works), but
-// it should only be the *forced* path when the user has not specified — and
-// ox cannot auto-detect — an LLM agent for daemon callouts.
+// Cost shape: every call is a *fresh* cold prompt against the user's
+// configured LLM CLI (claude/codex/gemini). On a 10K-entry session, that
+// runs roughly 30–80K input tokens through the model — ~10× the cost of
+// the equivalent `inline` call against an agent with the conversation
+// already cached. The cost is bounded by:
+//   - tokenopt (`pkg/tokenopt`) drops tool I/O / system entries before
+//     the call, typically a 40–60% reduction
+//   - judge gating discards low-quality summaries below a score threshold
+//     so we don't repeatedly re-summarize unsalvageable sessions
+//   - quality_score thresholds keep us from spinning on bad output
 //
 // When this handler runs, `ox session stop` returns immediately with an
-// empty `summary_prompt`. The daemon spawns the user's configured LLM CLI
-// (claude/codex/gemini), runs the same prompt the inline path would have
-// used, validates richness/content, and calls into the shared
-// `pushSummaryToLedger` flow. Prompt construction and validation live in
-// exactly one place (`pkg/sessionsummary`) — there is no second
-// implementation to drift.
+// empty `summary_prompt`. The daemon runs the same prompt the inline path
+// would have used and calls into the shared `pushSummaryToLedger` flow.
+// Prompt construction and validation live in exactly one place
+// (`pkg/sessionsummary`) — there is no second implementation to drift.
 //
 // `ox doctor` enqueues missing summaries into this same handler, so the
 // repair path is the same as the happy path.
+//
+// SessionEnd hook (Claude Code exit) also routes here regardless of the
+// user's `agent.summarizer` setting: at exit the calling agent process is
+// being torn down, so `inline` literally has no agent to whisper back to.
+// `delegated` is the only viable mode in that window.
 type SessionFinalizeHandler struct {
 	logger *slog.Logger
 	// skipGit disables git add/commit/push in tests
@@ -120,6 +141,15 @@ type SessionFinalizeHandler struct {
 	// ErrShutdownTimeout. Defaults to context.Background() when unset,
 	// which preserves behavior for tests that don't call SetDaemonContext.
 	daemonCtx context.Context
+	// telemetry is an optional sink for the per-summarization cost-shape
+	// event (see telemetry.EventSummarization). nil disables emission;
+	// the daemon wires its TelemetryCollector here at startup.
+	telemetry TelemetryRecorder
+	// lastJudgeResult stashes the most recent judge verdict so it can be
+	// piggybacked on the next summarization telemetry event. Cleared
+	// after each emit. Single-threaded by construction: judge and emit
+	// both run synchronously inside ProcessResult.
+	lastJudgeResult *summaryeval.JudgeResult
 }
 
 // NewSessionFinalizeHandler creates a handler with the given logger.
@@ -177,6 +207,15 @@ func (h *SessionFinalizeHandler) SetJudgeCompleter(c summaryeval.Completer) {
 // deadlines — triggering ErrShutdownTimeout that operators see as hangs.
 func (h *SessionFinalizeHandler) SetDaemonContext(ctx context.Context) {
 	h.daemonCtx = ctx
+}
+
+// SetTelemetry installs an optional telemetry sink. The handler emits a
+// `summarization` event after every LLM summarization call so the cost
+// shape (mode, model, tokens, duration, quality score) is observable in
+// production. Nil disables emission entirely — fine for tests and for the
+// privacy-conscious user (telemetry honors the existing opt-out gate).
+func (h *SessionFinalizeHandler) SetTelemetry(t TelemetryRecorder) {
+	h.telemetry = t
 }
 
 // NewSessionFinalizeHandlerForTest creates a handler with git and LFS operations disabled.
@@ -639,6 +678,67 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 	payload.storedSession = stored
 
 	entries := sessionsummary.EntriesFromRaw(stored.Entries)
+
+	// Pre-LLM low-value short-circuit. Sessions whose entries are too thin
+	// for a meaningful LLM-generated summary (very few entries, no
+	// assistant response, near-empty user content) get a deterministic
+	// stub built from user prompts — no claude -p invocation, no input
+	// prompt-guidelines tokens, no Haiku call. The stub's QualityScore
+	// is set low so the existing quality gate routes it to discard and
+	// it never reaches the team ledger. Saves the entire LLM round-trip
+	// on the long tail of exploratory pings that quality-gate to discard
+	// anyway.
+	//
+	// Implementation: when MaybeBuildSkipSummary returns ok=true, we
+	// stash the stub on the payload and signal SkipLLM=true so the
+	// manager skips runner.Run() entirely. ProcessResult then detects
+	// payload.prefilterSummary and uses it directly. See:
+	//   - pkg/sessionsummary/prefilter.go for heuristics + thresholds
+	//   - ProcessResult above for the consumption path
+	if skip, ok := sessionsummary.MaybeBuildSkipSummary(entries); ok {
+		payload.prefilterSummary = skip
+		sessionName := filepath.Base(payload.SessionDir)
+		h.logger.Info("session_finalize prefilter triggered, will skip LLM",
+			"session", sessionName,
+			"entry_count", len(entries),
+			"reason", skip.ScoreReason,
+		)
+
+		// Emit a `summarization_skipped` event so dashboards can count
+		// prefilter skips directly instead of inferring them from missing
+		// `summarization` events. Absent events are ambiguous (telemetry
+		// off, daemon restart, network drop) — an explicit marker is the
+		// only reliable signal for a per-window prefilter-skip rate.
+		//
+		// Privacy: scalars + categoricals only, plus the session_hash
+		// correlator (sha256 of the session name; see SessionHash). The
+		// `reason` field carries the prefilter's structured ScoreReason
+		// which names the heuristic that fired ("fewer than N entries",
+		// "no assistant response", "user content under N chars") — no
+		// content, no paths, no quoted prompt text.
+		if h.telemetry != nil {
+			userPromptCount := 0
+			for _, e := range entries {
+				if e.Type == sessionsummary.EntryTypeUser {
+					userPromptCount++
+				}
+			}
+			h.telemetry.Record("summarization_skipped", map[string]any{
+				"session_hash":      sessionsummary.SessionHash(sessionName),
+				"reason":            skip.ScoreReason,
+				"entry_count":       len(entries),
+				"user_prompt_count": userPromptCount,
+				// skip_kind segments deterministic-prefilter skips (this path)
+				// from LLM-judged skips (when the LLM emits quality_category=skip
+				// from the summarization call itself). Lets dashboards measure
+				// each rate independently and alert if either drifts.
+				"skip_kind": "deterministic",
+			})
+		}
+
+		return RunRequest{SkipLLM: true}, nil
+	}
+
 	// Daemon owns persistence (ProcessResult writes summary.json + meta.json
 	// and gitCommitAndPush commits). Pass empty ledgerSessionDir so the prompt
 	// drops the "save to file + run ox session push-summary" steps and the LLM
@@ -653,6 +753,7 @@ func (h *SessionFinalizeHandler) BuildPrompt(item *WorkItem) (RunRequest, error)
 	return RunRequest{
 		Prompt:  prompt,
 		WorkDir: payload.LedgerPath,
+		Model:   sessionsummary.DefaultSummaryModel(),
 	}, nil
 }
 
@@ -701,7 +802,43 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 
 	llmOutput := result.Output
 
-	// non-zero exit = summarization failed; don't trust the output at all
+	var summaryResp *session.SummarizeResponse
+	// scored gates whether EvaluateQuality runs against summaryResp.QualityScore.
+	// True when the score is meaningful — i.e. a real LLM evaluation OR the
+	// deterministic prefilter (which intentionally scores low to route to
+	// discard). Fallback stubs from validation failures stay scored=false
+	// so the quality gate doesn't double-penalize them.
+	scored := true
+
+	// Prefilter short-circuit. BuildPrompt called
+	// sessionsummary.MaybeBuildSkipSummary and decided this session was too
+	// thin for a meaningful LLM-generated summary. The synthesized stub it
+	// produced (echoing user prompts with quality_score 0.05, status OK) is
+	// what we use here directly — no LLM call happened, so result.Output is
+	// empty and the parse/validate pipeline below would only fail.
+	//
+	// Why injection at this point: artifact writing, LFS upload, git commit,
+	// and quality gating below this block are identical regardless of how
+	// summaryResp got populated. Wrapping the LLM-output handling in
+	// `if payload.prefilterSummary == nil { ... }` is the smallest invasive
+	// change that re-uses every downstream step.
+	//
+	// scored=true so EvaluateQuality runs and routes the 0.05 score to
+	// QualityDiscard (default discard threshold 0.1). Skipping the LLM AND
+	// uploading the stub would defeat the entire optimization.
+	//
+	// See pkg/sessionsummary/prefilter.go for the heuristics and rationale.
+	if payload.prefilterSummary != nil {
+		summaryResp = payload.prefilterSummary
+		scored = true
+		h.logger.Info("session prefilter skipped LLM summarization",
+			"session", filepath.Base(payload.SessionDir),
+			"reason", summaryResp.ScoreReason,
+			"quality_score", summaryResp.QualityScore,
+		)
+	} else {
+
+	// non-zero exit = summarization failed; don't trust the output at all.
 	if result.ExitCode != 0 {
 		h.logger.Warn("summarization agent exited with error, discarding output",
 			"session", filepath.Base(payload.SessionDir),
@@ -715,8 +852,6 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 	// summary or a fallback stub so the quality gate only runs on real scores
 	// — a fallback with QualityScore=0 must NOT flow through EvaluateQuality
 	// and get discarded, otherwise transient LLM failures lose sessions (#525).
-	var summaryResp *session.SummarizeResponse
-	scored := true
 	parsed, parseErr := sessionsummary.ParseSummaryJSON(llmOutput)
 	if parseErr != nil {
 		preview := llmOutput
@@ -835,12 +970,54 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		h.maybeRunJudge(sessionName, payload.LedgerPath, summaryResp)
 	}
 
-	// unscored fallbacks default to upload (preserve stub for teammates / doctor).
-	// Only real LLM-scored summaries are gated by the quality thresholds.
+	} // end of else — LLM-output handling. Prefilter path skips here directly.
+
+	// LLM-judged skip event. When the LLM ran (delegated path) and itself
+	// returned QualityCategory == "skip", emit summarization_skipped with
+	// skip_kind=llm_judged. The deterministic prefilter emits the same
+	// event from BuildPrompt with skip_kind=deterministic. Dashboards
+	// segment by skip_kind to monitor each path independently — a
+	// regression in either (LLM over-skipping, prefilter under-firing)
+	// surfaces as a divergence in those two rates.
+	//
+	// We don't emit on the prefilter path here because BuildPrompt
+	// already did — payload.prefilterSummary != nil means the
+	// deterministic event fired earlier in the lifecycle.
+	if h.telemetry != nil &&
+		payload.prefilterSummary == nil &&
+		sessionsummary.IsSkipCategory(summaryResp) {
+
+		entryCount := 0
+		if payload.storedSession != nil {
+			entryCount = len(payload.storedSession.Entries)
+		}
+		h.telemetry.Record("summarization_skipped", map[string]any{
+			"session_hash": sessionsummary.SessionHash(sessionName),
+			"reason":       summaryResp.ScoreReason,
+			"entry_count":  entryCount,
+			"skip_kind":    "llm_judged",
+		})
+	}
+
+	// Disposition routing.
+	//
+	// Three-way precedence:
+	//   1. QualityCategory (canonical, categorical) — used when present.
+	//      Maps cleanly to QualityDiscard/LocalOnly/Upload via
+	//      EvaluateQualityCategory. This is how new summaries flow.
+	//   2. QualityScore (legacy numeric) — used when category is absent
+	//      and the summary was scored. Reads existing summary.json files
+	//      written before categorical scoring shipped.
+	//   3. Unscored fallback (validation failure stubs) — default to
+	//      upload so teammates/doctor see the stub and can act on it.
+	//      Only real LLM-scored summaries are gated by thresholds.
 	var disposition session.QualityDisposition
-	if scored {
+	switch {
+	case summaryResp.QualityCategory != "":
+		disposition = session.EvaluateQualityCategory(summaryResp.QualityCategory)
+	case scored:
 		disposition = session.EvaluateQuality(summaryResp.QualityScore, h.qualityUploadThreshold, h.qualityDiscardThreshold)
-	} else {
+	default:
 		disposition = session.QualityUpload
 	}
 
@@ -887,7 +1064,18 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		"summary_json", artifactPaths.SummaryJSON,
 		"session_md", artifactPaths.SessionMD,
 		"quality_score", summaryResp.QualityScore,
+		"input_tokens", result.TokensIn,
+		"output_tokens", result.TokensOut,
+		"model", result.ModelUsed,
+		"duration_ms", result.Duration.Milliseconds(),
 	)
+
+	// Emit the cost-shape telemetry event. Privacy-by-design: only scalar
+	// numeric + categorical fields. Never include session content, repo
+	// paths, file paths, model output text, or anything derived from
+	// the user's conversation. Validators that aggregate this server-side
+	// rely on this guarantee.
+	h.emitSummarizationTelemetry(sessionName, "delegated", result, summaryResp, scored)
 
 	if disposition == session.QualityLocalOnly {
 		h.logger.Info("session below upload threshold, keeping locally",
@@ -1843,4 +2031,67 @@ func (h *SessionFinalizeHandler) maybeRunJudge(sessionName, ledgerPath string, s
 		"completion_tokens", result.CompletionTokens,
 		"suggestion_count", len(result.Suggestions),
 	)
+
+	// Stash the judge result on the handler so the per-summarization
+	// telemetry event (emitted from ProcessResult) can include judge
+	// fields without a separate event. Goroutine-safe via the same
+	// implicit ordering as the rest of finalize: judge runs synchronously
+	// inside ProcessResult before emitSummarizationTelemetry.
+	stashed := result
+	h.lastJudgeResult = &stashed
+}
+
+// emitSummarizationTelemetry records a single `summarization` event with the
+// cost shape (tokens, model, duration, quality_score) and judge tokens if a
+// judge run produced a verdict in the same ProcessResult call.
+//
+// The handler.telemetry field is optional — nil sink (tests, telemetry
+// disabled, daemon not wired) is a silent no-op. The TelemetryRecorder
+// implementation auto-attaches app_type and app_version, so this code
+// only sets the summarization-specific fields.
+//
+// Privacy: scalars and categoricals only. Never include session content,
+// model output text, file paths, or anything derived from the user's
+// conversation. The model identifier and quality_score are safe — they're
+// configuration / numeric measurements, not user data.
+func (h *SessionFinalizeHandler) emitSummarizationTelemetry(sessionName, mode string, result *RunResult, summaryResp *session.SummarizeResponse, scored bool) {
+	if h.telemetry == nil {
+		return
+	}
+
+	props := map[string]any{
+		"mode":          mode,
+		"model":         result.ModelUsed,
+		"input_tokens":  result.TokensIn,
+		"output_tokens": result.TokensOut,
+		"duration_ms":   result.Duration.Milliseconds(),
+		"exit_code":     result.ExitCode,
+		"scored":        scored,
+		// session_hash correlates this event with the EventTokenoptRun
+		// emitted by cmd/ox/session_optimize_for_summary.go. Same hash
+		// algorithm (sha256 of session name, first 8 bytes hex) so server-
+		// side joins between compression metrics and LLM cost shape are
+		// possible without exposing names or paths.
+		"session_hash": sessionsummary.SessionHash(sessionName),
+	}
+	if summaryResp != nil {
+		props["quality_score"] = summaryResp.QualityScore
+		// SummaryStatus is already a string-typed alias, no conversion needed.
+		props["summary_status"] = summaryResp.SummaryStatus
+	}
+
+	// piggyback judge fields on the same event when the judge ran during
+	// this finalize. The judge is gated on OX_SUMMARY_JUDGE=on; when off,
+	// lastJudgeResult stays nil and these fields are omitted.
+	if jr := h.lastJudgeResult; jr != nil {
+		props["judge_overall"] = jr.Overall
+		props["judge_model"] = jr.ModelUsed
+		props["judge_duration_ms"] = jr.DurationMs
+		props["judge_input_tokens"] = jr.PromptTokens
+		props["judge_output_tokens"] = jr.CompletionTokens
+		// clear so next session's emit doesn't double-count this judge run
+		h.lastJudgeResult = nil
+	}
+
+	h.telemetry.Record("summarization", props)
 }
