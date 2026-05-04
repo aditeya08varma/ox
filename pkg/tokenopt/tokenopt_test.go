@@ -251,9 +251,10 @@ func TestConversationOnly_KeepsUserAndAssistantDropsToolsAndSystem(t *testing.T)
 	}
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
-	// header + user + assistant + tool_mark (system dropped) = 4
-	if len(lines) != 4 {
-		t.Fatalf("expected 4 output lines, got %d: %v", len(lines), lines)
+	// user + assistant + tool_mark (header AND system both dropped in
+	// ConversationOnly) = 3
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 output lines, got %d: %v", len(lines), lines)
 	}
 	if stats.ToolsMarked != 1 {
 		t.Errorf("expected ToolsMarked=1, got %d", stats.ToolsMarked)
@@ -261,22 +262,197 @@ func TestConversationOnly_KeepsUserAndAssistantDropsToolsAndSystem(t *testing.T)
 	if stats.SystemDropped != 1 {
 		t.Errorf("expected SystemDropped=1, got %d", stats.SystemDropped)
 	}
-	if stats.EntriesOut != 4 {
-		t.Errorf("expected EntriesOut=4, got %d", stats.EntriesOut)
+	if stats.HeaderDropped != 1 {
+		t.Errorf("expected HeaderDropped=1, got %d", stats.HeaderDropped)
+	}
+	if stats.EntriesOut != 3 {
+		t.Errorf("expected EntriesOut=3, got %d", stats.EntriesOut)
 	}
 
 	// Assistant passes through verbatim.
 	var asst entry
-	_ = json.Unmarshal([]byte(lines[2]), &asst)
+	_ = json.Unmarshal([]byte(lines[1]), &asst)
 	if asst.Content != "I'll run make lint first" {
 		t.Errorf("assistant content not verbatim: %q", asst.Content)
 	}
 
-	// Tool entry becomes tool_mark with a brief.
+	// Tool entry becomes a bare tool_mark — no tool_name, no brief, no
+	// is_error. The summarizer recovers what was done from surrounding
+	// assistant prose; the marker only signals the agent paused to act.
 	var mark entry
-	_ = json.Unmarshal([]byte(lines[3]), &mark)
-	if mark.Type != "tool_mark" || mark.ToolName != "Bash" || mark.Brief != "make lint" {
-		t.Errorf("tool_mark mismatch: %+v", mark)
+	_ = json.Unmarshal([]byte(lines[2]), &mark)
+	if mark.Type != "tool_mark" {
+		t.Errorf("tool_mark type mismatch: %+v", mark)
+	}
+	if mark.ToolName != "" {
+		t.Errorf("tool_mark must not carry tool_name (cost-driven; see ModeConversationOnly doc): %+v", mark)
+	}
+	// Verify the JSON shape directly — Brief was removed from the entry
+	// struct; assert the wire format never carries a "brief" key.
+	if strings.Contains(lines[2], "\"brief\"") {
+		t.Errorf("tool_mark JSON must not include brief field: %s", lines[2])
+	}
+}
+
+// TestConversationOnly_HeaderDropped verifies header entries are dropped
+// from the optimized stream in ConversationOnly mode. Failure prevented:
+// silent regression that puts the ~50-token header back into every
+// summarization prompt — wasted tokens with zero downstream consumer.
+// Failure prevented (more important): header NOT dropped from
+// ModeLossless, where replay/debug consumers expect every entry.
+func TestConversationOnly_HeaderDropped(t *testing.T) {
+	hdr := `{"type":"header","metadata":{"agent_type":"claude-code","model":"claude-sonnet-4","ox_version":"0.7.1"}}`
+	user, _ := json.Marshal(map[string]any{"type": "user", "content": "hi"})
+	asst, _ := json.Marshal(map[string]any{"type": "assistant", "content": "hello"})
+	input := hdr + "\n" + string(user) + "\n" + string(asst) + "\n"
+
+	var out bytes.Buffer
+	stats, err := Compress(strings.NewReader(input), &out)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	if stats.HeaderDropped != 1 {
+		t.Errorf("ConversationOnly: HeaderDropped=%d, want 1", stats.HeaderDropped)
+	}
+	if strings.Contains(out.String(), `"type":"header"`) {
+		t.Errorf("ConversationOnly: header survived in output: %s", out.String())
+	}
+
+	// Lossless mode preserves header.
+	var outL bytes.Buffer
+	statsL, err := CompressWith(strings.NewReader(input), &outL, Options{Mode: ModeLossless})
+	if err != nil {
+		t.Fatalf("CompressWith Lossless: %v", err)
+	}
+	if statsL.HeaderDropped != 0 {
+		t.Errorf("Lossless: HeaderDropped=%d, want 0", statsL.HeaderDropped)
+	}
+	if !strings.Contains(outL.String(), `"type":"header"`) {
+		t.Errorf("Lossless: header missing from output: %s", outL.String())
+	}
+}
+
+// TestConversationOnly_ToolMarkBatching verifies that an entire run of
+// tool entries between assistant turns collapses into a single bare
+// tool_mark with a count field. Pre-slim, distinct tool_name+brief groups
+// stayed separate; today every tool entry produces an identical bare mark,
+// so all 6 calls in a single run collapse into one entry with count=6.
+//
+// Failure prevented: a regression that re-introduces per-call tool_marks
+// (or worse, leaks tool_name/brief into the optimized stream) silently
+// re-inflates the input-token bill on every delegated finalize.
+func TestConversationOnly_ToolMarkBatching(t *testing.T) {
+	mk := func(m map[string]any) string {
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+	editFoo := mk(map[string]any{
+		"type": "tool", "tool_name": "Edit",
+		"tool_input": `{"file_path":"/foo.go"}`,
+	})
+	editBar := mk(map[string]any{
+		"type": "tool", "tool_name": "Edit",
+		"tool_input": `{"file_path":"/bar.go"}`,
+	})
+	bash := mk(map[string]any{
+		"type": "tool", "tool_name": "Bash",
+		"tool_input": `{"command":"make test"}`,
+	})
+
+	input := strings.Join([]string{
+		mk(map[string]any{"type": "user", "content": "go"}),
+		mk(map[string]any{"type": "assistant", "content": "ok"}),
+		editFoo, editFoo, editFoo,
+		editBar,
+		bash, bash,
+		mk(map[string]any{"type": "assistant", "content": "done"}),
+		"",
+	}, "\n")
+
+	var out bytes.Buffer
+	stats, err := Compress(strings.NewReader(input), &out)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+
+	// 9 input entries → user + assistant + tool_mark(count=6) + assistant
+	// = 4 output entries. All 6 tool calls between the two assistant turns
+	// are now indistinguishable (no tool_name, no brief), so they collapse
+	// into a single mark.
+	if stats.EntriesOut != 4 {
+		t.Errorf("EntriesOut=%d, want 4 (user + asst + bare tool_mark + asst)", stats.EntriesOut)
+	}
+	if stats.ToolsMarked != 6 {
+		t.Errorf("ToolsMarked=%d, want 6 (counts every input tool entry)", stats.ToolsMarked)
+	}
+	if stats.ToolsBatched != 5 {
+		t.Errorf("ToolsBatched=%d, want 5 (6 marks, 1 emitted, 5 absorbed)", stats.ToolsBatched)
+	}
+
+	// Decode emitted lines and verify the single tool_mark carries
+	// count=6 and ZERO per-call detail.
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	var foundMark bool
+	for _, line := range lines {
+		if !strings.Contains(line, `"type":"tool_mark"`) {
+			continue
+		}
+		foundMark = true
+		// Must NOT contain any per-call detail.
+		for _, banned := range []string{"\"tool_name\"", "\"brief\"", "\"tool_input\"", "\"tool_output\"", "\"is_error\""} {
+			if strings.Contains(line, banned) {
+				t.Errorf("tool_mark must not carry %s; got: %s", banned, line)
+			}
+		}
+		var e entry
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			t.Fatalf("unmarshal %q: %v", line, err)
+		}
+		if e.Count != 6 {
+			t.Errorf("tool_mark count=%d, want 6 (3 editFoo + 1 editBar + 2 bash collapsed into one mark)", e.Count)
+		}
+	}
+	if !foundMark {
+		t.Errorf("expected exactly one tool_mark entry; got lines: %v", lines)
+	}
+}
+
+// TestConversationOnly_TokenEstimateSane verifies TokensInEstimate and
+// TokensOutEstimate are populated and reflect a real reduction.
+// Failure prevented: telemetry reports zero token counts, breaking the
+// cost dashboard that downstream beads (#1, #2) depend on.
+func TestConversationOnly_TokenEstimateSane(t *testing.T) {
+	mk := func(m map[string]any) string {
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+	bigInput, _ := json.Marshal(map[string]any{"command": strings.Repeat("echo x; ", 200)})
+	tool := mk(map[string]any{
+		"type": "tool", "tool_name": "Bash", "tool_input": string(bigInput),
+	})
+	input := strings.Join([]string{
+		mk(map[string]any{"type": "user", "content": "go"}),
+		tool, tool, tool, tool, tool,
+		"",
+	}, "\n")
+
+	var out bytes.Buffer
+	stats, err := Compress(strings.NewReader(input), &out)
+	if err != nil {
+		t.Fatalf("Compress: %v", err)
+	}
+	if stats.TokensInEstimate <= 0 {
+		t.Errorf("TokensInEstimate=%d, want >0", stats.TokensInEstimate)
+	}
+	if stats.TokensOutEstimate <= 0 {
+		t.Errorf("TokensOutEstimate=%d, want >0", stats.TokensOutEstimate)
+	}
+	if stats.TokensOutEstimate >= stats.TokensInEstimate {
+		t.Errorf("expected token reduction; in=%d out=%d", stats.TokensInEstimate, stats.TokensOutEstimate)
+	}
+	saved, pct := stats.TokenReduction()
+	if saved <= 0 || pct <= 0 {
+		t.Errorf("TokenReduction reports no savings: saved=%d pct=%.1f", saved, pct)
 	}
 }
 
@@ -313,30 +489,6 @@ func TestConversationOnly_ReducesBytesSubstantially(t *testing.T) {
 	}
 	if stats.ToolsMarked != 20 {
 		t.Errorf("expected ToolsMarked=20, got %d", stats.ToolsMarked)
-	}
-}
-
-func TestBriefForTool(t *testing.T) {
-	cases := []struct {
-		name       string
-		tool       string
-		input      string
-		wantSubstr string
-	}{
-		{"bash command", "Bash", `{"command":"make lint","description":"x"}`, "make lint"},
-		{"read file_path", "Read", `{"file_path":"/a/b.go","limit":50}`, "/a/b.go"},
-		{"grep pattern", "Grep", `{"pattern":"foo.*bar","path":"."}`, "foo.*bar"},
-		{"agent description", "Agent", `{"description":"fix bugs","prompt":"long..."}`, "fix bugs"},
-		{"unknown tool falls back to first string", "WeirdTool", `{"x":"hello","y":1}`, "hello"},
-		{"truncates long briefs", "Bash", `{"command":"` + strings.Repeat("x", 200) + `"}`, "…"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			got := briefForTool(c.tool, c.input)
-			if !strings.Contains(got, c.wantSubstr) {
-				t.Errorf("got %q, want substring %q", got, c.wantSubstr)
-			}
-		})
 	}
 }
 
@@ -412,24 +564,6 @@ func TestCompressLossless_PreservesUnknownTopLevelFields(t *testing.T) {
 	// Content was mutated (ANSI stripped), so that field should reflect change.
 	if s, _ := got["content"].(string); strings.Contains(s, "\x1b") {
 		t.Errorf("expected ANSI stripped from content, got: %q", s)
-	}
-}
-
-// TestBriefForTool_DeterministicForUnknownTool verifies unknown-tool briefs
-// don't flip based on Go's randomized map iteration.
-func TestBriefForTool_DeterministicForUnknownTool(t *testing.T) {
-	input := `{"z_last":"zeta","a_first":"alpha","m_mid":"mu"}`
-	// Many invocations — same input must produce same brief every time.
-	first := briefForTool("UnknownTool", input)
-	for i := 0; i < 50; i++ {
-		got := briefForTool("UnknownTool", input)
-		if got != first {
-			t.Fatalf("non-deterministic: iter %d got %q, first was %q", i, got, first)
-		}
-	}
-	// Sorted-key order means "a_first" wins.
-	if first != "alpha" {
-		t.Errorf("expected sorted-key 'alpha' to be selected, got %q", first)
 	}
 }
 

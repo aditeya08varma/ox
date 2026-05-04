@@ -21,10 +21,13 @@ func TestBuildSummaryPrompt(t *testing.T) {
 	t.Run("describes both raw and summary-input entry shapes", func(t *testing.T) {
 		// Prompt must stay agnostic to which file it points at, because
 		// callers pass either raw.jsonl or the tokenopt-optimized file.
-		// Summarizer needs to recognize tool_mark + brief in the optimized case.
+		// The summarizer needs to recognize tool_mark in the optimized
+		// case (and the optional `count` field for batched runs); since
+		// the design dropped tool_name/brief/output, the prompt no longer
+		// mentions "brief" — only "tool_mark" and the count semantics.
 		result := BuildSummaryPrompt(entries, "/tmp/raw.jsonl", "")
 		assert.Contains(t, result, `"tool_mark"`)
-		assert.Contains(t, result, "brief")
+		assert.Contains(t, result, "count")
 		assert.Contains(t, result, `"user"`)
 		assert.Contains(t, result, `"assistant"`)
 	})

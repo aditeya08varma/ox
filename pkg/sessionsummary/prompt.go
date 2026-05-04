@@ -163,9 +163,16 @@ The score_reason should be a single sentence explaining the rating.
 //   - raw.jsonl: every entry captured during the session (user, assistant, tool,
 //     system, header).
 //   - summary-input jsonl (produced by pkg/tokenopt in ConversationOnly mode):
-//     user + assistant + header kept verbatim, tool entries collapsed to
-//     `{type:"tool_mark", tool_name, brief}`, system entries dropped. May have
-//     fewer lines than len(entries).
+//     user + assistant kept verbatim; every tool entry replaced with a bare
+//     `{type:"tool_mark"}` marker (or `{type:"tool_mark", count:N}` when
+//     adjacent runs of tool entries collapse). The marker carries no
+//     tool_name, brief, or output — its only job is to tell the summarizer
+//     "the agent acted between these two messages, N times." BOTH system
+//     and header entries are dropped. The header is gone because the
+//     schema fields it carries (agent_type, model, ox_version, created_at,
+//     ...) are stamped into meta.json by the daemon directly and don't
+//     need a round-trip through the LLM. The optimized stream is
+//     typically much shorter than the original entry count.
 //
 // Callers pick the path; the prompt stays agnostic.
 //
@@ -202,13 +209,13 @@ func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) strin
 	sb.WriteString("## Session to Analyze\n\n")
 	fmt.Fprintf(&sb, "Read the session recording at: `%s`\n\n", rawPath)
 	sb.WriteString("The file is JSONL format — one JSON object per line. Possible entry shapes:\n\n")
-	sb.WriteString("- `{type:\"header\", metadata:{...}}` — session metadata, one per file\n")
 	sb.WriteString("- `{type:\"user\", content:\"...\", timestamp:\"...\"}` — human input\n")
 	sb.WriteString("- `{type:\"assistant\", content:\"...\", timestamp:\"...\"}` — AI response prose\n")
 	sb.WriteString("- `{type:\"tool\", tool_name:\"...\", tool_input:\"...\", tool_output:\"...\"}` — full tool invocation (only in unoptimized files)\n")
-	sb.WriteString("- `{type:\"tool_mark\", tool_name:\"...\", brief:\"...\"}` — compact tool marker (in summary-input files: carries the tool name + a short gist of what was invoked; full tool I/O is not preserved)\n")
+	sb.WriteString("- `{type:\"tool_mark\", count?:N}` — bare tool-activity marker (in summary-input files: signals the agent paused to act between messages). The marker is intentionally minimal: tool name, inputs, and outputs are NOT preserved here. The optional `count` field, when present, means N adjacent tool calls were collapsed into this single entry — read it as \"the agent did N tool things between these two messages.\" Recover concrete actions (file paths, commands, decisions) from surrounding assistant prose, not from these markers.\n")
 	sb.WriteString("- `{type:\"system\", content:\"...\"}` — system reminder (may be absent in summary-input files; they are dropped by the pre-summarize pass)\n\n")
-	sb.WriteString("Focus on user/assistant dialog to recover the session narrative; use tool and tool_mark entries as scaffolding for what the agent did between messages. Line count may be smaller than the original entry_count if the file has been pre-processed.\n\n")
+	sb.WriteString("Note: `header` entries (session metadata) and `system` entries are stripped from summary-input files; you do NOT need to read or echo them. Session metadata (agent type, version, model, username, created_at) is stamped into meta.json by the daemon directly, not by you.\n\n")
+	sb.WriteString("Focus on user/assistant dialog to recover the session narrative; use tool_mark entries as scaffolding for what the agent did between messages. A tool_mark with count=20 says more compactly than 20 separate marks would: \"the agent did this 20 times,\" which often signals an iterative refactor or polling loop worth reflecting in a chapter title. Line count may be smaller than the original entry_count if the file has been pre-processed.\n\n")
 
 	sb.WriteString("## Instructions\n\n")
 	sb.WriteString("1. Read the session recording file at the path above\n")
