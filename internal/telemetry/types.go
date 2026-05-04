@@ -60,6 +60,24 @@ const (
 
 	// summarization preprocessing events
 	EventTokenoptRun = "tokenopt_run" // summary-input optimization pass (cmd/ox/session_optimize_for_summary.go)
+
+	// EventSummarization is emitted once per LLM summarization call (delegated path
+	// today; inline coverage is a follow-up). It captures the cost shape of every
+	// session-stop summary so we can:
+	//
+	//   1. quantify the inline-vs-delegated cost gap in production (currently
+	//      asserted in ADR-016 from theory; this turns it into a measurement)
+	//   2. detect quality regressions if the Haiku-4.5 default drifts
+	//   3. catch model-ID mismatches between what the daemon thinks it's using
+	//      and what the local CLI actually picked
+	//
+	// Standard daemon-event props: app_type, app_version (auto-attached by
+	// TelemetryCollector.Record). Summarization-specific props live in the
+	// metadata payload and include at minimum: mode (inline|delegated|off|cloud),
+	// model, input_tokens, output_tokens, duration_ms, quality_score. Judge tokens
+	// piggyback on the same event when the judge ran (judge_input_tokens,
+	// judge_output_tokens, judge_model, judge_overall).
+	EventSummarization = "summarization"
 )
 
 // Batch represents a batch of events for efficient transmission

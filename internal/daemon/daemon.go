@@ -1083,6 +1083,11 @@ func (d *Daemon) initComponents() time.Duration {
 		// on daemon shutdown instead of blocking up to its 3-minute
 		// deadline and triggering ErrShutdownTimeout.
 		sfh.SetDaemonContext(d.ctx)
+		// Wire the cost-shape telemetry sink. Auto-disabled when telemetry
+		// is opt-out; the recorder no-ops on the daemon side.
+		if d.telemetry != nil {
+			sfh.SetTelemetry(d.telemetry)
+		}
 		awCfg := configLoader()
 		sfh.SetQualityThresholds(awCfg.GetQualityUploadThreshold(), awCfg.GetQualityDiscardThreshold())
 		d.sessionFinalizeHandler = sfh

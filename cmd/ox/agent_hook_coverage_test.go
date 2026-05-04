@@ -72,8 +72,11 @@ func TestDispatchPhase_UnknownPhase(t *testing.T) {
 
 func TestActivePhaseBehavior_Coverage(t *testing.T) {
 	t.Parallel()
-	// verify the known active phases are registered
-	expectedActive := []string{phaseStart, phaseCompact, phaseAfterTool, phaseStop, phasePrompt}
+	// verify the known active phases are registered. phaseEnd was added when
+	// the SessionEnd hook handler was wired up to auto-finalize recordings on
+	// agent exit (previously: hook entry installed in .claude/settings.json
+	// but dispatchPhase silently no-op'd). See cmd/ox/agent_hook.go:handleEnd.
+	expectedActive := []string{phaseStart, phaseCompact, phaseAfterTool, phaseStop, phasePrompt, phaseEnd}
 	for _, phase := range expectedActive {
 		if !activePhaseBehavior[phase] {
 			t.Errorf("expected phase %q to be active", phase)
@@ -81,7 +84,7 @@ func TestActivePhaseBehavior_Coverage(t *testing.T) {
 	}
 
 	// verify some phases are NOT active
-	expectedInactive := []string{phaseEnd, phaseBeforeTool}
+	expectedInactive := []string{phaseBeforeTool}
 	for _, phase := range expectedInactive {
 		if activePhaseBehavior[phase] {
 			t.Errorf("expected phase %q to be inactive", phase)

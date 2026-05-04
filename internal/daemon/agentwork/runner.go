@@ -39,3 +39,15 @@ type RunResult struct {
 	TokensOut int    // output tokens
 	ModelUsed string // model identifier the runner reports (for attribution in logs and judge verdicts)
 }
+
+// TelemetryRecorder is the minimal surface agentwork needs to emit telemetry.
+// Implemented by *daemon.TelemetryCollector. The interface lives here so the
+// agentwork package doesn't import daemon (which would create a cycle: daemon
+// already imports agentwork).
+//
+// Record must be safe for concurrent use and non-blocking — handlers fire
+// telemetry from the LLM completion path and cannot afford to wait on a
+// network round-trip.
+type TelemetryRecorder interface {
+	Record(event string, props map[string]any)
+}

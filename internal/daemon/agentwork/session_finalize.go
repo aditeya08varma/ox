@@ -127,6 +127,15 @@ type SessionFinalizeHandler struct {
 	// ErrShutdownTimeout. Defaults to context.Background() when unset,
 	// which preserves behavior for tests that don't call SetDaemonContext.
 	daemonCtx context.Context
+	// telemetry is an optional sink for the per-summarization cost-shape
+	// event (see telemetry.EventSummarization). nil disables emission;
+	// the daemon wires its TelemetryCollector here at startup.
+	telemetry TelemetryRecorder
+	// lastJudgeResult stashes the most recent judge verdict so it can be
+	// piggybacked on the next summarization telemetry event. Cleared
+	// after each emit. Single-threaded by construction: judge and emit
+	// both run synchronously inside ProcessResult.
+	lastJudgeResult *summaryeval.JudgeResult
 }
 
 // NewSessionFinalizeHandler creates a handler with the given logger.
@@ -184,6 +193,15 @@ func (h *SessionFinalizeHandler) SetJudgeCompleter(c summaryeval.Completer) {
 // deadlines — triggering ErrShutdownTimeout that operators see as hangs.
 func (h *SessionFinalizeHandler) SetDaemonContext(ctx context.Context) {
 	h.daemonCtx = ctx
+}
+
+// SetTelemetry installs an optional telemetry sink. The handler emits a
+// `summarization` event after every LLM summarization call so the cost
+// shape (mode, model, tokens, duration, quality score) is observable in
+// production. Nil disables emission entirely — fine for tests and for the
+// privacy-conscious user (telemetry honors the existing opt-out gate).
+func (h *SessionFinalizeHandler) SetTelemetry(t TelemetryRecorder) {
+	h.telemetry = t
 }
 
 // NewSessionFinalizeHandlerForTest creates a handler with git and LFS operations disabled.
@@ -895,7 +913,18 @@ func (h *SessionFinalizeHandler) ProcessResult(item *WorkItem, result *RunResult
 		"summary_json", artifactPaths.SummaryJSON,
 		"session_md", artifactPaths.SessionMD,
 		"quality_score", summaryResp.QualityScore,
+		"input_tokens", result.TokensIn,
+		"output_tokens", result.TokensOut,
+		"model", result.ModelUsed,
+		"duration_ms", result.Duration.Milliseconds(),
 	)
+
+	// Emit the cost-shape telemetry event. Privacy-by-design: only scalar
+	// numeric + categorical fields. Never include session content, repo
+	// paths, file paths, model output text, or anything derived from
+	// the user's conversation. Validators that aggregate this server-side
+	// rely on this guarantee.
+	h.emitSummarizationTelemetry(sessionName, "delegated", result, summaryResp, scored)
 
 	if disposition == session.QualityLocalOnly {
 		h.logger.Info("session below upload threshold, keeping locally",
@@ -1851,4 +1880,60 @@ func (h *SessionFinalizeHandler) maybeRunJudge(sessionName, ledgerPath string, s
 		"completion_tokens", result.CompletionTokens,
 		"suggestion_count", len(result.Suggestions),
 	)
+
+	// Stash the judge result on the handler so the per-summarization
+	// telemetry event (emitted from ProcessResult) can include judge
+	// fields without a separate event. Goroutine-safe via the same
+	// implicit ordering as the rest of finalize: judge runs synchronously
+	// inside ProcessResult before emitSummarizationTelemetry.
+	stashed := result
+	h.lastJudgeResult = &stashed
+}
+
+// emitSummarizationTelemetry records a single `summarization` event with the
+// cost shape (tokens, model, duration, quality_score) and judge tokens if a
+// judge run produced a verdict in the same ProcessResult call.
+//
+// The handler.telemetry field is optional — nil sink (tests, telemetry
+// disabled, daemon not wired) is a silent no-op. The TelemetryRecorder
+// implementation auto-attaches app_type and app_version, so this code
+// only sets the summarization-specific fields.
+//
+// Privacy: scalars and categoricals only. Never include session content,
+// model output text, file paths, or anything derived from the user's
+// conversation. The model identifier and quality_score are safe — they're
+// configuration / numeric measurements, not user data.
+func (h *SessionFinalizeHandler) emitSummarizationTelemetry(sessionName, mode string, result *RunResult, summaryResp *session.SummarizeResponse, scored bool) {
+	if h.telemetry == nil {
+		return
+	}
+
+	props := map[string]any{
+		"mode":          mode,
+		"model":         result.ModelUsed,
+		"input_tokens":  result.TokensIn,
+		"output_tokens": result.TokensOut,
+		"duration_ms":   result.Duration.Milliseconds(),
+		"exit_code":     result.ExitCode,
+		"scored":        scored,
+	}
+	if summaryResp != nil {
+		props["quality_score"] = summaryResp.QualityScore
+		props["summary_status"] = string(summaryResp.SummaryStatus)
+	}
+
+	// piggyback judge fields on the same event when the judge ran during
+	// this finalize. The judge is gated on OX_SUMMARY_JUDGE=on; when off,
+	// lastJudgeResult stays nil and these fields are omitted.
+	if jr := h.lastJudgeResult; jr != nil {
+		props["judge_overall"] = jr.Overall
+		props["judge_model"] = jr.ModelUsed
+		props["judge_duration_ms"] = jr.DurationMs
+		props["judge_input_tokens"] = jr.PromptTokens
+		props["judge_output_tokens"] = jr.CompletionTokens
+		// clear so next session's emit doesn't double-count this judge run
+		h.lastJudgeResult = nil
+	}
+
+	h.telemetry.Record("summarization", props)
 }
