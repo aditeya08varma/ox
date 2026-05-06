@@ -180,6 +180,7 @@ type Daemon struct {
 	settingsFetcher        *SettingsFetcher
 	eventBus               *hooks.EventBus
 	tracer                 *observability.DaemonTracer
+	autofixSched           *autofix.Scheduler
 
 	// state
 	mu               sync.Mutex
@@ -197,6 +198,12 @@ type Daemon struct {
 	// startup timing (written once in Start(), read by IPC status handler)
 	startupDurationMs  atomic.Int64
 	throttleDurationMs atomic.Int64
+
+	// doctorRunning is the single-flight guard for the async Doctor()
+	// RPC. CompareAndSwap from false→true claims the slot for a new
+	// pass; concurrent callers get AlreadyRunning=true and no work.
+	// The goroutine clears it via Store(false) on exit.
+	doctorRunning atomic.Bool
 }
 
 // New creates a new daemon instance.
@@ -1260,7 +1267,7 @@ func (d *Daemon) startWorkers() {
 	// auto-safe checks happens in follow-up beads.
 	if d.config.ProjectRoot != "" {
 		autofixReg := autofix.Default()
-		autofixSched := autofix.NewScheduler(autofixReg, d.logger,
+		d.autofixSched = autofix.NewScheduler(autofixReg, d.logger,
 			func() []string { return []string{d.config.ProjectRoot} },
 			func(r autofix.CheckResult) {
 				if d.issues == nil {
@@ -1280,7 +1287,7 @@ func (d *Daemon) startWorkers() {
 		d.wg.Add(1)
 		go func() {
 			defer d.wg.Done()
-			autofixSched.Run(d.ctx)
+			d.autofixSched.Run(d.ctx)
 		}()
 	}
 
@@ -1553,23 +1560,82 @@ func (s *daemonServiceImpl) CodeIndex(payload CodeIndexPayload, progress *Progre
 	return result, err
 }
 
+// Doctor kicks off a doctor pass (anti-entropy + autofix RunNow +
+// ForceDetect + session-watcher cleanup) in a background goroutine and
+// returns immediately. On large ledgers this work walks thousands of
+// session directories and would routinely exceed the IPC read timeout
+// if invoked synchronously; results surface instead via the daemon's
+// IssueTracker (visible in `ox daemon status`) and the agent worker
+// queue.
+//
+// Single-flight: concurrent Doctor() calls while a pass is already
+// running return AlreadyRunning=true and do not start a second pass.
+// That keeps the autofix walk + ForceDetect from racing themselves on
+// the same ledger when a user mashes the button.
 func (s *daemonServiceImpl) Doctor() *DoctorResponse {
-	// trigger anti-entropy (self-healing for missing repos)
-	s.d.scheduler.TriggerAntiEntropy()
-	resp := &DoctorResponse{AntiEntropyTriggered: true}
-	// trigger session finalization detection (bypasses hourly cooldown)
+	if !s.d.doctorRunning.CompareAndSwap(false, true) {
+		return &DoctorResponse{AlreadyRunning: true}
+	}
+	s.d.wg.Add(1)
+	go func() {
+		defer s.d.wg.Done()
+		defer s.d.doctorRunning.Store(false)
+		s.runDoctorPass()
+	}()
+	return &DoctorResponse{BackgroundStarted: true}
+}
+
+// runDoctorPass performs the heavy doctor work. Side effects only:
+// results land in the autofix scheduler's emit callback (which writes
+// to d.issues), in the agent worker queue, and in the daemon log.
+// Always called on a goroutine owned by Doctor(); never call directly.
+func (s *daemonServiceImpl) runDoctorPass() {
+	logger := s.d.logger.With("op", "doctor")
+	logger.Info("doctor pass starting")
+	start := time.Now()
+
+	// trigger anti-entropy (self-healing for missing repos). Already
+	// internally async — returns immediately. Nil-guarded for tests
+	// that drive Doctor() against a zero-value Daemon.
+	if s.d.scheduler != nil {
+		s.d.scheduler.TriggerAntiEntropy()
+	}
+
+	// Run the auto-fix-safe checks NOW (bypassing the 30m throttle) so
+	// the user-triggered Doctor() RPC actually performs meta.json
+	// recovery instead of waiting for the next slow tick. This catches
+	// the "summary.json has a clean title but meta.title is empty /
+	// leaky" case that the LLM-retry path can't see.
+	if s.d.autofixSched != nil {
+		results := s.d.autofixSched.RunNow(s.d.ctx)
+		nonClean := 0
+		for _, r := range results {
+			if r.Status == autofix.StatusClean {
+				continue
+			}
+			nonClean++
+			if r.Status == autofix.StatusError {
+				logger.Warn("autofix check error",
+					"slug", r.Slug, "summary", r.Summary, "repo", r.Repo)
+			}
+		}
+		logger.Info("autofix RunNow complete",
+			"checks", len(results), "non_clean", nonClean)
+	}
+
+	// trigger session finalization detection (bypasses ticker cooldown)
 	if s.d.agentWorker != nil {
 		queued := s.d.agentWorker.ForceDetect()
-		resp.SessionFinalizeTriggered = true
-		resp.SessionFinalizeQueued = queued
+		logger.Info("ForceDetect complete", "queued", queued)
 	}
-	// restart tail-mode watchers for recordings that lost their watcher (daemon restart)
-	// and clean up watchers for sessions that have been stopped or orphaned
+	// restart tail-mode watchers for recordings that lost their watcher
+	// (daemon restart) and clean up watchers for stopped/orphaned sessions
 	if s.d.sessionWatcher != nil {
 		s.d.sessionWatcher.DetectAndRestart(s.d.config.LedgerPath)
 		s.d.sessionWatcher.Cleanup()
 	}
-	return resp
+
+	logger.Info("doctor pass complete", "duration_ms", time.Since(start).Milliseconds())
 }
 
 func (s *daemonServiceImpl) SessionFinalize(payload SessionFinalizeIPCPayload) {
