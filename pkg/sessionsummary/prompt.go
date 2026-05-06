@@ -268,3 +268,71 @@ func BuildSummaryPrompt(entries []Entry, rawPath, ledgerSessionDir string) strin
 
 	return sb.String()
 }
+
+// maxInlineEntries is the cap beyond which we filter to user+assistant only.
+const maxInlineEntries = 800
+
+// BuildInlineSummaryPrompt builds a prompt with session content embedded
+// directly in the text. Used by the daemon's cold-start subprocess path
+// where the LLM (Haiku 4.5 via `claude -p`) cannot reliably read files
+// from disk. Embedding avoids the tool-use hop that was failing silently
+// for 40+ sessions since April 2026.
+//
+// For sessions exceeding maxInlineEntries, only user/assistant entries are
+// included (tool entries are dropped) to stay within context limits.
+func BuildInlineSummaryPrompt(entries []Entry) string {
+	var sb strings.Builder
+
+	sb.WriteString("# Summarize Session\n\n")
+	sb.WriteString("Analyze the following session transcript and generate a summary JSON object.\n\n")
+
+	sb.WriteString(SummaryPromptGuidelines)
+	sb.WriteString("\n")
+
+	sb.WriteString("## Session Transcript\n\n")
+	fmt.Fprintf(&sb, "Below is the session content in chronological order. NOTE: this transcript may be FILTERED OR TRUNCATED — for sessions over %d entries, tool activity is dropped and only user/assistant messages are kept; individual messages over 2000-3000 chars are cut with a `[...truncated]` marker. Base your summary, outcome, key_actions, and aha_moments ONLY on the content visible below. Do not assume the transcript is complete or infer events from gaps.\n\n", maxInlineEntries)
+
+	// for very long sessions, keep only user+assistant to fit context
+	filtered := entries
+	if len(entries) > maxInlineEntries {
+		filtered = make([]Entry, 0, len(entries)/2)
+		for _, e := range entries {
+			if e.Type == EntryTypeUser || e.Type == EntryTypeAssistant {
+				filtered = append(filtered, e)
+			}
+		}
+	}
+
+	seq := 0
+	for _, e := range filtered {
+		seq++
+		switch e.Type {
+		case EntryTypeUser:
+			content := truncateContent(e.Content, 2000)
+			fmt.Fprintf(&sb, "### [%d] Human\n%s\n\n", seq, content)
+		case EntryTypeAssistant:
+			content := truncateContent(e.Content, 3000)
+			fmt.Fprintf(&sb, "### [%d] Assistant\n%s\n\n", seq, content)
+		case "tool_mark":
+			fmt.Fprintf(&sb, "### [%d] *[tool activity]*\n\n", seq)
+		default:
+			seq-- // don't count skipped types
+		}
+	}
+
+	sb.WriteString("## Instructions\n\n")
+	sb.WriteString("Base every field — summary, outcome, key_actions, aha_moments, decisions — on what is visible in the transcript above. Treat missing entries and `[...truncated]` markers as unknown, not as evidence of inactivity. If the visible content is too thin to support a field, omit it or mark it conservatively rather than fabricating.\n")
+	sb.WriteString("CRITICAL: The title MUST be 5-10 words. Not a sentence. Not a paragraph. A short label like a git commit subject line.\n")
+	sb.WriteString("Output ONLY the JSON object — no markdown fences, no explanation, no preamble.\n")
+
+	return sb.String()
+}
+
+// truncateContent shortens content to maxLen characters, appending an
+// ellipsis marker if truncated.
+func truncateContent(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "\n[...truncated]"
+}

@@ -103,6 +103,133 @@ func RecoverEmptyTitleMeta(sessionDir string, dryRun bool) MetaRepairOutcome {
 	return out
 }
 
+// ResetInlineSummaryEligible resets sessions that failed summarization due
+// to the pre-0.7.2 file-read prompt bug. Targets sessions with
+// summary_status "unrecoverable" or "failed_validation" whose
+// validation_error contains "title too short".
+//
+// If client is non-nil and raw.jsonl is an LFS pointer, hydrates it to the
+// ledger cache so the daemon can read actual content for summarization.
+//
+// Returns true if the session was reset, false if not eligible.
+func ResetInlineSummaryEligible(sessionDir string, dryRun bool, client *Client, ledgerPath string) (reset bool) {
+	meta, err := ReadSessionMeta(sessionDir)
+	if err != nil {
+		return false
+	}
+
+	eligible := (meta.SummaryStatus == "unrecoverable" || meta.SummaryStatus == "failed_validation") &&
+		strings.Contains(meta.ValidationError, "title too short")
+	if !eligible {
+		return false
+	}
+
+	if dryRun {
+		return true
+	}
+
+	meta.SummaryStatus = ""
+	meta.SummaryAttempts = 0
+	meta.ValidationError = ""
+	if err := WriteSessionMetaOnly(sessionDir, meta); err != nil {
+		return false
+	}
+
+	// if raw.jsonl is an LFS pointer, hydrate to cache so daemon can read it
+	rawPath := filepath.Join(sessionDir, "raw.jsonl")
+	if client != nil && IsPointerFile(rawPath) {
+		sessionName := filepath.Base(sessionDir)
+		cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+		cachePath := HydrateRawToCache(client, sessionDir, ledgerPath)
+		if cachePath != "" {
+			rawPath = cachePath
+			writeNeedsSummaryMarker(cacheDir, rawPath, sessionDir)
+			return true
+		}
+	}
+
+	writeNeedsSummaryMarker(sessionDir, rawPath, sessionDir)
+	return true
+}
+
+func writeNeedsSummaryMarker(dir, rawPath, ledgerSessionDir string) {
+	marker := struct {
+		CacheDir         string `json:"cache_dir"`
+		RawPath          string `json:"raw_path"`
+		LedgerSessionDir string `json:"ledger_session_dir"`
+	}{dir, rawPath, ledgerSessionDir}
+	data, err := json.Marshal(marker)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(filepath.Join(dir, ".needs-summary"), data, 0644)
+}
+
+// HydrateRawToCache downloads raw.jsonl from LFS to the session cache dir.
+// Used by the doctor autofix to make pointer-stub sessions available for
+// re-summarization. The daemon's Detect() scans the cache dir first, so
+// placing hydrated content there allows re-summarization without modifying
+// the git-tracked pointer file.
+//
+// Returns the cache path on success, empty string on failure.
+func HydrateRawToCache(client *Client, sessionDir, ledgerPath string) string {
+	meta, err := ReadSessionMeta(sessionDir)
+	if err != nil {
+		return ""
+	}
+
+	rawRef, ok := meta.Files["raw.jsonl"]
+	if !ok || rawRef.OID == "" {
+		return ""
+	}
+
+	sessionName := filepath.Base(sessionDir)
+	cacheDir := filepath.Join(ledgerPath, ".sageox", "cache", "sessions", sessionName)
+	cachePath := filepath.Join(cacheDir, "raw.jsonl")
+
+	// skip if already cached
+	if info, err := os.Stat(cachePath); err == nil && info.Size() > 0 {
+		return cachePath
+	}
+
+	bareOID := rawRef.BareOID()
+	resp, err := client.BatchDownload([]BatchObject{{OID: bareOID, Size: rawRef.Size}})
+	if err != nil {
+		return ""
+	}
+	if len(resp.Objects) == 0 {
+		return ""
+	}
+	obj := resp.Objects[0]
+	if obj.Error != nil || obj.Actions == nil || obj.Actions.Download == nil {
+		return ""
+	}
+
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return ""
+	}
+
+	tmpPath := cachePath + ".tmp"
+	f, err := os.Create(tmpPath)
+	if err != nil {
+		return ""
+	}
+
+	if err := DownloadToFile(obj.Actions.Download, f, true, bareOID); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return ""
+	}
+	f.Close()
+
+	if err := os.Rename(tmpPath, cachePath); err != nil {
+		os.Remove(tmpPath)
+		return ""
+	}
+
+	return cachePath
+}
+
 // readSummaryJSONTitle returns a trimmed, non-leaky title from
 // summary.json or "" if none can be safely recovered. Mirrors the
 // shape of cmd/ox/session_repair_meta_summary.go's
