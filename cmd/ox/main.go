@@ -98,7 +98,7 @@ func main() {
 	_ = godotenv.Load(".env.local")
 	_ = godotenv.Load(".env")
 
-	args := os.Args[1:]
+	args := applyCatalogTokenRewrites(os.Args[1:], loadFlagAliases(defaultCatalogJSON))
 	exitCode := executeWithFrictionRecovery(args, 0)
 
 	// Record cli.exit_code on the root OTel span and flush. This runs on
