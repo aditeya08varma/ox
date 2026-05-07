@@ -73,7 +73,8 @@ DOWNLOAD_URL="https://github.com/${OX_REPO}/releases/download/${OX_INSTALL_REF}/
 
 # Portable mktemp template — works on both GNU (Linux) and BSD (macOS).
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ox-install.XXXXXXXX")"
-trap 'rm -rf "$WORK_DIR" 2>/dev/null' EXIT
+trap 'rm -rf "$WORK_DIR" 2>/dev/null; rm -f "$TMP_STATE_FILE" 2>/dev/null' EXIT
+TMP_STATE_FILE=""  # set later; trap is safe if unset
 
 echo "Downloading ox ${OX_INSTALL_REF} for ${PLATFORM}"
 echo "  from: ${DOWNLOAD_URL}"

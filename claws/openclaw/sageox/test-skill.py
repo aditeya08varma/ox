@@ -125,11 +125,12 @@ def run_tests():
     csv_path = OUTPUT_DIR / f"test-results-{timestamp}.csv"
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(OUTPUT_DIR, 0o700)
 
     # Verify SSH connectivity first
     print("Verifying SSH connection...")
     check = subprocess.run(
-        ["ssh", "-i", str(VPS_KEY), "-o", "ConnectTimeout=5", VPS_HOST, "echo ok"],
+        ["ssh", "-i", str(VPS_KEY), "-o", "StrictHostKeyChecking=accept-new", "-o", "ConnectTimeout=5", VPS_HOST, "echo ok"],
         capture_output=True, text=True, timeout=15,
     )
     if check.stdout.strip() != "ok":
