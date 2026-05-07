@@ -55,7 +55,8 @@ Build a prompt by substituting gathered data into `assets/CATCHUP.md`:
 Run synthesis:
 
 ```bash
-timeout 600 claude -p --model claude-sonnet-4-6 <<< "$PROMPT"
+TIMEOUT_BIN="$(command -v timeout || command -v gtimeout)"
+"$TIMEOUT_BIN" 600 claude -p --model claude-sonnet-4-6 <<< "$PROMPT"
 ```
 
 `claude -p` uses whatever credentials `claude` already has — either

@@ -24,7 +24,7 @@ If it fails with an auth error, tell the user to either run
 2. Read `~/.openclaw/memory/sageox-summary-state.json` if it exists.
    Missing file → empty state (first run). Malformed → proceed as empty
    and emit one warning to **stderr** (not stdout):
-   ```
+   ```text
    warning: sageox-summary-state.json was unreadable, starting from empty state
    ```
 
@@ -55,14 +55,14 @@ TEAM_BLOCK="$(ox distill history show \
 Read the template from `assets/SUMMARIZE.md`. Substitute:
 
 - `{{ENTRIES}}` — one section per team:
-  ```
+  ```text
   ### Team "<team_id>"
 
   <TEAM_BLOCK>
   ```
 
 - `{{MULTI_TEAM_RULES}}` — if two or more teams have content:
-  ```
+  ```text
   - Organize the summary by team, using each team ID as a section header
   - Attribute insights to the correct team
   ```
@@ -73,7 +73,8 @@ Do not re-wrap or mutate the markdown inside `TEAM_BLOCK`.
 ### Step 4: Run Claude
 
 ```bash
-timeout 600 claude -p --model claude-sonnet-4-6 <<< "$PROMPT"
+TIMEOUT_BIN="$(command -v timeout || command -v gtimeout)"
+"$TIMEOUT_BIN" 600 claude -p --model claude-sonnet-4-6 <<< "$PROMPT"
 ```
 
 No `--add-dir`, no `--allowedTools` — content is inline. If it fails

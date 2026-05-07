@@ -39,6 +39,7 @@ OX_SHA256_freebsd_amd64="ff05f45616f08918ac9c0fa3bc6fe45d8a7341e43d203d27f9000dd
 
 command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 3; }
 command -v tar  >/dev/null 2>&1 || { echo "error: tar is required"  >&2; exit 3; }
+command -v jq   >/dev/null 2>&1 || { echo "error: jq is required"   >&2; exit 3; }
 
 case "$(uname -s)" in
   Darwin)  OS="darwin"  ;;

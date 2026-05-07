@@ -85,7 +85,7 @@ NEW_STATE="$(
 # Atomic write: temp file in the same directory, then rename.
 STATE_DIR="$(dirname "$STATE_FILE")"
 mkdir -p "$STATE_DIR"
-TMP_FILE="${STATE_FILE}.tmp.$$"
+TMP_FILE="$(mktemp "${STATE_FILE}.tmp.XXXXXXXX")"
 trap 'rm -f "$TMP_FILE" 2>/dev/null' EXIT
 printf '%s\n' "$NEW_STATE" > "$TMP_FILE"
 mv -f "$TMP_FILE" "$STATE_FILE"

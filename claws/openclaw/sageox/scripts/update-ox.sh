@@ -20,7 +20,7 @@
 #   0 — pinned ox is ready, agent should proceed to the next prerequisite
 #   2 — ox is not usable (no state file, binary missing at pinned path,
 #       or PATH resolves to a different ox); agent must read
-#       references/INSTALL.md and run the install flow before continuing
+#       references/setup.md and run the install flow before continuing
 
 set -euo pipefail
 
@@ -28,7 +28,7 @@ STATE_FILE="$HOME/.openclaw/memory/sageox-ox-install.json"
 EXPECTED_OX="$HOME/.local/bin/ox"
 
 if [ ! -f "$STATE_FILE" ]; then
-  echo "ox install state not configured — run install flow from references/INSTALL.md" >&2
+  echo "ox install state not configured — run install flow from references/setup.md" >&2
   exit 2
 fi
 
@@ -37,7 +37,7 @@ fi
 # the state file is stale and the install flow needs to be re-run.
 if [ ! -x "$EXPECTED_OX" ]; then
   echo "error: ox is not installed at $EXPECTED_OX" >&2
-  echo "fix: re-run the install flow from references/INSTALL.md" >&2
+  echo "fix: re-run the install flow from references/setup.md" >&2
   exit 2
 fi
 
@@ -60,7 +60,7 @@ fi
 expected_ref="$(jq -r '.ox_install_ref // empty' "$STATE_FILE" 2>/dev/null || true)"
 if [ -z "$expected_ref" ]; then
   echo "error: $STATE_FILE is missing ox_install_ref" >&2
-  echo "fix: re-run the install flow from references/INSTALL.md" >&2
+  echo "fix: re-run the install flow from references/setup.md" >&2
   exit 2
 fi
 expected_version="${expected_ref#v}"
@@ -68,14 +68,14 @@ expected_version="${expected_ref#v}"
 if ! version_output="$("$EXPECTED_OX" version 2>&1)"; then
   echo "error: $EXPECTED_OX failed to run" >&2
   echo "$version_output" >&2
-  echo "fix: re-run the install flow from references/INSTALL.md" >&2
+  echo "fix: re-run the install flow from references/setup.md" >&2
   exit 2
 fi
 
 first_line="$(printf '%s\n' "$version_output" | head -n1)"
 if [ "$first_line" != "ox $expected_version" ]; then
   echo "error: $EXPECTED_OX reports '$first_line', expected 'ox $expected_version'" >&2
-  echo "fix: re-run the install flow from references/INSTALL.md" >&2
+  echo "fix: re-run the install flow from references/setup.md" >&2
   exit 2
 fi
 

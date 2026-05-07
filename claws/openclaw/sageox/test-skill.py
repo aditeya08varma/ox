@@ -15,6 +15,7 @@ Requires:
 
 import csv
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -28,7 +29,7 @@ sys.stderr.reconfigure(line_buffering=True)
 # --- Config ---
 VPS_KEY = Path.home() / ".ssh" / "ox-bot.pem"
 VPS_HOST = "ubuntu@35.164.224.156"
-OUTPUT_DIR = Path("/tmp/sageox-test-results")
+OUTPUT_DIR = Path.home() / ".sageox-test-results"
 TIMEOUT_SECONDS = 300  # max wait per prompt (agent responses can be slow)
 
 # --- Test cases ---
@@ -92,10 +93,10 @@ def send_prompt(prompt: str, session_id: str) -> dict:
     ssh_cmd = [
         "ssh",
         "-i", str(VPS_KEY),
-        "-o", "StrictHostKeyChecking=no",
+        "-o", "StrictHostKeyChecking=accept-new",
         "-o", "ConnectTimeout=10",
         VPS_HOST,
-        f'openclaw agent --session-id {session_id} --message {repr(prompt)} 2>&1',
+        f"openclaw agent --session-id {shlex.quote(session_id)} --message {shlex.quote(prompt)} 2>&1",
     ]
 
     try:
@@ -123,7 +124,7 @@ def run_tests():
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     csv_path = OUTPUT_DIR / f"test-results-{timestamp}.csv"
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     # Verify SSH connectivity first
     print("Verifying SSH connection...")
