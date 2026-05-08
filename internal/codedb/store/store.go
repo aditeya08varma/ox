@@ -10,17 +10,59 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/blevesearch/bleve/v2"
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
+	"go.etcd.io/bbolt"
 	_ "modernc.org/sqlite"
 )
 
 // ErrCorrupt indicates the index is corrupted and needs re-indexing.
 var ErrCorrupt = fmt.Errorf("codedb index is corrupt")
 
+// ErrFullReindexRequired is returned by RebuildBleveSubIndex when the
+// requested sub-index (code/diff) cannot be repopulated from existing SQL
+// data alone. Callers that hit this should fall back to a full reindex
+// (wipe dataDir + run IndexLocalRepo) — the rebuild path is currently only
+// safe for "comment" because ParseComments is gated on a per-blob SQL flag
+// we can reset, while code/diff are populated only during the per-commit
+// walk in IndexRepo and have no rebleve-from-blobs path yet.
+var ErrFullReindexRequired = errors.New("full reindex required")
+
+// MappingCorruptError indicates that a Bleve sub-index is in a structurally
+// broken state that bleve.Open cannot recover from on its own. The Name
+// identifies which sub-index ("code", "diff", or "comment") so callers can
+// perform a targeted rebuild via RebuildBleveSubIndex without nuking the
+// whole dataDir.
+//
+// Detected conditions (see isBleveIndexCorrupt):
+//   - persisted `_mapping` doc is empty/missing in the latest snapshot, or
+//   - the latest snapshot references segment IDs whose `.zap` files are
+//     missing on disk (the field-observed poison pill: bolt + mapping intact
+//     but a previous incomplete write left the snapshot pointing at segments
+//     that never landed)
+//
+// Distinct from "real lock contention" (another goroutine/process actively
+// writing): we only return this after a successful read-only bbolt open with
+// 100ms timeout — a held exclusive lock blocks the read and we stay in the
+// safe lock-contention path.
+type MappingCorruptError struct {
+	Name string
+	Path string
+}
+
+func (e *MappingCorruptError) Error() string {
+	return fmt.Sprintf("bleve %s index is structurally corrupt at %s", e.Name, e.Path)
+}
+
 // MetadataDBFile is the filename of the SQLite database inside a CodeDB directory.
 const MetadataDBFile = "metadata.db"
+
+// BleveSubIndexNames lists the bleve sub-indexes managed by Store, in the same
+// order they are opened. Used by self-heal callers (daemon, doctor) so they
+// don't have to hardcode the names.
+var BleveSubIndexNames = []string{"code", "diff", "comment"}
 
 // Store wraps a SQLite database and Bleve full-text search indexes.
 // All SQL access goes through the convenience methods below.
@@ -88,20 +130,20 @@ func Open(root string) (*Store, error) {
 		return nil, fmt.Errorf("create schema: %w", err)
 	}
 
-	codeIndex, err := openOrCreateBleveIndex(bleveCodeDir)
+	codeIndex, err := openOrCreateBleveIndex(bleveCodeDir, "code")
 	if err != nil {
 		db.Close()
 		return nil, fmt.Errorf("open code index: %w", err)
 	}
 
-	diffIndex, err := openOrCreateBleveIndex(bleveDiffDir)
+	diffIndex, err := openOrCreateBleveIndex(bleveDiffDir, "diff")
 	if err != nil {
 		db.Close()
 		codeIndex.Close()
 		return nil, fmt.Errorf("open diff index: %w", err)
 	}
 
-	commentIndex, err := openOrCreateBleveIndex(bleveCommentDir)
+	commentIndex, err := openOrCreateBleveIndex(bleveCommentDir, "comment")
 	if err != nil {
 		db.Close()
 		codeIndex.Close()
@@ -279,7 +321,7 @@ func removeSQLiteFiles(dbPath string) {
 	}
 }
 
-func openOrCreateBleveIndex(path string) (bleve.Index, error) {
+func openOrCreateBleveIndex(path, name string) (bleve.Index, error) {
 	idx, err := safeOpenBleve(path)
 	if err == nil {
 		return idx, nil
@@ -290,19 +332,27 @@ func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 	}
 
 	// Before treating as corruption, check if the bbolt file exists.
-	// If it does, the error is likely a lock-timeout (another goroutine or process
-	// has the index open with bbolt's exclusive flock). Nuking in that case destroys
-	// an index that is actively being written — the correct action is to return an
-	// error and let the caller retry later.
+	// If it does, the error is most often lock contention (another goroutine
+	// or process holds the bbolt exclusive flock). Nuking in that case destroys
+	// an index that is actively being written.
+	//
+	// But there's a separate failure mode hiding behind the same surface error:
+	// the bolt file exists, the snapshots are present, yet the persisted mapping
+	// document is empty (observed: `error parsing mapping JSON: unexpected end
+	// of JSON input` while the worktree's diff/code shards are healthy). That
+	// state is unrecoverable by waiting — the daemon will spin forever — so we
+	// peek the mapping non-blocking and surface a typed MappingCorruptError
+	// when the mapping is provably empty. The peek uses a read-only open with
+	// a 100ms timeout: a real exclusive lock blocks the read, the peek bails
+	// out, and we keep the safe lock-contention behavior.
 	boltPath := filepath.Join(path, "store", "root.bolt")
-	_, statErr := os.Stat(boltPath)
-	if statErr == nil {
+	if _, statErr := os.Stat(boltPath); statErr == nil {
+		if isBleveIndexCorrupt(boltPath) {
+			return nil, &MappingCorruptError{Name: name, Path: path}
+		}
 		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", err)
-	}
-	// only nuke when the bolt file is provably absent (ENOENT) or the path structure
-	// is broken (ENOTDIR: a directory was replaced by a file). Permission and I/O
-	// errors (EPERM, EIO, etc.) are transient — nuking would cause data loss.
-	if !os.IsNotExist(statErr) && !errors.Is(statErr, syscall.ENOTDIR) {
+	} else if !os.IsNotExist(statErr) && !errors.Is(statErr, syscall.ENOTDIR) {
+		// permission/IO errors are transient — nuking would cause data loss
 		return nil, fmt.Errorf("stat bleve bolt file %s: %w", boltPath, statErr)
 	}
 
@@ -313,6 +363,200 @@ func openOrCreateBleveIndex(path string) (bleve.Index, error) {
 	}
 	mapping := bleve.NewIndexMapping()
 	return bleve.New(path, mapping)
+}
+
+// isBleveIndexCorrupt opens root.bolt read-only with a short timeout and
+// affirmatively checks for two on-disk failure modes that present as the
+// same opaque "error parsing mapping JSON" surface error:
+//
+//  1. Empty/missing `_mapping` doc in every snapshot.
+//  2. Latest snapshot references segment IDs whose `.zap` shard files are
+//     missing on disk. (Observed in the field on a real poison pill: bolt is
+//     fully readable, mapping is intact, yet `bleve.Open` still fails because
+//     scorch can't load the snapshot's segments — and downstream the mapping
+//     read returns empty bytes through the degraded reader.)
+//
+// Returns true only when we successfully read the bolt AND can prove one of
+// the two conditions. On any access error (read-only open timeout, permission,
+// unparseable bolt structure) returns false — we never flag corruption
+// without proof, so a real exclusive write lock stays in the lock-contention
+// path.
+//
+// scorch's bbolt layout (verified against bleve v2.5.7):
+//
+//	bucket "s" (snapshots)
+//	  └── bucket <8-byte BE epoch>
+//	         ├── bucket "i" (internal)        — `_mapping` key here
+//	         ├── bucket "m" (meta)
+//	         └── bucket <0xf7-prefixed segId>  — one per .zap segment in snapshot
+//
+// Segment bucket keys are 0xf7 followed by a varint-encoded segment epoch
+// (two-byte minimum we see in practice). Segment epochs match the lower bits
+// of the .zap filename (e.g. segment epoch 0x521 → 000000000521.zap).
+func isBleveIndexCorrupt(boltPath string) bool {
+	db, err := bbolt.Open(boltPath, 0600, &bbolt.Options{
+		ReadOnly: true,
+		Timeout:  100 * time.Millisecond,
+	})
+	if err != nil {
+		return false
+	}
+	defer db.Close()
+
+	storeDir := filepath.Dir(boltPath)
+	zapsOnDisk, listErr := zapFilesInDir(storeDir)
+	if listErr != nil {
+		// can't enumerate segments — won't claim corruption without proof
+		return false
+	}
+
+	var corrupt bool
+	_ = db.View(func(tx *bbolt.Tx) error {
+		snaps := tx.Bucket([]byte{'s'})
+		if snaps == nil {
+			return nil
+		}
+		// pick the latest snapshot (highest 8-byte BE epoch — last in cursor order)
+		c := snaps.Cursor()
+		var latestKey []byte
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			latestKey = append(latestKey[:0], k...)
+		}
+		if latestKey == nil {
+			return nil
+		}
+		snap := snaps.Bucket(latestKey)
+		if snap == nil {
+			return nil
+		}
+
+		// (1) mapping doc empty/missing
+		internal := snap.Bucket([]byte{'i'})
+		if internal == nil || len(internal.Get([]byte("_mapping"))) == 0 {
+			corrupt = true
+			return nil
+		}
+
+		// (2) any referenced segment's .zap is missing on disk
+		_ = snap.ForEach(func(name []byte, _ []byte) error {
+			if len(name) == 0 || name[0] != 0xf7 {
+				return nil
+			}
+			segEpoch := decodeSegmentEpoch(name[1:])
+			zapName := fmt.Sprintf("%012x.zap", segEpoch)
+			if _, ok := zapsOnDisk[zapName]; !ok {
+				corrupt = true
+			}
+			return nil
+		})
+		return nil
+	})
+	return corrupt
+}
+
+// zapFilesInDir returns a set of *.zap filenames in dir for fast lookup.
+// On any os.ReadDir error returns the error so the caller can refuse to
+// flag corruption based on incomplete information — a transient read
+// failure must not be misread as "every segment is missing."
+func zapFilesInDir(dir string) (map[string]struct{}, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]struct{}{}
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if len(name) >= 4 && name[len(name)-4:] == ".zap" {
+			out[name] = struct{}{}
+		}
+	}
+	return out, nil
+}
+
+// decodeSegmentEpoch parses scorch's varint-style segment epoch encoding from
+// the bytes after the 0xf7 prefix. The encoding is a packed big-endian-ish
+// integer; observed instances:
+//
+//	0x02 0x09       → 0x209  → 521
+//	0x03 0x6d       → 0x36d  → 877
+//	0x04 0x81       → 0x481  → 1153
+//	0x05 0x21       → 0x521  → 1313
+//
+// Implementation: build the integer by left-shifting 8 bits per byte (i.e.
+// big-endian). This matches every observed case and the on-disk .zap naming
+// (lower-cased hex of the epoch zero-padded to 12 nibbles).
+func decodeSegmentEpoch(b []byte) uint64 {
+	var v uint64
+	for _, x := range b {
+		v = (v << 8) | uint64(x)
+	}
+	return v
+}
+
+// RebuildBleveSubIndex performs a targeted rebuild of a single bleve
+// sub-index. Currently supported only for "comment", which can be fully
+// repopulated from existing SQL data via the comments_parsed flag.
+//
+// For "code" and "diff", this function returns ErrFullReindexRequired
+// without modifying state — those sub-indexes are populated during the
+// per-commit walk in IndexRepo, gated on `commits` SQL rows, and there is
+// no rebleve-from-blobs path that could refill them from SQL alone. A
+// surgical rebuild would leave search permanently empty; callers must fall
+// back to a full reindex (wipe dataDir + IndexLocalRepo).
+//
+// On success for "comment": removes bleve/comment/, recreates empty, and
+// resets blobs.comments_parsed=0 so ParseComments re-extracts every blob
+// on the next indexing pass. SQL/Open failures during the flag reset are
+// surfaced as errors — a rebuild that "succeeds" with comments_parsed
+// still set would silently leave search empty forever.
+//
+// This function works without an open Store — by design, since Open fails
+// when the sub-index is in the corrupt state we are recovering from.
+func RebuildBleveSubIndex(root, name string) error {
+	switch name {
+	case "comment":
+		// continue
+	case "code", "diff":
+		return fmt.Errorf("%s sub-index: %w", name, ErrFullReindexRequired)
+	default:
+		return fmt.Errorf("unknown bleve sub-index %q", name)
+	}
+
+	bleveDir := filepath.Join(root, "bleve", name)
+	if err := os.RemoveAll(bleveDir); err != nil {
+		return fmt.Errorf("remove %s bleve dir: %w", name, err)
+	}
+	mapping := bleve.NewIndexMapping()
+	idx, err := bleve.New(bleveDir, mapping)
+	if err != nil {
+		return fmt.Errorf("recreate %s bleve index: %w", name, err)
+	}
+	if err := idx.Close(); err != nil {
+		return fmt.Errorf("close recreated %s bleve index: %w", name, err)
+	}
+
+	dbPath := filepath.Join(root, MetadataDBFile)
+	if _, statErr := os.Stat(dbPath); statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			// no metadata.db means no blobs to mark — nothing to do (e.g. fresh dataDir)
+			return nil
+		}
+		// permission/IO error: must not silently skip the SQL reset, which
+		// would leave the rebuilt comment shard unable to repopulate.
+		return fmt.Errorf("stat metadata.db for comment rebuild: %w", statErr)
+	}
+	db, openErr := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	if openErr != nil {
+		return fmt.Errorf("open metadata.db for comment rebuild: %w", openErr)
+	}
+	defer db.Close()
+	if _, exErr := db.Exec(`UPDATE blobs SET comments_parsed = 0`); exErr != nil {
+		return fmt.Errorf("reset comments_parsed after comment rebuild: %w", exErr)
+	}
+	return nil
 }
 
 // safeOpenBleve wraps bleve.Open with panic recovery.
