@@ -1,12 +1,19 @@
 // session.go handles Amp session reading, parsing, discovery, and types.
 //
-// Amp stores sessions as JSONL in ~/.amp/sessions/<session-id>.jsonl. Each line
-// is a JSON object with "type" field: "user", "assistant", "tool_use",
-// "tool_result", "system", or "session_meta". Tool entries use "tool_name",
-// "tool_input", and "call_id" for correlation. Session metadata (model,
-// agent_version) is in a "session_meta" entry.
+// Current Amp does not persist conversation transcripts to disk. The
+// `ox-bridge` Bun plugin (installed by install-hooks into a project's
+// .amp/plugins/) writes a JSONL sidecar per thread to
+// ~/.cache/amp/ox-sessions/<thread-id>.jsonl as Amp emits plugin
+// lifecycle events. This file is what the adapter discovers and tails.
 //
-// Format reference: https://sourcegraph.com/docs/amp
+// Each line is a JSON object with "type" field: "user", "assistant",
+// "tool_use", "tool_result", "system", or "session_meta". Tool entries
+// use "tool_name", "tool_input", and "call_id" for correlation. Session
+// metadata (model, agent_version) is in a "session_meta" entry.
+//
+// For users on the legacy pre-2026 Amp (which wrote
+// ~/.amp/sessions/*.jsonl directly), the discovery path falls back to
+// the old location so existing installs keep working.
 package main
 
 import (
@@ -184,22 +191,37 @@ func parseAmpLine(line []byte) *adapterprotocol.RawEntry {
 
 // --- session discovery ---
 
+// ampSessionsDirs returns the candidate sessions directories in priority
+// order. The first existing directory wins. New installs use
+// ~/.cache/amp/ox-sessions/ (written by the ox-bridge plugin); legacy
+// installs (pre-2026 Amp) used ~/.amp/sessions/ directly.
+func ampSessionsDirs(home string) []string {
+	return []string{
+		filepath.Join(home, ".cache", "amp", "ox-sessions"),
+		filepath.Join(home, ".amp", "sessions"),
+	}
+}
+
 func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
 
-	sessionsDir := filepath.Join(home, ".amp", "sessions")
+	dirs := ampSessionsDirs(home)
 
 	// direct lookup by session ID
 	if agentSessionID != "" {
 		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
 			return "", err
 		}
-		direct := filepath.Join(sessionsDir, agentSessionID+".jsonl")
-		if _, err := os.Stat(direct); err == nil {
-			return direct, nil
+		// Search every candidate directory by ID — covers users mid-
+		// migration who have files in both locations.
+		for _, d := range dirs {
+			direct := filepath.Join(d, agentSessionID+".jsonl")
+			if _, err := os.Stat(direct); err == nil {
+				return direct, nil
+			}
 		}
 	}
 
@@ -210,31 +232,52 @@ func findAmpSession(_, agentID, since, agentSessionID string) (string, error) {
 		}
 	}
 
-	entries, err := os.ReadDir(sessionsDir)
-	if err != nil {
-		return "", fmt.Errorf("failed to read sessions dir: %w", err)
-	}
-
+	// Walk each candidate dir in priority order; stop as soon as one
+	// yields usable session files. This makes the legacy fallback
+	// actually work when the bridge dir exists but is still empty
+	// (e.g. a fresh install where no session has flushed yet).
 	var candidates []sessionCandidate
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
-			continue
-		}
-		info, err := entry.Info()
+	var lastReadErr error
+	for _, sessionsDir := range dirs {
+		entries, err := os.ReadDir(sessionsDir)
 		if err != nil {
+			if !os.IsNotExist(err) {
+				lastReadErr = err
+			}
 			continue
 		}
-		if !sinceTime.IsZero() && !info.ModTime().After(sinceTime) {
-			continue
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".jsonl") {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			if !sinceTime.IsZero() && !info.ModTime().After(sinceTime) {
+				continue
+			}
+			candidates = append(candidates, sessionCandidate{
+				path:    filepath.Join(sessionsDir, entry.Name()),
+				modTime: info.ModTime(),
+			})
 		}
-		candidates = append(candidates, sessionCandidate{
-			path:    filepath.Join(sessionsDir, entry.Name()),
-			modTime: info.ModTime(),
-		})
+		if len(candidates) > 0 {
+			break
+		}
 	}
 
 	if len(candidates) == 0 {
-		return "", fmt.Errorf("no amp sessions found")
+		if lastReadErr != nil {
+			return "", fmt.Errorf("failed to read sessions dirs %v: %w "+
+				"(install the ox-bridge plugin via "+
+				"`ox-adapter-amp install-hooks --repo-root <path> --scope project`)",
+				dirs, lastReadErr)
+		}
+		return "", fmt.Errorf("no amp sessions found in %v "+
+			"(install the ox-bridge plugin via "+
+			"`ox-adapter-amp install-hooks --repo-root <path> --scope project`)",
+			dirs)
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
