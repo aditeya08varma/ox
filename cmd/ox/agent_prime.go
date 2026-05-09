@@ -438,6 +438,13 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	phaseStart = time.Now()
 	ledgerStatus := discoverLedger(teamCtx)
 
+	// fan out to the F3 three-source merger (kb API + legacy team-contexts +
+	// legacy ledger registry) and build the unified KB envelope. The merger
+	// owns dedup and per-source error handling; failures don't fail prime —
+	// at worst the KB array is empty and the deprecated mirrors carry the
+	// session through.
+	kbInfos, _ := buildPrimeKBEnvelope(cmd.Context(), projectRoot)
+
 	// load project guidance from AGENTS.md
 	projectGuidance := loadProjectGuidance(projectRoot, agentType)
 
@@ -551,6 +558,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		TeamInstructions:   teamInstructions,
 		CapturePrior:       capturePrior,
 		Session:            sessionStat,
+		KB:                 kbInfos,
 		Ledger:             ledgerStatus,
 		TeamContext:        teamCtx,
 		PrimeCallCount:     primeCallCount,
@@ -572,6 +580,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 					output.CumulativeContextTokens = di.CumulativeContextTokens
 					output.CumulativeContextTokensBySource = di.CumulativeContextTokensBySource
 					output.CommandCount = di.CommandCount
+					// Per-bubble Tokens sourced from THIS agent's instance only —
+					// previously we rolled CumulativeContextTokensByKBType across
+					// every Instance on the machine, which over-attributed to the
+					// current agent when sibling sessions were running.
+					output.KB = enrichKBTokensFromInstance(output.KB, di.CumulativeContextTokensByKBType)
 					break
 				}
 			}
@@ -2037,6 +2050,79 @@ func discoverLedger(teamCtx *teamContextInfo) *ledgerInfo {
 		Path:   path,
 		Hint:   hint,
 	}
+}
+
+// buildPrimeKBEnvelope runs the F3 three-source merger and converts the
+// result into the prime []KBInfo envelope, enforcing the I2 invariant that
+// the caller's personal bubble must always be present when the kb-API
+// source is reachable.
+//
+// Reuses newDefaultKBListMerger so the prime envelope and `ox kb list` see
+// the exact same view of the world (no chance of one rendering a bubble
+// the other can't see). A short timeout caps prime's worst-case latency —
+// merger fan-out is parallel across the three sources.
+//
+// Returns:
+//   - the sorted []KBInfo envelope (nil when no rows merged)
+//   - kbSourceReachable: true iff the kb API contributed at least one row,
+//     used by callers that need to know whether kb-API tokens / counters
+//     are real ("kb feature flag on") or absent because the source itself
+//     was unavailable.
+func buildPrimeKBEnvelope(ctx context.Context, projectRoot string) ([]prime.KBInfo, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	mergeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	merger := newDefaultKBListMerger(projectRoot)
+	res, err := merger.Merge(mergeCtx)
+	if err != nil {
+		// catastrophic merger failure — per-source errors land in
+		// res.Warnings, never here. Keep prime alive with an empty KB.
+		slog.Warn("prime_kb_merge_failed", "err", err.Error())
+		return nil, false
+	}
+
+	// per-bubble token attribution is filled in by the caller AFTER agentID
+	// is resolved — see enrichKBTokensFromInstance below. Building the
+	// envelope here without daemon-side counters keeps this function pure
+	// and avoids the previous bug where machine-wide aggregation inflated
+	// the current agent's KB[].Tokens with other agents' usage.
+	infos := prime.BuildKBInfos(res, nil)
+	reachable := prime.KBSourceReachable(res)
+	infos = prime.EnsurePersonalKBPresent(infos, reachable)
+	return infos, reachable
+}
+
+// enrichKBTokensFromInstance fills KBInfo.Tokens for kbInfos using the
+// per-agent token map carried on the daemon Instance. Called once we
+// know which Instance corresponds to the current agentID (same lookup
+// that populates CumulativeContextTokens). The kb-type totals are split
+// evenly across same-type bubbles so the per-bubble sum matches the
+// deprecated mirror's per-source rollup; types with no matching bubble
+// are dropped (the merger source list and the heartbeat tag should
+// agree, but be defensive).
+func enrichKBTokensFromInstance(kbInfos []prime.KBInfo, tokensByType map[string]int64) []prime.KBInfo {
+	if len(tokensByType) == 0 || len(kbInfos) == 0 {
+		return kbInfos
+	}
+	counts := make(map[string]int)
+	for _, info := range kbInfos {
+		counts[info.Type]++
+	}
+	for i := range kbInfos {
+		total, ok := tokensByType[kbInfos[i].Type]
+		if !ok {
+			continue
+		}
+		n := counts[kbInfos[i].Type]
+		if n == 0 {
+			continue
+		}
+		kbInfos[i].Tokens = int(total / int64(n))
+	}
+	return kbInfos
 }
 
 // ensureClaudeHooks auto-installs Claude Code hooks if Claude Code is detected

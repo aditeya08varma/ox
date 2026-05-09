@@ -587,6 +587,24 @@ func runInit() error {
 		}
 	}
 
+	// ensure the project's *root* .gitignore excludes .sageox/kb/.
+	// This is where the daemon materializes per-project knowledge-bubble
+	// symlinks (one slug-keyed link per relevant kb pointing at
+	// paths.KBDir(kb_id)). Symlinks are derived state — never committed.
+	// Idempotent: only appends the line when missing, never modifies
+	// other entries. Track the file with the init rollback tracker so a
+	// later API failure undoes our gitignore mutation alongside the rest
+	// of the staged files.
+	rootGitignore := filepath.Join(gitRoot, ".gitignore")
+	switch action, err := ensureProjectGitignoreKBLine(gitRoot); {
+	case err != nil:
+		cli.PrintWarning(fmt.Sprintf("Could not update project .gitignore: %v", err))
+	case action == kbGitignoreCreated:
+		tracker.trackCreatedFile(rootGitignore)
+	case action == kbGitignoreModified:
+		tracker.trackModifiedFile(rootGitignore)
+	}
+
 	// add SageOx entries to .gitattributes
 	gitattrsPath := filepath.Join(gitRoot, ".gitattributes")
 	gitattrsExisted := fileExists(gitattrsPath)
@@ -1151,6 +1169,76 @@ func generateSageoxLinksSection(cfg *config.ProjectConfig) string {
 
 func createSageoxGitignore(path string) error {
 	return os.WriteFile(path, []byte(sageoxGitignoreContent), 0644)
+}
+
+// projectGitignoreKBLine is the single entry appended to the project's
+// root .gitignore so daemon-managed knowledge-bubble symlinks
+// (.sageox/kb/<slug>) never end up tracked. The daemon uses the same
+// constant in internal/daemon/sync_symlinks.go to repair existing
+// projects on first reconciliation.
+const projectGitignoreKBLine = ".sageox/kb/"
+
+// ensureProjectGitignoreKBLine appends `.sageox/kb/` to <gitRoot>/.gitignore
+// exactly once. Idempotent: re-reads the file each call and only appends
+// when the line is genuinely absent. Creates the file with just the entry
+// if it does not already exist.
+// kbGitignoreAction reports what ensureProjectGitignoreKBLine actually
+// did to the project's .gitignore so the init tracker can register the
+// path for rollback + staging in the same way other init-modified files
+// are handled.
+type kbGitignoreAction int
+
+const (
+	kbGitignoreUnchanged kbGitignoreAction = iota
+	kbGitignoreCreated
+	kbGitignoreModified
+)
+
+func ensureProjectGitignoreKBLine(gitRoot string) (kbGitignoreAction, error) {
+	gitignorePath := filepath.Join(gitRoot, ".gitignore")
+	existed := true
+	existing, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return kbGitignoreUnchanged, fmt.Errorf("read .gitignore: %w", err)
+		}
+		existed = false
+		existing = nil
+	}
+	if hasGitignoreEntry(string(existing), projectGitignoreKBLine) {
+		return kbGitignoreUnchanged, nil
+	}
+	var out string
+	if len(existing) > 0 {
+		out = string(existing)
+		if !strings.HasSuffix(out, "\n") {
+			out += "\n"
+		}
+	}
+	out += projectGitignoreKBLine + "\n"
+	if err := os.WriteFile(gitignorePath, []byte(out), 0644); err != nil {
+		return kbGitignoreUnchanged, err
+	}
+	if existed {
+		return kbGitignoreModified, nil
+	}
+	return kbGitignoreCreated, nil
+}
+
+// hasGitignoreEntry reports whether `content` already has `entry` as a
+// non-comment, non-blank line. Comment-aware so a documentary
+// "# .sageox/kb/" line doesn't make us skip the real append.
+func hasGitignoreEntry(content, entry string) bool {
+	for _, raw := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(raw)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if trimmed == entry {
+			return true
+		}
+	}
+	return false
 }
 
 // GetSageoxReadmeContent returns the standard README content for .sageox/README.md.

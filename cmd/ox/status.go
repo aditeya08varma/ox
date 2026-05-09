@@ -381,7 +381,7 @@ func shortenPathViaSymlink(projectRoot, fullPath string, candidates ...string) s
 
 // Shows ledger and team contexts grouped by endpoint
 // Always renders both sections, showing "(none)" if not configured
-func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, daemonStatus *daemon.StatusData) string {
+func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, daemonStatus *daemon.StatusData, bubblesSummary statusBubblesSummary) string {
 	var b strings.Builder
 
 	hasLedger := localCfg != nil && localCfg.Ledger != nil && localCfg.Ledger.Path != ""
@@ -869,6 +869,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusMutedStyle.Render("not configured"))
 		b.WriteString("\n")
 	}
+
+	// Knowledge bubbles summary — rendered as the last line of the
+	// project-status block, immediately above "Other Team Contexts" so the
+	// kb noun is adjacent to the team contexts it (eventually) supersedes
+	// without dominating the project-state header.
+	b.WriteString(renderBubblesLine(bubblesSummary))
 
 	// Other team contexts
 	hasOtherTCs := len(otherCloudTCs) > 0 || len(otherDetailTCs) > 0
@@ -1412,11 +1418,24 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			}
 		}
 
+		// collect bubbles summary once — used by both JSON and human output.
+		// failure of the merger is not allowed to block the rest of status,
+		// so collectBubblesSummary swallows errors into Unavailable=true.
+		var bubblesSummary statusBubblesSummary
+		if gitRoot != "" || projectInitialized {
+			bubblesSummary = collectBubblesSummary(statusBubblesMergerForRoot(gitRoot))
+		} else {
+			// outside a project the merger has nothing useful to say;
+			// surface zero rather than "(unavailable)" which would imply
+			// a transient error.
+			bubblesSummary = statusBubblesSummary{}
+		}
+
 		// JSON output mode
 		if statusJSONFlag {
 			output := buildStatusJSON(authenticated, authErr, token, endpointSlug, authFile, authFileExists,
 				userConfigDir, cwd, sageoxDir, projectInitialized, localCfg, gitRoot, repoDetail, codeStats,
-				daemonStatus, client)
+				daemonStatus, client, bubblesSummary)
 			jsonBytes, err := json.MarshalIndent(output, "", "  ")
 			if err != nil {
 				return fmt.Errorf("failed to marshal JSON: %w", err)
@@ -1457,9 +1476,11 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// skip ledger/daemon sections when not in a git repo — nothing to show
 		if gitRoot != "" {
 
-			// Ledger and Team Context sections - shows repos from cloud API
-			// Only displays repos that are actually provisioned
-			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus))
+			// Ledger + Team Context sections — repos from cloud API.
+			// Knowledge-bubbles summary is rendered inside renderGitReposSection
+			// (just above "Other Team Contexts") so the kb line is the
+			// last line of the project-state block, not sandwiched mid-header.
+			fmt.Print(renderGitReposSection(localCfg, gitRoot, daemonStatus, bubblesSummary))
 
 			// show daemon sync section
 			fmt.Print(renderDaemonSyncSection(daemonStatus, syncHistory, localCfg, false, projectInitialized))
@@ -1487,12 +1508,21 @@ daemon health, and a tree view of all SageOx directory locations.`,
 // buildStatusJSON constructs the JSON output structure for ox status --json.
 // daemonStatus and daemonClient are pre-fetched from the daemon to avoid a second ping
 // that could race with the first (one succeeds, the other times out = contradictory output).
+//
+// bubblesSummary is the F3 three-source merger result. The deprecated
+// team_contexts/ledger fields are still populated from localCfg for one
+// release while consumers migrate to the new bubbles field.
 func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken, endpointSlug, authFile string, authFileExists bool,
 	userConfigDir, cwd, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
 	repoDetail *api.RepoDetailResponse, codeStats *daemon.CodeDBStats,
-	daemonStatus *daemon.StatusData, daemonClient *daemon.Client) statusJSONOutput {
+	daemonStatus *daemon.StatusData, daemonClient *daemon.Client,
+	bubblesSummary statusBubblesSummary) statusJSONOutput {
 
 	output := statusJSONOutput{}
+
+	// bubbles section — additive; team_contexts/ledger mirrors below
+	// stay populated for one release per the kb plan.
+	output.Bubbles = buildBubblesJSON(bubblesSummary)
 
 	// auth section
 	output.Auth = &statusAuthJSON{
