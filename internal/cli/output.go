@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"regexp"
@@ -91,30 +92,47 @@ func PrintJSON(v any) {
 }
 
 func PrintSuccess(msg string) {
+	PrintSuccessTo(os.Stdout, msg)
+}
+
+// PrintSuccessTo writes a success message to w. Parallel-safe — does not
+// touch os.Stdout. Honors jsonMode (encodes JSON to w) so output shape is
+// identical to PrintSuccess.
+func PrintSuccessTo(w io.Writer, msg string) {
 	if jsonMode {
-		PrintJSON(map[string]any{
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
 			"status":  "success",
 			"message": msg,
 		})
 		return
 	}
-	fmt.Fprintf(os.Stdout, "%s %s\n", successStyle.Render("✓"), msg)
+	fmt.Fprintf(w, "%s %s\n", successStyle.Render("✓"), msg)
 }
 
 // PrintPreserved prints a message indicating an existing file was preserved (not overwritten).
 // Uses cyan color to distinguish from green success (created) messages.
 func PrintPreserved(msg string) {
+	PrintPreservedTo(os.Stdout, msg)
+}
+
+// PrintPreservedTo writes a preserved-file notice to w. Parallel-safe.
+func PrintPreservedTo(w io.Writer, msg string) {
 	if jsonMode {
-		PrintJSON(map[string]any{
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
 			"status":  "preserved",
 			"message": msg,
 		})
 		return
 	}
-	fmt.Fprintf(os.Stdout, "%s %s\n", preservedStyle.Render("✓"), msg)
+	fmt.Fprintf(w, "%s %s\n", preservedStyle.Render("✓"), msg)
 }
 
 func PrintError(msg string) {
+	// Preserves historical split: JSON to stdout, text to stderr.
 	if jsonMode {
 		PrintJSON(map[string]any{
 			"status":  "error",
@@ -122,7 +140,23 @@ func PrintError(msg string) {
 		})
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s %s\n", errorStyle.Render("✗"), msg)
+	PrintErrorTo(os.Stderr, msg)
+}
+
+// PrintErrorTo writes an error message to w. Parallel-safe. Always writes
+// the formatted text (or JSON in jsonMode) to w — does not split between
+// stdout/stderr like the package-level PrintError does.
+func PrintErrorTo(w io.Writer, msg string) {
+	if jsonMode {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
+			"status":  "error",
+			"message": msg,
+		})
+		return
+	}
+	fmt.Fprintf(w, "%s %s\n", errorStyle.Render("✗"), msg)
 }
 
 func PrintWarning(msg string) {
@@ -133,26 +167,53 @@ func PrintWarning(msg string) {
 		})
 		return
 	}
-	fmt.Fprintf(os.Stderr, "%s %s\n", warningStyle.Render("⚠"), msg)
+	PrintWarningTo(os.Stderr, msg)
+}
+
+// PrintWarningTo writes a warning to w. Parallel-safe. Always writes to w
+// (does not split between stdout/stderr like the package-level PrintWarning).
+func PrintWarningTo(w io.Writer, msg string) {
+	if jsonMode {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
+			"status":  "warning",
+			"message": msg,
+		})
+		return
+	}
+	fmt.Fprintf(w, "%s %s\n", warningStyle.Render("⚠"), msg)
 }
 
 func PrintInfo(msg string) {
+	PrintInfoTo(os.Stdout, msg)
+}
+
+// PrintInfoTo writes an info message to w. Parallel-safe.
+func PrintInfoTo(w io.Writer, msg string) {
 	if jsonMode {
-		PrintJSON(map[string]any{
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(map[string]any{
 			"status":  "info",
 			"message": msg,
 		})
 		return
 	}
-	fmt.Fprintf(os.Stdout, "%s %s\n", infoStyle.Render("ℹ"), msg)
+	fmt.Fprintf(w, "%s %s\n", infoStyle.Render("ℹ"), msg)
 }
 
 // PrintHint prints a dimmed hint message (e.g., "Run 'ox login' to authenticate")
 func PrintHint(msg string) {
+	PrintHintTo(os.Stdout, msg)
+}
+
+// PrintHintTo writes a hint to w. Parallel-safe. Suppressed in jsonMode.
+func PrintHintTo(w io.Writer, msg string) {
 	if jsonMode {
 		return // hints are not included in JSON output
 	}
-	fmt.Fprintln(os.Stdout, hintStyle.Render(msg))
+	fmt.Fprintln(w, hintStyle.Render(msg))
 }
 
 // PrintActionHint prints a prominent actionable hint with star, command, and optional step.
