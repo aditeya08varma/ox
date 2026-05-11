@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -82,11 +83,28 @@ type Actions struct {
 }
 
 // Action is a single LFS action with an href and optional headers.
+//
+// TrustedHost and TrustedScheme are populated by doBatch from the batch
+// URL the action came from, so consumers (Upload/Download/Verify) can
+// reject hrefs whose host doesn't match the LFS server we just talked
+// to. Per ox-90gh: without this, a compromised LFS server can hand us
+// action.Href = https://attacker.example/leak with action.Header carrying
+// our bearer token, and the default http.Client follows redirects
+// blindly. The fields are zero-valued when actions are constructed by
+// callers outside doBatch (tests); the validation helpers below default
+// to "no constraint" in that case.
 type Action struct {
 	Href      string            `json:"href"`
 	Header    map[string]string `json:"header,omitempty"`
 	ExpiresIn int               `json:"expires_in,omitempty"` // seconds
 	ExpiresAt string            `json:"expires_at,omitempty"` // RFC3339
+
+	// TrustedScheme is "https" for actions returned by an https batch URL.
+	// Non-https schemes are rejected outside of loopback addresses.
+	TrustedScheme string `json:"-"`
+	// TrustedHost is the host:port of the batch URL the action came from.
+	// Lowercased so comparisons are case-insensitive.
+	TrustedHost string `json:"-"`
 }
 
 // ObjectError is returned when the server cannot process an object.
@@ -107,6 +125,20 @@ func (c *Client) BatchDownload(objects []BatchObject) (*BatchResponse, error) {
 
 // doBatch sends a batch request and returns the response.
 func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchResponse, error) {
+	// Fail closed before sending Authorization. The batch URL is built
+	// from the git remote URL in NewClient; if someone misconfigures or
+	// MITM-rewrites the remote to plaintext http://example.com, this
+	// guard prevents shipping Basic auth (the user's PAT) over the
+	// wire. http is only allowed for loopback hosts so httptest servers
+	// keep working without TLS.
+	batchU, parseErr := url.Parse(c.batchURL)
+	if parseErr != nil {
+		return nil, fmt.Errorf("batch url parse: %w", parseErr)
+	}
+	if strings.EqualFold(batchU.Scheme, "http") && !isLoopbackHost(batchU.Hostname()) {
+		return nil, fmt.Errorf("batch url %q uses plaintext http on a non-loopback host; refusing to send Authorization", c.batchURL)
+	}
+
 	reqBody := batchRequest{
 		Operation: operation,
 		Transfers: []string{"basic"},
@@ -147,6 +179,28 @@ func (c *Client) doBatch(operation string, objects []BatchObject) (*BatchRespons
 	var batchResp BatchResponse
 	if err := json.Unmarshal(respBody, &batchResp); err != nil {
 		return nil, fmt.Errorf("decode batch response: %w", err)
+	}
+
+	// Stamp every action in the response with the trusted host derived
+	// from the batch URL. Per ox-90gh, consumers use this to reject
+	// hrefs that point at attacker-controlled hosts. batchU was already
+	// parsed at the top of this function for the plaintext-auth guard.
+	scheme := strings.ToLower(batchU.Scheme)
+	host := strings.ToLower(batchU.Host)
+	stamp := func(a *Action) {
+		if a == nil {
+			return
+		}
+		a.TrustedScheme = scheme
+		a.TrustedHost = host
+	}
+	for i := range batchResp.Objects {
+		if batchResp.Objects[i].Actions == nil {
+			continue
+		}
+		stamp(batchResp.Objects[i].Actions.Upload)
+		stamp(batchResp.Objects[i].Actions.Download)
+		stamp(batchResp.Objects[i].Actions.Verify)
 	}
 
 	return &batchResp, nil
