@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log/slog"
 	"os"
@@ -9,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/config"
-	"github.com/sageox/ox/internal/endpoint"
 )
 
 func init() {
@@ -24,7 +22,12 @@ func init() {
 }
 
 // checkGuidanceFiles detects whether the old root-level DISTILL.md needs migration
-// and whether the base guidance files exist. On fix, migrates and seeds as needed.
+// and whether the base guidance files exist. On fix, migrates and seeds locally —
+// remote propagation happens via the daemon's normal team-context sync, not from
+// a synchronous push here. A push at this layer would (a) make the read-only
+// `ox doctor` command touch the network (FixLevelAuto runs even without --fix),
+// (b) hang tests that share the cached doctor run, and (c) block fast-tier CI on
+// any machine with a daemon-discovered team context.
 func checkGuidanceFiles(fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
@@ -36,18 +39,7 @@ func checkGuidanceFiles(fix bool) checkResult {
 		return SkippedCheck("Guidance files", "no team context", "")
 	}
 
-	result := checkGuidanceFilesForPath(tc.Path, fix)
-
-	// push team context after seeding/migrating guidance files
-	if fix && result.passed {
-		ep := endpoint.GetForProject(gitRoot)
-		if err := pushTeamContext(context.Background(), tc.Path, ep); err != nil {
-			slog.Warn("failed to push team context after guidance fix", "error", err)
-			result = WarningCheck("Guidance files", "seeded but push failed", err.Error())
-		}
-	}
-
-	return result
+	return checkGuidanceFilesForPath(tc.Path, fix)
 }
 
 // checkGuidanceFilesForPath is the testable core of the guidance check.

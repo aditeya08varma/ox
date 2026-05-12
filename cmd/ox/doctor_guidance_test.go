@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -151,4 +152,37 @@ func TestCheckGuidanceFiles_NoTeamContext(t *testing.T) {
 	result := checkGuidanceFiles(false)
 
 	assert.True(t, result.skipped, "should skip when no team context")
+}
+
+// TestCheckGuidanceFiles_FixDoesNotPush is the regression test for ox-ydb0.
+// Background: a previous version of checkGuidanceFiles called pushTeamContext
+// whenever fix=true. Because the check is FixLevelAuto, shouldFix returns true
+// even when the user did not pass --fix, which meant every run of `ox doctor`
+// shelled out to `git push` against the team context remote. That:
+//   - made a read-only diagnostic command mutate the remote,
+//   - hung the test package under high parallelism on real network I/O,
+//   - blocked fast-tier CI on any machine with a daemon-discovered team context.
+//
+// Push propagation is the daemon's job; this check is local-only by contract.
+// If anyone reintroduces a push from inside checkGuidanceFiles, this test wedges
+// on the broken `origin` URL set below and fails the suite quickly.
+func TestCheckGuidanceFiles_FixDoesNotPush(t *testing.T) {
+	tcPath := initTeamContextGitDir(t)
+
+	// add an unreachable origin so any attempted push would either fail fast
+	// or block; either way, the test budget catches it.
+	c := exec.Command("git", "remote", "add", "origin", "https://invalid.test.localhost:1/never.git")
+	c.Dir = tcPath
+	require.NoError(t, c.Run())
+
+	done := make(chan checkResult, 1)
+	go func() { done <- checkGuidanceFilesForPath(tcPath, true) }()
+
+	select {
+	case result := <-done:
+		assert.True(t, result.passed, "guidance check should pass after local seed")
+		assert.False(t, result.warning, "guidance check should not warn — push must not be attempted")
+	case <-time.After(5 * time.Second):
+		t.Fatal("guidance check exceeded 5s budget — a network push was likely reintroduced")
+	}
 }

@@ -647,17 +647,24 @@ func checkGitRepoPaths(fix bool) checkResult {
 		return fixRepoPathIssues(gitRoot, localCfg, issues)
 	}
 
-	// check if all issues are "missing" and the project was just initialized.
-	// after ox init, the daemon may not have cloned repos yet -- this is expected,
-	// not a failure. downgrade to info so users don't see scary errors on first run.
-	allMissing := true
+	// during the post-init bootstrap window, the daemon is still cloning repos,
+	// so any of these states is a transient artifact of the clone in progress —
+	// not a user-actionable problem. downgrade to info so a fresh install doesn't
+	// surface scary errors. a partially-created or stale directory at the default
+	// path counts the same as no directory at all for grace purposes.
+	allTransient := true
 	for _, issue := range issues {
-		if issue.issue != "missing" {
-			allMissing = false
+		switch issue.issue {
+		case "missing", "empty-dir", "not-git-repo":
+			// transient — clone in progress or pre-clone state
+		default:
+			allTransient = false
+		}
+		if !allTransient {
 			break
 		}
 	}
-	if allMissing && isRecentlyInitialized(gitRoot) {
+	if allTransient && isRecentlyInitialized(gitRoot) {
 		return InfoCheck("git repo paths",
 			fmt.Sprintf("%d repo(s) syncing", len(issues)),
 			"Background sync is cloning repos. Run `ox doctor` again in a minute.")

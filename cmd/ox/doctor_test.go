@@ -13,12 +13,21 @@ import (
 
 // cachedDoctorChecks caches runDoctorChecks result for tests that only need to
 // verify structure/behavior, not test multiple scenarios. This saves ~60s in test time.
+//
+// Skips in -short mode: a real runDoctorChecks shells out to git/auth/etc. and
+// against a developer machine with a daemon-discovered team context it can hang
+// the entire test package on a real network operation. Fast-tier callers should
+// never depend on full doctor state.
 var (
 	cachedCategories     []checkCategory
 	cachedCategoriesOnce sync.Once
 )
 
-func getCachedDoctorChecks() []checkCategory {
+func getCachedDoctorChecks(t *testing.T) []checkCategory {
+	t.Helper()
+	if testing.Short() {
+		t.Skip("short: full doctor pipeline shells out to git/auth — see .claude/rules/testing.md")
+	}
 	cachedCategoriesOnce.Do(func() {
 		cachedCategories = runDoctorChecks(doctorOptions{fix: false})
 	})
@@ -123,7 +132,7 @@ func setupTestGitRepo(t *testing.T) (string, func()) {
 // are suppressed when daemon is not running
 func TestDoctorSuppression_DaemonNotRunning(t *testing.T) {
 	t.Parallel()
-	categories := getCachedDoctorChecks()
+	categories := getCachedDoctorChecks(t)
 
 	// find the Daemon category
 	var daemonCat *checkCategory
@@ -155,7 +164,7 @@ func TestDoctorSuppression_DaemonNotRunning(t *testing.T) {
 // are suppressed when not logged in
 func TestDoctorSuppression_NotLoggedIn(t *testing.T) {
 	t.Parallel()
-	categories := getCachedDoctorChecks()
+	categories := getCachedDoctorChecks(t)
 
 	// find the SageOx Service category
 	var serviceCat *checkCategory
@@ -185,7 +194,7 @@ func TestDoctorSuppression_NotLoggedIn(t *testing.T) {
 // is suppressed when not logged in
 func TestDoctorSuppression_GitRepoPaths(t *testing.T) {
 	t.Parallel()
-	categories := getCachedDoctorChecks()
+	categories := getCachedDoctorChecks(t)
 
 	// find the Git Repository Health category
 	var gitCat *checkCategory
