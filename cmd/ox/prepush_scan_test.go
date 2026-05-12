@@ -218,7 +218,7 @@ func TestFormatPrePushFindings_DoesNotLeakBytes(t *testing.T) {
 	msg := FormatPrePushFindings(r)
 	assert.Contains(t, msg, "aws_access_key")
 	assert.Contains(t, msg, "leak.jsonl:42")
-	assert.Contains(t, msg, "ox doctor --check=ledger-secrets")
+	assert.Contains(t, msg, "ox session audit")
 	assert.Contains(t, msg, "OX_ALLOW_SECRETS=1")
 }
 
