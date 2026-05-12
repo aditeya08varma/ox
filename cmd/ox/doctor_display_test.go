@@ -438,7 +438,7 @@ func TestDisplayDoctorResults_DetailRendering(t *testing.T) {
 // TestRunDoctorChecks_CategoryStructure verifies runDoctorChecks returns expected category structure
 func TestRunDoctorChecks_CategoryStructure(t *testing.T) {
 	t.Parallel()
-	categories := getCachedDoctorChecks()
+	categories := getCachedDoctorChecks(t)
 
 	// should return at least the core categories
 	require.NotEmpty(t, categories, "runDoctorChecks() returned no categories")
@@ -472,7 +472,7 @@ func TestRunDoctorChecks_WithFixFlag(t *testing.T) {
 	require.NotEmpty(t, categoriesWithFix, "runDoctorChecks(true) returned no categories")
 
 	// use cached fix=false result
-	categoriesWithoutFix := getCachedDoctorChecks()
+	categoriesWithoutFix := getCachedDoctorChecks(t)
 	require.NotEmpty(t, categoriesWithoutFix, "runDoctorChecks(false) returned no categories")
 
 	// both should return similar category structure; minor differences acceptable
@@ -483,7 +483,7 @@ func TestRunDoctorChecks_WithFixFlag(t *testing.T) {
 // TestRunDoctorChecks_ChecksHaveValidFields verifies all checks have required fields
 func TestRunDoctorChecks_ChecksHaveValidFields(t *testing.T) {
 	t.Parallel()
-	categories := getCachedDoctorChecks()
+	categories := getCachedDoctorChecks(t)
 
 	for _, cat := range categories {
 		assert.NotEmpty(t, cat.name, "category has empty name")
@@ -502,7 +502,7 @@ func TestRunDoctorChecks_ChecksHaveValidFields(t *testing.T) {
 // TestRunDoctorChecks_ConfigCheckWithChildren verifies config check adds children when passed
 func TestRunDoctorChecks_ConfigCheckWithChildren(t *testing.T) {
 	t.Parallel()
-	categories := getCachedDoctorChecks()
+	categories := getCachedDoctorChecks(t)
 
 	var projectCat *checkCategory
 	for i := range categories {
