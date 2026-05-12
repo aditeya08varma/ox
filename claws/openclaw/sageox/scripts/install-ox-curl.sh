@@ -25,17 +25,17 @@
 
 set -euo pipefail
 
-OX_INSTALL_REF="v0.6.3"
+OX_INSTALL_REF="v0.7.2"
 OX_VERSION="${OX_INSTALL_REF#v}"
 OX_REPO="sageox/ox"
 
 # sha256(ox_<version>_<os>_<arch>.tar.gz) — from the checksums.txt asset
 # on the pinned release. Lock these when bumping OX_INSTALL_REF.
-OX_SHA256_darwin_amd64="4518b40aa7a59bc24b9b5fab324fb0a46f37129d5cf5b1f7cd1402aa6767acf4"
-OX_SHA256_darwin_arm64="3836fc5b1ac6ae6c50c1c80289ba8f1bf703a55b1afe9a446071ba8e960b6865"
-OX_SHA256_linux_amd64="c0de7c16db770206b19fa387708719f6f9b847d24110be14569c33b9ea24bd54"
-OX_SHA256_linux_arm64="f4324c1a0cbeb394e6c0443e4361eb1dc4f36f74e472a5b33df089467cfbdf30"
-OX_SHA256_freebsd_amd64="ff05f45616f08918ac9c0fa3bc6fe45d8a7341e43d203d27f9000ddbcfb30427"
+OX_SHA256_darwin_amd64="ea055f19af0d95ff92a863c25a7375c5312b91c55ceb4de6f39b7d7f6bd1aec4"
+OX_SHA256_darwin_arm64="4e4ec64a11b478f5ef820a910aaeb34d293bbc77e93461abbb8e841d2ea7d1c0"
+OX_SHA256_linux_amd64="db0535adaeca92afe64f4046029457132d2f3bb74c5e57c69da78ae443721d26"
+OX_SHA256_linux_arm64="5c705067fce9770b65d2c2db33cc29c2401b8549b1cfcb23d10b3d1f5b06f804"
+OX_SHA256_freebsd_amd64="635c4feacb7b859ebf0808311023f559dab4ed86e28a6c10f06bbaeb7b75c6d9"
 
 command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 3; }
 command -v tar  >/dev/null 2>&1 || { echo "error: tar is required"  >&2; exit 3; }

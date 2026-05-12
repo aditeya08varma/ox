@@ -8,33 +8,28 @@ Skills in this directory are published from the `ox` repo to
 
 | Slug | Emoji | What it does |
 |---|---|---|
-| [`sageox-distill`](sageox-distill/) | 🔬 | Sync team contexts, index GitHub activity, and run `ox distill` across multiple SageOx repos. |
-| [`sageox-summary`](sageox-summary/) | 📰 | Generate a Slack-ready cross-team summary of the last 24 hours from distilled daily files. |
+| [`sageox`](sageox/) | 🐂 | Complete toolkit for SageOx team knowledge: query, coworkers, distill, summary, glance, catchup, import/export, and repo manifest management. |
 
-The two skills pair: **distill** writes the source material, **summary**
-synthesizes it. You can use either independently, but using both gives you
-an end-to-end pipeline from raw repo activity → daily team digests → a
-unified cross-team readout.
+The earlier `sageox-distill` and `sageox-summary` skills have been folded
+into this single `sageox` skill. Consumers who previously installed them
+should switch to `clawhub install sageox`.
 
 ## Install (consumers)
 
 ```bash
-clawhub install sageox-distill
-clawhub install sageox-summary
+clawhub install sageox
 ```
 
-Both skills require `claude` to be installed and authenticated, and
+The skill requires `claude` to be installed and authenticated, and
 possibly a `PATH=` line in `~/.openclaw/.env` if `$HOME/.local/bin` is
 not on your default `PATH`. See below.
 
 ## Claude credentials
 
-Both skills require the `claude` CLI for LLM calls — `sageox-summary`
-shells out to `claude -p` directly, and `sageox-distill` runs `ox
-distill`, which itself shells out to `claude`. The skills do **not**
-accept a per-skill `apiKey` — earlier versions tried this via
-OpenClaw's `apiKey` injection, but the mechanism is unreliable and has
-been removed.
+The skill requires the `claude` CLI for LLM calls — `ox distill` and the
+summary capability both shell out to `claude`. The skill does **not**
+accept a per-skill `apiKey` — earlier versions tried this via OpenClaw's
+`apiKey` injection, but the mechanism is unreliable and has been removed.
 
 Authenticate `claude` once on the host, using either:
 
@@ -50,7 +45,7 @@ tells you which one to set up.
 
 ## PATH (required if `$HOME/.local/bin` is not already on PATH)
 
-The `ox` install flow shipped with the SageOx skills lands binaries in
+The `ox` install flow shipped with the skill lands binaries in
 `$HOME/.local/bin`. Some distros (notably stock macOS and some minimal
 Linux images) do not include that directory on the default `PATH`. If
 the install helper warns to stderr that `$HOME/.local/bin` is not on

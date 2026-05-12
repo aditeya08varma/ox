@@ -60,7 +60,7 @@ registry. `--all` skips the interactive confirmation for each skill.
 ### Publish a single skill explicitly
 
 ```bash
-clawhub skill publish claws/openclaw/sageox-distill \
+clawhub skill publish claws/openclaw/sageox \
   --version 0.2.0 \
   --tags latest \
   --changelog "Describe the change"
@@ -86,12 +86,17 @@ The first publish of each skill is `0.1.0`.
 
 Slugs are global on ClawHub (`^[a-z0-9][a-z0-9-]*$`). This repo owns:
 
-- `sageox-distill`
-- `sageox-summary`
+- `sageox`
 
 Derived automatically from the skill folder name. Once claimed, renames
 are possible via `clawhub skill rename <old> <new>` (the old slug becomes
 a redirect).
+
+The earlier `sageox-distill` and `sageox-summary` slugs have been folded
+into the unified `sageox` skill and are no longer maintained from this
+repo. If those slugs need to be retired on ClawHub (or rerouted to
+`sageox` via `clawhub skill rename`), do it as a separate registry-side
+action.
 
 ## What gets uploaded
 
