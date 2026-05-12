@@ -7,11 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-05-12
+
 ### Added
 
 **Modular team rules with first-class context-budget accounting**
 - Team rules now live as one-file-per-concern under `<team-context>/agents/rules/<topic>.md` (subdirectories supported, walked recursively). Mirrors the muscle memory of Claude Code's `.claude/rules/` and Cursor's `.cursor/rules/`, scaled up to team scope. Frontmatter spec covers `name`, `description`, `repos`, `audience`, `visibility`, `status`, `from-discussion`. `visibility: always` rules are inlined in `ox agent prime`; `visibility: indexed` rules emit a catalog entry only and the agent reads them on demand. Backward-compat fallback to `coworkers/rules/` for any teams that adopted that location early.
-- `ox agent prime` XML now reports a `<context-budget>` block split by content source (sageox / team / project, plus any future knowledge bubble like `user`). The split lets SageOx be measured on its own tool overhead instead of conflating it with team-authored content. The split flows through every layer: per-prime budget, per-heartbeat per-source aggregation, daemon-side cumulative tracking, and `ox agent list`'s per-source footer. The schema is open — adding a new knowledge bubble takes one new constant in `internal/prime/types.go` plus tagging emit sites; no IPC or daemon-schema changes required.
+- `ox agent prime` XML now reports a `<context-budget>` block split by content source (sageox / team / project). The split lets SageOx be measured on its own tool overhead instead of conflating it with team-authored content. It flows through every layer: per-prime budget, per-heartbeat per-source aggregation, daemon-side cumulative tracking, and `ox agent list`'s per-source footer. The schema is open — adding a new content source takes one new constant in `internal/prime/types.go` plus tagging emit sites.
 - New `<rule-promotion-guidance>` block in prime XML proactively coaches AI coworkers to ask before publishing a project-local rule team-wide ("this looks like it could apply to your whole team — want me to also add it under `<team-context>/agents/rules/`?"). Default to asking; never silently publish.
 - New `<team-rules-budget>` block reports the running token cost of `always`-tier rules so teams self-regulate rule-library size.
 - Regression-test guard on minimal-prime SageOx overhead (currently ~600 tokens, ceiling 1500). A future change that quietly adds 5K of `<instructions>` blocks itself on review.
@@ -29,23 +31,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 **Rules-support scaffolding for the remaining adapters**
 - New `rules.go` files for `ox-adapter-codex`, `ox-adapter-amp`, `ox-adapter-aider`, `ox-adapter-gemini`, `ox-adapter-opencode`, and `ox-adapter-pi` — each documenting the May 2026 state of that agent's rules surface. None of these agents has a Claude-Code-style modular *behavioral* rules directory today (Codex's `.codex/rules/` is for Starlark execution policies, not behavioral content). The handlers are stub no-ops, NOT wired into `main.go`, and the adapters do NOT advertise `CapRulesInstaller`. When upstream adds modular rules, flipping the wiring on is a 3-line change per adapter.
 
-**Knowledge Bubbles: one home for the knowledge your AI coworkers need**
-- New `ox kb` command surfaces every knowledge source you have access to in one list. Run `ox kb list` to see your personal scratchpad, your profile, your team contexts, and the per-repo ledgers side by side. `ox kb show <slug>` opens a single bubble; `ox kb path <slug>` prints its local checkout path so `cd $(ox kb path notes)` Just Works. `bubble` and `bubbles` are accepted as aliases for `kb` so muscle memory works either way.
-- Personal bubbles are surfaced for the first time. Every signed-in user gets a private, single-owner scratchpad provisioned automatically; it shows up in `ox kb list` and is loaded into `ox agent prime` so AI coworkers can read and reference it from session one.
-- Per-project ergonomic symlinks land in `.sageox/kb/<slug>` (gitignored) so editors and file pickers surface the bubbles relevant to the project you're in — personal, profile, team contexts you belong to, and this repo's ledger. The canonical XDG checkout still lives under `~/.local/share/sageox/<endpoint>/kb/<kb_id>/`; the symlinks are derived state, refreshed by the daemon on every reconciliation.
-- `ox doctor` learned three new checks: orphaned bubble directories that no longer match the API list, bubbles stuck in `provision-failed` lifecycle state, and bubbles whose last sync is more than an hour stale. All three are auto-fixable on `--fix`.
-- The daemon now syncs bubbles on its existing 15s/60s cadence (split by mutation rate) and gardens the local store: revoked bubbles move to `bubbles/.trash/<kb_id>-<timestamp>/` for a seven-day grace period before deletion, so an accidental access revoke is recoverable without a full reclone.
-- Set `OX_KB_DISABLE=1` to force the CLI and daemon to skip the kb API and fall back to legacy team-context + ledger sources only. Mirrors `OX_XDG_DISABLE`; intended as an operator escape hatch during the rollout, not for daily use.
-
 ### Changed
 
 **Reference docs regenerated**
-- `docs/reference/` is now in sync with current cobra command definitions. Adds `guide.mdx`, `session/repair-meta-summary.mdx`, `session/token-optimize.mdx`, and the new `kb/`, `kb/list.mdx`, `kb/show.mdx`, `kb/path.mdx` pages. Drops a stale `distill.mdx` that was never registered as a root command. The `teams.mdx` page now carries the deprecation note inline.
+- `docs/reference/` is now in sync with current cobra command definitions. Adds `guide.mdx`, `session/repair-meta-summary.mdx`, and `session/token-optimize.mdx`. Drops a stale `distill.mdx` that was never registered as a root command.
 
-### Deprecated
+**Adapter ergonomics**
+- The Amp adapter now records sessions via a user-global `ox-bridge` plugin. No per-repo configuration needed — install once and every Amp session in every cloned repo is captured automatically.
+- `adapter-pi` now detects its host agent's identity from the `PI_CODING_AGENT` environment variable instead of fragile process-name heuristics.
+- `--format=json` is now accepted as a hidden alias for `--json` across the CLI, so scripts written against either flag work everywhere.
 
-**`ox teams` is now an alias for `ox kb list --type=team`**
-- `ox teams` continues to work for one release and prints a one-line deprecation hint to stderr pointing at the canonical command. Existing `ox teams --json` consumers see a new `deprecated` field in the JSON envelope so tooling can detect the alias programmatically; the rest of the legacy shape is unchanged. The alias will be removed in a future release.
+### Fixed
+
+**Daemon CPU & resource hygiene**
+- Eliminated four recurring hot-loop CPU patterns that could pin a core under steady-state idle. Affected paths: failed session-upload retry, project-watcher tear-down, IPC reconnect, and friction-event drain.
+- Closed a file-descriptor leak that occurred when the daemon ended up watching a directory that turned out to be gitignored. Long-running daemons no longer accumulate FDs proportional to gitignored-subdir churn.
+
+**Doctor accuracy**
+- Credential checks now run after the post-EEQI bootstrap so doctor no longer flags freshly-rotated credentials as missing on the very next run; user-facing guidance was also corrected to point at the right remediation command.
+- Doctor scan gained correct session scoping, automatic hydration of LFS-stub recordings, catalog-identity verification, and an append-only redaction trail so previously-redacted content stays redacted across re-scans.
+- `ox doctor --force-session-uploads` now actually re-uploads past failed sessions instead of being a silent no-op.
+
+**Session reliability**
+- `ox session stop` now writes the prompt + pointer commit inline so finalize is atomic. Previously the two writes could interleave with daemon work and leave a session half-committed for up to a minute.
+
+**Security & redaction**
+- Additional credential-redaction patterns close gaps in friction-event sanitization and team-context git-URL handling. Strengthened path-traversal, auth, and LFS size-bound checks per the latest internal review.
+
+**Code search resilience**
+- `codedb` self-heals a corrupt bleve sub-index without forcing a full reindex. On large repos this drops recovery time from "several hours" to "2–5 minutes."
+
+[0.8.0]: https://github.com/sageox/ox/releases/tag/v0.8.0
 
 ## [0.7.2] - 2026-05-04
 
