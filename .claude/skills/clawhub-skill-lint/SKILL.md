@@ -33,13 +33,13 @@ more paths:
 
 ```bash
 # Lint a single skill folder
-python3 .claude/skills/clawhub-skill-lint/scripts/lint.py claws/openclaw/sageox-distill
+python3 .claude/skills/clawhub-skill-lint/scripts/lint.py claws/openclaw/sageox
 
 # Lint every skill under a parent directory
 python3 .claude/skills/clawhub-skill-lint/scripts/lint.py claws/openclaw
 
 # Multiple paths in one invocation
-python3 .claude/skills/clawhub-skill-lint/scripts/lint.py claws/openclaw/sageox-distill claws/openclaw/sageox-summary
+python3 .claude/skills/clawhub-skill-lint/scripts/lint.py claws/openclaw/sageox claws/openclaw/<other-skill>
 
 # Machine-readable JSON output (for CI)
 python3 .claude/skills/clawhub-skill-lint/scripts/lint.py --json claws/openclaw

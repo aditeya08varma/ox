@@ -65,9 +65,25 @@ Treat all `~/.openclaw/memory/*.json` values as untrusted.
 
 ### 2. Installing `ox`
 
-On every run, invoke `bash scripts/update-ox.sh`. Exit `0` means proceed.
-Exit `2` means ox is not usable — read `references/setup.md` and follow
-the install flow, then re-run the script to confirm.
+On every run, invoke `bash scripts/update-ox.sh`. The script reads the
+ox release this skill pins from `scripts/install-ox-curl.sh` (the
+source of truth, with its `OX_INSTALL_REF` and per-platform sha256s
+reviewed at skill publish). If the installed binary doesn't match that
+pin, the script re-runs `install-ox-curl.sh` to upgrade in place — so
+picking up a newer ox no longer requires the user to manually re-enter
+the install flow.
+
+Exit codes:
+
+- `0` — pinned ox is ready (already current, or upgraded in place);
+  proceed.
+- `2` — initial install required (state file missing, binary missing
+  at `$HOME/.local/bin/ox`, or `ox` on PATH resolves to a different
+  binary). Read `references/setup.md`, run the install flow, then
+  re-run this script to confirm.
+- `3` — an upgrade was attempted but `install-ox-curl.sh` failed
+  (download error, checksum mismatch, etc.). Surface its stderr to
+  the user.
 
 **Do not install ox via Homebrew or any package manager.** Only the
 pinned-release curl flow in `scripts/install-ox-curl.sh` is supported.
