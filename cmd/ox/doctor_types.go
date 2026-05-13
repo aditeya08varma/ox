@@ -186,6 +186,7 @@ const (
 	// credential exposure without uploading findings off-machine.
 	CheckSlugLedgerSecrets       = "ledger-secrets"
 	CheckSlugLedgerEmbeddedCreds = "ledger-embedded-creds"
+	CheckSlugLedgerRedactionDebt = "ledger-redaction-debt"
 
 	// Hook content integrity (ox-9y4k): scan installed adapter hook
 	// content for suspicious shapes (curl|sh, eval $(…), base64 -d|sh).

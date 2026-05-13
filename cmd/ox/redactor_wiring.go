@@ -2,33 +2,28 @@ package main
 
 import (
 	"github.com/sageox/ox/internal/gitserver"
-	"github.com/sageox/ox/internal/ledger"
-	"github.com/sageox/ox/internal/session"
 )
 
 // init wires cross-cutting hooks that internal packages need but cannot
-// resolve themselves without creating import cycles. Two hooks today:
+// resolve themselves without creating import cycles.
 //
-//   1. ledger.SetFieldRedactor — credential redaction for GitHub PR/Issue
-//      cache writers (ox-8bkk). internal/ledger can't import
-//      internal/session (cycle via session/health → ledger).
-//
-//   2. gitserver.SetHelperCommand — the shell command git invokes to
+//   1. gitserver.SetHelperCommand — the shell command git invokes to
 //      resolve credentials via ox-managed credential storage (ox-eeqi).
 //      internal/gitserver can't import cmd/ox to discover the running
 //      binary's absolute path.
 //
-// Both hooks apply to every ox CLI invocation, including the embedded
+// Previously also wired `ledger.SetFieldRedactor` (ox-8bkk) to scrub
+// credential patterns from GitHub PR/Issue cache fields at write time.
+// Removed per ox-cqdo (2026-05-12): `data/github/**` is a verbatim cache
+// of bytes already published on GitHub. Replicating those bytes into the
+// ledger is the same exposure surface we already accept by ingesting the
+// PR/Issue at all — rewriting them on the way to disk introduces a
+// false-positive class that blocks pushes for no actual security gain.
+// The `FieldRedactor` plumbing in internal/ledger is retained as a
+// no-op pass-through so a future warn-on-detect mode can re-use it.
+//
+// This hook applies to every ox CLI invocation, including the embedded
 // daemon — the daemon does not have a separate main package.
 func init() {
-	r := session.NewRedactor()
-	ledger.SetFieldRedactor(func(s string) string {
-		if s == "" {
-			return s
-		}
-		out, _ := r.RedactString(s)
-		return out
-	})
-
 	gitserver.SetHelperCommand(HelperCommandString())
 }

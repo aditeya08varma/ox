@@ -88,14 +88,17 @@ func TestScanPrePushForSecrets_CleanLedgerPasses(t *testing.T) {
 	work := makeLedgerWithCommit(t, map[string]string{
 		"sessions/2026-05-10/raw.jsonl": `{"text":"hello world, just a chat message"}` + "\n",
 		"sessions/2026-05-10/meta.json": `{"agent_type":"claude-code","files":[]}` + "\n",
-		"docs/README.md":                "# Sessions\n\nProse with no credentials.\n",
+		// docs/ is out of scope (see prePushScannerScopePrefixes) and must
+		// not be counted in FilesScanned.
+		"docs/README.md": "# Sessions\n\nProse with no credentials.\n",
 	})
 
 	result, err := scanPrePushForSecrets(context.Background(), work)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 	assert.Empty(t, result.Findings, "false-positive: %v", result.Findings)
-	assert.GreaterOrEqual(t, result.FilesScanned, 3, "expected to scan all 3 files")
+	assert.Equal(t, 2, result.FilesScanned,
+		"expected only the two sessions/ files; docs/ is out of scope")
 }
 
 func TestScanPrePushForSecrets_ScansOnlyDiffFiles(t *testing.T) {
@@ -115,34 +118,28 @@ func TestScanPrePushForSecrets_ScansOnlyDiffFiles(t *testing.T) {
 	}
 }
 
-// TestRunPrePushSecretGate_RefusesWhenSecretsPresent verifies the gate
-// returns a formatted error and the error contains the detector name and
-// path (but NOT the secret bytes themselves).
-func TestRunPrePushSecretGate_RefusesWhenSecretsPresent(t *testing.T) {
-	t.Setenv("OX_ALLOW_SECRETS", "") // ensure override off
+// TestRunPrePushSecretGate_NeverBlocks_FlatPathNoOpsRecovery covers the
+// degenerate-path case (file directly under sessions/ with no session
+// subdir). After ox-y3ok, neither auto-redact nor quarantine recognize
+// that shape (splitSessionPath returns ok=false), but the gate still
+// MUST return nil — that's the load-bearing "never block" invariant.
+//
+// Failure prevented: a malformed session path causes the gate to error
+// and block routine pushes because the recovery path can't run.
+func TestRunPrePushSecretGate_NeverBlocks_FlatPathNoOpsRecovery(t *testing.T) {
+	t.Setenv("OX_ALLOW_SECRETS", "")
 	work := makeLedgerWithCommit(t, map[string]string{
 		"sessions/leak.jsonl": "token=ghp_alphabetabcdefghijklmnopqrstuvwxyz12\n",
 	})
 
 	err := runPrePushSecretGate(context.Background(), work)
-	require.Error(t, err)
-
-	msg := err.Error()
-	assert.Contains(t, msg, "Push refused")
-	// After ox-def1 the broad `github_token` detector was split per-prefix;
-	// a full-shape ghp_<36> matches the personal-access-token variant.
-	assert.Contains(t, msg, "github_personal_access_token")
-	assert.Contains(t, msg, "sessions/leak.jsonl")
-	// MUST NOT include the secret bytes
-	assert.NotContains(t, msg, "alphabetabcdefghijklmnopqrstuvwxyz")
-	// remediation guidance must be present
-	assert.Contains(t, msg, "OX_ALLOW_SECRETS=1")
+	assert.NoError(t, err, "gate must NEVER return an error; recovery may no-op but push proceeds")
 }
 
-// TestRunPrePushSecretGate_AllowSecretsOverride verifies the env-var escape
-// hatch lets the push through with a loud warning. Required for emergency
-// overrides — without this, the gate would be a permanent block in any
-// scenario the detectors mis-classify.
+// TestRunPrePushSecretGate_AllowSecretsOverride verifies the env-var
+// override still short-circuits the recovery pipeline. Under the
+// never-block policy this is just a faster path: no scan, no
+// auto-redact, no quarantine — publish as-is per user request.
 func TestRunPrePushSecretGate_AllowSecretsOverride(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "1")
 	work := makeLedgerWithCommit(t, map[string]string{
@@ -151,21 +148,6 @@ func TestRunPrePushSecretGate_AllowSecretsOverride(t *testing.T) {
 
 	err := runPrePushSecretGate(context.Background(), work)
 	assert.NoError(t, err, "OX_ALLOW_SECRETS=1 must allow push")
-}
-
-// TestRunPrePushSecretGate_AllowSecretsRecognizesFalse verifies that values
-// that look like "off" (0, false, no, off, "") do NOT bypass the gate.
-func TestRunPrePushSecretGate_AllowSecretsRecognizesFalse(t *testing.T) {
-	work := makeLedgerWithCommit(t, map[string]string{
-		"sessions/leak.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-	})
-	for _, off := range []string{"", "0", "false", "no", "OFF"} {
-		t.Run("OX_ALLOW_SECRETS="+off, func(t *testing.T) {
-			t.Setenv("OX_ALLOW_SECRETS", off)
-			err := runPrePushSecretGate(context.Background(), work)
-			assert.Error(t, err, "off-like value %q should NOT bypass gate", off)
-		})
-	}
 }
 
 // TestPrePushScanner_SkipsBinaryExtensions verifies binary blobs are skipped.
@@ -192,6 +174,9 @@ func TestPrePushScanner_SkipsBinaryExtensions(t *testing.T) {
 // ledger has no origin/main yet — scanner falls back to scanning all
 // tracked files. Without this, brand-new ledgers (first push) would skip
 // the gate entirely.
+//
+// The canary lives under sessions/ — the fresh-ledger fallback respects
+// the same scope filter as the diff path (see ox-cqdo).
 func TestPrePushScanner_NoUpstreamFallsBackToHead(t *testing.T) {
 	// Bare repo + working clone, but DON'T configure origin or push.
 	tmp := t.TempDir()
@@ -200,7 +185,9 @@ func TestPrePushScanner_NoUpstreamFallsBackToHead(t *testing.T) {
 	mustGit(t, work, "init", "--initial-branch=main")
 	mustGit(t, work, "config", "user.email", "test@example.com")
 	mustGit(t, work, "config", "user.name", "test")
-	require.NoError(t, os.WriteFile(filepath.Join(work, "leak.txt"), []byte("AKIAIOSFODNN7EXAMPLE\n"), 0644))
+	leakPath := filepath.Join(work, "sessions", "fresh", "raw.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(leakPath), 0755))
+	require.NoError(t, os.WriteFile(leakPath, []byte("AKIAIOSFODNN7EXAMPLE\n"), 0644))
 	mustGit(t, work, "add", ".")
 	mustGit(t, work, "commit", "-m", "first")
 
@@ -240,6 +227,100 @@ func TestPrePushSecretsAllowed_Truthy(t *testing.T) {
 			assert.Equal(t, want, prePushSecretsAllowed())
 		})
 	}
+}
+
+// TestScanPrePushForSecrets_OnlyScansSessionsScope is the scope contract.
+//
+// Failure prevented (ox-cqdo, 2026-05-12): in PR #597 the gate was unscoped
+// and would scan every changed file in the push range. A daemon-written
+// data/github/<date>/pr/<n>.json containing PR copy that happens to match
+// `aws_sts_session_key` or `generic_secret` blocked every subsequent push
+// of a healthy ledger — and the gate's recovery message pointed the user
+// at `ox session audit` / `ox session redact`, which only operate on
+// sessions/. The fix scoped the scanner to prePushScannerScopePrefixes;
+// this test pins that contract so a future widening of scope must come
+// with a deliberate broadening of the recovery surface.
+func TestScanPrePushForSecrets_OnlyScansSessionsScope(t *testing.T) {
+	// Same canary in both a sessions/ path (must be flagged) and a
+	// data/github/ path (must NOT be flagged — it's a verbatim cache of
+	// bytes already published on GitHub, intentionally not gated; see
+	// prePushScannerScopePrefixes for the policy).
+	canary := `{"text":"AKIAIOSFODNN7EXAMPLE"}` + "\n"
+	work := makeLedgerWithCommit(t, map[string]string{
+		"sessions/2026-05-12/raw.jsonl":      canary,
+		"data/github/2026/05/09/pr/42.json":  canary,
+		"data/github/2026/05/11/issue/7.json": canary,
+		"kb/notes.md":                        canary,
+		"team-context/conventions.md":        canary,
+	})
+
+	result, err := scanPrePushForSecrets(context.Background(), work)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	// exactly one path is in scope; it must be the only one scanned and
+	// the only one with findings.
+	assert.Equal(t, 1, result.FilesScanned,
+		"only sessions/ should be scanned; got FilesScanned=%d", result.FilesScanned)
+	require.NotEmpty(t, result.Findings)
+	for _, f := range result.Findings {
+		assert.True(t, strings.HasPrefix(f.Path, "sessions/"),
+			"finding outside sessions/ scope: %s (%s)", f.Path, f.Detector)
+	}
+}
+
+// TestInPrePushScannerScope pins the scope predicate itself. Cheap to run
+// and keeps the contract surface visible — the production scanner is built
+// on top of this function, so widening it without a deliberate test edit
+// would let new paths into the gate silently.
+func TestInPrePushScannerScope(t *testing.T) {
+	cases := map[string]bool{
+		"sessions/abc/raw.jsonl":              true,
+		"sessions/2026-05-12/meta.json":       true,
+		"data/github/2026/05/11/pr/1.json":    false,
+		"data/github/issue/x.json":            false,
+		"kb/notes.md":                         false,
+		"team-context/conventions.md":         false,
+		"docs/README.md":                      false,
+		".sageox/config.json":                 false,
+		"":                                    false,
+		"session/typo/raw.jsonl":              false, // singular: not the prefix
+		"sessionsfoo/raw.jsonl":               false, // no trailing slash
+	}
+	for path, want := range cases {
+		t.Run(path, func(t *testing.T) {
+			assert.Equal(t, want, inPrePushScannerScope(path))
+		})
+	}
+}
+
+// TestFormatPrePushFindings_RecoveryMatchesScannerScope encodes the
+// writer-vs-message contract that the original bug exposed: the recovery
+// message tells the user to run `ox session audit` and `ox session redact`.
+// Those commands operate on the same path prefix that the scanner inspects.
+// If a future change widens prePushScannerScopePrefixes beyond what the
+// recovery commands can fix, the user is again handed instructions that
+// don't apply to the flagged path — exactly the symptom that prompted this
+// fix.
+//
+// We pin both directions: every scope prefix must appear in some recovery
+// command surface, and the recovery message must continue to reference
+// session-scoped tooling.
+func TestFormatPrePushFindings_RecoveryMatchesScannerScope(t *testing.T) {
+	r := &PrePushScanResult{
+		Findings: []PrePushFinding{
+			{Detector: "aws_access_key", Path: "sessions/x/raw.jsonl", Line: 1},
+		},
+	}
+	msg := FormatPrePushFindings(r)
+	assert.Contains(t, msg, "ox session audit",
+		"recovery message must reference the audit command that covers sessions/")
+	assert.Contains(t, msg, "ox session redact",
+		"recovery message must reference the redact command that covers sessions/")
+	// If the scanner is ever widened, the recovery surface must widen too.
+	// Today only "sessions/" is in scope.
+	assert.Equal(t, []string{"sessions/"}, prePushScannerScopePrefixes,
+		"scope widened without updating recovery message; see ox-cqdo")
 }
 
 // TestPrePushScanner_LargeFileExceedsCap verifies that files over the size

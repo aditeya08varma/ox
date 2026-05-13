@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-12
+
+### Fixed
+
+**Pre-push credential gate no longer blocks routine pushes**
+
+0.8.0 introduced a pre-push secret scanner that scanned every file in the push range and refused the push on any finding. In practice this had two failure modes:
+
+1. The scanner ran against `data/github/**` PR/Issue caches. PR titles, bodies, and comments often contain text that matches credential heuristics (sample `Authorization: Bearer` snippets, phrases like "STS session key", and other public bytes already on GitHub). `ox doctor` reconcile failed with *"Push refused: 3 credential pattern(s) detected in 2 file(s)"* pointing at JSON the user did not author. The recovery message named `ox session audit` / `ox session redact` — commands that only operate on `sessions/`, leaving the user unable to follow the instructions for paths outside `sessions/`.
+
+2. Even after scoping, a single session with a finding the chokepoint had missed would refuse the entire push, holding up every other session and unrelated commit.
+
+The gate is now scoped + recoverable + never-blocking:
+
+- **Scoped:** the scanner only inspects paths under `sessions/`. `data/github/**` (verbatim cache of bytes already public on GitHub), `kb/**` (user-curated), and `team-context/**` (user-authored markdown) are intentionally out of scope. The companion writer-side redactor that 0.8.0 wired into `WriteGitHubPR` / `WriteGitHubIssue` is unwired for the same reason.
+- **Auto-recovers:** on a finding in a session's JSONL, the gate rewrites the file in place through the canonical chokepoint, appends a `RedactionPass` audit-trail entry to the session's `meta.json`, amends the holding commit, and re-scans. The push then proceeds with scrubbed bytes.
+- **Quarantines what can't be auto-redacted:** findings in non-JSONL session paths (notes, summaries, transcripts) are moved to `.sageox/cache/quarantine/<session>/` — bytes preserved verbatim on disk — and dropped from the holding commit. The rest of the push proceeds normally; other sessions and unrelated commits sync as before.
+- **Surfaces persistent state in doctor:** a new `ledger-redaction-debt` check reports every quarantined session with the affected detectors and next-step recovery commands. The check is read-only; recovery is a deliberate user gesture (`ox session redact`, or manually inspect + restore from `.sageox/cache/quarantine/`).
+- **Never blocks:** the gate always returns nil. Recovery errors are logged, not propagated.
+
+`OX_ALLOW_SECRETS=1` still short-circuits the recovery pipeline for explicit "publish as-is" overrides.
+
+New tests pin the scope contract, the auto-redact happy path, the quarantine path with data preservation, and the doctor surface.
+
 ## [0.8.0] - 2026-05-12
 
 ### Added
