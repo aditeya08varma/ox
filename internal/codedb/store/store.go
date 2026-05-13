@@ -529,20 +529,95 @@ func (s *Store) CheckIntegrity() error {
 		return fmt.Errorf("sqlite: %w", ErrCorrupt)
 	}
 
-	// validate bleve indexes can serve a basic query (skip nil indexes for
-	// SQL-only stores — those legitimately have no bleve to check)
+	// Probe each bleve sub-index with the FST-touching field walk from PR #607.
+	// Skip nil indexes — a SQL-only store (OpenSQLOnly) legitimately has no
+	// bleve to check, and calling probeBleveIndex on nil would nil-deref before
+	// the recover could catch it.
 	for name, idx := range map[string]bleve.Index{"code": s.CodeIndex, "diff": s.DiffIndex, "comment": s.CommentIndex} {
 		if idx == nil {
 			continue
 		}
-		q := bleve.NewMatchNoneQuery()
-		req := bleve.NewSearchRequest(q)
-		req.Size = 0
-		if _, err := idx.Search(req); err != nil {
-			return fmt.Errorf("bleve %s index: %w", name, ErrCorrupt)
+		if err := probeBleveIndex(idx, name); err != nil {
+			return err
 		}
 	}
 
+	return nil
+}
+
+// probeBleveIndex runs an FST-touching probe against every indexed field
+// and reports ErrCorrupt if the FST cannot be loaded or the probe panics.
+//
+// What this probes: each indexed field has a term dictionary backed by a
+// vellum FST (Finite State Transducer) per segment. Partial-write disk
+// corruption can leave a segment whose FST bytes are unloadable — the
+// failure mode that wedges the daemon when the next batch write hits it.
+//
+// Strategy: get the raw IndexReader via Advanced() and call
+// TermFieldReader(field) directly for every field returned by Fields().
+// TermFieldReader iterates segments and calls segment.Dictionary(field)
+// inline on the calling goroutine, so each field's vellum.Load runs where
+// runBleveProbe's recover can catch a panic.
+//
+// Why not Document / FieldDict / MatchAll / MatchNone:
+//   - MatchNone short-circuits with no segment work at all.
+//   - MatchAll in scorch is served from the live-docs bitmap via
+//     DocIDReaderAll(), bypassing the FST.
+//   - FieldDict in scorch spawns one goroutine per segment for the
+//     Dictionary(field) call (see
+//     scorch.IndexSnapshot.newIndexSnapshotFieldDict). A panic in any of
+//     those goroutines escapes the recover in runBleveProbe and crashes
+//     the process.
+//   - Document(id) only loads the "_id" dictionary, so a corrupt FST on
+//     the searchable content field (where most ox queries land) would
+//     pass.
+//
+// Scope: catches FST loading failures (corrupt vellum bytes, bad dict
+// offsets) for every field in the index. The narrower "segment marks
+// field present but dictStart==0, fst is nil" pattern only panics during
+// write-path DocNumbers calls — that path is covered by safeBatch in
+// internal/codedb/index.
+func probeBleveIndex(idx bleve.Index, name string) error {
+	return runBleveProbe(name, func() error {
+		fields, err := idx.Fields()
+		if err != nil {
+			return err
+		}
+		adv, err := idx.Advanced()
+		if err != nil {
+			return err
+		}
+		reader, err := adv.Reader()
+		if err != nil {
+			return err
+		}
+		defer reader.Close()
+
+		probeTerm := []byte("__sageox_codedb_integrity_probe__")
+		for _, field := range fields {
+			tfr, tfrErr := reader.TermFieldReader(context.Background(), probeTerm, field, false, false, false)
+			if tfrErr != nil {
+				return tfrErr
+			}
+			_ = tfr.Close()
+		}
+		return nil
+	})
+}
+
+// runBleveProbe wraps a probe function with the panic-recovery and
+// ErrCorrupt-wrapping policy used by CheckIntegrity. Factored out so the
+// recovery contract can be tested without stubbing the whole bleve.Index
+// interface.
+func runBleveProbe(name string, probe func() error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("bleve %s index: panic during FST probe (%v): %w", name, r, ErrCorrupt)
+		}
+	}()
+	if sErr := probe(); sErr != nil {
+		return fmt.Errorf("bleve %s index: %w", name, errors.Join(ErrCorrupt, sErr))
+	}
 	return nil
 }
 
