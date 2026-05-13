@@ -53,6 +53,46 @@ var prePushScannerSkipExts = map[string]bool{
 // session content always fits.
 const prePushScannerSizeCap = 8 * 1024 * 1024 // 8 MiB
 
+// prePushScannerScopePrefixes restricts the gate to ledger paths the
+// recovery tooling can actually fix. As of ox-cqdo:
+//
+//   - sessions/      raw AI session recordings — assistant chat and tool
+//                    I/O. The one path where unscrubbed credentials can
+//                    plausibly land in a ledger from ox-controlled writes.
+//                    Covered by `ox session audit` / `ox session redact`.
+//
+// Out of scope (intentionally not gated):
+//
+//   - data/github/   verbatim cache of PR/Issue bytes already published on
+//                    GitHub. Replicating them into the ledger is the same
+//                    exposure surface as ingesting the PR at all; rewriting
+//                    them at write time produced a false-positive class
+//                    that blocked routine pushes (the regression that drove
+//                    this fix).
+//   - kb/            user-curated knowledge bubbles. User-authored content
+//                    is the user's responsibility; not an ox write path.
+//   - team-context/  same — user-edited markdown.
+//
+// If you widen this list, also widen the recovery surface in
+// FormatPrePushFindings. The test
+// TestFormatPrePushFindings_RecoveryMatchesScannerScope pins that contract.
+var prePushScannerScopePrefixes = []string{
+	"sessions/",
+}
+
+// inPrePushScannerScope returns true iff rel (a forward-slash-relative path
+// from the ledger root) sits inside one of prePushScannerScopePrefixes.
+// Paths produced by `git diff --name-only` and `git ls-tree` are already
+// forward-slash, so no normalization is needed.
+func inPrePushScannerScope(rel string) bool {
+	for _, prefix := range prePushScannerScopePrefixes {
+		if strings.HasPrefix(rel, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // scanPrePushForSecrets enumerates files that the next push would publish
 // (between `origin/main` and `HEAD`) and runs the credential detectors
 // against each file's current working-tree content.
@@ -110,14 +150,18 @@ func scanAllTrackedFiles(ctx context.Context, ledgerPath string) (*PrePushScanRe
 
 // scanPaths runs the redactor against the working-tree content of every
 // path in paths, recording detector matches as PrePushFindings. Skip rules:
-// binary extensions, files over prePushScannerSizeCap, files that no longer
-// exist in the working tree (legitimately deleted in the commit range).
+// out-of-scope paths (see prePushScannerScopePrefixes), binary extensions,
+// files over prePushScannerSizeCap, files that no longer exist in the
+// working tree (legitimately deleted in the commit range).
 func scanPaths(ledgerPath string, paths []string) (*PrePushScanResult, error) {
 	redactor := session.NewRedactor()
 	result := &PrePushScanResult{}
 
 	for _, rel := range paths {
 		if rel == "" {
+			continue
+		}
+		if !inPrePushScannerScope(rel) {
 			continue
 		}
 		if prePushScannerSkipExts[strings.ToLower(filepath.Ext(rel))] {

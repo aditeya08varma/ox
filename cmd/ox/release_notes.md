@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-05-12
+
+### Fixed
+
+**Pre-push credential gate no longer blocks routine pushes on legacy `data/github/` content**
+- 0.8.0 introduced a pre-push secret scanner that ran against every file in the push range, including `data/github/**` PR/Issue caches. PR titles, bodies, and comments often contain text that matches credential heuristics (sample `Authorization: Bearer` snippets, the literal phrase "STS session key", and other public bytes already on GitHub). The result was a persistent block: `ox doctor` reconcile failed with messages like *"Push refused: 3 credential pattern(s) detected in 2 file(s)"* pointing at PR cache JSON the user did not author and could not fix by running `ox session audit` or `ox session redact` — the recovery commands the gate's error message names. On clean machines the only escape was setting `OX_ALLOW_SECRETS=1`, which defeats the gate's purpose.
+- The fix is two-part:
+  - The pre-push scanner is now scoped to `sessions/**` only — the path where genuinely unscrubbed AI session content can land. `data/github/**`, `kb/**`, and `team-context/**` are intentionally out of scope (verbatim caches or user-authored content).
+  - The companion writer-side redactor that 0.8.0 wired into `WriteGitHubPR` / `WriteGitHubIssue` is unwired. PR/Issue bytes are now stored verbatim. Rewriting bytes that are already public on GitHub never gave a real security gain and was the upstream cause of the false-positive class.
+- Existing in-flight sessions with real findings are still gated. The recovery message (`ox session audit` / `ox session redact`) now corresponds to the actual flagged paths, so users can follow it.
+- New scope-contract tests in `cmd/ox/prepush_scan_test.go` pin the policy: any future widening of the scanner must come with a deliberate broadening of the recovery surface.
+
 ## [0.8.0] - 2026-05-12
 
 ### Added

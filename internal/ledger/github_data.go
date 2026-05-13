@@ -128,18 +128,25 @@ func DateDir(ledgerPath string, t time.Time, dataType string) string {
 	)
 }
 
-// FieldRedactor is an optional function that scrubs credential patterns from
-// user-authored text fields before a PR or Issue is serialized to disk.
-// `internal/ledger` cannot import `internal/session` (cycle via session/health),
-// so the secret redactor lives in a sibling package and is injected from above.
-// When SetFieldRedactor has not been called, WriteGitHubPR/WriteGitHubIssue
-// passes content through unchanged — but every CLI/daemon entry point that can
-// reach these writers MUST set a redactor at startup (see cmd/ox/main.go).
+// FieldRedactor is an optional hook that can rewrite user-authored text
+// fields (PR/Issue title, body, comments, commit messages) before they
+// are serialized to disk. `internal/ledger` cannot import
+// `internal/session` (cycle via session/health), so the hook is injected
+// from above.
 //
-// Per ox-8bkk: the forensic scan on 2026-05-10 found 16 Authorization: Bearer
-// headers across 8 PR cache files. They came from PR descriptions and comments
-// (user-authored text that pasted curl examples), not from any HTTP-header
-// capture in ox itself. Redaction at the cache writer closes that hole.
+// As of ox-cqdo (2026-05-12) no entry point installs a redactor, so
+// these calls are pass-throughs. The plumbing is retained so a future
+// warn-on-detect mode can re-use the same chokepoint without re-plumbing
+// the package boundary.
+//
+// History: ox-8bkk briefly installed a credential-redacting hook here on
+// the theory that the 2026-05-10 forensic scan's hits in PR cache files
+// (16 `Authorization: Bearer` strings across 8 files) warranted scrubbing
+// at the cache writer. That reasoning was wrong: the bytes in question
+// were already public on GitHub, and rewriting them in the local cache
+// drove a false-positive class in the push-time gate (cmd/ox/prepush_scan.go)
+// that blocked routine pushes. The pre-push gate is now scoped to
+// `sessions/**` only and the cache writer no longer rewrites content.
 type FieldRedactor func(string) string
 
 var fieldRedactor FieldRedactor
@@ -205,10 +212,12 @@ func redactIssue(issue *IssueFile) *IssueFile {
 // WriteGitHubPR writes a PR to its date-partitioned directory based on created_at.
 // Creates the directory structure if it does not exist.
 //
-// Credentials in user-authored fields (Title, Body, Comments, commit messages)
-// are redacted before serialization when a FieldRedactor has been installed via
-// SetFieldRedactor. Per ox-8bkk, this closes the cache-side credential leak that
-// forensic scans observed in PR JSON files.
+// Content is serialized verbatim. The optional FieldRedactor hook is a
+// no-op pass-through in production today (see ox-cqdo) — `data/github/**`
+// is a cache of bytes already published on GitHub, and rewriting them
+// here is a net negative (false-positive class in the push-time gate, no
+// real security gain). The hook is retained for a future warn-on-detect
+// mode.
 //
 // Design decision: files stay in the created_at date directory permanently — we do NOT
 // move them on close/merge. This means long-lived open issues may fall outside the
