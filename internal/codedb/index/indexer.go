@@ -132,7 +132,7 @@ func (st *indexState) flushCodeBatch(force bool) error {
 	if !force && st.codeBatchN < bleveBatchSize {
 		return nil
 	}
-	if err := st.store.CodeIndex.Batch(st.codeBatch); err != nil {
+	if err := safeBatch(func() error { return st.store.CodeIndex.Batch(st.codeBatch) }); err != nil {
 		return fmt.Errorf("flush code batch: %w", err)
 	}
 	st.codeBatch = st.store.CodeIndex.NewBatch()
@@ -152,7 +152,7 @@ func (st *indexState) flushDiffBatch(force bool) error {
 	if !force && st.diffBatchN < bleveBatchSize {
 		return nil
 	}
-	if err := st.store.DiffIndex.Batch(st.diffBatch); err != nil {
+	if err := safeBatch(func() error { return st.store.DiffIndex.Batch(st.diffBatch) }); err != nil {
 		st.diffIndexFailed = true
 		slog.Warn("codedb: diff index write failed, type:diff search will be incomplete for this run", "err", err)
 		st.diffBatch = st.store.DiffIndex.NewBatch()
@@ -477,7 +477,7 @@ func BuildDirtyIndex(ctx context.Context, localPath, dirtyPath string, opts Inde
 	}
 
 	if indexed > 0 {
-		if err := dirtyIdx.Batch(batch); err != nil {
+		if err := safeBatch(func() error { return dirtyIdx.Batch(batch) }); err != nil {
 			dirtyIdx.Close()
 			_ = os.RemoveAll(tmpPath)
 			return 0, fmt.Errorf("batch dirty index: %w", err)
@@ -2071,7 +2071,7 @@ sendLoop2:
 				stats.CommentsExtracted++
 
 				if commentBatchN >= bleveBatchSize {
-					if err := s.CommentIndex.Batch(commentBatch); err != nil {
+					if err := safeBatch(func() error { return s.CommentIndex.Batch(commentBatch) }); err != nil {
 						rows.Close()
 						return stats, fmt.Errorf("flush comment batch: %w", err)
 					}
@@ -2102,7 +2102,7 @@ sendLoop2:
 
 	// flush remaining bleve batch after SQL commit
 	if commentBatchN > 0 {
-		if err := s.CommentIndex.Batch(commentBatch); err != nil {
+		if err := safeBatch(func() error { return s.CommentIndex.Batch(commentBatch) }); err != nil {
 			return stats, fmt.Errorf("flush final comment batch: %w", err)
 		}
 	}
