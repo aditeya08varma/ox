@@ -11,13 +11,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-**Pre-push credential gate no longer blocks routine pushes on legacy `data/github/` content**
-- 0.8.0 introduced a pre-push secret scanner that ran against every file in the push range, including `data/github/**` PR/Issue caches. PR titles, bodies, and comments often contain text that matches credential heuristics (sample `Authorization: Bearer` snippets, the literal phrase "STS session key", and other public bytes already on GitHub). The result was a persistent block: `ox doctor` reconcile failed with messages like *"Push refused: 3 credential pattern(s) detected in 2 file(s)"* pointing at PR cache JSON the user did not author and could not fix by running `ox session audit` or `ox session redact` — the recovery commands the gate's error message names. On clean machines the only escape was setting `OX_ALLOW_SECRETS=1`, which defeats the gate's purpose.
-- The fix is two-part:
-  - The pre-push scanner is now scoped to `sessions/**` only — the path where genuinely unscrubbed AI session content can land. `data/github/**`, `kb/**`, and `team-context/**` are intentionally out of scope (verbatim caches or user-authored content).
-  - The companion writer-side redactor that 0.8.0 wired into `WriteGitHubPR` / `WriteGitHubIssue` is unwired. PR/Issue bytes are now stored verbatim. Rewriting bytes that are already public on GitHub never gave a real security gain and was the upstream cause of the false-positive class.
-- Existing in-flight sessions with real findings are still gated. The recovery message (`ox session audit` / `ox session redact`) now corresponds to the actual flagged paths, so users can follow it.
-- New scope-contract tests in `cmd/ox/prepush_scan_test.go` pin the policy: any future widening of the scanner must come with a deliberate broadening of the recovery surface.
+**Pre-push credential gate no longer blocks routine pushes**
+
+0.8.0 introduced a pre-push secret scanner that scanned every file in the push range and refused the push on any finding. In practice this had two failure modes:
+
+1. The scanner ran against `data/github/**` PR/Issue caches. PR titles, bodies, and comments often contain text that matches credential heuristics (sample `Authorization: Bearer` snippets, phrases like "STS session key", and other public bytes already on GitHub). `ox doctor` reconcile failed with *"Push refused: 3 credential pattern(s) detected in 2 file(s)"* pointing at JSON the user did not author. The recovery message named `ox session audit` / `ox session redact` — commands that only operate on `sessions/`, leaving the user unable to follow the instructions for paths outside `sessions/`.
+
+2. Even after scoping, a single session with a finding the chokepoint had missed would refuse the entire push, holding up every other session and unrelated commit.
+
+The gate is now scoped + recoverable + never-blocking:
+
+- **Scoped:** the scanner only inspects paths under `sessions/`. `data/github/**` (verbatim cache of bytes already public on GitHub), `kb/**` (user-curated), and `team-context/**` (user-authored markdown) are intentionally out of scope. The companion writer-side redactor that 0.8.0 wired into `WriteGitHubPR` / `WriteGitHubIssue` is unwired for the same reason.
+- **Auto-recovers:** on a finding in a session's JSONL, the gate rewrites the file in place through the canonical chokepoint, appends a `RedactionPass` audit-trail entry to the session's `meta.json`, amends the holding commit, and re-scans. The push then proceeds with scrubbed bytes.
+- **Quarantines what can't be auto-redacted:** findings in non-JSONL session paths (notes, summaries, transcripts) are moved to `.sageox/cache/quarantine/<session>/` — bytes preserved verbatim on disk — and dropped from the holding commit. The rest of the push proceeds normally; other sessions and unrelated commits sync as before.
+- **Surfaces persistent state in doctor:** a new `ledger-redaction-debt` check reports every quarantined session with the affected detectors and next-step recovery commands. The check is read-only; recovery is a deliberate user gesture (`ox session redact`, or manually inspect + restore from `.sageox/cache/quarantine/`).
+- **Never blocks:** the gate always returns nil. Recovery errors are logged, not propagated.
+
+`OX_ALLOW_SECRETS=1` still short-circuits the recovery pipeline for explicit "publish as-is" overrides.
+
+New tests pin the scope contract, the auto-redact happy path, the quarantine path with data preservation, and the doctor surface.
 
 ## [0.8.0] - 2026-05-12
 

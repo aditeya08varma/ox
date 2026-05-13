@@ -539,6 +539,19 @@ func init() {
 		Run:         checkLedgerEmbeddedCreds,
 	})
 
+	// ox-y3ok: surface sessions that the pre-push secret gate
+	// auto-quarantined because it couldn't auto-redact them. Read-only;
+	// recovery is user-driven (interactive `ox session redact` or
+	// manual scrub + restore from .sageox/cache/quarantine/).
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerRedactionDebt,
+		Name:        "Ledger redaction debt",
+		Category:    "Credential Hygiene",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Surfaces sessions quarantined by the pre-push secret gate (preserved under .sageox/cache/quarantine/, dropped from pushes until redacted).",
+		Run:         checkLedgerRedactionDebt,
+	})
+
 	// ox-9y4k: scan installed adapter hook content for known-suspicious
 	// shapes that have no legitimate use in a commit/prompt hook.
 	RegisterDoctorCheck(&DoctorCheck{

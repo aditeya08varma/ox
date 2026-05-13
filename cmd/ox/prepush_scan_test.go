@@ -118,34 +118,28 @@ func TestScanPrePushForSecrets_ScansOnlyDiffFiles(t *testing.T) {
 	}
 }
 
-// TestRunPrePushSecretGate_RefusesWhenSecretsPresent verifies the gate
-// returns a formatted error and the error contains the detector name and
-// path (but NOT the secret bytes themselves).
-func TestRunPrePushSecretGate_RefusesWhenSecretsPresent(t *testing.T) {
-	t.Setenv("OX_ALLOW_SECRETS", "") // ensure override off
+// TestRunPrePushSecretGate_NeverBlocks_FlatPathNoOpsRecovery covers the
+// degenerate-path case (file directly under sessions/ with no session
+// subdir). After ox-y3ok, neither auto-redact nor quarantine recognize
+// that shape (splitSessionPath returns ok=false), but the gate still
+// MUST return nil — that's the load-bearing "never block" invariant.
+//
+// Failure prevented: a malformed session path causes the gate to error
+// and block routine pushes because the recovery path can't run.
+func TestRunPrePushSecretGate_NeverBlocks_FlatPathNoOpsRecovery(t *testing.T) {
+	t.Setenv("OX_ALLOW_SECRETS", "")
 	work := makeLedgerWithCommit(t, map[string]string{
 		"sessions/leak.jsonl": "token=ghp_alphabetabcdefghijklmnopqrstuvwxyz12\n",
 	})
 
 	err := runPrePushSecretGate(context.Background(), work)
-	require.Error(t, err)
-
-	msg := err.Error()
-	assert.Contains(t, msg, "Push refused")
-	// After ox-def1 the broad `github_token` detector was split per-prefix;
-	// a full-shape ghp_<36> matches the personal-access-token variant.
-	assert.Contains(t, msg, "github_personal_access_token")
-	assert.Contains(t, msg, "sessions/leak.jsonl")
-	// MUST NOT include the secret bytes
-	assert.NotContains(t, msg, "alphabetabcdefghijklmnopqrstuvwxyz")
-	// remediation guidance must be present
-	assert.Contains(t, msg, "OX_ALLOW_SECRETS=1")
+	assert.NoError(t, err, "gate must NEVER return an error; recovery may no-op but push proceeds")
 }
 
-// TestRunPrePushSecretGate_AllowSecretsOverride verifies the env-var escape
-// hatch lets the push through with a loud warning. Required for emergency
-// overrides — without this, the gate would be a permanent block in any
-// scenario the detectors mis-classify.
+// TestRunPrePushSecretGate_AllowSecretsOverride verifies the env-var
+// override still short-circuits the recovery pipeline. Under the
+// never-block policy this is just a faster path: no scan, no
+// auto-redact, no quarantine — publish as-is per user request.
 func TestRunPrePushSecretGate_AllowSecretsOverride(t *testing.T) {
 	t.Setenv("OX_ALLOW_SECRETS", "1")
 	work := makeLedgerWithCommit(t, map[string]string{
@@ -154,21 +148,6 @@ func TestRunPrePushSecretGate_AllowSecretsOverride(t *testing.T) {
 
 	err := runPrePushSecretGate(context.Background(), work)
 	assert.NoError(t, err, "OX_ALLOW_SECRETS=1 must allow push")
-}
-
-// TestRunPrePushSecretGate_AllowSecretsRecognizesFalse verifies that values
-// that look like "off" (0, false, no, off, "") do NOT bypass the gate.
-func TestRunPrePushSecretGate_AllowSecretsRecognizesFalse(t *testing.T) {
-	work := makeLedgerWithCommit(t, map[string]string{
-		"sessions/leak.jsonl": "AKIAIOSFODNN7EXAMPLE\n",
-	})
-	for _, off := range []string{"", "0", "false", "no", "OFF"} {
-		t.Run("OX_ALLOW_SECRETS="+off, func(t *testing.T) {
-			t.Setenv("OX_ALLOW_SECRETS", off)
-			err := runPrePushSecretGate(context.Background(), work)
-			assert.Error(t, err, "off-like value %q should NOT bypass gate", off)
-		})
-	}
 }
 
 // TestPrePushScanner_SkipsBinaryExtensions verifies binary blobs are skipped.

@@ -283,16 +283,29 @@ func prePushSecretsAllowed() bool {
 	return true
 }
 
-// runPrePushSecretGate is the entry point used by pushLedger. Returns nil
-// if push may proceed; returns a formatted error if findings are present
-// and OX_ALLOW_SECRETS is not set.
+// runPrePushSecretGate is the entry point used by pushLedger. As of
+// ox-y3ok the gate NEVER blocks the push: a single bad session must not
+// hold up other sessions and unrelated commits from syncing. Instead the
+// gate runs a recovery pipeline:
+//
+//  1. Scan (scoped to sessions/ per ox-cqdo).
+//  2. Auto-redact every JSONL finding via the canonical chokepoint
+//     (autoRedactSessionFindings → redactFileInPlace + meta.json
+//     RedactionPass + amend). Re-scan.
+//  3. Anything still remaining is quarantined: the file is atomically
+//     moved to <ledger>/.sageox/cache/quarantine/ (preserved, just
+//     outside the daemon's session-finalize surface) and its path is
+//     carved out of the holding commit. A debt marker is written under
+//     <ledger>/.sageox/cache/redaction-debt/ so `ox doctor` can surface
+//     the persistent state.
+//
+// Always returns nil. Scan errors and recovery errors are logged and
+// the push proceeds; making the gate impassable is a worse outcome than
+// publishing whatever the chokepoint missed (the same content already
+// hit the chokepoint at write time).
 func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
 	result, err := scanPrePushForSecrets(ctx, ledgerPath)
 	if err != nil {
-		// Scan-side error (e.g. git command failed). Fail OPEN here rather
-		// than blocking the push — the scanner is a guardrail, not an oracle,
-		// and the user has no way to recover if a transient git problem makes
-		// the gate impassable.
 		slog.Warn("pre-push secret gate: scan failed, allowing push", "error", err)
 		return nil
 	}
@@ -304,13 +317,71 @@ func runPrePushSecretGate(ctx context.Context, ledgerPath string) error {
 		slog.Warn("pre-push secret gate: OVERRIDDEN by OX_ALLOW_SECRETS",
 			"findings", len(result.Findings),
 			"files", countDistinctPaths(result.Findings))
-		// emit a loud stderr line so the override isn't invisible in
-		// non-structured logs.
 		fmt.Fprintln(os.Stderr,
 			"WARNING: ox pre-push secret gate overridden by OX_ALLOW_SECRETS — "+
 				"credentials may be published to the cloud Ledger")
 		return nil
 	}
-	return fmt.Errorf("%s", FormatPrePushFindings(result))
+
+	// Try the canonical chokepoint first; it can clear anything the
+	// scanner found (they share a detector catalog).
+	auto, redactErr := autoRedactSessionFindings(ctx, ledgerPath, result)
+	if redactErr != nil {
+		slog.Warn("pre-push secret gate: auto-redact failed; will quarantine remainder",
+			"error", redactErr)
+	}
+
+	// Re-scan post-redact. Anything left is either non-JSONL or hit a
+	// per-file error in the redact pass.
+	rescan, rescanErr := scanPrePushForSecrets(ctx, ledgerPath)
+	if rescanErr != nil {
+		slog.Warn("pre-push secret gate: rescan after auto-redact failed; allowing push",
+			"error", rescanErr)
+		return nil
+	}
+	if len(rescan.Findings) == 0 {
+		if auto != nil && len(auto.FixedPaths) > 0 {
+			fmt.Fprintf(os.Stderr,
+				"ox pre-push: auto-redacted %d file(s) across %d session(s) before push (catalog %s).\n",
+				len(auto.FixedPaths), len(auto.RedactedSessions), auto.CatalogVersion)
+		}
+		return nil
+	}
+
+	// Quarantine the remainder so the rest of the push can proceed.
+	q, qErr := quarantineUnredactableFindings(ledgerPath, rescan.Findings)
+	if qErr != nil {
+		slog.Warn("pre-push secret gate: quarantine partial; push will still proceed",
+			"error", qErr)
+	}
+
+	// Loud user-visible summary. Stderr (not the structured slog) so
+	// `ox session stop` callers see it even when slog is at WARN level.
+	emitQuarantineWarning(os.Stderr, auto, q, rescan)
+	return nil
+}
+
+// emitQuarantineWarning prints the user-facing summary of what was
+// auto-redacted, what was quarantined, and what to do next. Centralized
+// so the format stays consistent if call sites change.
+func emitQuarantineWarning(w *os.File, auto *autoRedactResult, q *quarantineResult, rescan *PrePushScanResult) {
+	var b strings.Builder
+	b.WriteString("\nox pre-push: credential findings detected in session content.\n")
+	if auto != nil && len(auto.FixedPaths) > 0 {
+		fmt.Fprintf(&b, "  Auto-redacted in place via canonical chokepoint: %d file(s) across %d session(s).\n",
+			len(auto.FixedPaths), len(auto.RedactedSessions))
+	}
+	if q != nil && len(q.QuarantinedRels) > 0 {
+		fmt.Fprintf(&b, "  Quarantined (preserved on disk, dropped from this push): %d file(s).\n",
+			len(q.QuarantinedRels))
+		for _, p := range q.QuarantinedRels {
+			fmt.Fprintf(&b, "    %s\n", p)
+		}
+		b.WriteString("  Bytes preserved under .sageox/cache/quarantine/<session>/.\n")
+		b.WriteString("  Run `ox doctor` for next steps. Other sessions and unrelated commits will sync normally.\n")
+	} else if rescan != nil && len(rescan.Findings) > 0 {
+		b.WriteString("  Some findings could not be quarantined; they remain in the push.\n")
+	}
+	fmt.Fprint(w, b.String())
 }
 
