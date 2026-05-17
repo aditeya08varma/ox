@@ -211,6 +211,15 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 
 	// direct lookup via agent session ID: Claude Code files are {sessionId}.jsonl
 	if agentSessionID != "" {
+		// Trust boundary: AgentSessionID arrives via the adapterprotocol JSON-RPC
+		// channel from the daemon. Without this gate, a malicious project's
+		// CLAUDE.md hook could pass "../../../sensitive-export" and the adapter
+		// would happily read and return that file's bytes through the normal
+		// session pipeline. The other 6 ox adapters already call this — claude-code
+		// was the lone outlier flagged by /security-review.
+		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
+			return "", 0, err
+		}
 		candidate := filepath.Join(projectDir, agentSessionID+".jsonl")
 		if _, err := os.Stat(candidate); err == nil {
 			sinceTime := time.Time{}
@@ -281,7 +290,15 @@ func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, i
 		}
 	}
 
-	return candidates[0].path, 0, nil
+	// Trust-boundary note: the previous fallback returned candidates[0].path
+	// (the newest file) when the caller supplied an agentID but no candidate
+	// contained it. Under concurrent ox sessions sharing a project root, that
+	// silently handed session A's adapter a JSONL belonging to session B —
+	// including secrets typed in B. The caller asked for a specific identity;
+	// returning a different one violates the contract. Fail loud instead so
+	// the caller can decide (retry, prompt the user, fall through to a
+	// different lookup). See SECREVIEW llm-trust LOW.
+	return "", 0, fmt.Errorf("no session file contains agentID %q", agentID)
 }
 
 func sessionContainsAgentID(path, agentID string) bool {
