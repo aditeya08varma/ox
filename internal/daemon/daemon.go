@@ -716,7 +716,28 @@ func (d *Daemon) shutdown() error {
 		d.cancel()
 	}
 
-	// wait for goroutines with timeout
+	// CodeDB drain: the CheckFreshness indexing goroutine is NOT tracked by
+	// d.wg (it owns its own per-pass context). Killing the daemon mid-bleve-
+	// batch leaves a torn `_mapping` doc — store.openOrCreateBleveIndex
+	// self-heals on next open, but draining cleanly avoids the recovery
+	// cycle entirely. Wait up to 30s explicitly; bleve batches typically
+	// flush in well under that. We do this BEFORE wg.Wait so the wg timeout
+	// only governs the daemon's own goroutines.
+	if d.codedb != nil {
+		drainCtx, drainCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		drainStart := time.Now()
+		if err := d.codedb.WaitIdle(drainCtx); err != nil {
+			d.logger.Warn("codedb did not drain before shutdown timeout; in-flight bleve batch may be killed",
+				"waited", time.Since(drainStart), "err", err)
+		} else if time.Since(drainStart) > 100*time.Millisecond {
+			// only log when we actually waited — silent in the common case
+			d.logger.Info("codedb drained before shutdown", "waited", time.Since(drainStart))
+		}
+		drainCancel()
+	}
+
+	// Wait for goroutines with a fixed 5s timeout — codedb drain handled
+	// above out-of-band.
 	done := make(chan struct{})
 	go func() {
 		d.wg.Wait()

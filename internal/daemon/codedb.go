@@ -19,12 +19,6 @@ import (
 	"github.com/sageox/ox/internal/paths"
 )
 
-// maxBleveRebuildAttempts caps how many times the daemon will auto-rebuild a
-// single bleve sub-index across CheckFreshness cycles before giving up. A
-// genuinely-corrupt-disk situation should not become a rebuild loop; once the
-// cap is hit we leave the index broken and let `ox doctor` surface it.
-const maxBleveRebuildAttempts = 2
-
 // CodeDBManager manages CodeDB indexing in the daemon.
 // It ensures only one indexing operation runs at a time and tracks index status.
 //
@@ -72,11 +66,6 @@ type CodeDBManager struct {
 	lastDirtyRefresh time.Time
 	// dirtyTestHook is called at the start of RefreshDirtyOverlay; nil in production.
 	dirtyTestHook func()
-
-	// bleveRebuildAttempts tracks per-sub-index auto-rebuild attempts so a
-	// chronically-corrupt index can't become an infinite rebuild loop. Keyed
-	// by sub-index name ("code"/"diff"/"comment").
-	bleveRebuildAttempts map[string]int
 }
 
 // CodeDBStats tracks index statistics.
@@ -395,6 +384,47 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	if payload.URL != "" {
 		target = payload.URL
 	}
+
+	// Honor self-heal markers written by store.openOrCreateBleveIndex: if any
+	// bleve sub-index was nuked + recreated since the last pass, force a full
+	// reindex now so the empty sub-index gets repopulated from git history.
+	// Without this, the empty bleve persists across freshness cycles (incremental
+	// indexing skips already-indexed commits) and code search stays empty until
+	// the user manually runs `ox code index --full`.
+	healedMarkers := store.NeedsReindexMarkers(dataDir)
+	markerForcedFull := false
+	if len(healedMarkers) > 0 && !payload.Full {
+		m.logger.Warn("codedb self-heal markers present, forcing full reindex",
+			"markers", healedMarkers, "data_dir", dataDir)
+		payload.Full = true
+		markerForcedFull = true
+	}
+
+	// If we wipe dataDir for a marker-forced reindex, the markers themselves
+	// get deleted along with everything else. If the subsequent indexing pass
+	// then fails (network blip, OOM, context cancel), the marker signal is
+	// gone and the NEXT freshness pass won't know to force --full — leaving
+	// the healed-but-empty bleve permanently empty until manual intervention.
+	// Restore the markers in a deferred-success path: indexSucceeded flips
+	// true only after the full pipeline completes; the defer rewrites the
+	// markers when indexSucceeded is still false at function exit.
+	indexSucceeded := false
+	if markerForcedFull {
+		defer func() {
+			if indexSucceeded {
+				return
+			}
+			m.logger.Warn("codedb marker-forced reindex failed; restoring self-heal markers so next pass retries",
+				"markers", healedMarkers, "data_dir", dataDir)
+			for _, name := range healedMarkers {
+				if err := store.WriteNeedsReindexMarker(dataDir, name); err != nil {
+					m.logger.Warn("failed to restore self-heal marker",
+						"name", name, "data_dir", dataDir, "err", err)
+				}
+			}
+		}()
+	}
+
 	m.logger.Info("codedb indexing started", "target", target, "data_dir", dataDir, "full", payload.Full)
 
 	// --full: wipe existing index so we rebuild from scratch
@@ -564,6 +594,20 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	m.lastErr = nil
 	m.stats = cachedStats
 	m.mu.Unlock()
+
+	// indexing succeeded — clear any self-heal markers so the next freshness
+	// check doesn't re-force --full. (The dataDir wipe above would have removed
+	// them too, but markers may exist on the incremental path if a future
+	// change ever decouples them from --full forcing; clearing here is the
+	// defensive invariant.) Log clear failures: leaving stale markers means
+	// the next pass re-forces --full unnecessarily.
+	if err := store.ClearAllNeedsReindexMarkers(dataDir); err != nil {
+		m.logger.Warn("codedb failed to clear self-heal markers after successful indexing",
+			"data_dir", dataDir, "err", err)
+	}
+	// Marker restoration is keyed off this flag — flip AFTER clearing so a
+	// transient marker-clear failure doesn't trigger the deferred restore.
+	indexSucceeded = true
 
 	logArgs := []any{
 		"blobs_parsed", stats.BlobsParsed,
@@ -777,16 +821,11 @@ func (m *CodeDBManager) CheckFreshness(ctx context.Context) {
 					Summary:  "codedb cache directory missing; sparse-checkout may have wiped .sageox/cache/",
 				})
 			}
-			// Self-heal: a single bleve sub-index with an empty mapping doc
-			// blocks every indexing pass forever (observed: daemon at 340% CPU
-			// looping on `error parsing mapping JSON: unexpected end of JSON
-			// input`). Detect via typed MappingCorruptError; rebuild only the
-			// affected sub-index and let the next CheckFreshness cycle retry
-			// the indexing pipeline. Bounded by maxBleveRebuildAttempts so a
-			// chronically-broken disk doesn't become a rebuild loop.
-			if mce := mappingCorruptFromErr(err); mce != nil {
-				m.handleMappingCorrupt(mce, dataDir)
-			}
+			// (Previously: bounded auto-rebuild for MappingCorruptError. Now
+			// handled silently inside store.openOrCreateBleveIndex via nuke +
+			// recreate + .needs_reindex_<name> marker, so doIndex no longer
+			// observes MappingCorruptError. The marker is consumed at the top
+			// of the next doIndex pass, which forces payload.Full=true.)
 			if isInitial {
 				m.logger.Warn("codedb initial index failed", "error", err)
 			} else {
@@ -1082,49 +1121,44 @@ func (m *CodeDBManager) setError(err error) {
 	m.mu.Unlock()
 }
 
-// mappingCorruptFromErr returns the MappingCorruptError in err's chain, or nil.
-func mappingCorruptFromErr(err error) *store.MappingCorruptError {
-	var mce *store.MappingCorruptError
-	if errors.As(err, &mce) {
-		return mce
-	}
-	return nil
+// IsIndexing reports whether a full indexing pass is currently in flight.
+// Reports the worktree-indexing flag only — the ledger-index flag has its
+// own short lifetime and uses an independent codepath.
+func (m *CodeDBManager) IsIndexing() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.indexing
 }
 
-// handleMappingCorrupt rebuilds a single bleve sub-index that has an empty
-// persisted mapping doc. Bounded by maxBleveRebuildAttempts per sub-index so
-// repeated rebuild failures don't burn CPU forever — once exhausted, the
-// daemon emits a warning and leaves recovery to `ox doctor`.
-func (m *CodeDBManager) handleMappingCorrupt(mce *store.MappingCorruptError, dataDir string) {
-	m.mu.Lock()
-	if m.bleveRebuildAttempts == nil {
-		m.bleveRebuildAttempts = make(map[string]int)
-	}
-	attempts := m.bleveRebuildAttempts[mce.Name]
-	if attempts >= maxBleveRebuildAttempts {
-		m.mu.Unlock()
-		m.logger.Warn("codedb sub-index auto-rebuild exhausted",
-			"name", mce.Name, "attempts", attempts,
-			"action", "run 'ox doctor --fix' to repair manually")
-		return
-	}
-	m.bleveRebuildAttempts[mce.Name] = attempts + 1
-	m.mu.Unlock()
-
-	if err := store.RebuildBleveSubIndex(dataDir, mce.Name); err != nil {
-		if errors.Is(err, store.ErrFullReindexRequired) {
-			// code/diff: not safe to auto-rebuild (would leave search empty
-			// until manual --full). Surface to ox doctor instead of looping.
-			m.logger.Warn("codedb sub-index needs full reindex; not auto-recovering",
-				"name", mce.Name,
-				"action", "run 'ox doctor --fix' or 'ox code index --full'")
-			return
+// WaitIdle blocks until no indexing pass is in flight or ctx is canceled.
+// Returns ctx.Err() on cancellation, nil when idle.
+//
+// Used by daemon shutdown to actually wait for codedb to drain. Without this,
+// kill-9'ing the daemon mid-bleve-batch leaves a torn _mapping doc (the
+// original "bleve index appears to be in use" bug). store.Open's self-heal
+// recovers from that on the next open, but draining cleanly avoids the wipe-
+// and-reindex cycle entirely.
+//
+// The CheckFreshness goroutine is intentionally NOT registered with the
+// daemon's sync.WaitGroup (it has its own per-pass context that the daemon-
+// wide cancel propagates into), so daemon.shutdown needs an explicit drain
+// primitive that polls m.indexing under the same mutex that gates it.
+//
+// Polling every 100ms is appropriate here: indexing passes are seconds-to-
+// minutes long, so the worst-case extra wait is sub-second. A condition
+// variable would be tighter but adds complexity for negligible gain in this
+// codepath (called once at shutdown).
+func (m *CodeDBManager) WaitIdle(ctx context.Context) error {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if !m.IsIndexing() {
+			return nil
 		}
-		m.logger.Warn("codedb sub-index auto-rebuild failed",
-			"name", mce.Name, "error", err)
-		return
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
 	}
-	m.logger.Warn("codedb sub-index auto-rebuilt",
-		"name", mce.Name, "attempt", attempts+1,
-		"note", "next indexing pass will repopulate")
 }

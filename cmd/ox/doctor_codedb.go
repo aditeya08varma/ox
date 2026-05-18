@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/store"
@@ -38,13 +39,10 @@ func checkCodeIndexAtDir(dataDir string, fix bool) checkResult {
 
 	db, err := codedb.Open(dataDir)
 	if err != nil {
-		// Targeted self-heal: a single bleve sub-index with an empty mapping
-		// document is independently recoverable without nuking the whole
-		// dataDir (~1GB+ on real repos). Detect via typed MappingCorruptError
-		// from store.openOrCreateBleveIndex; rebuild only that sub-index.
-		// "comment" repairs surgically; "code"/"diff" fall back to full
-		// dataDir wipe (the original behavior) since they cannot be
-		// repopulated from SQL alone.
+		// store.Open self-heals MappingCorruptError transparently (nuke +
+		// recreate + marker) — so it is rare to reach this branch. Keep it as
+		// defense-in-depth in case Open's self-heal itself fails (disk full,
+		// EACCES on the bleve dir, panic recovery surfacing a different error).
 		var mce *store.MappingCorruptError
 		if errors.As(err, &mce) {
 			if fix {
@@ -77,6 +75,24 @@ func checkCodeIndexAtDir(dataDir string, fix bool) checkResult {
 		return FailedCheck("Code index", "index corruption detected", "run 'ox doctor' to remove and rebuild")
 	}
 
+	// Self-heal markers come BEFORE the empty-index check: a freshly-healed
+	// store always looks empty (nuke + recreate left no docs in bleve, and the
+	// store is opened against the same SQL state as before — but ParseComments
+	// flags etc. weren't reset by Open's self-heal). Surfacing "empty index"
+	// here would route comment-only corruptions through os.RemoveAll(dataDir),
+	// destroying healthy code/diff data that the daemon's next pass could
+	// otherwise preserve. The markers branch handles fix surgically (comment)
+	// or via wipe (code/diff) based on what RebuildBleveSubIndex can do.
+	if healing := store.NeedsReindexMarkers(dataDir); len(healing) > 0 {
+		if fix {
+			return handleHealMarkersFix(db, dataDir, healing)
+		}
+		return WarningCheck("Code index",
+			fmt.Sprintf("auto-repair in progress for sub-index(es) %s — daemon will rebuild on next pass",
+				strings.Join(healing, ", ")),
+			"force immediate rebuild: 'ox code index --full'")
+	}
+
 	// Detect "empty index": schema exists but no data was ever written.
 	// This happens when indexing was interrupted (daemon crash, context cancel)
 	// after the DB was created but before any commits were processed.
@@ -93,4 +109,47 @@ func checkCodeIndexAtDir(dataDir string, fix bool) checkResult {
 	}
 
 	return PassedCheck("Code index", "healthy")
+}
+
+// handleHealMarkersFix is the --fix branch for self-heal markers. For each
+// marker, try a targeted RebuildBleveSubIndex (works for "comment", which can
+// be repopulated from SQL alone via the comments_parsed flag). If the rebuild
+// reports ErrFullReindexRequired (the contract for "code" and "diff" — they
+// can only be repopulated from a full git walk), fall back to a dataDir wipe
+// and let the daemon's next pass do the full reindex. Surgical rebuilds clear
+// their markers; wipes drop all markers along with the dataDir.
+//
+// Rationale: a comment-only corruption used to cost ~1GB of code+diff data
+// because doctor's only remedy was os.RemoveAll(dataDir). Surgical paths
+// preserve healthy peer sub-indexes byte-for-byte.
+func handleHealMarkersFix(db *codedb.DB, dataDir string, markers []string) checkResult {
+	var rebuilt, wiped []string
+	for _, name := range markers {
+		rbErr := store.RebuildBleveSubIndex(dataDir, name)
+		if rbErr == nil {
+			_ = store.ClearNeedsReindexMarker(dataDir, name)
+			rebuilt = append(rebuilt, name)
+			continue
+		}
+		if errors.Is(rbErr, store.ErrFullReindexRequired) {
+			wiped = append(wiped, name)
+			continue
+		}
+		return FailedCheck("Code index",
+			fmt.Sprintf("rebuild %s sub-index failed: %v", name, rbErr),
+			"run 'ox code index --full' to rebuild from scratch")
+	}
+
+	if len(wiped) > 0 {
+		// At least one marker can only be cleared by a full reindex. Wipe
+		// dataDir and let the daemon repopulate everything on its next pass.
+		db.Close()
+		_ = os.RemoveAll(dataDir)
+		return PassedCheck("Code index",
+			fmt.Sprintf("full reindex needed for %s; dataDir wiped, run 'ox code index' to rebuild now",
+				strings.Join(wiped, ", ")))
+	}
+	return PassedCheck("Code index",
+		fmt.Sprintf("surgically rebuilt %s sub-index(es); run 'ox code index' to repopulate",
+			strings.Join(rebuilt, ", ")))
 }
