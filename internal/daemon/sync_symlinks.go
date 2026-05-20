@@ -17,7 +17,8 @@ package daemon
 //                            access, so a team row implies membership)
 //   - repo               -> link only in its OWN project, matched by
 //                            kb.repo_id == projectConfig.repo_id
-//   - custom, unknown    -> skip (deferred until explicit subscribe)
+//   - custom, channel,
+//     unknown            -> skip (deferred until explicit subscribe)
 //
 // Critical safety:
 //   - We only ever create/replace/remove symlinks. The canonical kb
@@ -39,6 +40,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/fileutil"
 	"github.com/sageox/ox/internal/paths"
 )
@@ -85,6 +87,29 @@ func (s *SyncScheduler) reconcileAllProjectSymlinks(ctx context.Context, bubbles
 	if len(roots) == 0 {
 		s.logger.Debug("kb_symlink: no initialized projects discovered")
 		return
+	}
+
+	// Scope reconciliation to projects on the current daemon's endpoint —
+	// global-sync ownership is per-endpoint, so the owner for endpoint A
+	// must never create/prune .sageox/kb links in projects configured for
+	// endpoint B. Empty current-endpoint short-circuits (unconfigured
+	// daemon → no global sync to reconcile).
+	currentEndpoint := endpoint.NormalizeSlug(endpoint.GetForProject(s.config.ProjectRoot))
+	if currentEndpoint != "" {
+		filtered := roots[:0]
+		for _, root := range roots {
+			projectEndpoint := endpoint.NormalizeSlug(endpoint.GetForProject(root))
+			if projectEndpoint == "" || projectEndpoint == currentEndpoint {
+				filtered = append(filtered, root)
+				continue
+			}
+			s.logger.Debug("kb_symlink: skipping project on different endpoint",
+				"project", root, "project_endpoint", projectEndpoint, "current_endpoint", currentEndpoint)
+		}
+		roots = filtered
+		if len(roots) == 0 {
+			return
+		}
 	}
 
 	for _, root := range roots {
@@ -254,6 +279,11 @@ func desiredSymlinks(bubbles []api.KB, projectRepoID string) map[string]string {
 			if projectRepoID == "" || b.RepoID == "" || b.RepoID != projectRepoID {
 				continue
 			}
+		case api.KBType("channel"):
+			// channel is defined in kbconfig but not yet promoted into
+			// internal/api as a typed KBType. Same policy as custom: skip
+			// until explicit subscribe.
+			continue
 		default:
 			// custom, unknown — deferred, skip.
 			continue

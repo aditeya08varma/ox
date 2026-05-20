@@ -11,6 +11,7 @@ import (
 
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
+	"gopkg.in/yaml.v3"
 )
 
 func init() {
@@ -140,6 +141,18 @@ type ProjectConfig struct {
 	// GitHubSyncIssues controls issue sync independently.
 	// Values: "enabled" (default), "disabled"
 	GitHubSyncIssues string `json:"github_sync_issues,omitempty"`
+
+	// KBID is the immutable knowledge-bubble identifier this project is bound
+	// to (ADR-017). Populated when the project has been migrated to the new
+	// .sageox/config.yaml format. Empty for legacy JSON-only projects that
+	// haven't been migrated yet.
+	KBID string `json:"-" yaml:"kb_id,omitempty"`
+
+	// Format records which on-disk format the loader treated as authoritative
+	// when constructing this struct. Values: "json", "yaml", "both", "none".
+	// Useful for doctor to decide whether a migration is pending.
+	// NOT serialized — derived at load time.
+	Format string `json:"-" yaml:"-"`
 }
 
 // NeedsUpgrade returns true if the config version is older than CurrentConfigVersion
@@ -155,16 +168,37 @@ func (c *ProjectConfig) SetCurrentVersion() {
 const (
 	defaultUpdateFrequencyHours     = 24
 	projectConfigFilename           = "config.json"
+	projectConfigYAMLFilename       = "config.yaml"
 	sageoxDir                       = ".sageox"
 	defaultOfflineSnapshotStaleDays = 7
 )
 
+// ProjectConfigYAML is the binding subset of the project-side
+// .sageox/config.yaml (ADR-017). The file itself may contain the full
+// ProjectConfig shape; yaml.v3 honors json tags, so LoadProjectConfig can
+// unmarshal directly into ProjectConfig and preserve existing per-project
+// settings. This narrower view is kept for code paths that only need the
+// binding fields (kb_id + repo_id), such as doctor reconciliation tests.
+type ProjectConfigYAML struct {
+	KBID   string `yaml:"kb_id,omitempty"`
+	RepoID string `yaml:"repo_id,omitempty"`
+}
+
 // IsInitialized checks if SageOx is initialized in the given git root directory.
-// Returns true if .sageox/config.json exists (the canonical file created by ox init).
+// Returns true if .sageox/config.json OR .sageox/config.yaml exists. Both
+// formats co-exist during the staged deprecation window (ADR-017 §7).
+//
+// TODO(release N+3): drop the JSON fallback once all repos have migrated.
 func IsInitialized(gitRoot string) bool {
-	configPath := filepath.Join(gitRoot, sageoxDir, projectConfigFilename)
-	_, err := os.Stat(configPath)
-	return err == nil
+	jsonPath := filepath.Join(gitRoot, sageoxDir, projectConfigFilename)
+	if _, err := os.Stat(jsonPath); err == nil {
+		return true
+	}
+	yamlPath := filepath.Join(gitRoot, sageoxDir, projectConfigYAMLFilename)
+	if _, err := os.Stat(yamlPath); err == nil {
+		return true
+	}
+	return false
 }
 
 // IsInitializedInCwd checks if SageOx is initialized by walking up from current directory.
@@ -219,39 +253,123 @@ func GetDefaultProjectConfig() *ProjectConfig {
 	}
 }
 
-// LoadProjectConfig loads the project configuration from .sageox/config.json relative to gitRoot
+// LoadProjectConfig loads the project configuration from .sageox/config.json,
+// then merges in .sageox/config.yaml (ADR-017) when present.
+//
+// Hybrid read posture during the staged migration window (ADR-017 §7):
+//
+//   - JSON only present  → Format="json".
+//   - YAML only present  → Format="yaml"; unmarshal YAML directly into the
+//     canonical struct, preserving all project-scoped settings that were
+//     migrated across.
+//   - Both present       → Format="both"; JSON is the base, YAML overrides on
+//     conflict for every field it carries. This lets the doctor migration
+//     write the YAML alongside the legacy JSON without losing information.
+//   - Neither present    → return default config with Format unset (callers
+//     keep treating this as "not initialized" via IsInitialized).
+//
+// TODO(release N+3): drop the JSON read path entirely once all repos are
+// migrated and the legacy files have been removed.
 func LoadProjectConfig(gitRoot string) (*ProjectConfig, error) {
 	if gitRoot == "" {
 		return nil, errors.New("git root cannot be empty")
 	}
 
-	configPath := filepath.Join(gitRoot, sageoxDir, projectConfigFilename)
+	jsonPath := filepath.Join(gitRoot, sageoxDir, projectConfigFilename)
+	yamlPath := filepath.Join(gitRoot, sageoxDir, projectConfigYAMLFilename)
 
-	// check if file exists
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		// return default config if file doesn't exist
+	// Distinguish ENOENT (file genuinely missing) from EACCES / other
+	// stat failures (parent dir unreadable, broken symlink, etc.). The
+	// legacy LoadProjectConfig used os.IsNotExist; mirroring that here
+	// keeps ensureSageoxConfig's "permission-denied → configError"
+	// contract intact under hostile filesystem state.
+	jsonExists := false
+	if _, err := os.Stat(jsonPath); err == nil {
+		jsonExists = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("failed to stat config file: %w", err)
+	}
+	yamlExists := false
+	if _, err := os.Stat(yamlPath); err == nil {
+		yamlExists = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("failed to stat yaml config: %w", err)
+	}
+
+	// Neither file exists — preserve the legacy "return defaults" contract so
+	// callers that load eagerly (daemon, IPC discovery) don't have to special-case
+	// uninitialized repos. IsInitialized() is the canonical existence gate.
+	if !jsonExists && !yamlExists {
 		return GetDefaultProjectConfig(), nil
 	}
 
-	// read the file
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+	cfg := ProjectConfig{}
+
+	if jsonExists {
+		data, err := os.ReadFile(jsonPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read config file: %w", err)
+		}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse config file: %w", err)
+		}
 	}
 
-	// parse JSON
-	var cfg ProjectConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	if yamlExists {
+		data, err := os.ReadFile(yamlPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read yaml config: %w", err)
+		}
+		if err := mergeProjectConfigYAML(data, &cfg); err != nil {
+			return nil, fmt.Errorf("failed to parse yaml config: %w", err)
+		}
 	}
 
-	// apply defaults for missing fields
+	switch {
+	case jsonExists && yamlExists:
+		cfg.Format = "both"
+	case yamlExists:
+		cfg.Format = "yaml"
+	default:
+		cfg.Format = "json"
+	}
+
 	applyDefaults(&cfg)
-
-	// normalize endpoint defensively (handles configs saved by older versions)
 	cfg.Endpoint = endpoint.NormalizeEndpoint(cfg.Endpoint)
 
 	return &cfg, nil
+}
+
+func mergeProjectConfigYAML(data []byte, cfg *ProjectConfig) error {
+	if cfg == nil {
+		return errors.New("config cannot be nil")
+	}
+
+	var raw map[string]any
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if len(raw) > 0 {
+		jsonData, err := json.Marshal(raw)
+		if err != nil {
+			return fmt.Errorf("yaml to json bridge: %w", err)
+		}
+		if err := json.Unmarshal(jsonData, cfg); err != nil {
+			return fmt.Errorf("yaml to project config: %w", err)
+		}
+	}
+
+	var binding ProjectConfigYAML
+	if err := yaml.Unmarshal(data, &binding); err != nil {
+		return err
+	}
+	if binding.KBID != "" {
+		cfg.KBID = binding.KBID
+	}
+	if binding.RepoID != "" {
+		cfg.RepoID = binding.RepoID
+	}
+	return nil
 }
 
 // SaveProjectConfig saves the project configuration to .sageox/config.json relative to gitRoot
@@ -390,15 +508,22 @@ func FindProjectRoot() string {
 	}
 }
 
-// findProjectConfigPathFromDir walks up from the given directory looking for .sageox/config.json
+// findProjectConfigPathFromDir walks up from the given directory looking for
+// .sageox/config.json, or .sageox/config.yaml when JSON is absent (ADR-017).
+// Prefer JSON during the migration window so existing tooling/callers that
+// expect a JSON path keep working; fall back to YAML so YAML-only repos are
+// still discoverable.
 func findProjectConfigPathFromDir(startDir string) (string, error) {
 	currentDir := startDir
 
 	for {
-		// check if .sageox/config.json exists in current directory
-		configPath := filepath.Join(currentDir, sageoxDir, projectConfigFilename)
-		if _, err := os.Stat(configPath); err == nil {
-			return configPath, nil
+		jsonPath := filepath.Join(currentDir, sageoxDir, projectConfigFilename)
+		if _, err := os.Stat(jsonPath); err == nil {
+			return jsonPath, nil
+		}
+		yamlPath := filepath.Join(currentDir, sageoxDir, projectConfigYAMLFilename)
+		if _, err := os.Stat(yamlPath); err == nil {
+			return yamlPath, nil
 		}
 
 		// get parent directory

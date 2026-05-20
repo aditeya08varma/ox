@@ -109,22 +109,49 @@ run: build ## Build and run ox
 #
 GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/gotestsum@latest")
 
+# Isolate test `git` invocations from the developer's global config.
+# Many tests build scratch repos in t.TempDir() and run `git init` +
+# `git commit`. Without isolation, git inherits the user's `~/.gitconfig`
+# — including `commit.gpgsign=true` and `user.signingkey` pointing at an
+# encrypted SSH key — and `git commit` blocks on a passphrase prompt
+# that the test runner can't satisfy. This manifests as cascade failures
+# in internal/codedb/index, internal/doctor, internal/repotools,
+# internal/secrets, etc.
+#
+# Disabling global config also wipes the runner's `user.name`/`user.email`,
+# so we supply identity via the GIT_{AUTHOR,COMMITTER}_{NAME,EMAIL} env
+# vars — git respects these in lieu of config and they cannot be hijacked
+# by signing/passphrase machinery.
+#
+# GIT_CONFIG_GLOBAL=/dev/null  → ignore $HOME/.gitconfig
+# GIT_CONFIG_NOSYSTEM=1        → ignore /etc/gitconfig
+# GIT_TERMINAL_PROMPT=0        → never prompt; fail fast on missing creds
+# GIT_AUTHOR_*  / GIT_COMMITTER_*  → identity without needing config
+TEST_GIT_ISOLATION := \
+	GIT_CONFIG_GLOBAL=/dev/null \
+	GIT_CONFIG_NOSYSTEM=1 \
+	GIT_TERMINAL_PROMPT=0 \
+	GIT_AUTHOR_NAME=ox-test \
+	GIT_AUTHOR_EMAIL=test@test.sageox.ai \
+	GIT_COMMITTER_NAME=ox-test \
+	GIT_COMMITTER_EMAIL=test@test.sageox.ai
+
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
 test: ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
 	$(call say,"Running fast tests (skipping >500ms, no coverage)...")
-	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 ./...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 ./...
 
 test-cover: ## Run fast tests with coverage collection (~15-20% slower than `make test`)
 	$(call say,"Running fast tests with coverage...")
-	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
 
 test-all: ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")
-	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
 
 test-slow: ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
 	$(call say,"Running slow tests (requires built ox binary)...")
-	@$(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=slow -race -timeout=10m ./...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=slow -race -timeout=10m ./...
 
 test-integration: ## Integration tests live in sageox/ox-test-harness
 	@echo "Coding agent integration tests are in sageox/ox-test-harness."
