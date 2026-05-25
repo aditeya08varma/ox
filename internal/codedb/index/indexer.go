@@ -1665,14 +1665,9 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 		return stats, fmt.Errorf("query unparsed blobs: %w", err)
 	}
 
-	type blobRow struct {
-		id          int64
-		contentHash string
-		language    string
-	}
-	var blobs []blobRow
+	var blobs []parseBlobRow
 	for rows.Next() {
-		var b blobRow
+		var b parseBlobRow
 		if err := rows.Scan(&b.id, &b.contentHash, &b.language); err != nil {
 			rows.Close()
 			return stats, fmt.Errorf("scan blob row: %w", err)
@@ -1697,7 +1692,11 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 		}
 	}()
 
-	// Prefetch all blob content in parallel
+	// Prefetch all blob content in parallel. Symbol extraction is serial and
+	// transient (per-blob garbage is GC'd quickly), so chunking the prefetch
+	// only adds per-chunk pool churn and measured *higher* peak — the daemon's
+	// tighter GOGC bounds this phase's heap instead. (ParseComments, which holds
+	// all results live, IS chunked.)
 	hashes := make([]string, len(blobs))
 	for i, b := range blobs {
 		hashes[i] = b.contentHash
@@ -1840,6 +1839,19 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 	return stats, nil
 }
 
+// parseBlobRow is a tip blob queued for comment extraction.
+type parseBlobRow struct {
+	id          int64
+	contentHash string
+	language    string
+}
+
+// parseChunkSize bounds how many blobs ParseComments prefetches and holds in its
+// result set per transaction, so peak memory is proportional to one chunk rather
+// than the whole repo (which previously prefetched + held every tip blob's
+// comments at once).
+const parseChunkSize = 512
+
 // CommentStats holds statistics from the comment parsing phase.
 type CommentStats struct {
 	BlobsParsed       uint64
@@ -1894,14 +1906,9 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 		return stats, fmt.Errorf("query unparsed blobs: %w", err)
 	}
 
-	type blobRow struct {
-		id          int64
-		contentHash string
-		language    string
-	}
-	var blobs []blobRow
+	var blobs []parseBlobRow
 	for rows.Next() {
-		var b blobRow
+		var b parseBlobRow
 		if err := rows.Scan(&b.id, &b.contentHash, &b.language); err != nil {
 			rows.Close()
 			return stats, fmt.Errorf("scan blob row: %w", err)
@@ -1926,30 +1933,56 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 		}
 	}()
 
-	// Prefetch all blob content in parallel
-	hashes := make([]string, len(blobs))
-	for i, b := range blobs {
+	// Process in chunks so prefetched content, the extraction result set, and
+	// the open transaction stay bounded regardless of repo size.
+	for start := 0; start < len(blobs); start += parseChunkSize {
+		end := start + parseChunkSize
+		if end > len(blobs) {
+			end = len(blobs)
+		}
+		bp, ce, err := processCommentChunk(ctx, s, repos, repoPaths, blobs[start:end], report)
+		stats.BlobsParsed += bp
+		stats.CommentsExtracted += ce
+		if err != nil {
+			return stats, err
+		}
+		report(fmt.Sprintf("Parsing comments: %d/%d blobs...", end, len(blobs)))
+	}
+
+	report(fmt.Sprintf("Comment parsing complete: %d blobs parsed, %d comments extracted.",
+		stats.BlobsParsed, stats.CommentsExtracted))
+
+	return stats, nil
+}
+
+// processCommentChunk extracts and inserts comments for one chunk of blobs.
+// Extraction runs in parallel (comments.Extract is a stateless rune scanner,
+// unlike gotreesitter); a single-writer phase then inserts in one transaction.
+// Counts are returned only on a successful commit; on error the chunk's
+// transaction rolls back and (0,0,err) is returned.
+func processCommentChunk(ctx context.Context, s *store.Store, repos []*git.Repository, repoPaths []string, chunk []parseBlobRow, report func(string)) (blobsParsed, commentsExtracted uint64, err error) {
+	const maxCommentsPerBlob = 1000
+	const maxBlobSize = 1 << 20 // 1MB
+	const commentSQLBatchSize = 100
+
+	hashes := make([]string, len(chunk))
+	for i, b := range chunk {
 		hashes[i] = b.contentHash
 	}
 	blobCache := prefetchBlobContents(ctx, repos, repoPaths, hashes, report)
-	report(fmt.Sprintf("  prefetched %d/%d blobs", len(blobCache), len(blobs)))
 
-	const maxCommentsPerBlob = 1000
-	const maxBlobSize = 1 << 20 // 1MB
-
-	// Phase 2: Extract comments in parallel
+	// Phase 1: extract comments in parallel.
 	workers := runtime.GOMAXPROCS(0)
-	if workers > len(blobs) {
-		workers = len(blobs)
+	if workers > len(chunk) {
+		workers = len(chunk)
 	}
 	if workers < 1 {
 		workers = 1
 	}
 
-	results := make([]commentResult, len(blobs))
+	results := make([]commentResult, len(chunk))
 	var wg sync.WaitGroup
 	ch := make(chan int, workers*2)
-	var extracted atomic.Int64
 
 	for w := 0; w < workers; w++ {
 		wg.Add(1)
@@ -1959,7 +1992,7 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 				if ctx.Err() != nil {
 					return
 				}
-				blob := blobs[idx]
+				blob := chunk[idx]
 				content, ok := blobCache[blob.contentHash]
 				if !ok {
 					results[idx] = commentResult{blobID: blob.id, miss: true}
@@ -1972,16 +2005,12 @@ func ParseComments(ctx context.Context, s *store.Store, progress ProgressFunc) (
 					}
 					results[idx] = commentResult{blobID: blob.id, comments: cms}
 				}
-				n := extracted.Add(1)
-				if n%500 == 0 {
-					report(fmt.Sprintf("  extracting comments: %d/%d blobs...", n, len(blobs)))
-				}
 			}
 		}()
 	}
 
 sendLoop2:
-	for i := range blobs {
+	for i := range chunk {
 		select {
 		case <-ctx.Done():
 			break sendLoop2
@@ -1992,30 +2021,26 @@ sendLoop2:
 	wg.Wait()
 
 	if err := ctx.Err(); err != nil {
-		return stats, err
+		return 0, 0, err
 	}
 
-	// Free blob cache before SQL phase to reduce memory pressure
+	// Free blob cache before the SQL phase to reduce memory pressure.
 	blobCache = nil
 
-	// Phase 3: Single-writer SQL + Bleve insertion with batched INSERTs
+	// Phase 2: single-writer SQL + Bleve insertion with batched INSERTs.
 	tx, err := s.Begin()
 	if err != nil {
-		return stats, fmt.Errorf("begin transaction: %w", err)
+		return 0, 0, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
 	txq := codedbsqlc.New(tx)
 	commentBatch := s.CommentIndex.NewBatch()
 	commentBatchN := 0
-	const commentSQLBatchSize = 100
 
-	for i, result := range results {
+	for _, result := range results {
 		if err := ctx.Err(); err != nil {
-			return stats, err
-		}
-		if (i+1)%500 == 0 {
-			report(fmt.Sprintf("  inserting comments: %d/%d blobs...", i+1, len(results)))
+			return 0, 0, err
 		}
 
 		if result.miss {
@@ -2027,7 +2052,7 @@ sendLoop2:
 				slog.Warn("mark blob comments_parsed", "blob_id", result.blobID, "err", err)
 			}
 			if !result.skip {
-				stats.BlobsParsed++
+				blobsParsed++
 			}
 			continue
 		}
@@ -2054,26 +2079,26 @@ sendLoop2:
 			sb.WriteString(" RETURNING id")
 			rows, err := tx.Query(sb.String(), sqlArgs...)
 			if err != nil {
-				return stats, fmt.Errorf("batch insert comments: %w", err)
+				return 0, 0, fmt.Errorf("batch insert comments: %w", err)
 			}
 			cmIdx := 0
 			for rows.Next() {
 				var commentID int64
 				if err := rows.Scan(&commentID); err != nil {
 					rows.Close()
-					return stats, fmt.Errorf("scan inserted comment id: %w", err)
+					return 0, 0, fmt.Errorf("scan inserted comment id: %w", err)
 				}
 				if cmIdx < len(batch) {
 					commentBatch.Index("comment_"+strconv.FormatInt(commentID, 10), BleveCommentDoc{Content: batch[cmIdx].Text})
 				}
 				cmIdx++
 				commentBatchN++
-				stats.CommentsExtracted++
+				commentsExtracted++
 
 				if commentBatchN >= bleveBatchSize {
 					if err := s.CommentIndex.Batch(commentBatch); err != nil {
 						rows.Close()
-						return stats, fmt.Errorf("flush comment batch: %w", err)
+						return 0, 0, fmt.Errorf("flush comment batch: %w", err)
 					}
 					commentBatch = s.CommentIndex.NewBatch()
 					commentBatchN = 0
@@ -2081,34 +2106,31 @@ sendLoop2:
 			}
 			if err := rows.Err(); err != nil {
 				rows.Close()
-				return stats, fmt.Errorf("iterate inserted comment ids: %w", err)
+				return 0, 0, fmt.Errorf("iterate inserted comment ids: %w", err)
 			}
 			rows.Close()
 			if cmIdx != len(batch) {
-				return stats, fmt.Errorf("comments batch: expected %d returned ids, got %d", len(batch), cmIdx)
+				return 0, 0, fmt.Errorf("comments batch: expected %d returned ids, got %d", len(batch), cmIdx)
 			}
 		}
 
 		if err := txq.MarkBlobCommentsParsed(ctx, result.blobID); err != nil {
-			return stats, fmt.Errorf("mark blob comments_parsed: %w", err)
+			return 0, 0, fmt.Errorf("mark blob comments_parsed: %w", err)
 		}
 
-		stats.BlobsParsed++
+		blobsParsed++
 	}
 
 	if err := tx.Commit(); err != nil {
-		return stats, fmt.Errorf("commit transaction: %w", err)
+		return 0, 0, fmt.Errorf("commit transaction: %w", err)
 	}
 
 	// flush remaining bleve batch after SQL commit
 	if commentBatchN > 0 {
 		if err := s.CommentIndex.Batch(commentBatch); err != nil {
-			return stats, fmt.Errorf("flush final comment batch: %w", err)
+			return 0, 0, fmt.Errorf("flush final comment batch: %w", err)
 		}
 	}
 
-	report(fmt.Sprintf("Comment parsing complete: %d blobs parsed, %d comments extracted.",
-		stats.BlobsParsed, stats.CommentsExtracted))
-
-	return stats, nil
+	return blobsParsed, commentsExtracted, nil
 }
