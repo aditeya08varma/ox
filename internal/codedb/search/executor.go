@@ -181,6 +181,38 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 		return nil, nil
 	}
 
+	// Enrich all hits with a single batched SQL query per search rather than one
+	// lookup per hit (avoids an N+1 against SQLite, which also reduces reader
+	// contention with the daemon writer). Dirty code hits carry no SQL metadata
+	// and are assembled inline.
+	ids := make([]string, 0, len(searchResult.Hits))
+	for _, hit := range searchResult.Hits {
+		switch plan.BleveIndex {
+		case "diff":
+			ids = append(ids, strings.TrimPrefix(hit.ID, "diff_"))
+		case "comment":
+			ids = append(ids, strings.TrimPrefix(hit.ID, "comment_"))
+		default:
+			if !strings.HasPrefix(hit.ID, "dirty_") {
+				ids = append(ids, strings.TrimPrefix(hit.ID, "blob_"))
+			}
+		}
+	}
+
+	var meta map[string][]Result
+	var codeHashes map[string]string // populated for code path only; needed for blob re-derivation
+	switch plan.BleveIndex {
+	case "diff":
+		meta, err = enrichDiffHits(ctx, s, ids, filters)
+	case "comment":
+		meta, err = enrichCommentHits(ctx, s, ids, filters)
+	default:
+		meta, codeHashes, err = enrichCodeHits(ctx, s, ids, filters)
+	}
+	if err != nil {
+		return nil, err
+	}
+
 	var results []Result
 	seen := make(map[string]bool) // dedup by file:line to avoid worktree/committed duplicates
 	for _, hit := range searchResult.Hits {
@@ -193,18 +225,15 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 		var hitResults []Result
 		switch plan.BleveIndex {
 		case "diff":
-			hitResults, err = enrichDiffHit(ctx, s, hit, fragment, filters)
+			hitResults = assembleDiffHit(hit, fragment, meta)
 		case "comment":
-			hitResults, err = enrichCommentHit(ctx, s, hit, fragment, filters)
+			hitResults = assembleCommentHit(hit, fragment, meta)
 		default:
 			if strings.HasPrefix(hit.ID, "dirty_") {
-				hitResults, err = enrichDirtyHit(hit, fragment)
+				hitResults, _ = enrichDirtyHit(hit, fragment)
 			} else {
-				hitResults, err = enrichCodeHit(ctx, s, hit, plan, fragment, filters)
+				hitResults = assembleCodeHit(s, hit, plan, fragment, meta, codeHashes)
 			}
-		}
-		if err != nil {
-			continue
 		}
 		for _, r := range hitResults {
 			key := r.FilePath + ":" + strconv.Itoa(r.Line) + ":" + r.Content
@@ -224,6 +253,14 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 	return results, nil
 }
 
+// sqlInPlaceholders returns "?,?,…" with n placeholders for a SQL IN clause.
+func sqlInPlaceholders(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
+}
+
 // extractFragment pulls the first highlighted content fragment from a Bleve hit.
 func extractFragment(hit *blevesearch.DocumentMatch) string {
 	if frags, ok := hit.Fragments["content"]; ok && len(frags) > 0 {
@@ -232,15 +269,21 @@ func extractFragment(hit *blevesearch.DocumentMatch) string {
 	return ""
 }
 
-// enrichDiffHit looks up diff metadata from SQL for a Bleve diff hit.
-func enrichDiffHit(ctx context.Context, s *store.Store, hit *blevesearch.DocumentMatch, fragment string, filters *Filters) ([]Result, error) {
-	diffID := strings.TrimPrefix(hit.ID, "diff_")
+// enrichDiffHits batch-loads diff metadata for all Bleve diff hits, keyed by
+// diff id. Score and content are per-hit and applied later in assembleDiffHit.
+func enrichDiffHits(ctx context.Context, s *store.Store, diffIDs []string, filters *Filters) (map[string][]Result, error) {
+	if len(diffIDs) == 0 {
+		return nil, nil
+	}
 
 	sqlQ := `
-		SELECT substr(c.hash, 1, 10), c.author, substr(c.message, 1, 80), d.path
+		SELECT d.id, substr(c.hash, 1, 10), c.author, substr(c.message, 1, 80), d.path
 		FROM diffs d JOIN commits c ON c.id = d.commit_id
-		WHERE d.id = ?`
-	args := []interface{}{diffID}
+		WHERE d.id IN (` + sqlInPlaceholders(len(diffIDs)) + `)`
+	args := make([]interface{}, 0, len(diffIDs)+4)
+	for _, id := range diffIDs {
+		args = append(args, id)
+	}
 
 	if filters != nil {
 		addDiffFilters(&sqlQ, &args, filters)
@@ -252,44 +295,63 @@ func enrichDiffHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 	}
 	defer rows.Close()
 
-	var results []Result
+	meta := make(map[string][]Result, len(diffIDs))
 	for rows.Next() {
+		var id int64
 		var hash, author, message, path string
-		if err := rows.Scan(&hash, &author, &message, &path); err != nil {
+		if err := rows.Scan(&id, &hash, &author, &message, &path); err != nil {
 			slog.Warn("diff hit scan error, skipping row", "err", err)
 			continue
 		}
-		results = append(results, Result{
-			CommitHash: hash, Author: author, Message: message,
-			FilePath: path, Score: hit.Score, Content: fragment,
+		key := strconv.FormatInt(id, 10)
+		meta[key] = append(meta[key], Result{
+			CommitHash: hash, Author: author, Message: message, FilePath: path,
 		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate diff rows: %w", err)
 	}
-	return results, nil
+	return meta, nil
 }
 
-// enrichCodeHit looks up file metadata from SQL for a Bleve code hit.
-func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.DocumentMatch, plan *ExecutionPlan, fragment string, filters *Filters) ([]Result, error) {
-	blobID := strings.TrimPrefix(hit.ID, "blob_")
+// assembleDiffHit applies the per-hit score and fragment to the diff metadata
+// rows for one Bleve hit.
+func assembleDiffHit(hit *blevesearch.DocumentMatch, fragment string, meta map[string][]Result) []Result {
+	rows := meta[strings.TrimPrefix(hit.ID, "diff_")]
+	out := make([]Result, 0, len(rows))
+	for _, r := range rows {
+		r.Score = hit.Score
+		r.Content = fragment
+		out = append(out, r)
+	}
+	return out
+}
+
+// enrichCodeHits batch-loads file metadata + content_hash for every Bleve code
+// hit in one round-trip (avoids N+1). The returned hashes map joins each blob
+// id to its git content_hash so assembleCodeHit can re-derive the snippet from
+// the blob (ADR-018 phase 1b: Bleve no longer stores committed code).
+func enrichCodeHits(ctx context.Context, s *store.Store, blobIDs []string, filters *Filters) (map[string][]Result, map[string]string, error) {
+	if len(blobIDs) == 0 {
+		return nil, nil, nil
+	}
 
 	var revFilter string
 	if filters != nil && filters.Rev != "" {
 		revFilter = resolveRevRef(filters.Rev)
 	}
 
-	// content_hash joins us to git for ADR-018 phase 1b snippet re-derivation:
-	// Bleve no longer stores the committed code; we read the blob and locate
-	// the match ourselves to populate Line + a plain-text snippet.
 	sqlQ := `
-		SELECT fr.path, b.language, rp.name, b.content_hash
+		SELECT b.id, fr.path, b.language, rp.name, b.content_hash
 		FROM blobs b
 		JOIN file_revs fr ON fr.blob_id = b.id
 		LEFT JOIN refs r ON r.commit_id = fr.commit_id
 		LEFT JOIN repos rp ON rp.id = r.repo_id
-		WHERE b.id = ?`
-	args := []interface{}{blobID}
+		WHERE b.id IN (` + sqlInPlaceholders(len(blobIDs)) + `)`
+	args := make([]interface{}, 0, len(blobIDs)+4)
+	for _, id := range blobIDs {
+		args = append(args, id)
+	}
 
 	if revFilter != "" {
 		sqlQ += " AND r.name = ?"
@@ -300,69 +362,93 @@ func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 		addCodeFilters(&sqlQ, &args, filters)
 	}
 
-	sqlQ += " GROUP BY fr.path"
+	sqlQ += " GROUP BY b.id, fr.path"
 
 	rows, err := s.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
-	var results []Result
-	var contentHash string
+	meta := make(map[string][]Result, len(blobIDs))
+	hashes := make(map[string]string, len(blobIDs))
 	for rows.Next() {
+		var id int64
 		var path string
 		var lang, repo sql.NullString
 		var hash string
-		if err := rows.Scan(&path, &lang, &repo, &hash); err != nil {
+		if err := rows.Scan(&id, &path, &lang, &repo, &hash); err != nil {
 			slog.Warn("code hit scan error, skipping row", "err", err)
 			continue
 		}
-		contentHash = hash // same blob across rows (multiple paths/refs)
-		results = append(results, Result{
-			FilePath: path, Score: hit.Score,
-			Language: lang.String, Repo: repo.String,
+		key := strconv.FormatInt(id, 10)
+		meta[key] = append(meta[key], Result{
+			FilePath: path, Language: lang.String, Repo: repo.String,
 		})
+		hashes[key] = hash // identical across rows for the same blob; last write is fine
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate code rows: %w", err)
+		return nil, nil, fmt.Errorf("iterate code rows: %w", err)
 	}
-
-	// Snippet+line derivation: a non-empty Bleve fragment means this hit came
-	// from a stored doc (dirty overlay) — use it as-is. Otherwise (committed
-	// code, index-only) read the blob and locate the match ourselves.
-	line, snippet := 0, fragment
-	if fragment == "" && contentHash != "" {
-		if content := s.ReadBlob(contentHash); content != nil {
-			line, snippet = locateMatchAndSnippet(content, plan, codeSnippetMaxLen)
-		}
-	}
-	for i := range results {
-		results[i].Line = line
-		results[i].Content = snippet
-	}
-	return results, nil
+	return meta, hashes, nil
 }
 
-// enrichCommentHit looks up comment metadata from SQL for a Bleve comment hit.
-func enrichCommentHit(ctx context.Context, s *store.Store, hit *blevesearch.DocumentMatch, fragment string, filters *Filters) ([]Result, error) {
-	commentID := strings.TrimPrefix(hit.ID, "comment_")
+// assembleCodeHit applies the per-hit score and Content/Line for one Bleve hit.
+// A non-empty fragment means the hit came from a stored doc (dirty overlay) and
+// is used as-is. Otherwise — the index-only committed code path — the blob is
+// read once via Store.ReadBlob and the match located so Line + a plain-text
+// snippet are re-derived (ADR-018 phase 1b). All rows for the same blob share
+// the same derived snippet+line.
+func assembleCodeHit(s *store.Store, hit *blevesearch.DocumentMatch, plan *ExecutionPlan, fragment string, meta map[string][]Result, hashes map[string]string) []Result {
+	id := strings.TrimPrefix(hit.ID, "blob_")
+	rows := meta[id]
+	if len(rows) == 0 {
+		return nil
+	}
+	line, snippet := 0, fragment
+	if fragment == "" {
+		if hash := hashes[id]; hash != "" {
+			if content := s.ReadBlob(hash); content != nil {
+				line, snippet = locateMatchAndSnippet(content, plan, codeSnippetMaxLen)
+			}
+		}
+	}
+	out := make([]Result, 0, len(rows))
+	for _, r := range rows {
+		r.Score = hit.Score
+		r.Content = snippet
+		r.Line = line
+		out = append(out, r)
+	}
+	return out
+}
+
+// enrichCommentHits batch-loads comment metadata for all Bleve comment hits,
+// keyed by comment id. Score and content are per-hit and applied later in
+// assembleCommentHit.
+func enrichCommentHits(ctx context.Context, s *store.Store, commentIDs []string, filters *Filters) (map[string][]Result, error) {
+	if len(commentIDs) == 0 {
+		return nil, nil
+	}
 
 	sqlQ := `
-		SELECT fr.path, b.language, rp.name, cm.kind, cm.text, cm.line
+		SELECT cm.id, fr.path, b.language, rp.name, cm.kind, cm.text, cm.line
 		FROM comments cm
 		JOIN blobs b ON b.id = cm.blob_id
 		JOIN file_revs fr ON fr.blob_id = b.id
 		LEFT JOIN refs r ON r.commit_id = fr.commit_id
 		LEFT JOIN repos rp ON rp.id = r.repo_id
-		WHERE cm.id = ?`
-	args := []interface{}{commentID}
+		WHERE cm.id IN (` + sqlInPlaceholders(len(commentIDs)) + `)`
+	args := make([]interface{}, 0, len(commentIDs)+4)
+	for _, id := range commentIDs {
+		args = append(args, id)
+	}
 
 	if filters != nil {
 		addCommentFilters(&sqlQ, &args, filters)
 	}
 
-	sqlQ += " GROUP BY fr.path"
+	sqlQ += " GROUP BY cm.id, fr.path"
 
 	rows, err := s.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
@@ -370,24 +456,20 @@ func enrichCommentHit(ctx context.Context, s *store.Store, hit *blevesearch.Docu
 	}
 	defer rows.Close()
 
-	var results []Result
+	meta := make(map[string][]Result, len(commentIDs))
 	for rows.Next() {
+		var id int64
 		var path string
 		var lang, repo sql.NullString
 		var kind, text string
 		var line int
-		if err := rows.Scan(&path, &lang, &repo, &kind, &text, &line); err != nil {
+		if err := rows.Scan(&id, &path, &lang, &repo, &kind, &text, &line); err != nil {
 			slog.Warn("comment hit scan error, skipping row", "err", err)
 			continue
 		}
-		content := fragment
-		if content == "" {
-			content = text
-		}
-		results = append(results, Result{
+		key := strconv.FormatInt(id, 10)
+		meta[key] = append(meta[key], Result{
 			FilePath:    path,
-			Score:       hit.Score,
-			Content:     content,
 			Language:    lang.String,
 			Repo:        repo.String,
 			Line:        line,
@@ -398,7 +480,25 @@ func enrichCommentHit(ctx context.Context, s *store.Store, hit *blevesearch.Docu
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate comment rows: %w", err)
 	}
-	return results, nil
+	return meta, nil
+}
+
+// assembleCommentHit applies the per-hit score and fragment to the comment
+// metadata rows for one Bleve hit, falling back to the stored comment text when
+// the hit has no highlighted fragment.
+func assembleCommentHit(hit *blevesearch.DocumentMatch, fragment string, meta map[string][]Result) []Result {
+	rows := meta[strings.TrimPrefix(hit.ID, "comment_")]
+	out := make([]Result, 0, len(rows))
+	for _, r := range rows {
+		content := fragment
+		if content == "" {
+			content = r.CommentText
+		}
+		r.Score = hit.Score
+		r.Content = content
+		out = append(out, r)
+	}
+	return out
 }
 
 // enrichDirtyHit creates a result for a dirty worktree Bleve hit (no SQL metadata).
