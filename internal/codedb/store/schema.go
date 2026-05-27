@@ -81,6 +81,29 @@ CREATE TABLE IF NOT EXISTS symbol_refs (
     col       INTEGER NOT NULL
 );
 
+-- ADR-019: resolved symbol edges. Populated alongside symbol_refs at index
+-- time by per-language resolvers. src_symbol_id is the *containing* symbol
+-- (caller); dst_symbol_id is the *resolved target* (callee) when known.
+-- dst_blob_id/dst_symbol_id are NULL for unresolved/external targets (the
+-- dst_name column always carries the referenced name so name-fallback queries
+-- still work). confidence: extracted (direct binding), inferred (heuristic
+-- match), ambiguous (one row per candidate, capped).
+CREATE TABLE IF NOT EXISTS symbol_edges (
+    id            INTEGER PRIMARY KEY,
+    src_blob_id   INTEGER NOT NULL REFERENCES blobs(id),
+    src_symbol_id INTEGER NOT NULL REFERENCES symbols(id),
+    dst_blob_id   INTEGER          REFERENCES blobs(id),
+    dst_symbol_id INTEGER          REFERENCES symbols(id),
+    dst_name      TEXT    NOT NULL,
+    kind          TEXT    NOT NULL,
+    confidence    TEXT    NOT NULL,
+    line          INTEGER NOT NULL,
+    col           INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_symbol_edges_src      ON symbol_edges(src_symbol_id, kind);
+CREATE INDEX IF NOT EXISTS idx_symbol_edges_dst      ON symbol_edges(dst_symbol_id, kind);
+CREATE INDEX IF NOT EXISTS idx_symbol_edges_dst_name ON symbol_edges(dst_name, kind);
+
 CREATE TABLE IF NOT EXISTS pull_requests (
     id          INTEGER PRIMARY KEY,
     number      INTEGER NOT NULL UNIQUE,
