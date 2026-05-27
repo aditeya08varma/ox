@@ -1796,6 +1796,14 @@ func ParseSymbols(ctx context.Context, s *store.Store, progress ProgressFunc) (P
 		if err := insertSymbolEdges(tx, blob.id, syms, refs, symDBIDs); err != nil {
 			return stats, fmt.Errorf("insert symbol edges: %w", err)
 		}
+		// Stamp the resolver version on the blob so BackfillSymbolEdges can
+		// distinguish "already at current resolver" from "needs backfill".
+		if _, err := tx.ExecContext(ctx,
+			"UPDATE blobs SET edge_version = ? WHERE id = ?",
+			symbols.ResolverVersion, blob.id,
+		); err != nil {
+			return stats, fmt.Errorf("update blob edge_version: %w", err)
+		}
 
 		if err := txq.MarkBlobParsed(ctx, blob.id); err != nil {
 			return stats, fmt.Errorf("mark blob parsed: %w", err)

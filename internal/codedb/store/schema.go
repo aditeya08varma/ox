@@ -219,7 +219,31 @@ func CreateSchema(db *sql.DB) error {
 	if err := migrateAddPRCommits(db); err != nil {
 		return err
 	}
+	if err := migrateAddEdgeVersion(db); err != nil {
+		return err
+	}
 	return migrateInvalidateGitHubMtimesForIssue474(db)
+}
+
+// migrateAddEdgeVersion adds the blobs.edge_version column used by the ADR-019
+// resolver. Existing rows default to 0; the backfill routine bumps them to the
+// current resolver version after edges are populated, and ParseSymbols stamps
+// new blobs at the current version inline.
+func migrateAddEdgeVersion(db *sql.DB) error {
+	var exists bool
+	err := db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('blobs') WHERE name='edge_version'`).Scan(&exists)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE blobs ADD COLUMN edge_version INTEGER NOT NULL DEFAULT 0`); err != nil {
+		return err
+	}
+	// Index supports the backfill scan: find blobs needing edges fast.
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS idx_blobs_edge_version ON blobs(edge_version)`)
+	return err
 }
 
 // migrateAddTypeInfo adds signature, return_type, and params columns to the

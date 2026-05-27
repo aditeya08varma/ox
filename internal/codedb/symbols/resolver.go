@@ -19,6 +19,13 @@ type Edge struct {
 // hundreds of definitions) don't blow up the edges table.
 const ambiguousEdgeCap = 8
 
+// ResolverVersion is the structural version of Resolve's output. Bump when
+// changing the resolver semantics (new edge kinds, scope rules, confidence
+// policy). ParseSymbols stamps `blobs.edge_version` at this version after
+// inserting edges; BackfillSymbolEdges processes blobs whose stored version
+// is below this one.
+const ResolverVersion = 1
+
 // Resolve produces same-file edges from refs to in-scope symbols (ADR-019
 // phase 1). Drops refs that aren't inside any containing symbol (file-scope
 // refs have no meaningful "caller"); drops refs whose name doesn't match any
