@@ -160,11 +160,15 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 		bleveQuery = bleve.NewQueryStringQuery(plan.BleveQuery)
 	}
 	searchReq := bleve.NewSearchRequestOptions(bleveQuery, plan.Limit*5, 0, false)
-	// Per ADR-018, the code and comment indexes are index-only (Store=false): they
-	// can't return stored content or highlight fragments. Comment snippets come
-	// from SQLite (`comments.text`, set in assembleCommentHit). Diff text still
-	// lives only in Bleve (phase 1), so it keeps stored fields + ANSI highlight.
-	if plan.BleveIndex == "diff" {
+	// Per ADR-018, the committed code Bleve index is index-only (Store=false) so
+	// it returns no stored content or fragments — code snippets are re-derived
+	// from git blobs in enrichCodeHit. But CombinedCodeIndex aliases dirty
+	// overlays (still stored, in-memory), so we keep Highlight on for the code
+	// path: stored-doc (dirty) hits get fragments, index-only (committed) hits
+	// get empty fragments and fall through to blob re-derivation. Diff stays
+	// stored (phase 1, diff text lives only in Bleve). Comments skip highlight
+	// entirely — snippets come from `comments.text` in SQLite.
+	if plan.BleveIndex != "comment" {
 		searchReq.Fields = []string{"content"}
 		searchReq.Highlight = bleve.NewHighlightWithStyle("ansi")
 	}
@@ -196,7 +200,7 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 			if strings.HasPrefix(hit.ID, "dirty_") {
 				hitResults, err = enrichDirtyHit(hit, fragment)
 			} else {
-				hitResults, err = enrichCodeHit(ctx, s, hit, fragment, filters)
+				hitResults, err = enrichCodeHit(ctx, s, hit, plan, fragment, filters)
 			}
 		}
 		if err != nil {
@@ -267,7 +271,7 @@ func enrichDiffHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 }
 
 // enrichCodeHit looks up file metadata from SQL for a Bleve code hit.
-func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.DocumentMatch, fragment string, filters *Filters) ([]Result, error) {
+func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.DocumentMatch, plan *ExecutionPlan, fragment string, filters *Filters) ([]Result, error) {
 	blobID := strings.TrimPrefix(hit.ID, "blob_")
 
 	var revFilter string
@@ -275,8 +279,11 @@ func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 		revFilter = resolveRevRef(filters.Rev)
 	}
 
+	// content_hash joins us to git for ADR-018 phase 1b snippet re-derivation:
+	// Bleve no longer stores the committed code; we read the blob and locate
+	// the match ourselves to populate Line + a plain-text snippet.
 	sqlQ := `
-		SELECT fr.path, b.language, rp.name
+		SELECT fr.path, b.language, rp.name, b.content_hash
 		FROM blobs b
 		JOIN file_revs fr ON fr.blob_id = b.id
 		LEFT JOIN refs r ON r.commit_id = fr.commit_id
@@ -302,20 +309,37 @@ func enrichCodeHit(ctx context.Context, s *store.Store, hit *blevesearch.Documen
 	defer rows.Close()
 
 	var results []Result
+	var contentHash string
 	for rows.Next() {
 		var path string
 		var lang, repo sql.NullString
-		if err := rows.Scan(&path, &lang, &repo); err != nil {
+		var hash string
+		if err := rows.Scan(&path, &lang, &repo, &hash); err != nil {
 			slog.Warn("code hit scan error, skipping row", "err", err)
 			continue
 		}
+		contentHash = hash // same blob across rows (multiple paths/refs)
 		results = append(results, Result{
-			FilePath: path, Score: hit.Score, Content: fragment,
+			FilePath: path, Score: hit.Score,
 			Language: lang.String, Repo: repo.String,
 		})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate code rows: %w", err)
+	}
+
+	// Snippet+line derivation: a non-empty Bleve fragment means this hit came
+	// from a stored doc (dirty overlay) — use it as-is. Otherwise (committed
+	// code, index-only) read the blob and locate the match ourselves.
+	line, snippet := 0, fragment
+	if fragment == "" && contentHash != "" {
+		if content := s.ReadBlob(contentHash); content != nil {
+			line, snippet = locateMatchAndSnippet(content, plan, codeSnippetMaxLen)
+		}
+	}
+	for i := range results {
+		results[i].Line = line
+		results[i].Content = snippet
 	}
 	return results, nil
 }

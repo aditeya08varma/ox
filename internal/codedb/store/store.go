@@ -147,6 +147,12 @@ type Store struct {
 	// dirty overlays for uncommitted worktree files (keyed by worktree ID)
 	dirtyCodeIndexes  map[string]bleve.Index
 	CombinedCodeIndex bleve.Index // alias of CodeIndex + all dirty indexes, or just CodeIndex
+
+	// blob-read pool — lazy-initialized on first ReadBlob call (search read path).
+	// Per-repo mutex serializes packfile reads (go-git's packfile reader isn't
+	// safe for concurrent access from the same handle). See blob_reader.go.
+	blobReposOnce sync.Once
+	blobRepos     []blobRepoHandle
 }
 
 // Open opens (or creates) a Store at the given root directory.
@@ -385,6 +391,7 @@ func (s *Store) Close() error {
 	var firstErr error
 	s.closeOnce.Do(func() {
 		s.DetachDirtyOverlay()
+		s.closeBlobRepos()
 		for _, idx := range []bleve.Index{s.CodeIndex, s.DiffIndex, s.CommentIndex} {
 			if idx == nil {
 				continue
