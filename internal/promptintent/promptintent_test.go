@@ -12,9 +12,17 @@ func TestLooksLikeRecall_LengthGate(t *testing.T) {
 		want   bool
 	}{
 		{"empty", "", false},
-		{"too short", "find foo bar", false},
+		{"fragment find", "find a", false},
+		{"fragment explain", "explain", false},
 		{"just under threshold", strings.Repeat("a", MinPromptChars-1), false},
 		{"long but no intent", strings.Repeat("alpha beta ", 30), false},
+		// regression for ox-5vnf: short recall questions must now pass the
+		// length gate now that local query is ~12ms (no cloud-tax to amortize).
+		// Intent classifier still does the heavy lifting; length only guards
+		// against fragment-sized false positives.
+		{"short recall question", "how do we handle auth in this repo?", true},
+		{"short where-is question", "where is the ledger cache helper?", true},
+		{"short explain prompt", "explain what ox agent prime does please", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -22,6 +30,70 @@ func TestLooksLikeRecall_LengthGate(t *testing.T) {
 				t.Fatalf("LooksLikeRecall(%q)=%v want %v", tc.prompt, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestMinPromptCharsThreshold pins the threshold so a future PR that raises
+// it without updating the rationale doc-comment trips this test first.
+// Failure prevented: threshold drift away from the local-only cost model.
+func TestMinPromptCharsThreshold(t *testing.T) {
+	if MinPromptChars != 20 {
+		t.Fatalf("MinPromptChars=%d, want 20 (see ox-5vnf rationale). "+
+			"If raising, update the doc-comment in promptintent.go.", MinPromptChars)
+	}
+}
+
+// TestTrimForMatch covers the upper-bound cap (ox-3ti2) that protects
+// ledgersearch from term dilution on long planning preambles.
+// Failure prevented: long prompts being passed verbatim, producing zero
+// matches under AND semantics or diluted ranking under OR semantics.
+func TestTrimForMatch(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want int // exact length expected, or -1 for "unchanged"
+	}{
+		{"short prompt unchanged", "how do we handle auth?", -1},
+		{"exactly at threshold", strings.Repeat("a", MaxPromptCharsForMatch), -1},
+		{"one over threshold no space", strings.Repeat("a", MaxPromptCharsForMatch+1), MaxPromptCharsForMatch},
+		{
+			"long prompt with late space falls back to hard cut",
+			strings.Repeat("a", MaxPromptCharsForMatch*4/5-1) + " " + strings.Repeat("b", MaxPromptCharsForMatch),
+			MaxPromptCharsForMatch,
+		},
+		{
+			"long prompt with space inside upper 20% trims to space",
+			strings.Repeat("a", MaxPromptCharsForMatch-10) + " " + strings.Repeat("b", 100),
+			MaxPromptCharsForMatch - 10,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := TrimForMatch(tc.in)
+			if tc.want == -1 {
+				if got != tc.in {
+					t.Fatalf("expected unchanged for len=%d, got len=%d", len(tc.in), len(got))
+				}
+				return
+			}
+			if len(got) != tc.want {
+				t.Fatalf("TrimForMatch len=%d, want %d (input len=%d)", len(got), tc.want, len(tc.in))
+			}
+			// invariant: trimmed result is always a prefix of the input
+			if !strings.HasPrefix(tc.in, got) {
+				t.Fatalf("trimmed result is not a prefix of the input — TrimForMatch must never modify content")
+			}
+		})
+	}
+}
+
+// TestMaxPromptCharsForMatchThreshold pins the upper cap so a future PR
+// that raises it without re-evaluating the term-dilution analysis trips
+// this test first.
+func TestMaxPromptCharsForMatchThreshold(t *testing.T) {
+	if MaxPromptCharsForMatch != 400 {
+		t.Fatalf("MaxPromptCharsForMatch=%d, want 400 (see ox-3ti2 rationale). "+
+			"If raising, document why term-dilution is no longer a concern.", MaxPromptCharsForMatch)
 	}
 }
 

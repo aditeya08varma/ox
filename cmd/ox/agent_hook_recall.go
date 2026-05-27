@@ -86,7 +86,13 @@ func emitLocalRecallPreamble(w io.Writer, prompt string) {
 	ctx, cancel := context.WithTimeout(context.Background(), recallQueryTimeout)
 	defer cancel()
 
-	results, err := defaultRunner.Query(ctx, prompt, recallMaxResults)
+	// Trim only the matching surface — never the user's actual prompt (the
+	// model still sees the full original text). Long planning preambles
+	// would otherwise tokenize into too many AND terms (zero matches) or
+	// flood OR ranking with noise (per ox-3ti2). The cap keeps the
+	// intent sentence(s) intact while bounding the keyword set.
+	matchText := promptintent.TrimForMatch(prompt)
+	results, err := defaultRunner.Query(ctx, matchText, recallMaxResults)
 	if err != nil {
 		slog.Debug("hook: local recall query error", "error", err)
 		return

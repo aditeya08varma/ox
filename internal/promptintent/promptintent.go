@@ -2,14 +2,20 @@
 // freshly submitted prompt to decide whether it is worth firing a local
 // recall query against the ledger / team-context cache.
 //
-// Two gates run in order:
+// Three gates run in order:
 //
-//  1. Length gate (MinPromptChars) — rules out "yes", "ok", "go", "fix this"
-//     and similar low-signal turns where recall would mostly be noise.
+//  1. Length gate (MinPromptChars) — rules out single-token noise like
+//     "yes", "ok", "go", "fix" where recall would surface nothing useful.
+//     Threshold is intentionally LOW because the recall runner is local
+//     and ~12ms — there is no cloud round-trip tax to amortize.
 //  2. Intent classifier — only prompts that look like a *question* or
 //     *recall request* are forwarded. Prompts that begin with a clear
 //     edit/action verb (fix, add, write, ...) are skipped because the user
 //     is already mid-flow and wants execution, not retrieval.
+//  3. Match-surface cap (MaxPromptCharsForMatch) — long prompts have their
+//     match surface trimmed BEFORE being handed to the runner. The user's
+//     actual prompt is never modified; only the bytes used for matching
+//     shrink, so AND-term dilution / OR-result-flooding stays bounded.
 //
 // The package is intentionally dependency-free and pure-string so it can
 // be unit-tested in isolation and reused outside the hook handler.
@@ -21,9 +27,54 @@ import (
 )
 
 // MinPromptChars is the lower bound below which the prompt is considered
-// too short to bother running recall on. ~40 tokens ≈ 160 chars by the
-// rough 4-chars-per-token English heuristic used across LLM tooling.
-const MinPromptChars = 160
+// too short to bother running recall on.
+//
+// Rationale (revised under ox-5vnf): the original threshold of 160 chars
+// (~40 tokens) was tuned when every recall fire was assumed to cost a
+// 200-2000ms cloud round-trip — the gate existed to amortize that tax.
+// With ox-m01h's local ledgersearch running at ~12ms p95, the cost is
+// near-zero. The intent classifier (recallPatterns below) does the real
+// work of filtering meaningless prompts; this length gate now exists
+// only to reject intent-classifier false positives on fragment-sized
+// prompts like "find a" or "explain" that match the regex but carry
+// no searchable signal. 20 chars is the boundary between fragments
+// ("find a" = 6) and minimum-viable recall questions ("where is the
+// ledger" = 19, "how do we handle X" = 18).
+const MinPromptChars = 20
+
+// MaxPromptCharsForMatch caps the number of prompt bytes handed to the
+// recall runner for matching. Long planning preambles (1000+ chars) get
+// tokenized into many keywords; AND semantics produce zero matches and
+// OR semantics dilute ranking — either way the 5-line preamble budget
+// either stays empty or fills with irrelevant hits.
+//
+// 400 chars (~100 tokens) is enough to capture the user's intent
+// sentence(s) while staying within a sensible matching surface.
+// This is intentionally MVP — keyword extraction (CamelCase tokens,
+// snake_case identifiers, proper nouns) is a follow-up if truncation
+// proves lossy in practice.
+const MaxPromptCharsForMatch = 400
+
+// TrimForMatch returns the prompt trimmed to at most MaxPromptCharsForMatch
+// characters, preferring to cut on a word boundary so we never split an
+// identifier in half. Returns the prompt unchanged if it already fits.
+//
+// The caller must keep the original prompt for downstream rendering —
+// only the matching surface should ever see the trimmed copy.
+func TrimForMatch(prompt string) string {
+	if len(prompt) <= MaxPromptCharsForMatch {
+		return prompt
+	}
+	cut := prompt[:MaxPromptCharsForMatch]
+	// prefer last whitespace boundary within the cut window so we do not
+	// slice through a token. Only honor the boundary if it leaves at
+	// least 80% of the budget intact — otherwise the hard cut is closer
+	// to user intent than a too-short word-boundary cut.
+	if idx := strings.LastIndexAny(cut, " \t\n"); idx >= MaxPromptCharsForMatch*4/5 {
+		return cut[:idx]
+	}
+	return cut
+}
 
 // recallPatterns match phrases that signal the user is trying to recall
 // or discover something. They are intentionally broad — false positives
