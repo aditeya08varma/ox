@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- UserPromptSubmit hook prepends ox query --local recall; local-only by default (ADR-018).
+
 ### Changed
 
 **`ox session audit` and `ox session redact` now require an explicit scope**
