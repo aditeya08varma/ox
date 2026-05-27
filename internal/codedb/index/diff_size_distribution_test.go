@@ -162,6 +162,8 @@ func TestDiffStoredVsIndexOnly(t *testing.T) {
 	}
 
 	storedSize := buildIdx("stored", bleve.NewIndexMapping())
+	require.Greater(t, storedSize, uint64(0),
+		"stored baseline must be > 0 — otherwise the saving% log emits Inf/NaN, not actionable output")
 
 	ft := bleve.NewTextFieldMapping()
 	ft.Store = false

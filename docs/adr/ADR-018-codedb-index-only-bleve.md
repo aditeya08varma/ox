@@ -1,3 +1,4 @@
+<!-- doc-audience: ai -->
 # ADR-018: Index-Only Bleve — Drop Stored Content & Highlighting in CodeDB
 
 **Status**: Accepted (merged 2026-05-26 via PR #621)
@@ -40,7 +41,7 @@ index to store content — to produce an ANSI string we immediately discard.
 
 **Measured savings** (`TestBleveStoredContentCost`, 1707 ox `.go` files):
 
-```
+```text
 stored (default)            = 39.9 MB
 index-only (Store=false, no term vectors) = 10.3 MB
 saving = 74%
@@ -187,7 +188,7 @@ Measured the actual diff text size distribution on the largest live codedb
 (`repo_019c6d2e`, 52,363 diffs, harness:
 `internal/codedb/index/diff_size_distribution_test.go`):
 
-```
+```text
 mean: 5.3 KB    p50: 4.1 KB    p90: 7.9 KB    p95: 9.0 KB    p99: 17 KB    max: 707 KB
 total stored text: 265.2 MB   bleve diff dir on disk: 671 MB
 ```
@@ -196,7 +197,7 @@ total stored text: 265.2 MB   bleve diff dir on disk: 671 MB
 same 52,363-doc corpus (harness: `TestDiffStoredVsIndexOnly` — rebuilds the
 same docs into two fresh Bleve indexes, default-stored vs index-only):
 
-```
+```text
 stored (default):       672.4 MB
 index-only (phase 2):   125.8 MB
 saving:                 546.5 MB  (81.3%)

@@ -2063,14 +2063,11 @@ sendLoop2:
 				commentBatchN++
 				commentsExtracted++
 
-				if commentBatchN >= bleveBatchSize {
-					if err := s.CommentIndex.Batch(commentBatch); err != nil {
-						rows.Close()
-						return 0, 0, fmt.Errorf("flush comment batch: %w", err)
-					}
-					commentBatch = s.CommentIndex.NewBatch()
-					commentBatchN = 0
-				}
+				// NOTE: do NOT flush bleve here mid-tx. If the SQL tx later rolls
+				// back, any already-flushed bleve docs become orphans (pointing
+				// to comment ids that don't exist post-rollback). Per-chunk
+				// bounds keep the in-memory batch reasonable; single flush
+				// happens after the tx commits below.
 			}
 			if err := rows.Err(); err != nil {
 				rows.Close()

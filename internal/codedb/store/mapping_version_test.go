@@ -20,7 +20,9 @@ func TestMappingVersion_FreshIndexWritesMarker(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, idx.Close())
 
-	require.Equal(t, bleveMappingVersion("code"), readMappingVersion(codePath),
+	gotVer, verErr := readMappingVersion(codePath)
+	require.NoError(t, verErr)
+	require.Equal(t, bleveMappingVersion("code"), gotVer,
 		"fresh index should carry the current mapping version")
 	require.False(t, HasNeedsReindexMarker(root, "code"),
 		"fresh index shouldn't claim it needs a rebuild")
@@ -58,7 +60,9 @@ func TestMappingVersion_UpgradeFromPreMarker(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(0), count,
 		"upgraded index must be empty — daemon's next pass refills it from the needs_reindex marker")
-	require.Equal(t, bleveMappingVersion("code"), readMappingVersion(codePath),
+	gotVer, verErr := readMappingVersion(codePath)
+	require.NoError(t, verErr)
+	require.Equal(t, bleveMappingVersion("code"), gotVer,
 		"upgraded index should be stamped at the current mapping version")
 	require.True(t, HasNeedsReindexMarker(root, "code"),
 		".needs_reindex_code must be set so the daemon refills the empty index")

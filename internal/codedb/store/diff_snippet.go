@@ -40,6 +40,16 @@ func (s *Store) DiffSnippet(oldHash, newHash, path string) string {
 			newText = string(b)
 		}
 	}
+	// Honor the doc'd empty contract: when both sides are unreadable (missing
+	// blobs, binary, or too large), return "" rather than the bare
+	// "--- a/path\n+++ b/path\n" header diffformat.Format would otherwise emit.
+	// Callers treat empty as "no snippet available".
+	if oldText == "" && newText == "" {
+		if s.diffCache != nil {
+			s.diffCache.Add(key, "")
+		}
+		return ""
+	}
 	text := diffformat.Format(path, oldText, newText)
 	if s.diffCache != nil {
 		s.diffCache.Add(key, text)

@@ -269,9 +269,10 @@ func openSQLite(root string) (*sql.DB, error) {
 // Comment text is still retrievable in full from SQLite (`comments.text`);
 // code snippets are re-derived from git blobs at search time.
 //
-// The `diff` index stays on the default (stored) mapping for now because diff
-// text lives ONLY in bleve today (the `diffs` SQLite table is metadata-only) —
-// see ADR-018 open question 1 for the phase-2 plan.
+// The `diff` index is also index-only (ADR-018 phase 2 — Option D + Option A):
+// diff text is regenerated on the search read path via Store.DiffSnippet
+// (LRU-cached, using the shared internal/codedb/diffformat package so the
+// indexer's write format and the search re-derivation stay byte-stable).
 //
 // Bump bleveMappingVersion(name) whenever this returns a structurally different
 // mapping; existing on-disk indexes whose stored version is older will be nuked
@@ -311,16 +312,26 @@ func bleveMappingVersion(name string) int {
 // version of the mapping the index was created with. Missing => v1 (pre-marker).
 const mappingVersionMarker = ".mapping_version"
 
-func readMappingVersion(path string) int {
+// readMappingVersion returns the recorded mapping version for path. Missing
+// marker (os.IsNotExist) is the legitimate pre-v2 case → returns (1, nil) and
+// the caller may proceed with a destructive upgrade. Any other I/O failure
+// (permission, transient EIO, EROFS) returns (0, err); callers MUST refuse to
+// upgrade on a non-nil error so a transient read failure can't trigger a
+// destructive nuke-and-recreate of a healthy index. Garbage marker contents
+// are treated as pre-marker (v1, no error) — that case is recoverable.
+func readMappingVersion(path string) (int, error) {
 	b, err := os.ReadFile(filepath.Join(path, mappingVersionMarker))
 	if err != nil {
-		return 1 // pre-marker indexes are treated as v1
+		if os.IsNotExist(err) {
+			return 1, nil
+		}
+		return 0, fmt.Errorf("read mapping version at %s: %w", path, err)
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || n < 1 {
-		return 1
+	n, parseErr := strconv.Atoi(strings.TrimSpace(string(b)))
+	if parseErr != nil || n < 1 {
+		return 1, nil
 	}
-	return n
+	return n, nil
 }
 
 func writeMappingVersion(path, name string) error {
@@ -580,8 +591,17 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 		// Mapping-version check: an existing index opened cleanly, but if its
 		// mapping version is below the current one (e.g., ADR-018 flipped code
 		// from default-stored to index-only), it must be rebuilt — the old
-		// stored segments don't shrink in place.
-		if got := readMappingVersion(path); got < bleveMappingVersion(name) {
+		// stored segments don't shrink in place. On a transient marker-read
+		// failure (permission, I/O), keep the existing index rather than
+		// destructively rebuild — a flaky filesystem must not nuke a healthy
+		// bleve dir.
+		got, verErr := readMappingVersion(path)
+		if verErr != nil {
+			slog.Warn("read mapping version failed; keeping existing index (no destructive upgrade)",
+				"name", name, "path", path, "err", verErr)
+			return idx, nil
+		}
+		if got < bleveMappingVersion(name) {
 			if closeErr := idx.Close(); closeErr != nil {
 				slog.Warn("close before mapping upgrade failed",
 					"name", name, "err", closeErr)

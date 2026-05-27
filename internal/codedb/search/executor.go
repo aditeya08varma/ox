@@ -314,7 +314,7 @@ func enrichDiffHits(ctx context.Context, s *store.Store, diffIDs []string, filte
 
 	rows, err := s.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("query diff hit metadata: %w", err)
 	}
 	defer rows.Close()
 
@@ -410,7 +410,7 @@ func enrichCodeHits(ctx context.Context, s *store.Store, blobIDs []string, filte
 
 	rows, err := s.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("query code hit metadata: %w", err)
 	}
 	defer rows.Close()
 
@@ -496,7 +496,7 @@ func enrichCommentHits(ctx context.Context, s *store.Store, commentIDs []string,
 
 	rows, err := s.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query comment hit metadata: %w", err)
 	}
 	defer rows.Close()
 
