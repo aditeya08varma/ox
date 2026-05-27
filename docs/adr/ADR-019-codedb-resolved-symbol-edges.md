@@ -1,3 +1,4 @@
+<!-- doc-audience: ai -->
 # ADR-019: Resolved Symbol Edges for CodeDB
 
 **Status**: Proposed (needs Ryan — new data structure + changes call-graph search semantics)
