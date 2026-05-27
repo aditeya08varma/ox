@@ -3,6 +3,7 @@ package promptintent
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestLooksLikeRecall_LengthGate(t *testing.T) {
@@ -40,6 +41,26 @@ func TestMinPromptCharsThreshold(t *testing.T) {
 	if MinPromptChars != 20 {
 		t.Fatalf("MinPromptChars=%d, want 20 (see ox-5vnf rationale). "+
 			"If raising, update the doc-comment in promptintent.go.", MinPromptChars)
+	}
+}
+
+// TestTrimForMatch_UTF8Safe verifies the rune-aware trimming never splits
+// a multi-byte UTF-8 codepoint. Failure prevented: emoji / CJK / accented
+// Latin input being sliced mid-codepoint, producing invalid UTF-8 in the
+// matcher's view of the prompt.
+func TestTrimForMatch_UTF8Safe(t *testing.T) {
+	// Build a prompt where each "character" is a 4-byte emoji. A
+	// byte-based slice at MaxPromptCharsForMatch would land mid-codepoint
+	// and produce a string ending in 0xFFFD (replacement char).
+	emoji := "🔥" // 4 bytes
+	prompt := strings.Repeat(emoji, MaxPromptCharsForMatch+50)
+	got := TrimForMatch(prompt)
+	if !utf8.ValidString(got) {
+		t.Fatalf("TrimForMatch produced invalid UTF-8 — split a codepoint")
+	}
+	gotRunes := []rune(got)
+	if len(gotRunes) > MaxPromptCharsForMatch {
+		t.Fatalf("trimmed result has %d runes, expected <= %d", len(gotRunes), MaxPromptCharsForMatch)
 	}
 }
 

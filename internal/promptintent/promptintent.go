@@ -24,10 +24,11 @@ package promptintent
 import (
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
-// MinPromptChars is the lower bound below which the prompt is considered
-// too short to bother running recall on.
+// MinPromptChars is the lower bound (in runes, not bytes) below which the
+// prompt is considered too short to bother running recall on.
 //
 // Rationale (revised under ox-5vnf): the original threshold of 160 chars
 // (~40 tokens) was tuned when every recall fire was assumed to cost a
@@ -37,43 +38,59 @@ import (
 // work of filtering meaningless prompts; this length gate now exists
 // only to reject intent-classifier false positives on fragment-sized
 // prompts like "find a" or "explain" that match the regex but carry
-// no searchable signal. 20 chars is the boundary between fragments
+// no searchable signal. 20 runes is the boundary between fragments
 // ("find a" = 6) and minimum-viable recall questions ("where is the
 // ledger" = 19, "how do we handle X" = 18).
+//
+// Counted in runes so a non-ASCII prompt (CJK, emoji, accented Latin)
+// is treated like its ASCII equivalent — a 20-character question is a
+// 20-character question regardless of UTF-8 encoding width.
 const MinPromptChars = 20
 
-// MaxPromptCharsForMatch caps the number of prompt bytes handed to the
-// recall runner for matching. Long planning preambles (1000+ chars) get
-// tokenized into many keywords; AND semantics produce zero matches and
-// OR semantics dilute ranking — either way the 5-line preamble budget
+// MaxPromptCharsForMatch caps the number of runes (not bytes) handed to
+// the recall runner for matching. Long planning preambles (1000+ chars)
+// get tokenized into many keywords; AND semantics produce zero matches
+// and OR semantics dilute ranking — either way the 5-line preamble budget
 // either stays empty or fills with irrelevant hits.
 //
-// 400 chars (~100 tokens) is enough to capture the user's intent
+// 400 runes (~100 tokens) is enough to capture the user's intent
 // sentence(s) while staying within a sensible matching surface.
 // This is intentionally MVP — keyword extraction (CamelCase tokens,
 // snake_case identifiers, proper nouns) is a follow-up if truncation
 // proves lossy in practice.
+//
+// Counted in runes so a UTF-8 prompt (emoji, CJK, accented Latin) is
+// never sliced mid-codepoint, which would produce invalid UTF-8 and a
+// garbled trailing character in the matcher's view of the prompt.
 const MaxPromptCharsForMatch = 400
 
 // TrimForMatch returns the prompt trimmed to at most MaxPromptCharsForMatch
-// characters, preferring to cut on a word boundary so we never split an
+// runes, preferring to cut on a word boundary so we never split an
 // identifier in half. Returns the prompt unchanged if it already fits.
 //
 // The caller must keep the original prompt for downstream rendering —
 // only the matching surface should ever see the trimmed copy.
+//
+// Rune-aware: counts and slices on []rune so UTF-8 multi-byte sequences
+// are preserved intact. A byte-based slice could split a codepoint and
+// hand the runner invalid UTF-8 with a garbled trailing character.
 func TrimForMatch(prompt string) string {
-	if len(prompt) <= MaxPromptCharsForMatch {
+	runes := []rune(prompt)
+	if len(runes) <= MaxPromptCharsForMatch {
 		return prompt
 	}
-	cut := prompt[:MaxPromptCharsForMatch]
+	cut := runes[:MaxPromptCharsForMatch]
 	// prefer last whitespace boundary within the cut window so we do not
 	// slice through a token. Only honor the boundary if it leaves at
 	// least 80% of the budget intact — otherwise the hard cut is closer
 	// to user intent than a too-short word-boundary cut.
-	if idx := strings.LastIndexAny(cut, " \t\n"); idx >= MaxPromptCharsForMatch*4/5 {
-		return cut[:idx]
+	threshold := MaxPromptCharsForMatch * 4 / 5
+	for i := len(cut) - 1; i >= threshold; i-- {
+		if r := cut[i]; r == ' ' || r == '\t' || r == '\n' {
+			return string(cut[:i])
+		}
 	}
-	return cut
+	return string(cut)
 }
 
 // recallPatterns match phrases that signal the user is trying to recall
@@ -130,7 +147,9 @@ var actionVerbs = map[string]struct{}{
 // The function is pure: no I/O, no allocations beyond regex matching.
 func LooksLikeRecall(prompt string) bool {
 	trimmed := strings.TrimSpace(prompt)
-	if len(trimmed) < MinPromptChars {
+	// rune-aware length so a 20-character non-ASCII prompt isn't rejected
+	// just because UTF-8 makes each character 2-4 bytes
+	if utf8.RuneCountInString(trimmed) < MinPromptChars {
 		return false
 	}
 	if startsWithActionVerb(trimmed) {
