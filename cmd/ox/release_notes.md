@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- UserPromptSubmit hook prepends ox query --local recall; local-only by default (ADR-018).
+- New `hooks.userpromptsubmit.cloud_query` config key (default `off`) opts the UserPromptSubmit hook into a parallel SageOx cloud query. When enabled, prompt content is redacted via the session secrets pipeline before any byte leaves the machine, and the cloud path silently degrades to local-only if `ox login` has not run. `ox doctor` reports the effective value and the privacy/recall tradeoff.
+
 ### Changed
 
 **`ox session audit` and `ox session redact` now require an explicit scope**

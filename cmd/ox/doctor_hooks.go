@@ -6,6 +6,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/sageox/ox/internal/config"
 )
 
 func init() {
@@ -19,6 +21,32 @@ func init() {
 			return checkProjectHookCompleteness(fix)
 		},
 	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugCloudQueryConfig,
+		Name:        "UserPromptSubmit cloud query",
+		Category:    "Integration",
+		FixLevel:    FixLevelCheckOnly,
+		Description: "Reports the effective cloud_query opt-in and the privacy/recall tradeoff",
+		Run: func(_ bool) checkResult {
+			return checkUserPromptSubmitCloudQuery()
+		},
+	})
+}
+
+// checkUserPromptSubmitCloudQuery reports the effective value of
+// hooks.userpromptsubmit.cloud_query and the one-line tradeoff explanation.
+// This is informational only (FixLevelCheckOnly) — there is no broken
+// state to repair; the user explicitly chose the value.
+func checkUserPromptSubmitCloudQuery() checkResult {
+	gitRoot := findGitRoot()
+	enabled := config.ResolveUserPromptSubmitCloudQuery(gitRoot)
+	if enabled {
+		return PassedCheck("UserPromptSubmit cloud query",
+			"on — prompts also queried against SageOx cloud (redacted); higher recall, less privacy")
+	}
+	return PassedCheck("UserPromptSubmit cloud query",
+		"off — local-ledger only, zero network calls on prompt path; strictest privacy, lower recall")
 }
 
 // checkSessionStartHookBug warns about Claude Code bug #10373 where SessionStart

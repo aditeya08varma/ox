@@ -338,6 +338,10 @@ type UserConfig struct {
 	// SageOx cloud-side summarization and is rejected at validation today. See
 	// internal/config/agent_summarizer.go and ADR-016.
 	AgentSummarizer string `yaml:"agent_summarizer,omitempty"`
+
+	// Hooks holds per-hook-event policy switches. Today only carries the
+	// UserPromptSubmit cloud_query opt-in; see HooksConfig for rationale.
+	Hooks *HooksConfig `yaml:"hooks,omitempty"`
 }
 
 // BadgeConfig tracks badge suggestion state across all projects.

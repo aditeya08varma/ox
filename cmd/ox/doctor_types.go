@@ -133,6 +133,7 @@ const (
 	CheckSlugSessionStartHookBug = "session-start-hook-bug"
 	CheckSlugGitCommitHooks      = "git-commit-hooks"
 	CheckSlugAdapterPrimeBlocks  = "adapter-prime-blocks"
+	CheckSlugCloudQueryConfig    = "userpromptsubmit-cloud-query"
 
 	// Team Context checks
 	CheckSlugTeamRegistration   = "team-registration"
