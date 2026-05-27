@@ -9,7 +9,7 @@ You did not configure this. It is on by default, and it runs entirely on your ma
 
 Above an agent response, a few lines like:
 
-```
+```text
 [ox-recall]
 2026-04-12-activity-feed · "we cursor-paginate by created_at desc with a tiebreak on id"
 2026-03-30-feed-perf · "switched off offset pagination after the N+1 regression on page 30+"

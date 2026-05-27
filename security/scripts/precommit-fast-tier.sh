@@ -25,15 +25,24 @@ STAGED_SENSITIVE=$(git diff --cached --name-only --diff-filter=ACM | grep -E '(i
 
 if [[ -n "$STAGED_GO" ]] && command -v govulncheck >/dev/null 2>&1; then
   echo "[SEC_PRECOMMIT] govulncheck on touched Go packages..."
-  PKGS=$(echo "$STAGED_GO" | xargs -n1 dirname 2>/dev/null | sort -u | sed 's|^|./|')
-  if [[ -n "$PKGS" ]]; then
-    govulncheck $PKGS 2>&1 | head -50 || echo "[SEC_PRECOMMIT] govulncheck warnings (advisory, not blocking)"
+  # array-build so package paths with spaces/special chars survive intact
+  PKGS=()
+  while IFS= read -r f; do
+    [[ -z "$f" ]] && continue
+    PKGS+=("./$(dirname "$f")")
+  done < <(printf '%s\n' "$STAGED_GO" | sort -u)
+  # de-dupe (xargs uniq via sort -u was on file paths, not dirs)
+  if [[ ${#PKGS[@]} -gt 0 ]]; then
+    mapfile -t PKGS < <(printf '%s\n' "${PKGS[@]}" | sort -u)
+    govulncheck "${PKGS[@]}" 2>&1 | head -50 || echo "[SEC_PRECOMMIT] govulncheck warnings (advisory, not blocking)"
   fi
 fi
 
 if [[ -n "$STAGED_SENSITIVE" ]] && [[ -x "./bin/opengrep" ]] && [[ -f "./security/rules/sageox-entry-points.yml" ]]; then
   echo "[SEC_PRECOMMIT] opengrep --diff-aware on sensitive paths..."
-  ./bin/opengrep --config security/rules/sageox-entry-points.yml $STAGED_SENSITIVE 2>&1 | head -30 || echo "[SEC_PRECOMMIT] opengrep warnings (advisory, not blocking)"
+  # array-build so paths with spaces are passed as separate args
+  mapfile -t SENSITIVE_PATHS < <(printf '%s\n' "$STAGED_SENSITIVE")
+  ./bin/opengrep --config security/rules/sageox-entry-points.yml "${SENSITIVE_PATHS[@]}" 2>&1 | head -30 || echo "[SEC_PRECOMMIT] opengrep warnings (advisory, not blocking)"
 fi
 
 exit 0

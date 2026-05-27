@@ -105,7 +105,7 @@ The fail-open contract is load-bearing. A hook that fails closed would tax every
 
 ## 6. Config keys
 
-All keys live under `hooks.userpromptsubmit.*` in the standard config layering (`config.Project` overrides `config.Local` overrides defaults). Surfaced via `ox config get/set`.
+All keys live under `hooks.userpromptsubmit.*`. The resolver contract (see `ResolveUserPromptSubmitCloudQuery` in `internal/config/hooks_cloud_query.go`) is **user config > project config > defaults** — a user-level setting always wins over a project-level setting. Any config-load error fails closed (returns the default). Surfaced via `ox config get/set`.
 
 | Key | Type | Default | Effect |
 |-----|------|---------|--------|

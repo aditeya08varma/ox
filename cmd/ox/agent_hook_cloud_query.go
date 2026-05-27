@@ -63,6 +63,19 @@ var cloudQueryTimeout = 100 * time.Millisecond
 func PrepareCloudQuery(ctx context.Context, projectRoot, prompt string) CloudQueryDecision {
 	decision := CloudQueryDecision{CloudQueryTimeout: cloudQueryTimeout}
 
+	// Caller-context observation: the UserPromptSubmit handler wraps this
+	// call with a 100ms timeout (recallQueryTimeout). If the caller's
+	// context is already done, or becomes done while redaction runs, we
+	// MUST degrade to local-only rather than continue silently — the
+	// whole point of the gate is that a slow remote (or slow redactor)
+	// cannot block the prompt path.
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := ctx.Err(); err != nil {
+		return decision
+	}
+
 	// gate 1: opt-in. Default false means no network calls ever.
 	if !config.ResolveUserPromptSubmitCloudQuery(projectRoot) {
 		return decision
@@ -86,7 +99,32 @@ func PrepareCloudQuery(ctx context.Context, projectRoot, prompt string) CloudQue
 	// gate 3: redaction. ALWAYS runs before transmit — this is the
 	// load-bearing invariant. If RedactPrompt panics or otherwise fails,
 	// fail-closed via the recover() below.
-	redacted, count := redactPromptSafe(prompt)
+	//
+	// Run redaction off-goroutine and race it against ctx.Done() so a
+	// pathological pattern that takes longer than the caller's budget
+	// cannot wedge the prompt path. Goroutine leaks are bounded: even if
+	// the redactor never returns, only one goroutine per prompt leaks and
+	// the channel is buffered so the goroutine can always exit cleanly.
+	type redactResult struct {
+		redacted string
+		count    int
+	}
+	resultCh := make(chan redactResult, 1)
+	go func() {
+		r, c := redactPromptSafe(prompt)
+		resultCh <- redactResult{redacted: r, count: c}
+	}()
+
+	var redacted string
+	var count int
+	select {
+	case <-ctx.Done():
+		slog.Debug("cloud-query: context done before redaction completed, degrading", "err", ctx.Err())
+		return decision
+	case res := <-resultCh:
+		redacted, count = res.redacted, res.count
+	}
+
 	if redacted == "" && prompt != "" {
 		// defensive: redactor returned empty for non-empty input —
 		// treat as redaction failure and degrade

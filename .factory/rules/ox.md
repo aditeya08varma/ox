@@ -34,7 +34,7 @@ Sessions auto-record when `ox agent prime` runs. Discussions may be shared with 
 
 Publish WIP to teammates so they stay in sync:
 
-```
+```bash
 ox murmur --topic=wip "what you're building, which files you're modifying"
 ```
 

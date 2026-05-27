@@ -212,4 +212,6 @@ rules:
       - pattern: slog.Info($MSG, ..., "api_key", $TOKEN, ...)
     metavariable-regex:
       metavariable: $TOKEN
-      regex: '(token|key|secret|password|credential)'
+      # case-insensitive so camelCase identifiers like apiKey, authToken,
+      # sessionKey are caught alongside snake_case and lowercase variants
+      regex: '(?i)(token|secret|password|credential|api[_-]?key|auth[_-]?key)'

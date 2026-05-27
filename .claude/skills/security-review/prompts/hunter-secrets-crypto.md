@@ -9,7 +9,7 @@ Sister to [monorepo's hunter-secrets-crypto.md](https://github.com/sageox/sageox
 | Signal | What it means |
 |---|---|
 | New `go.sum` entry with a hash that doesn't correspond to an explicit `go.mod` change | Possible transitive supply-chain shift; review |
-| New install scripts in a published Go binary's deps | Go modules have `cgo` build hooks — verify nothing runs at build time that shouldn't |
+| New build-time execution surface in deps | Go modules do NOT have npm-style install / postinstall scripts. The relevant execution surfaces are `cgo` invocations during `go build` (when a dep uses `import "C"`) and any explicit `go generate` step — verify expected behavior when a new dep introduces either |
 | Crypto downgrade in the update path | If `ox upgrade` accepts an unsigned binary, supply-chain compromise is one MITM away |
 | Hardcoded BYOK key or OAuth secret anywhere in code | Critical (overlap with hunter-token-handling) |
 | Weak random for token generation | Must use `crypto/rand`, not `math/rand` |

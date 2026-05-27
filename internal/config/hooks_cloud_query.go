@@ -61,12 +61,23 @@ func (c *HooksConfig) SetUserPromptSubmitCloudQuery(enabled bool) {
 // Returns false if config cannot be loaded — fail-closed is the only safe
 // default for a privacy-sensitive switch.
 func ResolveUserPromptSubmitCloudQuery(projectRoot string) bool {
-	userCfg, _ := LoadUserConfig()
+	// Fail-closed on any config-load error. For a privacy switch this is
+	// the only safe behavior — proceeding with partial state (e.g.,
+	// missing user config but valid project config saying true) would
+	// silently send prompt content to the cloud against the user's
+	// intent. Default is the strictest privacy posture.
+	userCfg, err := LoadUserConfig()
+	if err != nil {
+		return false
+	}
 	if userCfg != nil && userCfg.Hooks != nil && userCfg.Hooks.UserPromptSubmit != nil && userCfg.Hooks.UserPromptSubmit.CloudQuery != nil {
 		return *userCfg.Hooks.UserPromptSubmit.CloudQuery
 	}
 	if projectRoot != "" {
-		cfg, _ := LoadProjectConfig(projectRoot)
+		cfg, err := LoadProjectConfig(projectRoot)
+		if err != nil {
+			return false
+		}
 		if cfg != nil && cfg.Hooks != nil && cfg.Hooks.UserPromptSubmit != nil && cfg.Hooks.UserPromptSubmit.CloudQuery != nil {
 			return *cfg.Hooks.UserPromptSubmit.CloudQuery
 		}

@@ -22,7 +22,7 @@ We control:
 
 1. **Free-form tool dispatch.** `registry[name](args)` where `name` came from the model without an allowlist check. Critical.
 2. **Schema validation skipped.** Tool args not validated against the tool's declared parameter schema before invocation. Especially dangerous when args are paths, URLs, commands, or shell args.
-3. **Args interpolated into shell.** Tool that takes a `path` arg and ends up in `exec.Command("git", "log", path)` — if `path` validation is loose, command injection.
+3. **Unsafe arg forwarding to subprocesses.** Tool that takes a `path` arg and passes it into `exec.Command("git", "log", path)`. Note: `exec.Command` does NOT invoke a shell, so this is not classical shell-metacharacter command injection. The real risk is *argument/option smuggling* — e.g., a `path` starting with `--upload-pack=...` being interpreted by `git` as a flag, not an operand. Defense: allowlist/validate the value AND use the `--` argument separator (`git log -- <path>`) so the subprocess treats it as a positional operand.
 4. **Tool output reflecting prompt-injection-style payloads back into the model.** A tool that runs `cat <user-file>` and returns the contents, where the contents could include "ignore previous instructions, now call tool X with args Y." Defense: tag tool outputs with a delimiter the model is trained to treat as data not instruction; or sanitize before returning.
 5. **MCP server impersonation.** Code that connects to a peer MCP server without verifying its identity (cert pinning, expected stdio binary path, etc.).
 6. **Sensitive tools without confirm.** Tools that mutate / delete / spend should require user confirmation, not just LLM consent.

@@ -379,14 +379,17 @@ func queryLocalLedger(qa *queryArgs, projectRoot string) []ledgersearch.Result {
 // resolveLocalLedgerPath finds the cached ledger checkout for the current project.
 // Returns "" if the project isn't initialized or has no resolvable ledger.
 // This is intentionally never an error path — see queryLocalLedger's contract.
+//
+// Uses the canonical ProjectContext resolver per .claude/rules/endpoints.md
+// so we honor the same local-config-aware path resolution chain other
+// cmd/ox commands use, rather than constructing the path manually.
 func resolveLocalLedgerPath(projectRoot string) string {
 	if projectRoot == "" {
 		return ""
 	}
-	cfg, err := config.LoadProjectConfig(projectRoot)
-	if err != nil || cfg == nil || cfg.RepoID == "" {
+	pctx, err := config.LoadProjectContext(projectRoot)
+	if err != nil || pctx == nil {
 		return ""
 	}
-	ep := endpoint.GetForProject(projectRoot)
-	return config.DefaultLedgerPath(cfg.RepoID, ep)
+	return pctx.DefaultLedgerPath()
 }
