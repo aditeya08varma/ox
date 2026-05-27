@@ -273,7 +273,11 @@ func openSQLite(root string) (*sql.DB, error) {
 func bleveMappingFor(name string) mapping.IndexMapping {
 	m := bleve.NewIndexMapping()
 	switch name {
-	case "code", "comment":
+	case "code", "comment", "diff":
+		// ADR-018 phase 2 added "diff" to the index-only set per Option D
+		// (drop diff snippet; agents `git show` for the patch). Inverted index
+		// is unchanged — diff search keeps working; only the stored copy of
+		// the patch text (used previously for ANSI fragments) goes away.
 		ft := bleve.NewTextFieldMapping()
 		ft.Store = false
 		ft.IncludeTermVectors = false
@@ -289,9 +293,9 @@ func bleveMappingFor(name string) mapping.IndexMapping {
 func bleveMappingVersion(name string) int {
 	switch name {
 	case "code", "comment":
-		return 2 // ADR-018: index-only (was 1 = default stored)
+		return 2 // ADR-018 phase 1: index-only (was 1 = default stored)
 	case "diff":
-		return 1 // unchanged from original default mapping
+		return 2 // ADR-018 phase 2: index-only Option D (was 1)
 	}
 	return 1
 }

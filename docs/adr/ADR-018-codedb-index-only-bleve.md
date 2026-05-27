@@ -163,10 +163,86 @@ index). These need no data-access review.
 ## Open questions for review
 
 1. **Diff**: regenerate from blobs, or keep the diff index stored (phase the
-   change)?
+   change)? → **Resolved 2026-05-27, see Phase 2 below: D (drop snippet).**
 2. **Snippet at all?** Is `file:line` + symbol enough for agents, or is the
-   ≤120-char snippet worth the per-result blob read?
+   ≤120-char snippet worth the per-result blob read? → For code, snippet
+   restored in phase 1b via blob re-derivation. For diff, see Phase 2.
 3. **Reindex trigger**: piggyback on the existing mapping/self-heal version, or an
-   explicit `ox code index --rebuild`?
+   explicit `ox code index --rebuild`? → Mapping-version marker
+   (`.mapping_version`) + existing `.needs_reindex_<name>` self-heal path
+   (phase 1a). Daemon's next pass wipes + recreates automatically; verified by
+   `TestMappingVersion_UpgradeFromPreMarker`.
 4. Sign-off on the search-result schema change (`Content` now re-derived plain
-   text; `Line` populated for code).
+   text; `Line` populated for code). → Accepted via PR #621 merge.
+
+## Phase 2: diff handling (Option D — drop diff snippet)
+
+**Decision (2026-05-27):** Flip the diff Bleve index to index-only (`Store=false`,
+no term vectors). Don't return a diff snippet — agents get `commit + path` and
+can `git show <commit>:<path>` for the patch when needed.
+
+### Why D, not C (truncated `text_head`) or A (regenerate-on-read)
+
+Measured the actual diff text size distribution on the largest live codedb
+(`repo_019c6d2e`, 52,363 diffs, harness:
+`internal/codedb/index/diff_size_distribution_test.go`):
+
+```
+mean: 5.3 KB    p50: 4.1 KB    p90: 7.9 KB    p95: 9.0 KB    p99: 17 KB    max: 707 KB
+total stored text: 265.2 MB   bleve diff dir on disk: 671 MB
+```
+
+**Measured Bleve saving** from flipping the diff index to index-only on the
+same 52,363-doc corpus (harness: `TestDiffStoredVsIndexOnly` — rebuilds the
+same docs into two fresh Bleve indexes, default-stored vs index-only):
+
+```
+stored (default):       672.4 MB
+index-only (phase 2):   125.8 MB
+saving:                 546.5 MB  (81.3%)
+```
+
+The empirical 81% beat the extrapolated ~30–40% estimate (code's synthetic 74%
+under-projected diff): scorch's inverted index for diffs is much smaller
+relative to the stored copy than for source code.
+
+Per-option cost re-computed with the real Bleve saving:
+
+| Option | Bleve Δ | SQLite Δ | **Net disk on biggest repo** | Snippet UX | Latency |
+|---|---|---|---|---|---|
+| **D** drop snippet | **−546 MB** | 0 | **−546 MB** | none — `git show` for patch | unchanged |
+| C @ 8 KB head | −546 MB | +220 MB | **−326 MB** | 92% snippets full | unchanged |
+| A regen-on-read | −546 MB | 0 | −546 MB | full | **+10–50 ms/hit** + LRU cache |
+| B full text in SQLite | −546 MB | +265 MB | −281 MB | full | unchanged |
+
+The 220 MB premium of C@8K over D buys ≥92% diff snippet UX on the biggest
+repo (and proportionally less on smaller repos). D ships the biggest disk
+saving cleanly and pushes UX restoration to a follow-up *if* metrics show
+agents actually rely on inline diff snippets — the same "ship the lever,
+restore UX if needed" pattern phase 1a→1b followed. C@8K stays as the
+top-ranked Phase 2 follow-up if the diff snippet turns out to matter.
+
+### What changes in code (Phase 2)
+
+- `bleveMappingFor("diff")` joins `code`/`comment` in the index-only branch.
+- `bleveMappingVersion("diff")` bumped 1 → 2 → triggers the existing
+  upgrade-via-self-heal path on next Open of an existing codedb (mapping marker
+  written by `createBleveSubIndex`; `.needs_reindex_diff` written by
+  `upgradeBleveSubIndex`; daemon's full reindex pass rebuilds with the new
+  mapping).
+- Search read path: drop ANSI highlight request for diff (no stored docs to
+  highlight). The code-index path still requests highlight because dirty-overlay
+  docs there remain stored.
+- `assembleDiffHit`: `Content` stays empty for diff hits; the SQL-derived
+  fields (`CommitHash`, `Author`, `Message`, `FilePath`) carry the actionable
+  context.
+- `generateDiffText` at index time stays — Bleve still needs the text to
+  tokenize for the inverted index; only the *stored* copy goes away.
+
+### Phase 2 follow-up (deferred, only if needed)
+
+If diff-search UX without snippet proves to be a problem in practice, add
+Option A: on a diff hit, look up `old_blob_id`/`new_blob_id` from the `diffs`
+table, read both via `Store.ReadBlob`, run `object.NewPatch` to regenerate the
+unified diff, locate the match, return a snippet + line. Cache recent diffs in
+a small LRU. No SQLite bloat; preserves full snippet on demand.

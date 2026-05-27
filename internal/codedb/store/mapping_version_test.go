@@ -89,12 +89,14 @@ func TestMappingVersion_SameVersionOpenPreservesData(t *testing.T) {
 		"no needs_reindex marker should be written for a same-version open")
 }
 
-// TestMappingVersion_DiffStaysAtV1 verifies phase 1's deliberate choice to keep
-// the diff index on the default stored mapping (because diff text lives only in
-// Bleve today — ADR-018 open question 1).
-func TestMappingVersion_DiffStaysAtV1(t *testing.T) {
-	require.Equal(t, 1, bleveMappingVersion("diff"),
-		"phase 1 must NOT upgrade the diff mapping — diff text lives only in Bleve")
+// TestMappingVersion_AllAtV2 verifies that after ADR-018 phase 2 (OQ1
+// resolution = Option D), all three sub-indexes are at the index-only mapping
+// version. Bumping any of these must move the index-only invariant in sync
+// across the trio: future opens of pre-v2 indexes get rebuilt via the
+// .needs_reindex_<name> self-heal flow.
+func TestMappingVersion_AllAtV2(t *testing.T) {
 	require.Equal(t, 2, bleveMappingVersion("code"))
 	require.Equal(t, 2, bleveMappingVersion("comment"))
+	require.Equal(t, 2, bleveMappingVersion("diff"),
+		"phase 2 flipped diff to index-only (Option D — drop diff snippet); see ADR-018")
 }

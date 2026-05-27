@@ -160,15 +160,21 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 		bleveQuery = bleve.NewQueryStringQuery(plan.BleveQuery)
 	}
 	searchReq := bleve.NewSearchRequestOptions(bleveQuery, plan.Limit*5, 0, false)
-	// Per ADR-018, the committed code Bleve index is index-only (Store=false) so
-	// it returns no stored content or fragments — code snippets are re-derived
-	// from git blobs in enrichCodeHit. But CombinedCodeIndex aliases dirty
-	// overlays (still stored, in-memory), so we keep Highlight on for the code
-	// path: stored-doc (dirty) hits get fragments, index-only (committed) hits
-	// get empty fragments and fall through to blob re-derivation. Diff stays
-	// stored (phase 1, diff text lives only in Bleve). Comments skip highlight
-	// entirely — snippets come from `comments.text` in SQLite.
-	if plan.BleveIndex != "comment" {
+	// Per ADR-018, the committed code / comment / diff Bleve indexes are all
+	// index-only (Store=false) — no stored fields to return, no fragments.
+	// Snippet sources:
+	//   - committed code: re-derived from git blob in assembleCodeHit (phase 1b)
+	//   - comment: SQLite `comments.text` via assembleCommentHit (phase 1a)
+	//   - diff: none (phase 2 Option D — agents `git show` for the patch)
+	// The CombinedCodeIndex aliases dirty overlays (still stored, in-memory),
+	// so we keep Highlight on for the code path: stored-doc (dirty) hits return
+	// fragments; index-only (committed) hits get empty fragments and fall
+	// through to blob re-derivation.
+	switch plan.BleveIndex {
+	case "diff", "comment":
+		// index-only, no overlays — skip highlight entirely
+	default:
+		// code path keeps highlight to surface dirty-overlay fragments
 		searchReq.Fields = []string{"content"}
 		searchReq.Highlight = bleve.NewHighlightWithStyle("ansi")
 	}
@@ -314,14 +320,17 @@ func enrichDiffHits(ctx context.Context, s *store.Store, diffIDs []string, filte
 	return meta, nil
 }
 
-// assembleDiffHit applies the per-hit score and fragment to the diff metadata
-// rows for one Bleve hit.
+// assembleDiffHit applies the per-hit score to diff metadata rows for one
+// Bleve hit. Under ADR-018 phase 2 Option D the diff index is index-only, so
+// `fragment` is always empty and Content stays unset — the actionable context
+// for a diff hit is CommitHash + FilePath + Author + Message (set in
+// enrichDiffHits); agents `git show <commit>:<path>` for the full patch.
 func assembleDiffHit(hit *blevesearch.DocumentMatch, fragment string, meta map[string][]Result) []Result {
 	rows := meta[strings.TrimPrefix(hit.ID, "diff_")]
 	out := make([]Result, 0, len(rows))
 	for _, r := range rows {
 		r.Score = hit.Score
-		r.Content = fragment
+		r.Content = fragment // empty for index-only diff; non-empty only if a future stored variant returns
 		out = append(out, r)
 	}
 	return out
