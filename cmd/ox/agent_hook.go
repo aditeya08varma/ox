@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -438,6 +439,34 @@ func handleEnd(ctx *HookContext) error {
 // whispers are delivered exactly once across all channels. If handlePrompt delivers
 // a whisper, the PostToolUse fallback and active pull get 0 entries — no duplication.
 func handlePrompt(ctx *HookContext) error {
+	// Local-recall preamble runs BEFORE whispers so the model sees prior
+	// ledger context first. Strictly additive: any failure / timeout /
+	// no-match leaves the existing whisper path completely untouched.
+	if ctx.Input != nil {
+		if prompt := extractPromptText(ctx.Input.RawBytes); prompt != "" {
+			emitLocalRecallPreamble(os.Stdout, prompt)
+
+			// Cloud-query gate (opt-in only; default off). Wired here so the
+			// policy + redaction layer is exercised on every prompt — even
+			// though the cloud-side runner that consumes the decision is a
+			// follow-up (epic ox-r9mq). Today this is a no-op on the default
+			// config; under opt-in it logs the decision and produces the
+			// redacted prompt the future runner will transmit. Keeping the
+			// gate hot means a future runner cannot accidentally skip the
+			// redaction step — the only way to get a transmittable prompt
+			// is through PrepareCloudQuery.
+			cqCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			decision := PrepareCloudQuery(cqCtx, ctx.ProjectRoot, prompt)
+			cancel()
+			if decision.ShouldQuery {
+				slog.Info("hook: cloud-query gate open", "redacted_tokens", decision.RedactedTokens)
+				// cloud runner dispatch lives in a follow-up; until it lands
+				// the decision is computed (and tested) but no bytes leave
+				// the machine.
+			}
+		}
+	}
+
 	agentID := ""
 	if ctx.Marker != nil {
 		agentID = ctx.Marker.AgentID
