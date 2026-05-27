@@ -160,8 +160,14 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 		bleveQuery = bleve.NewQueryStringQuery(plan.BleveQuery)
 	}
 	searchReq := bleve.NewSearchRequestOptions(bleveQuery, plan.Limit*5, 0, false)
-	searchReq.Fields = []string{"content"}
-	searchReq.Highlight = bleve.NewHighlightWithStyle("ansi")
+	// Per ADR-018, the code and comment indexes are index-only (Store=false): they
+	// can't return stored content or highlight fragments. Comment snippets come
+	// from SQLite (`comments.text`, set in assembleCommentHit). Diff text still
+	// lives only in Bleve (phase 1), so it keeps stored fields + ANSI highlight.
+	if plan.BleveIndex == "diff" {
+		searchReq.Fields = []string{"content"}
+		searchReq.Highlight = bleve.NewHighlightWithStyle("ansi")
+	}
 	searchResult, err := idx.Search(searchReq)
 	if err != nil {
 		return nil, fmt.Errorf("bleve search: %w", err)

@@ -9,11 +9,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/mapping"
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	"go.etcd.io/bbolt"
 	_ "modernc.org/sqlite"
@@ -244,6 +247,108 @@ func openSQLite(root string) (*sql.DB, error) {
 	return db, nil
 }
 
+// bleveMappingFor returns the bleve index mapping for a sub-index.
+//
+// Per ADR-018, the `code` and `comment` indexes use **index-only** content
+// fields (`Store=false`, `IncludeTermVectors=false`): the inverted index — and
+// thus full-text search — is unchanged, but the redundant stored copy of the
+// source text that existed only to produce ANSI highlight fragments is gone.
+// Comment text is still retrievable in full from SQLite (`comments.text`);
+// code snippets are re-derived from git blobs at search time.
+//
+// The `diff` index stays on the default (stored) mapping for now because diff
+// text lives ONLY in bleve today (the `diffs` SQLite table is metadata-only) —
+// see ADR-018 open question 1 for the phase-2 plan.
+//
+// Bump bleveMappingVersion(name) whenever this returns a structurally different
+// mapping; existing on-disk indexes whose stored version is older will be nuked
+// and recreated via the existing self-heal path (and the daemon's
+// `.needs_reindex_<name>` marker triggers a full rebuild on the next pass).
+func bleveMappingFor(name string) mapping.IndexMapping {
+	m := bleve.NewIndexMapping()
+	switch name {
+	case "code", "comment":
+		ft := bleve.NewTextFieldMapping()
+		ft.Store = false
+		ft.IncludeTermVectors = false
+		dm := bleve.NewDocumentMapping()
+		dm.AddFieldMappingsAt("content", ft)
+		m.DefaultMapping = dm
+	}
+	return m
+}
+
+// bleveMappingVersion is the structural version of bleveMappingFor(name).
+// Bump when changing Store / IncludeTermVectors / field set.
+func bleveMappingVersion(name string) int {
+	switch name {
+	case "code", "comment":
+		return 2 // ADR-018: index-only (was 1 = default stored)
+	case "diff":
+		return 1 // unchanged from original default mapping
+	}
+	return 1
+}
+
+// mappingVersionMarker is the per-sub-index file recording the structural
+// version of the mapping the index was created with. Missing => v1 (pre-marker).
+const mappingVersionMarker = ".mapping_version"
+
+func readMappingVersion(path string) int {
+	b, err := os.ReadFile(filepath.Join(path, mappingVersionMarker))
+	if err != nil {
+		return 1 // pre-marker indexes are treated as v1
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || n < 1 {
+		return 1
+	}
+	return n
+}
+
+func writeMappingVersion(path, name string) error {
+	return os.WriteFile(
+		filepath.Join(path, mappingVersionMarker),
+		[]byte(strconv.Itoa(bleveMappingVersion(name))),
+		0o644,
+	)
+}
+
+// createBleveSubIndex creates a fresh bleve sub-index using the ADR-018 mapping
+// for `name`, then writes the mapping-version marker. Used both for first-time
+// creation and post-rebuild recreation.
+func createBleveSubIndex(path, name string) (bleve.Index, error) {
+	idx, err := bleve.New(path, bleveMappingFor(name))
+	if err != nil {
+		return nil, err
+	}
+	if err := writeMappingVersion(path, name); err != nil {
+		slog.Warn("failed to write bleve mapping version marker",
+			"name", name, "path", path, "err", err)
+	}
+	return idx, nil
+}
+
+// upgradeBleveSubIndex nukes an out-of-date sub-index and recreates it empty
+// under the current mapping, then writes `.needs_reindex_<name>` so the
+// daemon's next pass does a full rebuild via the established self-heal path.
+func upgradeBleveSubIndex(root, path, name string, fromVersion int) (bleve.Index, error) {
+	slog.Info("bleve mapping version upgrade, rebuilding",
+		"name", name, "from", fromVersion, "to", bleveMappingVersion(name))
+	if err := os.RemoveAll(path); err != nil {
+		return nil, fmt.Errorf("remove out-of-date bleve sub-index %s: %w", path, err)
+	}
+	idx, err := createBleveSubIndex(path, name)
+	if err != nil {
+		return nil, fmt.Errorf("recreate bleve sub-index %s: %w", path, err)
+	}
+	if err := WriteNeedsReindexMarker(root, name); err != nil {
+		slog.Warn("failed to write needs_reindex marker after mapping upgrade",
+			"name", name, "err", err)
+	}
+	return idx, nil
+}
+
 // openBleveIndexes opens (or self-heals + recreates) the three bleve
 // sub-indexes. Returns all three on success; closes any successfully opened
 // indexes if a later one fails.
@@ -454,11 +559,21 @@ func removeSQLiteFiles(dbPath string) {
 func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 	idx, err := safeOpenBleve(path)
 	if err == nil {
+		// Mapping-version check: an existing index opened cleanly, but if its
+		// mapping version is below the current one (e.g., ADR-018 flipped code
+		// from default-stored to index-only), it must be rebuilt — the old
+		// stored segments don't shrink in place.
+		if got := readMappingVersion(path); got < bleveMappingVersion(name) {
+			if closeErr := idx.Close(); closeErr != nil {
+				slog.Warn("close before mapping upgrade failed",
+					"name", name, "err", closeErr)
+			}
+			return upgradeBleveSubIndex(root, path, name, got)
+		}
 		return idx, nil
 	}
 	if errors.Is(err, bleve.ErrorIndexPathDoesNotExist) {
-		mapping := bleve.NewIndexMapping()
-		return bleve.New(path, mapping)
+		return createBleveSubIndex(path, name)
 	}
 
 	// Before treating as corruption, check if the bbolt file exists.
@@ -491,8 +606,7 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return nil, fmt.Errorf("remove corrupt bleve index %s: %w", path, removeErr)
 	}
-	mapping := bleve.NewIndexMapping()
-	return bleve.New(path, mapping)
+	return createBleveSubIndex(path, name)
 }
 
 // selfHealBleveSubIndex recovers from proven mapping/snapshot corruption by
@@ -512,8 +626,7 @@ func selfHealBleveSubIndex(root, path, name string, openErr error) (bleve.Index,
 	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return nil, fmt.Errorf("remove corrupt bleve sub-index %s: %w", path, removeErr)
 	}
-	mapping := bleve.NewIndexMapping()
-	idx, err := bleve.New(path, mapping)
+	idx, err := createBleveSubIndex(path, name)
 	if err != nil {
 		return nil, fmt.Errorf("recreate empty bleve sub-index %s: %w", path, err)
 	}
@@ -713,8 +826,7 @@ func RebuildBleveSubIndex(root, name string) error {
 	if err := os.RemoveAll(bleveDir); err != nil {
 		return fmt.Errorf("remove %s bleve dir: %w", name, err)
 	}
-	mapping := bleve.NewIndexMapping()
-	idx, err := bleve.New(bleveDir, mapping)
+	idx, err := createBleveSubIndex(bleveDir, name)
 	if err != nil {
 		return fmt.Errorf("recreate %s bleve index: %w", name, err)
 	}
