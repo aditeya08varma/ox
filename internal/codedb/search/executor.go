@@ -165,7 +165,8 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 	// Snippet sources:
 	//   - committed code: re-derived from git blob in assembleCodeHit (phase 1b)
 	//   - comment: SQLite `comments.text` via assembleCommentHit (phase 1a)
-	//   - diff: none (phase 2 Option D — agents `git show` for the patch)
+	//   - diff: regenerated on read via Store.DiffSnippet from old/new blobs
+	//     in assembleDiffHit (phase 2 Option A; LRU-cached, no SQLite bloat)
 	// The CombinedCodeIndex aliases dirty overlays (still stored, in-memory),
 	// so we keep Highlight on for the code path: stored-doc (dirty) hits return
 	// fragments; index-only (committed) hits get empty fragments and fall
@@ -206,10 +207,11 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 	}
 
 	var meta map[string][]Result
-	var codeHashes map[string]string // populated for code path only; needed for blob re-derivation
+	var codeHashes map[string]string      // populated for code path only
+	var diffBlobsMap map[string]diffBlobs // populated for diff path only (Option A snippet derivation)
 	switch plan.BleveIndex {
 	case "diff":
-		meta, err = enrichDiffHits(ctx, s, ids, filters)
+		meta, diffBlobsMap, err = enrichDiffHits(ctx, s, ids, filters)
 	case "comment":
 		meta, err = enrichCommentHits(ctx, s, ids, filters)
 	default:
@@ -231,7 +233,7 @@ func executePlanBleve(ctx context.Context, s *store.Store, plan *ExecutionPlan, 
 		var hitResults []Result
 		switch plan.BleveIndex {
 		case "diff":
-			hitResults = assembleDiffHit(hit, fragment, meta)
+			hitResults = assembleDiffHit(s, hit, plan, fragment, meta, diffBlobsMap)
 		case "comment":
 			hitResults = assembleCommentHit(hit, fragment, meta)
 		default:
@@ -277,14 +279,29 @@ func extractFragment(hit *blevesearch.DocumentMatch) string {
 
 // enrichDiffHits batch-loads diff metadata for all Bleve diff hits, keyed by
 // diff id. Score and content are per-hit and applied later in assembleDiffHit.
-func enrichDiffHits(ctx context.Context, s *store.Store, diffIDs []string, filters *Filters) (map[string][]Result, error) {
+// diffBlobs carries the inputs needed to re-derive a diff snippet on read.
+type diffBlobs struct {
+	oldHash string
+	newHash string
+	path    string
+}
+
+func enrichDiffHits(ctx context.Context, s *store.Store, diffIDs []string, filters *Filters) (map[string][]Result, map[string]diffBlobs, error) {
 	if len(diffIDs) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 
+	// LEFT JOIN on blobs for old/new content_hash so assembleDiffHit can call
+	// Store.DiffSnippet (ADR-018 phase 2 Option A — regenerate on read).
+	// old_blob_id and new_blob_id are nullable (file add/delete); the joined
+	// hash columns come back as NULL on the missing side.
 	sqlQ := `
-		SELECT d.id, substr(c.hash, 1, 10), c.author, substr(c.message, 1, 80), d.path
-		FROM diffs d JOIN commits c ON c.id = d.commit_id
+		SELECT d.id, substr(c.hash, 1, 10), c.author, substr(c.message, 1, 80), d.path,
+		       ob.content_hash, nb.content_hash
+		FROM diffs d
+		JOIN commits c ON c.id = d.commit_id
+		LEFT JOIN blobs ob ON ob.id = d.old_blob_id
+		LEFT JOIN blobs nb ON nb.id = d.new_blob_id
 		WHERE d.id IN (` + sqlInPlaceholders(len(diffIDs)) + `)`
 	args := make([]interface{}, 0, len(diffIDs)+4)
 	for _, id := range diffIDs {
@@ -297,15 +314,17 @@ func enrichDiffHits(ctx context.Context, s *store.Store, diffIDs []string, filte
 
 	rows, err := s.QueryContext(ctx, sqlQ, args...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer rows.Close()
 
 	meta := make(map[string][]Result, len(diffIDs))
+	blobs := make(map[string]diffBlobs, len(diffIDs))
 	for rows.Next() {
 		var id int64
 		var hash, author, message, path string
-		if err := rows.Scan(&id, &hash, &author, &message, &path); err != nil {
+		var oldHash, newHash sql.NullString
+		if err := rows.Scan(&id, &hash, &author, &message, &path, &oldHash, &newHash); err != nil {
 			slog.Warn("diff hit scan error, skipping row", "err", err)
 			continue
 		}
@@ -313,24 +332,40 @@ func enrichDiffHits(ctx context.Context, s *store.Store, diffIDs []string, filte
 		meta[key] = append(meta[key], Result{
 			CommitHash: hash, Author: author, Message: message, FilePath: path,
 		})
+		blobs[key] = diffBlobs{oldHash: oldHash.String, newHash: newHash.String, path: path}
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate diff rows: %w", err)
+		return nil, nil, fmt.Errorf("iterate diff rows: %w", err)
 	}
-	return meta, nil
+	return meta, blobs, nil
 }
 
-// assembleDiffHit applies the per-hit score to diff metadata rows for one
-// Bleve hit. Under ADR-018 phase 2 Option D the diff index is index-only, so
-// `fragment` is always empty and Content stays unset — the actionable context
-// for a diff hit is CommitHash + FilePath + Author + Message (set in
-// enrichDiffHits); agents `git show <commit>:<path>` for the full patch.
-func assembleDiffHit(hit *blevesearch.DocumentMatch, fragment string, meta map[string][]Result) []Result {
-	rows := meta[strings.TrimPrefix(hit.ID, "diff_")]
+// assembleDiffHit applies per-hit score and re-derives a Content snippet by
+// regenerating the diff text from the recorded blob hashes (ADR-018 phase 2
+// Option A: no permanent diff-text storage; Store.DiffSnippet computes via
+// diffformat.Format, cached in a per-Store LRU). Empty `Line` — the matched
+// position within a synthetic diff isn't a meaningful file-line and the
+// useful locator is already CommitHash + FilePath.
+func assembleDiffHit(s *store.Store, hit *blevesearch.DocumentMatch, plan *ExecutionPlan, fragment string, meta map[string][]Result, blobs map[string]diffBlobs) []Result {
+	id := strings.TrimPrefix(hit.ID, "diff_")
+	rows := meta[id]
+	if len(rows) == 0 {
+		return nil
+	}
+	// Derive snippet once per diff (all rows share the same diff text).
+	snippet := fragment
+	if snippet == "" {
+		if b, ok := blobs[id]; ok && (b.oldHash != "" || b.newHash != "") {
+			text := s.DiffSnippet(b.oldHash, b.newHash, b.path)
+			if text != "" {
+				_, snippet = locateMatchAndSnippet([]byte(text), plan, codeSnippetMaxLen)
+			}
+		}
+	}
 	out := make([]Result, 0, len(rows))
 	for _, r := range rows {
 		r.Score = hit.Score
-		r.Content = fragment // empty for index-only diff; non-empty only if a future stored variant returns
+		r.Content = snippet
 		out = append(out, r)
 	}
 	return out

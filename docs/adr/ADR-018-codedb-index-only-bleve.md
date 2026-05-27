@@ -246,3 +246,30 @@ Option A: on a diff hit, look up `old_blob_id`/`new_blob_id` from the `diffs`
 table, read both via `Store.ReadBlob`, run `object.NewPatch` to regenerate the
 unified diff, locate the match, return a snippet + line. Cache recent diffs in
 a small LRU. No SQLite bloat; preserves full snippet on demand.
+
+## Phase 2 (Option A — snippet restoration via regenerate-on-read)
+
+**Decision (2026-05-27, same session):** After the empirical measurement
+returned 81% Bleve saving (much higher than the pre-measurement estimate), we
+implemented Option A on top of D in the same change. Net result:
+- **Storage**: phase 2 D unchanged — diff index stays index-only, full 81%
+  Bleve saving preserved.
+- **Snippet**: re-derived on read via `Store.DiffSnippet(oldHash, newHash, path)`
+  with a per-Store LRU cache (`hashicorp/golang-lru/v2`, 512 entries). Cache
+  miss: read both blobs via `Store.ReadBlob`, format via the shared
+  `internal/codedb/diffformat` package (byte-stable with the indexer's writer),
+  locate the match with the existing `locateMatchAndSnippet` helper, populate
+  `Content`. Cache hit: ~free.
+- **Format consistency**: `diffformat.Format(path, oldText, newText)` is the
+  single source of truth, called from both `index.generateDiffText` (write
+  path) and `Store.DiffSnippet` (read path). If the format ever changes, the
+  diff mapping version (`bleveMappingVersion("diff")`) must be bumped and a
+  reindex will trigger automatically via the existing self-heal flow.
+- **Schema**: no SQLite changes — the `diffs` table already carries
+  `old_blob_id`, `new_blob_id`, and `path`; the read path uses LEFT JOIN to
+  `blobs` for the content hashes (handles nullable add/delete cases).
+- **Latency**: +blob×2 reads + format on uncached hits (≈10–50 ms typical
+  given warm packfiles); cache absorbs repeat-hit workloads.
+- **Line**: stays `0` for diff hits — the matched offset inside a synthetic
+  before/after dump isn't a meaningful file line; the locator is
+  `CommitHash + FilePath`.

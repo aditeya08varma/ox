@@ -28,6 +28,7 @@ import (
 	"github.com/go-git/go-git/v6/utils/merkletrie"
 
 	"github.com/sageox/ox/internal/codedb/comments"
+	"github.com/sageox/ox/internal/codedb/diffformat"
 	"github.com/sageox/ox/internal/codedb/language"
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	"github.com/sageox/ox/internal/codedb/store"
@@ -1302,54 +1303,21 @@ func (st *indexState) ensureBlob(blobOID plumbing.Hash, path string) (int64, str
 // oldText/newText are pre-read blob contents from ensureBlob; when non-empty they
 // avoid a redundant git object read (saves one BlobObject+ReadAll per side).
 func generateDiffText(repo *git.Repository, path string, oldOID, newOID plumbing.Hash, hasOld, hasNew bool, oldText, newText string) string {
-	const maxLines = 100
-
-	var b strings.Builder
-	b.WriteString("--- a/")
-	b.WriteString(path)
-	b.WriteByte('\n')
-	b.WriteString("+++ b/")
-	b.WriteString(path)
-	b.WriteByte('\n')
-
-	if hasOld && oldOID != (plumbing.Hash{}) {
-		if oldText == "" {
-			oldText = readBlobText(repo, oldOID)
-		}
-		if oldText != "" {
-			writePrefixedLines(&b, oldText, '-', maxLines)
-		}
+	if hasOld && oldOID != (plumbing.Hash{}) && oldText == "" {
+		oldText = readBlobText(repo, oldOID)
 	}
-
-	if hasNew && newOID != (plumbing.Hash{}) {
-		if newText == "" {
-			newText = readBlobText(repo, newOID)
-		}
-		if newText != "" {
-			writePrefixedLines(&b, newText, '+', maxLines)
-		}
+	if hasNew && newOID != (plumbing.Hash{}) && newText == "" {
+		newText = readBlobText(repo, newOID)
 	}
-
-	return b.String()
-}
-
-// writePrefixedLines writes up to maxLines lines from text into b, each prefixed with prefix.
-// Replaces strings.SplitN (allocates []string) + fmt.Fprintf per line (allocs per call):
-// before: 317 allocs/op, ~130-184µs; after: 114 allocs/op, ~93-106µs (-64% allocs, -30% time).
-func writePrefixedLines(b *strings.Builder, text string, prefix byte, maxLines int) {
-	for remaining := maxLines; remaining > 0 && text != ""; remaining-- {
-		var line string
-		if idx := strings.IndexByte(text, '\n'); idx >= 0 {
-			line = text[:idx]
-			text = text[idx+1:]
-		} else {
-			line = text
-			text = ""
-		}
-		b.WriteByte(prefix)
-		b.WriteString(line)
-		b.WriteByte('\n')
+	if !hasOld {
+		oldText = ""
 	}
+	if !hasNew {
+		newText = ""
+	}
+	// Shared with search read-path's diff snippet re-derivation; must stay
+	// byte-stable across both call sites (ADR-018 phase 2 Option A).
+	return diffformat.Format(path, oldText, newText)
 }
 
 // readBlobText reads a blob's content as a string, returning "" if unreadable or binary.

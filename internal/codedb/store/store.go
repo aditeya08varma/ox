@@ -17,6 +17,7 @@ import (
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/mapping"
+	lru "github.com/hashicorp/golang-lru/v2"
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	"go.etcd.io/bbolt"
 	_ "modernc.org/sqlite"
@@ -153,6 +154,12 @@ type Store struct {
 	// safe for concurrent access from the same handle). See blob_reader.go.
 	blobReposOnce sync.Once
 	blobRepos     []blobRepoHandle
+
+	// diff snippet cache — lazy-initialized on first DiffSnippet call.
+	// LRU dedupes per-(old_hash, new_hash, path) recomputation of the
+	// indexer-format diff text during search. See diff_snippet.go.
+	diffCacheOnce sync.Once
+	diffCache     *lru.Cache[string, string]
 }
 
 // Open opens (or creates) a Store at the given root directory.
