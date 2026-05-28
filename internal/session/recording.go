@@ -104,6 +104,25 @@ type RecordingState struct {
 	InheritedPause       bool             `json:"inherited_pause,omitempty"`
 	InheritedFromSession string           `json:"inherited_from_session,omitempty"`
 
+	// ProducedCommits is the reverse-direction index of commit SHAs authored
+	// during this recording. Appended by the post-commit hook; rewritten
+	// in place by the post-rewrite hook on amend/rebase. Folded into
+	// SessionMeta.ProducedCommits at session stop / finalize. omitempty so
+	// older .recording.json files round-trip unchanged.
+	ProducedCommits []string `json:"produced_commits,omitempty"`
+
+	// LinkedPRs / LinkedIssues are the GitHub PR and issue references this
+	// recording is associated with. Appended by the pre-push hook from the
+	// pushed commit range, folded into SessionMeta at stop. omitempty for
+	// round-trip with older .recording.json files.
+	LinkedPRs    []string `json:"linked_prs,omitempty"`
+	LinkedIssues []string `json:"linked_issues,omitempty"`
+
+	// LinkageStatus tracks the upload/notify lifecycle for PR/issue linkage
+	// during the active recording. Mirrors lfs.LinkageStatus* values; folded
+	// into SessionMeta.LinkageStatus at stop. omitempty for round-trip.
+	LinkageStatus string `json:"linkage_status,omitempty"`
+
 	// Hook observability: lets `ox session status` show whether hooks are firing
 	// and why they're skipping. Without these, a broken recording path (e.g.
 	// adapter binary missing, session file not discoverable) looks identical to

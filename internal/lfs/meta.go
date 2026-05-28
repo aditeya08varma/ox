@@ -149,6 +149,49 @@ type SessionMeta struct {
 	// older readers ignore the new field.
 	Redactions []RedactionPass `json:"redactions,omitempty"`
 
+	// ProducedCommits is the reverse-direction index linking this session to
+	// the git commits authored during the recording. Populated by the
+	// post-commit hook on the producing repo while the recording is active
+	// and folded into meta.json at session-stop / finalize.
+	//
+	// Source-of-truth note: the canonical forward link is the
+	// SageOx-Session: trailer on each commit message (commit→session). This
+	// list is a structured reverse index for fast session→commits lookup
+	// in session view / query, NOT a replacement for the trailer. If the
+	// two disagree (e.g. because a closed-session post-rewrite went stale),
+	// the trailer wins during reconciliation.
+	//
+	// Staleness model (D3): post-rewrite updates this list ONLY while the
+	// recording is still active. If the user rebases a commit range after
+	// session stop, entries here may reference SHAs no longer reachable in
+	// git log; `ox doctor` surfaces this as a soft signal but does not
+	// auto-mutate closed sessions.
+	//
+	// omitempty so older meta.json files (pre-Phase B) round-trip unchanged.
+	ProducedCommits []string `json:"produced_commits,omitempty"`
+
+	// LinkedPRs is the set of GitHub pull-request references (URL or
+	// owner/repo#N form) this session is associated with. Populated by the
+	// pre-push hook when a PR exists for the pushed branch, and folded into
+	// meta.json at session stop. The server-side reconciler (epic ox-fdre,
+	// v2) is the user-visible source of truth for PR↔session mapping via
+	// sticky PR comments; this field is the CLI-side mirror used by
+	// `ox session view` and `ox query`. omitempty for legacy round-trip.
+	LinkedPRs []string `json:"linked_prs,omitempty"`
+
+	// LinkedIssues is the set of GitHub issue references (owner/repo#N or
+	// URL) this session touched, extracted from commit-message footers
+	// (Fixes #N / Closes #N / Resolves #N / GH-N) on the pushed range and
+	// from any LinkedPR body. omitempty for legacy round-trip.
+	LinkedIssues []string `json:"linked_issues,omitempty"`
+
+	// LinkageStatus is the upload/notify lifecycle state for PR/issue
+	// linkage. See docs/ai/specs/session-pr-issue-linkage.md (v1.5) for the
+	// state machine: pending → staged → uploaded → notified, with *_failed
+	// branches retried by `ox doctor`. Empty string == legacy/unknown,
+	// treated as pre-linkage and never blocking. omitempty for round-trip.
+	LinkageStatus string `json:"linkage_status,omitempty"`
+
 	Files map[string]FileRef `json:"files"` // OID manifest: filename -> ref
 }
 
@@ -224,6 +267,28 @@ type RedactionEntry struct {
 // enough to absorb a transient LLM hiccup without burning unbounded
 // tokens on a structurally-broken session.
 const MaxSummaryAttempts = 3
+
+// LinkageStatus lifecycle values for SessionMeta.LinkageStatus and
+// RecordingState.LinkageStatus. See docs/ai/specs/session-pr-issue-linkage.md
+// (v1.5) for the full state machine. Empty string is the legacy/unknown
+// zero value and is treated as pre-linkage — never blocking.
+const (
+	// LinkageStatusPending — session exists locally with linkage intent;
+	// not yet eligible for any PR-comment posting.
+	LinkageStatusPending = "pending"
+	// LinkageStatusStaged — meta.json written, content in cache, LFS upload
+	// not yet attempted.
+	LinkageStatusStaged = "staged"
+	// LinkageStatusUploaded — meta.json + LFS blobs + git push all landed;
+	// the session URL is viewable.
+	LinkageStatusUploaded = "uploaded"
+	// LinkageStatusNotified — SageOx server has been told of the upload.
+	LinkageStatusNotified = "notified"
+	// LinkageStatusUploadFailed — upload transition errored; doctor retries.
+	LinkageStatusUploadFailed = "upload_failed"
+	// LinkageStatusNotifyFailed — notify transition errored; doctor retries.
+	LinkageStatusNotifyFailed = "notify_failed"
+)
 
 // FileRef identifies a session content file by storage backend, OID
 // (for LFS files), and size.
@@ -365,6 +430,34 @@ func (b *SessionMetaBuilder) UserID(id string) *SessionMetaBuilder {
 
 func (b *SessionMetaBuilder) RepoID(id string) *SessionMetaBuilder {
 	b.meta.RepoID = id
+	return b
+}
+
+// ProducedCommits sets the reverse-direction commit-SHA index for this
+// session. Caller passes the SHAs accumulated by the post-commit hook in
+// RecordingState during the active recording. Order preserves commit
+// order; duplicates are not deduplicated (callers do that if needed).
+func (b *SessionMetaBuilder) ProducedCommits(shas []string) *SessionMetaBuilder {
+	b.meta.ProducedCommits = shas
+	return b
+}
+
+// LinkedPRs sets the GitHub pull-request references for this session.
+func (b *SessionMetaBuilder) LinkedPRs(prs []string) *SessionMetaBuilder {
+	b.meta.LinkedPRs = prs
+	return b
+}
+
+// LinkedIssues sets the GitHub issue references for this session.
+func (b *SessionMetaBuilder) LinkedIssues(issues []string) *SessionMetaBuilder {
+	b.meta.LinkedIssues = issues
+	return b
+}
+
+// LinkageStatus sets the upload/notify lifecycle state. Use the
+// LinkageStatus* constants.
+func (b *SessionMetaBuilder) LinkageStatus(status string) *SessionMetaBuilder {
+	b.meta.LinkageStatus = status
 	return b
 }
 
