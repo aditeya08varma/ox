@@ -323,6 +323,7 @@ type SessionInfo struct {
 	Origin          string              `json:"origin,omitempty"`           // session origin: "human", "subagent", "agent"
 	HasRawData      bool                `json:"has_raw_data,omitempty"`     // true if raw.jsonl exists with content on disk
 	StopReason      string              `json:"stop_reason,omitempty"`      // how session ended: "stopped", "aborted", "recovered"
+	SuspendedAt     *time.Time          `json:"suspended_at,omitempty"`     // ADR-020: non-nil while session is actively paused
 }
 
 // ListSessions returns session files from the last 7 days, sorted by date descending.
@@ -415,6 +416,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 		var isSubagent bool
 		var parentPID int
 		var origin string
+		var suspendedAt *time.Time
 		recPath := filepath.Join(sessionPath, recordingFile)
 		if recData, recErr := os.ReadFile(recPath); recErr == nil {
 			var recState RecordingState
@@ -426,6 +428,13 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 				isSubagent = recState.IsSubagent()
 				parentPID = recState.ParentPID
 				origin = recState.Origin
+				// ADR-020: ClassifySession branches on SessionInfo.SuspendedAt to
+				// return StatusSuspended; without this propagation, suspended
+				// active sessions get reported as plain "recording".
+				if recState.SuspendedAt != nil {
+					ts := *recState.SuspendedAt
+					suspendedAt = &ts
+				}
 				if !recState.StartedAt.IsZero() && createdAt.IsZero() {
 					createdAt = recState.StartedAt
 				}
@@ -505,6 +514,7 @@ func (s *Store) listSessionSessions(since time.Time) ([]SessionInfo, error) {
 			Origin:          origin,
 			HasRawData:      hasRawData,
 			StopReason:      stopReason(meta),
+			SuspendedAt:     suspendedAt,
 		})
 	}
 
