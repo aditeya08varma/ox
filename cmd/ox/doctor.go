@@ -355,6 +355,12 @@ common issues, or --fix-slug to target specific checks.`,
 
 		cli.PrintDisclaimer()
 
+		// trailing PAT expiry warning — single-line stderr, suppressed in
+		// ephemeral mode and when stderr isn't a TTY. Doctor is the right
+		// surface: users run it when something feels off, and a near-expired
+		// PAT is exactly the class of thing they'd want surfaced.
+		_ = auth.CheckAndWarnExpiry(cmd.Context(), projectEndpoint, os.Stderr)
+
 		if hasFailed && (cfg == nil || !cfg.JSON) {
 			return fmt.Errorf("some checks failed")
 		}
@@ -889,12 +895,24 @@ func runDoctorChecks(opts doctorOptions) []checkCategory {
 		}
 	}
 
+	// Category 9b: Ephemeral Mode (own category, NOT merged into Daemon).
+	// Surfacing this as a sibling category — rather than appending it to
+	// Daemon — keeps the Daemon category's "single grouped skip" invariant
+	// intact (see TestDoctorSuppression_DaemonNotRunning) while still
+	// making the predicate visible. Ephemeral mode is the most common
+	// explanation for an absent daemon, but it deserves its own grouping.
+	// See docs/ai/adr/adr-ephemeral-mode.md.
+	progress.show("Ephemeral Mode")
+	categories = append(categories, checkCategory{
+		name:   "Ephemeral Mode",
+		checks: []checkResult{checkEphemeralMode()},
+	})
+
 	// Category 10: Daemon
 	progress.show("Daemon")
 	if state.isDaemonRunning {
 		daemonChecks := checkDaemonHealth(opts)
 		if state.isBootstrapping && len(daemonChecks) > 0 {
-			// prepend bootstrap info banner
 			bootstrapBanner := InfoCheck("daemon bootstrap",
 				"initial sync in progress",
 				"Run `ox doctor` again in a minute")
