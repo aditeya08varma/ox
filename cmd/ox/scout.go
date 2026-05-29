@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -118,12 +119,13 @@ func runScout(cmd *cobra.Command, args []string) error {
 		sa.question = scoutDefaultQuestion
 	}
 
-	return executeScout(sa, os.Stdin, os.Stdout)
+	return executeScout(cmd.Context(), sa, os.Stdin, os.Stdout)
 }
 
 // executeScout reads the transcript, calls Perplexity, and writes results to out.
+// ctx carries the command's cancellation (e.g. Ctrl+C) through to the HTTP call.
 // stdin is parameterized so tests can inject content for the "-" path.
-func executeScout(sa *scoutArgs, stdin io.Reader, out io.Writer) error {
+func executeScout(ctx context.Context, sa *scoutArgs, stdin io.Reader, out io.Writer) error {
 	apiKey := strings.TrimSpace(os.Getenv(perplexityAPIKeyEnv))
 	if apiKey == "" {
 		return fmt.Errorf("missing %s environment variable. Get a key at https://www.perplexity.ai/settings/api", perplexityAPIKeyEnv)
@@ -151,7 +153,7 @@ func executeScout(sa *scoutArgs, stdin io.Reader, out io.Writer) error {
 		Tools:        []perplexityTool{tool},
 	}
 
-	resp, raw, err := callPerplexity(apiKey, reqBody)
+	resp, raw, err := callPerplexity(ctx, apiKey, reqBody)
 	if err != nil {
 		return err
 	}
@@ -225,17 +227,18 @@ type perplexitySearchResult struct {
 	Date    string `json:"date,omitempty"`
 }
 
-// callPerplexity POSTs the request to Perplexity's Agent API and returns the
+// callPerplexity POSTs the request to Perplexity's Agent API (honoring ctx for
+// cancellation) and returns the
 // decoded response alongside the raw body (so callers can emit --json without a
 // re-marshal). A non-2xx status yields an error carrying a truncated body
 // excerpt; the raw bytes are still returned for diagnostics.
-func callPerplexity(apiKey string, body perplexityAgentRequest) (*perplexityAgentResponse, []byte, error) {
+func callPerplexity(ctx context.Context, apiKey string, body perplexityAgentRequest) (*perplexityAgentResponse, []byte, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode request: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, perplexityEndpoint, bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, perplexityEndpoint, bytes.NewReader(payload))
 	if err != nil {
 		return nil, nil, fmt.Errorf("build request: %w", err)
 	}
