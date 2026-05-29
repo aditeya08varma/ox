@@ -122,6 +122,11 @@ func isExpectedEmptyRepoIssue(category string, check checkResult) bool {
 	if category == "Authentication" {
 		return true
 	}
+	// Updates check fires whenever upstream releases a new version after
+	// this binary's pinned ldflags version — not a state the test controls.
+	if category == "Updates" {
+		return true
+	}
 	// .sageox missing should be skipped, not a warning
 	if check.name == ".sageox" && check.skipped {
 		return true
@@ -395,6 +400,13 @@ func filterTestEnvironmentIssues(issues []string) []string {
 		}
 		// skip agent worker binary — not installed in test environment
 		if strings.Contains(issue, "agent worker") || strings.Contains(issue, "agent CLI") {
+			continue
+		}
+		// skip update-available warnings — the test binary's version is
+		// pinned by ldflags but upstream releases keep advancing, so this
+		// warning fires whenever a new release ships. Matches the exemption
+		// already present in doctor_e2e_test.go.
+		if strings.HasPrefix(issue, "Updates:") {
 			continue
 		}
 		filtered = append(filtered, issue)
