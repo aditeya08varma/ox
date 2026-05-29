@@ -128,6 +128,12 @@ func isExpectedEmptyRepoIssue(category string, check checkResult) bool {
 	if category == "Updates" {
 		return true
 	}
+	// Session trailer coverage is a soft signal that fires whenever recent
+	// commits lack a SageOx-Session trailer. A fresh test repo's commits are
+	// made without ox running, so coverage is always 0%. Working as designed.
+	if check.name == "session trailer coverage" {
+		return true
+	}
 	// .sageox missing should be skipped, not a warning
 	if check.name == ".sageox" && check.skipped {
 		return true
@@ -408,6 +414,13 @@ func filterTestEnvironmentIssues(issues []string) []string {
 		// warning fires whenever a new release ships. Matches the exemption
 		// already present in doctor_e2e_test.go.
 		if strings.HasPrefix(issue, "Updates:") {
+			continue
+		}
+		// skip session trailer coverage — a soft signal that fires whenever
+		// recent commits lack a SageOx-Session trailer. A fresh test repo's
+		// commits are made without ox running, so coverage is always 0%.
+		// Working as designed; not a state init controls.
+		if strings.Contains(issue, "session trailer coverage") {
 			continue
 		}
 		filtered = append(filtered, issue)
