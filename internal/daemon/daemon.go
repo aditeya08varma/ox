@@ -31,6 +31,7 @@ import (
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/perf"
 	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/sageox/ox/internal/version"
@@ -1079,7 +1080,26 @@ func (d *Daemon) initComponents() time.Duration {
 		if env := os.Getenv("AGENT_ENV"); env != "" {
 			daemonAttrs = append(daemonAttrs, attribute.String(observability.AttrAgentEnv, env))
 		}
-		if err := observability.Init(d.ctx, "ox-daemon", apiEndpoint, daemonAttrs...); err != nil {
+		// The OTLP proxy is JWT-gated. The daemon is long-running and the
+		// stored token rotates on refresh, so resolve per-export via this
+		// closure rather than baking a static header at Init time.
+		tokenFunc := func() string {
+			tok, err := auth.GetTokenForEndpoint(apiEndpoint)
+			if err != nil || tok == nil {
+				return ""
+			}
+			return tok.AccessToken
+		}
+		// Install perf processor BEFORE Init so the daemon's tree sink
+		// receives every span the OTLP exporter does. Per-span slog is
+		// gated by duration (>=100ms) and OX_TRACE; tree rendering to
+		// the daemon log is gated on OX_TRACE only — both are
+		// configured inside the perf sinks themselves.
+		observability.AddSpanProcessor(perf.NewTreeProcessor(perf.Options{
+			OnSpan: perf.PerSpanSlog(d.logger),
+			OnTree: perf.DaemonTreeSink(d.logger),
+		}))
+		if err := observability.Init(d.ctx, "ox-daemon", apiEndpoint, tokenFunc, daemonAttrs...); err != nil {
 			d.logger.Warn("otel tracing init failed", "error", err)
 		}
 		d.tracer = observability.NewDaemonTracer()
