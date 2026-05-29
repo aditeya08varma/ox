@@ -89,6 +89,9 @@ func init() {
 	scoutCmd.Flags().Bool("json", false, "emit the raw Perplexity Agent API response as JSON")
 }
 
+// runScout is the cobra RunE for `ox scout`. It reads flags, builds a
+// scoutArgs, validates required inputs (filling in the default question when
+// none was given), and hands off to executeScout against real stdin/stdout.
 func runScout(cmd *cobra.Command, args []string) error {
 	question, _ := cmd.Flags().GetString("question")
 	model, _ := cmd.Flags().GetString("model")
@@ -161,6 +164,8 @@ func executeScout(sa *scoutArgs, stdin io.Reader, out io.Writer) error {
 	return renderScoutResponse(out, resp, sa.showCitations)
 }
 
+// readTranscript returns the transcript text for the given path, reading from
+// stdin when path is "-". Read errors are wrapped with the source for context.
 func readTranscript(path string, stdin io.Reader) (string, error) {
 	if path == "-" {
 		b, err := io.ReadAll(stdin)
@@ -220,6 +225,10 @@ type perplexitySearchResult struct {
 	Date    string `json:"date,omitempty"`
 }
 
+// callPerplexity POSTs the request to Perplexity's Agent API and returns the
+// decoded response alongside the raw body (so callers can emit --json without a
+// re-marshal). A non-2xx status yields an error carrying a truncated body
+// excerpt; the raw bytes are still returned for diagnostics.
 func callPerplexity(apiKey string, body perplexityAgentRequest) (*perplexityAgentResponse, []byte, error) {
 	payload, err := json.Marshal(body)
 	if err != nil {
@@ -264,6 +273,9 @@ func callPerplexity(apiKey string, body perplexityAgentRequest) (*perplexityAgen
 	return &resp, raw, nil
 }
 
+// renderScoutResponse writes the agent's message text to out, and — when
+// showCitations is set and the response carried search results — appends the
+// raw "Sources" list. It errors if the response contained no message content.
 func renderScoutResponse(out io.Writer, resp *perplexityAgentResponse, showCitations bool) error {
 	var messageText strings.Builder
 	var searchResults []perplexitySearchResult
