@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -37,6 +38,11 @@ import (
 	"github.com/sageox/ox/internal/version"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
+
+// daemonGCPercent is the GC target (GOGC) applied at startup when the operator
+// hasn't set GOGC. Lower than the default 100 to cap the heap high-water during
+// allocation-heavy CodeDB indexing. See Start() for the rationale and numbers.
+const daemonGCPercent = 50
 
 // Version returns the daemon version including build timestamp.
 // Used for heartbeat version comparison to detect when CLI has been rebuilt.
@@ -347,6 +353,17 @@ func (d *Daemon) Start() error {
 	d.mu.Unlock()
 
 	d.logger.Info("daemon starting", "ledger", d.config.LedgerPath, "version", Version())
+
+	// Memory footprint: CodeDB indexing is allocation-heavy (tree-sitter parsing
+	// churns multiple GB). At the default GOGC=100 the heap grows to ~2x live
+	// before a collection, which roughly doubled the daemon's RSS high-water
+	// during indexing (measured ~1.5 GB peak → ~0.7 GB at GOGC=50, ~10% more GC
+	// CPU during heavy phases — a good trade for a background daemon). Respect an
+	// explicit operator GOGC; only apply the tighter default when unset.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(daemonGCPercent)
+		d.logger.Debug("set GC target", "gogc", daemonGCPercent)
+	}
 
 	// write PID file (informational only)
 	if err := d.writePidFile(); err != nil {

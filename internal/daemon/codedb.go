@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -247,6 +248,9 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 		m.mu.Unlock()
 	}()
 
+	// Return the heap high-water to the OS after this allocation-heavy pass.
+	defer debug.FreeOSMemory()
+
 	if m.ledgerTestHook != nil {
 		m.ledgerTestHook()
 	}
@@ -357,6 +361,10 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	if m.testHook != nil {
 		m.testHook()
 	}
+
+	// Indexing churns multiple GB of short-lived allocations; return the heap
+	// high-water to the OS once it completes so steady-state RSS drops back down.
+	defer debug.FreeOSMemory()
 
 	m.mu.Lock()
 	projectRoot := m.projectRoot // snapshot under lock to avoid races with UpdateProjectRoot
