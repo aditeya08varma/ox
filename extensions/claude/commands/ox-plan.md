@@ -46,6 +46,14 @@ flowchart TB
    - When unsure whether a conflict is real, downgrade to "Novel — no prior decision found," not a false `conflicts`.
    - Set `kind:"judgment"` on every badge you author so the renderer can style it distinctly from ox's deterministic ones.
 
+   **NEVER paste the `context[]` bundle verbatim into the HTML.** The bundle is your *reasoning input*, not render output. Dumping the raw items as a flat "session / discussion" card list is the failure mode this spec exists to prevent — it surfaces mid-sentence snippet fragments, low-relevance chatter, and un-cited noise as if it were a finding. The bundle items become HTML *only* after you reason over them into a cited judgment badge attached to a specific plan section. A bundle item you can't turn into a section-anchored, cited badge does not appear in the render at all. Worked example:
+
+   > Bundle item → `{kind:"adr", title:"ADR-018 codedb perf budget", ref:"docs/adr/018...", snippet:"...512MB resident ceiling..."}`
+   > Plan section 3 proposes an in-memory index. →
+   > **Authored badge** → `{section:"3. Index", kind:"judgment", type:"conflicts", why:"In-memory index may breach the 512MB ceiling set in ADR-018", source_url:"docs/adr/018...", ...}`
+   >
+   > If the same ADR were only tangentially related: degrade to `expert-perspective` → "consult `<name>`", NOT a card pasting the raw snippet.
+
 3. **Render ONE self-contained HTML file** meeting the full html-plan quality bar below PLUS the badge-native additions.
 
 4. **Persist the full plan with `ox plan save`.** Bare `ox plan` only auto-saves ox's *deterministic* badges (it cannot see your judgment badges). To persist the complete plan — your merged badges plus the render — call:
@@ -80,7 +88,23 @@ These are what make this an *enriched* plan, not just a pretty one. The human mu
 
 Use the SageOx semantic colors: sage for aligns, red for conflicts, amber for collisions/active-work, copper for expert routes. Each count is a chip; clicking/anchoring it can jump to the first section carrying that badge. This is the "should I even keep reading" glance.
 
-**2. Per-section badge rail.** Every plan section renders its badges in a right-aligned rail (or a row directly under the H2). A badge shows: an icon/dot, the type label, and a **source link** when `source_url`/`ref` is present. Collapse multiple badges of the same type into a count chip that expands.
+**2. Per-section badge rail.** Every plan section renders its badges in a right-aligned rail (or a row directly under the H2). A badge shows: an icon/dot, the type label, a **provenance chip** (see below), and a **source link** when `source_url`/`ref` is present. Collapse multiple badges of the same type into a count chip that expands.
+
+**2a. Per-kind provenance chip + (i) popover.** Every badge carries a small chip naming WHERE its evidence came from, keyed off the bundle item's `kind`, so the reviewer can tell team convention from ledger history from live work at a glance:
+
+| `kind` | Chip label | Semantic color |
+|---|---|---|
+| `adr` | `ADR` | copper |
+| `decision` | `decision` | copper |
+| `discussion` | `team context` | sage |
+| `session` | `ledger · session` | teal |
+| `commit` | `commit` | teal |
+| `murmur` | `active work` | amber |
+
+Each chip has an **(i) affordance** that, on hover OR keyboard focus, opens a small popover showing: the source kind, the author and `when` (if present), the **cleaned** snippet trimmed to one readable clause (never a mid-sentence fragment — if the snippet is clipped, summarize it instead of pasting it), and the resolved link. Requirements:
+- **Pure CSS + a tiny vanilla-JS toggle — no external JS, must work from `file://`.** Hover via `:hover`/`:focus-within`; also support click-to-pin for touch/keyboard. The trigger is a real `<button>` (focusable, `aria-describedby` the popover) — not a bare `<span>` — so it is keyboard- and screen-reader-accessible.
+- The popover inherits the light/dark CSS variables (legible in both themes) and never overflows the viewport (flip/clamp on the right edge).
+- Group/color the chips by the palette above so the alignment strip, rail, and popovers tell one consistent provenance story.
 
 **3. Deterministic vs. judgment — visually distinct.** The human must always know which badges ox *computed* (factual) and which the agent *authored* (cited judgment). Make the treatment unmistakable:
 
@@ -99,7 +123,40 @@ Put a tiny legend near the alignment strip ("● ox-computed · ○ agent-reason
 
 A judgment badge with no resolvable citation is a bug — degrade it to "consult `<name>`" instead.
 
+**5. SageOx insight overlays — the OX marker (NOT a prose blob).** SageOx insight must NEVER render as a standalone wall of synthesized prose. The anti-pattern, verbatim from a real bad render — **do not produce anything resembling this**:
+
+> ⛒ **SageOx team context (from ox plan)** — expert perspective
+> Foundation owner / prior art: scribe-jbf00 (gate epic), scribe-xfy17 (console-routing trap), scribe-ljzhn (rotted SDL behave sim — do NOT use for BDD). Session 2026-05-15… → informs the twin golden-trace gate. Collisions: platformio.ini + debug_server_scribe.cpp contended (rsnodgrass ryan/flash-dev); the P3-fw firmware edits land there — rebase + re-verify /health fields. Experts: Galex Yen owns twin-sageox-api/admin.go…
+
+That blob fails every respect-the-reader test: lore before action, three distinct signals comma-spliced into one badge, bare IDs that resolve to nothing, no severity, no "so what." Replace it with **anchored OX markers**:
+
+- **The marker.** Each SageOx signal renders as a small, recognizable **SageOx glyph** sitting in the margin gutter (or inline) right next to the plan element it concerns — a heading, a file ref, a step. It is the visual tell that "SageOx has something to say *here*," the way a code-review comment dot marks a line.
+  - **Canonical mark = the SageOx avatar** (`https://avatars.githubusercontent.com/u/224450799?s=200&v=4`). **Base64-inline it as a `data:image/png;base64,…` URI at render time** (fetch once during rendering, embed the bytes) — the page is self-contained and must render from `file://` with **no runtime network**, so a live remote `<img src>` is banned. Keep it small (a ~28px avatar at `s=64` is plenty; don't inline a giant blob).
+  - **Offline fallback:** if the avatar can't be fetched at render time, draw an **inline-SVG `ox` monogram** (rounded square, sage/copper, themeable via `currentColor`) instead. Never block the render on the network.
+  - The marker is a real `<button aria-label="SageOx insight">` so it is focusable and screen-reader-named, with a faint ring/badge so it reads as interactive.
+- **Rollover reveals the insight.** Hover OR keyboard-focus OR click-to-pin opens the same popover mechanics as 2a. One marker = one signal = one popover. Inside, **action first**:
+  - **Headline (one line, imperative when there's an action):** e.g. *"Rebase before editing `platformio.ini` — contended on PR ryan/flash-dev."* Not *"Collisions: platformio.ini + … contended."*
+  - **Severity color** by signal: collision/active-work → amber; conflict or an explicit "do NOT use" → red; prior-art/session → teal; expert route → copper; alignment → sage.
+  - **Every reference resolves.** A bare `scribe-jbf00` is noise — render it as a link (to the PR/issue/ADR `source_url`) or as the runnable `ox session view <ref>` for a session. An ID with no resolution is degraded to "consult `<name>`", never shown raw.
+  - **Provenance chip + author/when** from 2a.
+  - **Synthesize the "so what," drop the lore.** State what the signal means *for this plan* and what to do; don't recite ownership trivia. Expand or link domain abbreviations (BDD, SDL, `X-Device-ID`) — a busy reviewer should not have to decode jargon.
+- **The only standalone SageOx UI is the alignment strip (item 1) plus an optional collapsed index** ("SageOx flagged: 1 collision · 3 prior-art · 2 experts") whose entries are anchor links that jump/scroll to the corresponding OX marker. No paragraph, ever.
+
+One signal that genuinely spans the whole plan (not a specific element) anchors its OX marker on the plan's H1 / TL;DR — still a marker with a popover, still action-first, still not a blob.
+
 ---
+
+## The reader's ten minutes — audience & time contract (governs everything below)
+
+You are writing for a **senior / principal engineer or engineering manager whose time is worth ~$10,000/hour.** They will spend **no more than ten minutes** on this page, and they must walk away with **everything they need to decide** in those ten minutes. Design every pixel against that budget:
+
+- **Get to the point. Lead with the conclusion**, the decision needed, and the biggest risk — not the backstory. The TL;DR and alignment strip must answer "do I approve, and what do I watch" before any scrolling.
+- **The page stands on its own.** Never reference a symbol, file, ID, or PR without setting enough context to understand *why it matters* — a reader who has not opened the codebase still follows the argument. A bare `scribe-jbf00` or `admin.go` with no framing is wasted ink.
+- **No minutiae.** Do not walk through single lines of code, signatures, or implementation trivia the reader doesn't need to make the call. Describe **how the system behaves and why the change matters**, not how each function is wired. Altitude over detail; zoom in only where a risk lives.
+- **Leverage HTML for compression, not decoration.** A diagram, a colored verdict cell, a severity-coded badge, or an OX-marker popover should *replace* paragraphs — each visual must let the reader understand something faster than prose would. Visuals that don't reduce reading time are noise.
+- **Concise is a feature, verbose is a bug.** Every sentence, badge, and row earns its place or is cut. Density with structure (scannable) beats completeness without it. If it can't be skimmed in ten minutes, it has failed regardless of how correct it is.
+
+This contract outranks any individual rule below: when a "nice to have" visual or a complete-but-long explanation would blow the ten-minute budget, cut it.
 
 ## html-plan quality bar (inherited — all non-negotiable)
 
@@ -129,6 +186,25 @@ Shape rules:
 | State with time-bounded transitions (timeouts, debounce, retry/backoff) | **`stateDiagram-v2`** with durations on edges | Label transitions with the timeout. |
 
 **Do NOT use Mermaid `gantt` with `dateFormat X` (numeric)** — it renders a meaningless `0 0 1 1 2…` axis. For relative-effort plans, hand-build a CSS swimlane: a per-lane row (`grid-template-columns: 160px 1fr`), a relative track with faint vertical unit gridlines, and absolutely-positioned bars (`left:%` / `width:%`) colored by workstream, with a diamond marker for any gate.
+
+**Pick the diagram by the QUESTION the reader is asking — not by habit.** Reach for the richer diagram types when (and only when) the plan genuinely has that structure. A flat list is a list; do not flowchart it. Never draw two diagrams that show the same thing.
+
+| The reader is asking… | Diagram type | When it earns its place |
+|---|---|---|
+| "In what **order** does this call out — and how many round-trips?" | **`sequenceDiagram`** | A request/call path crosses components, services, or async boundaries. Shows ordering + latency a flowchart can't. ≤ 4–5 participants. |
+| "**What depends on / connects to** what?" (topology, not order) | **interaction / dependency graph** (`flowchart LR`, C4-ish) | Components, actors, modules and their edges — to reveal coupling, blast radius, a contended boundary. |
+| "What are the **steps and branches**?" | **flow diagram** (`flowchart TB` + decision gates) | A pipeline or algorithm with conditionals/gates. The default "shape in one picture" hero. |
+| "What **states** exist and what **transitions** between them?" | **`stateDiagram-v2`** (enriched) | A lifecycle, connection/session model, retry/backoff, or anything with modes. Label edges with the trigger; push the guard/timeout/side-effect to hover. |
+| "**When**, in what sequence, how long?" | **timeline / CSS swimlane** (see table above) | Phases, rollout, parallel work, latency budget. |
+
+One **hero diagram near the top** captures the whole shape. Add a second diagram only where a specific section has structure the hero can't carry. If a diagram needs more than ~7 nodes / ~5 participants to be honest, it's two diagrams.
+
+**Progressive disclosure — rich underneath, calm on top (lean HARD into HTML here).** The single biggest lever for human understanding is putting *little* on the screen while keeping *all* the richness one hover away. The on-screen diagram is the **skeleton**; the detail lives in reveals:
+- **Mermaid node/edge interactions.** Use `click <NodeId> callback "<short tooltip>"` (requires `securityLevel:'loose'` at init) to attach a hover/click handler that opens the **same popover component as the OX markers / 2a chips**. Keep the node label terse ("auth check"); put the payload, the file/symbol it maps to, the cost, and the rationale in the popover — never on the diagram face.
+- **Sequence diagrams:** terse message labels on the line; the contract/payload/error-path detail surfaces on hover of that message (or a `Note` styled collapsed-by-default, expand on click).
+- **State machines:** the edge shows only its trigger; hovering the edge or state reveals guard, side effects, timeout/backoff, and the code path that implements it.
+- **Layered drill-down.** Start at the subsystem altitude; clicking a node expands its internal subgraph (toggle a second `.mermaid` block / swap source + `mermaid.run`), so the reader drills only where they care. One topic, many depths — the ten-minute reader stays at the top layer; the skeptic drills one node.
+- All of it **pure CSS + vanilla JS, keyboard-focusable, `file://`-safe, no network** — same constraints as every other interaction. Tie it back to the time contract: the diagram answers "how does it behave" at a glance; deeper time is spent *only* on the node the reader chooses to interrogate.
 
 **User-facing mockups — show how the feature is exposed.** If the plan changes anything the user sees or hears, include a visual of the resulting UI state honoring the project's design system — don't describe it in prose. For a net-new or multi-state flow, recommend the `/design-mockup` skill rather than hand-rolling many states. Always state which design-system rules the mockup honors. Annotate behavior in user-facing language, never with implementation detail (write "a subtle chime plays", not a source filename).
 
@@ -165,10 +241,17 @@ Shape rules:
 2. Read the `context[]` bundle; author judgment badges **cited-only**, degrading to "consult `<name>`" when evidence is thin.
 3. Extract from the plan: problem/why, blockers/findings, architecture/flow, concrete steps (with file refs), impact numbers, verification, risks.
 4. Choose the diagrams that compress the most (before/after, sequence, decision gates, state machine, swimlane timeline).
-5. Write one polished self-contained HTML file meeting every html-plan non-negotiable PLUS the alignment strip, per-section badge rail, deterministic-vs-judgment styling, and resolved source links.
-6. Merge your judgment badges into the `ox plan --json` annotations and persist with `ox plan save --plan ... --annotations <merged.json> --html <render.html>`.
-7. Open the HTML and report the path.
+5. Write one polished self-contained HTML file meeting every html-plan non-negotiable PLUS the alignment strip, per-section badge rail, deterministic-vs-judgment styling, OX-marker overlays, and resolved source links.
+6. **Architect review pass (required, before saving).** Spawn an `architect` (or general-purpose) subagent and have it review the rendered HTML *as the $10k/hour principal reader*. It checks, and you then fix, against the audience contract:
+   - Can the reader get **everything they need to decide in ten minutes**? Is the conclusion/decision/biggest-risk up top, before any scroll?
+   - Is it **direct, concise, to the point** — or padded with backstory, minutiae, or single-line code walk-throughs that don't change the decision?
+   - Does it **stand on its own** — is every file/ID/symbol/PR given enough context to matter, with no bare references?
+   - Do the visuals **compress** understanding (replace prose) or just decorate?
+   - Are SageOx insights **anchored OX markers with action-first popovers**, never a prose blob?
+   Revise until the architect signs off that a busy principal would get full value in ten minutes. Cut anything that fails the contract.
+7. Merge your judgment badges into the `ox plan --json` annotations and persist with `ox plan save --plan ... --annotations <merged.json> --html <render.html>`.
+8. Open the HTML and report the path.
 
-The goal: a reviewer skims the alignment strip + TL;DR + hero diagram and already knows whether the plan aligns with team direction and whether to approve — every badge says where its claim comes from, and ox-computed facts are visually separate from agent-reasoned judgment.
+The goal: a $10k/hour principal reader skims the alignment strip + TL;DR + hero diagram and within ten minutes knows whether the plan aligns with team direction and whether to approve — the decision and biggest risk are up top, every badge and OX marker says where its claim comes from and what to do about it, ox-computed facts are visually separate from agent-reasoned judgment, and nothing on the page wastes the reader's time.
 
 $ox plan --json
