@@ -12,6 +12,7 @@ import (
 	"time"
 
 	lipgloss "charm.land/lipgloss/v2"
+	"github.com/sageox/ox/internal/agenttask"
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
@@ -1310,6 +1311,84 @@ func renderAICoworkersSection(client *daemon.Client) string {
 	return b.String()
 }
 
+// renderAgentTasksSection renders a one-line summary of scheduled agent tasks.
+// Emits nothing when the queue is empty so it never clutters a clean status.
+// Detail belongs in `ox agent <id> tasks list`.
+func renderAgentTasksSection(gitRoot string) string {
+	ready, inProgress := countAgentTasks(gitRoot)
+	if ready == 0 && inProgress == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(statusLabelStyle.Render("Agent Tasks"))
+	// pending work is informational, not a "success" state — use a neutral
+	// highlight (no ✓ glyph) so "N ready" doesn't read as "N completed".
+	switch {
+	case ready > 0 && inProgress > 0:
+		b.WriteString(formatValue(fmt.Sprintf("%d ready, %d in progress", ready, inProgress), "highlight"))
+	case ready > 0:
+		b.WriteString(formatValue(fmt.Sprintf("%d ready", ready), "highlight"))
+	default:
+		b.WriteString(formatValue(fmt.Sprintf("%d in progress", inProgress), "muted"))
+	}
+	b.WriteString(statusMutedStyle.Render("  (ox agent <id> tasks list)"))
+	b.WriteString("\n")
+	return b.String()
+}
+
+// countAgentTasks returns the ready and in-progress task counts for the repo,
+// reconciling stale leases as a side effect of the read. Returns (0, 0) when
+// there is no queue or it cannot be read.
+func countAgentTasks(gitRoot string) (ready, inProgress int) {
+	if gitRoot == "" {
+		return 0, 0
+	}
+	// avoid creating the queue dir as a side effect of a status read
+	if !agenttask.QueueExists(gitRoot) {
+		return 0, 0
+	}
+	store, err := agenttask.NewStore(gitRoot)
+	if err != nil {
+		return 0, 0
+	}
+	defer store.Close()
+	tasks, err := store.ListView(false)
+	if err != nil {
+		return 0, 0
+	}
+	for _, t := range tasks {
+		switch t.Status {
+		case agenttask.StatusReady:
+			ready++
+		case agenttask.StatusInProgress:
+			inProgress++
+		}
+	}
+	return ready, inProgress
+}
+
+// countReadyAgentTasks returns the number of ready tasks the given agent type
+// may claim. Used by prime to surface scheduled work at session start — the
+// universal delivery channel (every adapter runs prime). Best-effort and gated
+// on the queue existing so the read never materializes the directory.
+func countReadyAgentTasks(gitRoot, agentType string) int {
+	if gitRoot == "" || !agenttask.QueueExists(gitRoot) {
+		return 0
+	}
+	store, err := agenttask.NewStore(gitRoot)
+	if err != nil {
+		return 0
+	}
+	defer store.Close()
+	ready, err := store.ReadyView(agentType)
+	if err != nil {
+		return 0
+	}
+	return len(ready)
+}
+
 var statusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Display SageOx status and directory locations",
@@ -1506,6 +1585,9 @@ daemon health, and a tree view of all SageOx directory locations.`,
 
 			// show active AI coworkers with context stats
 			fmt.Print(renderAICoworkersSection(client))
+
+			// show pending scheduled agent tasks, if any
+			fmt.Print(renderAgentTasksSection(gitRoot))
 		}
 
 		// show version update notice if available
@@ -1546,6 +1628,12 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 	// bubbles section — additive; team_contexts/ledger mirrors below
 	// stay populated for one release per the kb plan.
 	output.Bubbles = buildBubblesJSON(bubblesSummary)
+
+	// agent-task queue summary — mirror the human one-liner; omit when empty so
+	// JSON consumers see the same "silent when empty" behavior.
+	if ready, inProgress := countAgentTasks(gitRoot); ready > 0 || inProgress > 0 {
+		output.AgentTasks = &status.AgentTasksJSON{Ready: ready, InProgress: inProgress}
+	}
 
 	// auth section
 	output.Auth = &statusAuthJSON{
