@@ -72,7 +72,13 @@ Reads the active plan from --file or stdin. Use --json for the plumbing path
 		// a concise human summary.
 		savedDir := maybeSavePlan(gitRoot, in, result)
 		plan.RecordPlanGenerated(result, savedDir != "")
-		return writePlanHuman(cmd, result, savedDir)
+		if err := writePlanHuman(cmd, result, savedDir); err != nil {
+			return err
+		}
+		if open, _ := cmd.Flags().GetBool("open"); open {
+			openSavedPlanHTML(cmd, savedDir)
+		}
+		return nil
 	},
 }
 
@@ -99,7 +105,7 @@ var planSaveCmd = &cobra.Command{
 	Short: "Persist a fully-enriched plan (merged badges + optional HTML) to the ledger",
 	Long: `Persist a fully-enriched plan to the ledger. Unlike bare 'ox plan' — which
 auto-saves only the deterministic, ox-computed annotations — 'ox plan save' is the
-explicit full-plan persist path used by the ox-plan renderer skill after it has
+explicit full-plan persist path used by the html-plan renderer skill after it has
 authored its judgment badges and (optionally) rendered the HTML.
 
   --plan        the plan markdown (source for plan.md + topic/slug derivation)
@@ -113,6 +119,21 @@ always saves (the skill is deliberately persisting), independent of the
 plan.save config.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runPlanSave(cmd)
+	},
+}
+
+var planLintCmd = &cobra.Command{
+	Use:   "lint <slug>",
+	Short: "Check a saved plan's HTML render for SageOx attribution + self-contained invariants",
+	Long: `Lint a saved plan's rendered HTML against the html-plan attribution contract:
+when the plan carried SageOx enrichment the render must credit it (footer line +
+an anchored OX marker), an un-enriched plan must not overclaim, and the SageOx
+mark must be self-contained (no live remote avatar). Advisory by default; pass
+--strict to exit non-zero on findings (for CI / golden checks).`,
+	Args: cobra.ExactArgs(1),
+	RunE: func(cmd *cobra.Command, args []string) error {
+		strict, _ := cmd.Flags().GetBool("strict")
+		return runPlanLint(cmd, args[0], strict)
 	},
 }
 
@@ -221,7 +242,7 @@ func collabCount(c *plan.CollabSignals, field string) int {
 // runPlanSave persists a fully-enriched plan to the ledger from a plan markdown
 // file, a MERGED annotations.json (deterministic + judgment badges), and an
 // optional pre-rendered HTML file. This is the explicit full-plan persist path
-// the ox-plan skill calls — it always saves (no auto-save config gate) and never
+// the html-plan skill calls — it always saves (no auto-save config gate) and never
 // renders HTML here (the skill already produced it).
 func runPlanSave(cmd *cobra.Command) error {
 	planPath, _ := cmd.Flags().GetString("plan")
@@ -273,6 +294,54 @@ func runPlanSave(cmd *cobra.Command) error {
 
 	slog.Info("plan_saved", "dir", dir, "html", htmlPath != "", "annotations", len(result.Annotations))
 	fmt.Fprintf(cmd.OutOrStdout(), "Saved plan to ledger: %s\n", dir)
+
+	// Branding guarantee: every render the skill saves is checked for the
+	// earned-and-conditional SageOx attribution. Warn-only — a missing credit
+	// must never block the save (fail-open). Run `ox plan lint <slug>` to recheck.
+	for _, f := range plan.LintBranding(html, result) {
+		cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
+	}
+	return nil
+}
+
+// runPlanLint loads a saved plan's HTML render and reports SageOx-attribution
+// findings. Advisory by default; --strict makes it exit non-zero on findings so
+// a golden check or CI step can enforce the contract. Fail-open on a missing or
+// LFS-dehydrated render (nothing local to lint).
+func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
+	out := cmd.OutOrStdout()
+	gitRoot := findGitRoot()
+
+	_, res, info, err := plan.Load(gitRoot, slug)
+	if err != nil {
+		return err
+	}
+
+	path, _, isPointer, exists := plan.PlanHTMLPath(info.Dir)
+	if !exists {
+		fmt.Fprintln(out, "No HTML render for this plan — nothing to lint.")
+		return nil
+	}
+	if isPointer {
+		cli.PrintHint("This plan's HTML is stored in LFS and not hydrated locally; cannot lint its content.")
+		return nil
+	}
+	html, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read plan html %q: %w", path, err)
+	}
+
+	findings := plan.LintBranding(html, res)
+	if len(findings) == 0 {
+		fmt.Fprintln(out, cli.StyleSuccess.Render("✓")+" SageOx attribution OK")
+		return nil
+	}
+	for _, f := range findings {
+		fmt.Fprintf(out, "%s [%s] %s\n", cli.StyleWarning.Render("!"), f.Rule, f.Message)
+	}
+	if strict {
+		return fmt.Errorf("%d branding lint finding(s)", len(findings))
+	}
 	return nil
 }
 
@@ -322,7 +391,10 @@ func writePlanJSON(cmd *cobra.Command, result plan.Result) error {
 
 // writePlanHuman prints a concise summary: signal counts plus one line per
 // material annotation, where the plan was saved (if captured), and a hint that
-// an enriched HTML render is available via the ox-plan skill.
+// an enriched HTML render is available via the html-plan skill. The render
+// recommendation fires when EITHER team-context signals (Material) OR structural
+// substance (NonTrivial) warrant a human-review render — the same two axes the
+// ExitPlanMode nudge uses, so porcelain and hook stay consistent.
 func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string) error {
 	out := cmd.OutOrStdout()
 	s := result.Signals
@@ -347,12 +419,39 @@ func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string) err
 		fmt.Fprintf(&b, "\nSaved to ledger: %s\n", savedDir)
 	}
 
-	if s.Material {
-		b.WriteString("\nMaterial signals found. Render an enriched HTML plan via the ox-plan skill for faster human review.\n")
+	if s.Material || s.NonTrivial {
+		lead := "Substantial plan."
+		if s.Material {
+			lead = "Material signals found."
+		}
+		fmt.Fprintf(&b, "\n%s Render an enriched HTML plan via the html-plan skill for faster human review (open it with `ox plan --open`).\n", lead)
 	}
 
 	fmt.Fprint(out, b.String())
 	return nil
+}
+
+// openSavedPlanHTML backs `ox plan --open`: it opens the render of the plan the
+// porcelain path just saved, mirroring `ox plan view --open` but off the saved
+// directory. Best-effort — enrichment already succeeded, so a missing render or
+// a headless shell prints a hint instead of erroring.
+func openSavedPlanHTML(cmd *cobra.Command, savedDir string) {
+	if savedDir == "" {
+		cli.PrintHint("No saved plan to open (plan capture is off or no ledger is configured).")
+		return
+	}
+	path, _, _, exists := plan.PlanHTMLPath(savedDir)
+	if !exists {
+		cli.PrintHint("No HTML render yet — run the `html-plan` skill to produce one, then re-run with --open.")
+		return
+	}
+	if cli.IsHeadless() {
+		fmt.Fprintf(cmd.OutOrStdout(), "Rendered HTML: %s\n", path)
+		return
+	}
+	if err := openPlanHTML(savedDir); err != nil {
+		cli.PrintHint("Could not open the rendered plan: " + err.Error())
+	}
 }
 
 // runPlanList renders the saved plans as a table. Fail-open: outside a project
@@ -553,6 +652,7 @@ func init() {
 	planCmd.Flags().Bool("json", false, "emit the enrichment Result as JSON (plumbing path; no network/LLM call)")
 	planCmd.Flags().Bool("persist", false, "with --json, also save + commit a draft to the ledger (used by the ExitPlanMode hook)")
 	planCmd.Flags().String("file", "", "plan source file (default: stdin, else newest ~/.claude/plans/*.md)")
+	planCmd.Flags().Bool("open", false, "after enrich, open this plan's rendered HTML if one is saved")
 
 	planViewCmd.Flags().Bool("open", false, "open the rendered plan.html in your browser (if one was saved)")
 
@@ -560,9 +660,12 @@ func init() {
 	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: ox --json badges + agent judgment badges (required)")
 	planSaveCmd.Flags().String("html", "", "optional pre-rendered HTML; size-gated plain-git-vs-LFS on save")
 
+	planLintCmd.Flags().Bool("strict", false, "exit non-zero when the render has attribution findings (for CI / golden checks)")
+
 	planCmd.AddCommand(planListCmd)
 	planCmd.AddCommand(planViewCmd)
 	planCmd.AddCommand(planSaveCmd)
+	planCmd.AddCommand(planLintCmd)
 
 	planCmd.GroupID = "dev"
 	rootCmd.AddCommand(planCmd)
