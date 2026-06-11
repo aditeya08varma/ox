@@ -138,3 +138,25 @@ SageOx reads configuration from, in order:
 - [Privacy Policy](https://sageox.ai/privacy)
 - [Terms of Service](https://sageox.ai/terms)
 - [Acceptable Use Policy](https://sageox.ai/acceptable-use)
+
+## Tools we love
+
+We build `ox` in great company. These are the tools we rely on — and love —
+every day. Gratitude to the teams behind them, and to the wider developer
+community.
+
+<p align="center">
+  <a href="https://socket.dev" title="Socket — supply-chain security"><img src="docs/assets/logos/socket.svg" height="26" alt="Socket"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://sageox.ai" title="SageOx — agentic context infrastructure"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/sageox-dark.svg"><img src="docs/assets/logos/sageox-light.svg" height="26" alt="SageOx"></picture></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://www.coderabbit.ai" title="CodeRabbit — AI code review"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/coderabbit-dark.svg"><img src="docs/assets/logos/coderabbit-light.svg" height="22" alt="CodeRabbit"></picture></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://www.greptile.com" title="Greptile — AI codebase review"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/greptile-dark.png"><img src="docs/assets/logos/greptile-light.png" height="26" alt="Greptile"></picture></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://charm.sh" title="Charm — delightful tools for the command line"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/assets/logos/charm-dark.svg"><img src="docs/assets/logos/charm-light.svg" height="24" alt="Charm"></picture></a>
+</p>
+
+<p align="center">
+  <sub><a href="https://socket.dev">Socket</a> · <a href="https://sageox.ai">SageOx</a> · <a href="https://www.coderabbit.ai">CodeRabbit</a> · <a href="https://www.greptile.com">Greptile</a> · <a href="https://charm.sh">Charm</a></sub>
+</p>

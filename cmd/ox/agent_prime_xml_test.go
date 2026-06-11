@@ -805,9 +805,16 @@ func TestOutputAgentPrimeXML_SageoxOverheadBudget_Regression(t *testing.T) {
 	// As of this test landing, minimal sageox overhead measured roughly
 	// 600 tokens (instructions + attribution + rule-promotion-guidance +
 	// session-context + immediate-actions + budget block itself).
-	// The 1500-token ceiling gives ~2.5x headroom; crossing it should
-	// trigger an explicit decision-and-review, not silent acceptance.
-	const sageoxOverheadCeiling = 1500
+	// The ceiling gives ~2.5x headroom; crossing it should trigger an
+	// explicit decision-and-review, not silent acceptance.
+	//
+	// Raised 1500 -> 1550 (ox-nut2): the <plan-enrichment-guidance> block gained
+	// the explicit two-beat framing (enrich --json WHILE drafting, render a
+	// "SageOx team-context-optimized plan" on present) AND the offer-the-live-
+	// review-loop guidance (proactively offer `ox plan review`, run on the
+	// human's yes) — the headline of that change. ~42 tokens on every Gold
+	// session, deliberately accepted for a high-value collaboration loop.
+	const sageoxOverheadCeiling = 1550
 	sageoxTokens := budget.Get(prime.BudgetSourceSageox)
 	if sageoxTokens > sageoxOverheadCeiling {
 		t.Errorf("SageOx overhead floor for minimal prime = %d tokens, exceeds ceiling %d.\n"+
