@@ -7,11 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.10.0] - 2026-06-10
+## [0.10.0] - 2026-06-11
 
 ### Added
 
 - **Cross-agent HTML plans with a human review loop** — `ox plan` renders a team-context-enriched plan as a self-contained HTML page for *any* coding agent, not just Claude Code, backed by a catalog of reusable visualizations (timelines, collision maps, sequence diagrams). A new review loop (`ox plan review`) serves the plan for inline human feedback, so a reviewer can shape the approach *before* any code is written — and the feedback is captured back to the ledger.
+- **Just-in-time `ox plan enrich` hint while drafting** — during plan mode (Claude Code), `ox` nudges the agent to fold deterministic team context (collisions, prior art, expert routing) into the plan *while it is being drafted*, so enrichment lands in the first draft a human sees rather than being bolted on after.
 
 ### Changed
 
