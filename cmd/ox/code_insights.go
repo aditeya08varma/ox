@@ -81,6 +81,11 @@ var codeInsightsCmd = &cobra.Command{
 
 		dataDir := resolveCodeDBDir(root)
 		if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+			if agentID, _ := detectAgentContext(); agentID != "" {
+				return emitIndexNotReadyJSON(cmd, indexStatusNotIndexed,
+					"No code index found for this repo.",
+					"Run 'ox code index' to build the index, then rerun 'ox code insights'. Until then, use Grep/Glob to inspect recent changes.")
+			}
 			return fmt.Errorf("no code index found — run 'ox code index' first")
 		}
 

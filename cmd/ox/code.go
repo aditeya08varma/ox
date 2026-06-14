@@ -169,7 +169,17 @@ parse the status field before treating output as results.`,
 		query := strings.Join(args, " ")
 		dataDir, useLedger := resolvePreferredCodeDBDir(root)
 
+		agentID, _ := detectAgentContext()
+
+		// Index-not-ready paths: emit structured JSON when an agent is calling
+		// so it can branch on `status` instead of treating an error as terminal.
+		// Humans still get the human-readable error.
 		if isCodeDBIndexing(useLedger) {
+			if agentID != "" {
+				return emitIndexNotReadyJSON(cmd, indexStatusIndexing,
+					"Code index is currently being built. Search will be available once indexing completes.",
+					"Use Grep/Glob until indexing completes; rerun 'ox code search' afterward.")
+			}
 			return fmt.Errorf("code index is currently being built — search is unavailable until indexing completes. Run 'ox code status' to check progress")
 		}
 
@@ -181,10 +191,12 @@ parse the status field before treating output as results.`,
 
 		// attach all daemon-built dirty overlays for uncommitted file search
 		// (supports multiple simultaneous worktrees)
-		if n := db.AttachAllDirtyIndexes(); n > 0 {
-			slog.Debug("attached dirty overlays", "count", n)
+		dirtyCount := db.AttachAllDirtyIndexes()
+		if dirtyCount > 0 {
+			slog.Debug("attached dirty overlays", "count", dirtyCount)
 		}
 
+		searchStart := time.Now()
 		decisionsOnly, _ := cmd.Flags().GetBool("decisions")
 		isDecision := decision.PathMatcher(root)
 		var results []search.Result
@@ -196,6 +208,7 @@ parse the status field before treating output as results.`,
 		} else {
 			results, err = db.Search(context.Background(), query)
 		}
+		searchElapsed := time.Since(searchStart)
 		if err != nil {
 			return fmt.Errorf("search: %w", err)
 		}
@@ -218,6 +231,10 @@ parse the status field before treating output as results.`,
 
 		fullJSON, _ := cmd.Flags().GetBool("full-json")
 		limit, _ := cmd.Flags().GetInt("limit")
+		snippetLen, _ := cmd.Flags().GetInt("snippet")
+		if snippetLen <= 0 {
+			snippetLen = defaultSnippetLen
+		}
 
 		var buf bytes.Buffer
 		enc := json.NewEncoder(&buf)
@@ -229,10 +246,30 @@ parse the status field before treating output as results.`,
 				return fmt.Errorf("encode: %w", err)
 			}
 		} else {
-			compact := compactSearchResults(results, limit, isDecision)
+			compact := compactSearchResults(results, limit, snippetLen, isDecision)
+			// JIT DSL hint: if the agent issued a bare query (no DSL filters)
+			// and we returned non-zero results, append a one-line nudge toward
+			// the call-graph / type-filter capabilities they likely didn't
+			// know about. Cheap discovery channel; only fires when we have
+			// something useful to teach.
+			if isBareQuery(query) && len(compact.Results) > 0 {
+				if compact.Guidance != "" {
+					compact.Guidance += " "
+				}
+				compact.Guidance += "Tip: refine with `type:symbol` for defs, `calledby:<name>`/`calls:<name>` for the resolved call graph, `type:pr`/`type:issue` for indexed GitHub records, or `before:`/`after:` to scope by time."
+			}
 			if err := enc.Encode(compact); err != nil {
 				return fmt.Errorf("encode: %w", err)
 			}
+		}
+
+		// Stderr stats one-liner: gives the agent (and humans) a feel for
+		// latency and scope on every call. Stderr only, so JSON-strict
+		// stdout consumers are unaffected. Suppressed by --quiet.
+		quiet, _ := cmd.Flags().GetBool("quiet")
+		if !quiet {
+			fmt.Fprintf(os.Stderr, "codedb: %d results in %s (dirty overlays: %d)\n",
+				len(results), formatDurationBrief(searchElapsed), dirtyCount)
 		}
 
 		outputBytes := buf.Len()
@@ -240,13 +277,70 @@ parse the status field before treating output as results.`,
 			return err
 		}
 
-		agentID, _ := detectAgentContext()
 		if agentID != "" {
 			slog.Debug("code search context cost", "agent_id", agentID, "bytes", outputBytes)
 			trackContextBytes(int64(outputBytes))
 		}
 		return nil
 	},
+}
+
+// defaultSnippetLen bounds the per-result snippet returned in compact mode.
+// Bumped from 120 → 200 to better cover typical Go signatures + brief context;
+// override via --snippet N for narrower or wider snippets.
+const defaultSnippetLen = 200
+
+// indexStatusIndexing / indexStatusNotIndexed are the canonical `status`
+// values emitted by emitIndexNotReadyJSON so agent-context consumers can
+// branch on a stable string.
+const (
+	indexStatusIndexing   = "indexing"
+	indexStatusNotIndexed = "not_indexed"
+)
+
+// indexNotReadyResponse is the structured payload emitted on stdout when an
+// agent-context invocation hits an index that is mid-build or missing. Agents
+// branch on `status` rather than parsing stderr — this turns a hard error into
+// a recoverable signal that includes the recommended fallback.
+type indexNotReadyResponse struct {
+	Status       string `json:"status"`        // "indexing" | "not_indexed"
+	Message      string `json:"message"`
+	FallbackHint string `json:"fallback_hint"`
+}
+
+// emitIndexNotReadyJSON writes a structured status response to stdout and
+// returns nil so the command exits 0. Callers should ONLY invoke this when
+// they have already confirmed an agent context — humans get a plain error
+// instead so the terminal output remains readable.
+func emitIndexNotReadyJSON(cmd *cobra.Command, status, message, fallback string) error {
+	resp := indexNotReadyResponse{
+		Status:       status,
+		Message:      message,
+		FallbackHint: fallback,
+	}
+	enc := json.NewEncoder(cmd.OutOrStdout())
+	enc.SetIndent("", "  ")
+	return enc.Encode(resp)
+}
+
+// isBareQuery returns true when the query string carries no DSL filters and
+// is essentially "one search term." Used to decide whether to append a JIT
+// DSL hint to the compact response — agents using `ox code` like a grep get
+// a one-line nudge toward the unique-value filters.
+func isBareQuery(q string) bool {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return false
+	}
+	// any DSL filter syntax (`key:value`) disqualifies — already non-bare
+	if strings.Contains(q, ":") {
+		return false
+	}
+	// boolean operators or forced regex also count as non-bare
+	if strings.Contains(q, " OR ") || (strings.HasPrefix(q, "/") && strings.HasSuffix(q, "/")) {
+		return false
+	}
+	return true
 }
 
 // compactSearchResult is a minimal search result optimized for agent context.
@@ -277,16 +371,21 @@ type compactSearchResponse struct {
 }
 
 // compactSearchResults converts full results into a compact format for agents.
-func compactSearchResults(results []search.Result, limit int, isDecision func(string) bool) compactSearchResponse {
+// snippetLen caps per-result snippet length; pass 0 to use defaultSnippetLen.
+// isDecision, when non-nil, tags hits under the repo's decision-record globs.
+func compactSearchResults(results []search.Result, limit, snippetLen int, isDecision func(string) bool) compactSearchResponse {
 	total := len(results)
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
+	}
+	if snippetLen <= 0 {
+		snippetLen = defaultSnippetLen
 	}
 
 	compact := make([]compactSearchResult, 0, len(results))
 	for _, r := range results {
 		snippet := stripANSIEscapes(r.Content)
-		snippet = compactSnippet(snippet, 120)
+		snippet = compactSnippet(snippet, snippetLen)
 		cr := compactSearchResult{
 			File:        r.FilePath,
 			Line:        r.Line,
@@ -930,12 +1029,14 @@ func formatIndexTiming(r *daemon.CodeIndexResult) string {
 }
 
 func init() {
-	codeSearchCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~6x more context tokens)")
+	codeSearchCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~4x more context tokens)")
 	codeSearchCmd.Flags().Int("limit", 10, "max results to return")
 	codeSearchCmd.Flags().Bool("decisions", false, "only results from this repo's decision records (ADRs/DDRs)")
+	codeSearchCmd.Flags().Int("snippet", defaultSnippetLen, "max snippet length per result, in characters")
 
-	codeQueryCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~6x more context tokens)")
+	codeQueryCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~4x more context tokens)")
 	codeQueryCmd.Flags().Int("limit", 10, "max results to return")
+	codeQueryCmd.Flags().Int("snippet", defaultSnippetLen, "max snippet length per result, in characters")
 
 	// mirror indexCodeCmd flags so the alias works correctly
 	codeIndexCmd.Flags().Bool("full", false, "wipe index and rebuild from scratch")

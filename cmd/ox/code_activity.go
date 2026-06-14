@@ -42,6 +42,11 @@ func runCodeActivity(cmd *cobra.Command, _ []string) error {
 
 	dataDir := resolveCodeDBDir(root)
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
+		if agentID, _ := detectAgentContext(); agentID != "" {
+			return emitIndexNotReadyJSON(cmd, indexStatusNotIndexed,
+				"No code index found for this repo.",
+				"Run 'ox code index' to build the index, then rerun 'ox code activity'.")
+		}
 		return fmt.Errorf("%s\n%s",
 			cli.StyleError.Render("No code index found"),
 			"Run "+cli.StyleCommand.Render("ox code index")+" to create one")
