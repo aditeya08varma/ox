@@ -85,6 +85,10 @@ func runCodePRs(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("invalid --state %q: must be one of open | closed | merged | all", state)
 	}
 
+	// Normalize once so validation, the query, and the echoed response all agree.
+	sort = strings.ToLower(sort)
+	state = strings.ToLower(state)
+
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
@@ -92,8 +96,8 @@ func runCodePRs(cmd *cobra.Command, _ []string) error {
 
 	results, err := query.TriagePRs(ctx, db.Store(), query.TriageOpts{
 		Limit: limit,
-		Sort:  strings.ToLower(sort),
-		State: strings.ToLower(state),
+		Sort:  sort,
+		State: state,
 	})
 	if err != nil {
 		return fmt.Errorf("triage PRs: %w", err)
