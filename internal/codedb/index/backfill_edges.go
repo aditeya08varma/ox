@@ -53,6 +53,10 @@ func BackfillSymbolEdges(ctx context.Context, s *store.Store, progress ProgressF
 		}
 		blobIDs = append(blobIDs, id)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return stats, fmt.Errorf("iterate blobs for edge backfill: %w", err)
+	}
 	rows.Close()
 
 	if len(blobIDs) == 0 {

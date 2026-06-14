@@ -92,8 +92,8 @@ func runCodePRs(cmd *cobra.Command, _ []string) error {
 
 	results, err := query.TriagePRs(ctx, db.Store(), query.TriageOpts{
 		Limit: limit,
-		Sort:  sort,
-		State: state,
+		Sort:  strings.ToLower(sort),
+		State: strings.ToLower(state),
 	})
 	if err != nil {
 		return fmt.Errorf("triage PRs: %w", err)
