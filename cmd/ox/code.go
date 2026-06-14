@@ -422,7 +422,12 @@ func compactSearchResults(results []search.Result, limit, snippetLen int, isDeci
 	return resp
 }
 
-// compactSnippet collapses whitespace and truncates to maxLen chars.
+// compactSnippet collapses whitespace and truncates to maxLen runes.
+//
+// Truncation is rune-aware (not byte-aware) — slicing a UTF-8 string mid-rune
+// produces invalid output and breaks JSON encoding for any non-ASCII content
+// (Greek identifiers, emoji in comments, CJK in PR titles, etc.). maxLen is
+// counted in runes so the output is bounded by visual width, not bytes.
 func compactSnippet(s string, maxLen int) string {
 	// collapse newlines and tabs into single spaces
 	var b strings.Builder
@@ -442,8 +447,21 @@ func compactSnippet(s string, maxLen int) string {
 	// strip leading ellipsis from bleve fragments
 	result = strings.TrimPrefix(result, "…")
 	result = strings.TrimSpace(result)
-	if len(result) > maxLen {
-		result = result[:maxLen] + "…"
+
+	// Rune-aware truncation: count runes, find the byte offset of the
+	// (maxLen+1)-th rune, cut there. Pure ASCII falls through with the same
+	// behavior as the original byte slice (1 rune == 1 byte).
+	runeCount := 0
+	cutAt := -1
+	for byteIdx := range result {
+		if runeCount == maxLen {
+			cutAt = byteIdx
+			break
+		}
+		runeCount++
+	}
+	if cutAt >= 0 {
+		result = result[:cutAt] + "…"
 	}
 	return result
 }

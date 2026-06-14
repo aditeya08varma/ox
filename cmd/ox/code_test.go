@@ -315,6 +315,103 @@ func TestEmitIndexNotReadyJSON_NotIndexed(t *testing.T) {
 	assert.Contains(t, got.FallbackHint, "ox code index")
 }
 
+// --- compactSnippet rune-aware truncation (UTF-8 safety) ---
+
+func TestCompactSnippet_RuneAware_ASCII(t *testing.T) {
+	// Pure ASCII falls through with the same behavior as the original
+	// byte-slice path; 1 byte == 1 rune.
+	got := compactSnippet(strings.Repeat("a", 250), 200)
+	require.True(t, strings.HasSuffix(got, "…"))
+	assert.Equal(t, 200+len("…"), len(got), "ASCII: byte length tracks rune count")
+}
+
+func TestCompactSnippet_RuneAware_MultibyteUTF8(t *testing.T) {
+	// "λ" is 2 bytes per rune; 100 λ-runes is 200 bytes.
+	in := strings.Repeat("λ", 250)
+	got := compactSnippet(in, 100)
+
+	// Must end at a valid rune boundary — never produce invalid UTF-8.
+	assert.True(t, strings.HasSuffix(got, "…"), "must append ellipsis when truncated")
+	stripped := strings.TrimSuffix(got, "…")
+	// Each λ is exactly 2 bytes
+	assert.Equal(t, 200, len(stripped), "100 runes × 2 bytes/rune = 200 bytes")
+	// And rune count is exactly 100
+	count := 0
+	for range stripped {
+		count++
+	}
+	assert.Equal(t, 100, count, "must hold exactly maxLen runes")
+}
+
+func TestCompactSnippet_RuneAware_Emoji(t *testing.T) {
+	// "🤖" is 4 bytes per rune. Byte truncation at an odd offset would
+	// produce invalid UTF-8 and break JSON encoding downstream.
+	in := strings.Repeat("🤖", 50)
+	got := compactSnippet(in, 10)
+	// Strip ellipsis (3 bytes), expect 10 runes × 4 bytes = 40 bytes.
+	stripped := strings.TrimSuffix(got, "…")
+	assert.Equal(t, 40, len(stripped))
+	// And valid UTF-8 (rune iteration completes without invalid bytes).
+	count := 0
+	for range stripped {
+		count++
+	}
+	assert.Equal(t, 10, count)
+}
+
+func TestCompactSnippet_RuneAware_NoTruncationNeeded(t *testing.T) {
+	// Under the limit — should pass through unchanged, no ellipsis.
+	got := compactSnippet("short", 100)
+	assert.Equal(t, "short", got)
+	got = compactSnippet(strings.Repeat("λ", 10), 100)
+	assert.Equal(t, strings.Repeat("λ", 10), got)
+}
+
+// --- verb-arg validation (DSL-injection defense) ---
+
+func TestValidateSymbolArg_AcceptsCleanIdentifiers(t *testing.T) {
+	for _, ok := range []string{"authenticate", "ResolveSession", "foo_bar", "func123", "x"} {
+		assert.NoError(t, validateSymbolArg("test", ok), "must accept %q", ok)
+	}
+}
+
+func TestValidateSymbolArg_RejectsDSLInjection(t *testing.T) {
+	bad := []string{
+		"foo calledby:bar",         // whitespace + colon — would inject second filter
+		"foo bar",                  // whitespace — would re-tokenize
+		"foo:bar",                  // colon — would be parsed as filter
+		`"quoted"`,                 // quote — would short-circuit tokenizer
+		"foo\ttab",                 // tab — whitespace variant
+		"foo\nnewline",             // newline — whitespace variant
+		"foo'apostrophe",           // single quote — DSL delimiter
+	}
+	for _, b := range bad {
+		assert.Error(t, validateSymbolArg("test", b), "must reject %q", b)
+	}
+}
+
+func TestValidateSymbolArg_RejectsEmpty(t *testing.T) {
+	assert.Error(t, validateSymbolArg("test", ""))
+}
+
+func TestValidatePathArg_AcceptsPaths(t *testing.T) {
+	for _, ok := range []string{"cmd/ox/code.go", "internal/", ".", "a/b/c-d.go", "internal/codedb/store/schema.go"} {
+		assert.NoError(t, validatePathArg("log", ok), "must accept %q", ok)
+	}
+}
+
+func TestValidatePathArg_RejectsDSLInjection(t *testing.T) {
+	bad := []string{
+		"cmd/ox/code.go author:foo",
+		"path with spaces",
+		`path"quote`,
+		"path:colon",
+	}
+	for _, b := range bad {
+		assert.Error(t, validatePathArg("log", b), "must reject %q", b)
+	}
+}
+
 func TestIndexStatusConstants_AreStable(t *testing.T) {
 	// Agent-side consumers branch on these strings; lock them in so a future
 	// rename doesn't silently break callers parsing the JSON.
