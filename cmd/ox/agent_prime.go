@@ -904,9 +904,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			}
 			teamLabel = tn + " "
 		}
-		output.CodeSearchTip = fmt.Sprintf("'ox code search' is available for %s, PREFER over grep for code search (it indexes symbols, git history, diffs). Use 'ox query' only for %steam context (discussions) and ledger session recordings.", repoSlug, teamLabel)
+		output.CodeSearchTip = fmt.Sprintf("'ox code search' is indexed for %s — DSL filters (type:symbol, calls:, calledby:, type:pr, type:comment, before:/after:) unlock things grep cannot do. Use 'ox query' for %steam context (discussions) and ledger session recordings.", repoSlug, teamLabel)
 	} else {
-		output.CodeSearchTip = fmt.Sprintf("Run 'ox code index' to enable local code search (symbols, diffs, git history) for %s.", repoSlug)
+		output.CodeSearchTip = fmt.Sprintf("Run 'ox code index' to enable CodeDB (symbols, resolved call graph, diffs, git history, indexed PRs/issues/comments) for %s.", repoSlug)
 	}
 
 	output.ElapsedMs = time.Since(primeStart).Milliseconds()

@@ -16,7 +16,7 @@ import (
 
 var codePRsCmd = &cobra.Command{
 	Use:   "prs",
-	Short: "List pull requests with triage signals",
+	Short: "List pull requests ranked for triage (stalled, age, activity)",
 	Long: `List indexed pull requests ranked for triage.
 
 By default surfaces the most-stalled open PRs first (least-recent activity at
