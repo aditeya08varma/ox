@@ -9,6 +9,7 @@ package main
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -112,13 +113,27 @@ Examples:
 		var parts []string
 		parts = append(parts, fmt.Sprintf(`file:%s`, args[0]))
 		parts = append(parts, "type:commit")
-		if author, _ := cmd.Flags().GetString("author"); author != "" {
+		author, _ := cmd.Flags().GetString("author")
+		after, _ := cmd.Flags().GetString("after")
+		before, _ := cmd.Flags().GetString("before")
+
+		// The CodeDB commit-search executor requires at least one of
+		// author:/before:/after:/message: alongside file: (the file filter
+		// alone does not satisfy the "give the planner some bound" check in
+		// translate.go). When the agent passes no filters, default --after
+		// to one year ago so `ox code log <path>` always returns something
+		// useful instead of erroring.
+		if author == "" && after == "" && before == "" {
+			after = time.Now().AddDate(-1, 0, 0).Format("2006-01-02")
+		}
+
+		if author != "" {
 			parts = append(parts, fmt.Sprintf(`author:%s`, author))
 		}
-		if after, _ := cmd.Flags().GetString("after"); after != "" {
+		if after != "" {
 			parts = append(parts, fmt.Sprintf(`after:%s`, after))
 		}
-		if before, _ := cmd.Flags().GetString("before"); before != "" {
+		if before != "" {
 			parts = append(parts, fmt.Sprintf(`before:%s`, before))
 		}
 		return runCodeSearch(cmd, strings.Join(parts, " "))
