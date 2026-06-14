@@ -240,7 +240,7 @@ func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs) (int, er
 		LocalResults: combined.LocalResults,
 	}
 	if len(combined.CodeResults) > 0 {
-		compact := compactSearchResults(combined.CodeResults, qa.limit)
+		compact := compactSearchResults(combined.CodeResults, qa.limit, 0)
 		resp.CodeResults = compact.Results
 		resp.Guidance = compact.Guidance
 	}
