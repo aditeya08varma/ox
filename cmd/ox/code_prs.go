@@ -85,6 +85,10 @@ func runCodePRs(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("invalid --state %q: must be one of open | closed | merged | all", state)
 	}
 
+	// Normalize once so validation, the query, and the echoed response all agree.
+	sort = strings.ToLower(sort)
+	state = strings.ToLower(state)
+
 	ctx := cmd.Context()
 	if ctx == nil {
 		ctx = context.Background()
