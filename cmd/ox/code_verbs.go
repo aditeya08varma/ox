@@ -14,6 +14,41 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// validateSymbolArg rejects arguments that would smuggle additional DSL filters
+// into a verb's constructed query string. Verbs build DSL via Sprintf — without
+// validation, `ox code callers "foo calledby:bar"` would render
+// `calledby:foo calledby:bar` and the parser would interpret it as a
+// multi-filter query rather than a single-symbol lookup. The constraint is
+// intentionally strict (one bare identifier-like token): a user who needs the
+// full DSL should drop to `ox code search` instead of the verb wrapper.
+func validateSymbolArg(name, arg string) error {
+	if arg == "" {
+		return fmt.Errorf("%s: name argument must not be empty", name)
+	}
+	if strings.ContainsAny(arg, " \t\n\r") {
+		return fmt.Errorf("%s: name must not contain whitespace — use 'ox code search' for multi-term DSL queries", name)
+	}
+	if strings.ContainsAny(arg, ":\"'") {
+		return fmt.Errorf("%s: name must not contain DSL delimiters (':', quotes) — use 'ox code search' for DSL queries", name)
+	}
+	return nil
+}
+
+// validatePathArg is the path-shaped sibling of validateSymbolArg. Paths can
+// contain `/` and `.` and `-` but still must not embed DSL filter syntax.
+func validatePathArg(name, arg string) error {
+	if arg == "" {
+		return fmt.Errorf("%s: path argument must not be empty", name)
+	}
+	if strings.ContainsAny(arg, " \t\n\r") {
+		return fmt.Errorf("%s: path must not contain whitespace", name)
+	}
+	if strings.ContainsAny(arg, ":\"'") {
+		return fmt.Errorf("%s: path must not contain DSL delimiters (':', quotes)", name)
+	}
+	return nil
+}
+
 // codeCallersCmd — "who calls X?" Wraps `search "" calledby:<name>`.
 var codeCallersCmd = &cobra.Command{
 	Use:   "callers <name>",
@@ -27,6 +62,9 @@ Examples:
   ox code callers ResolveSessionRecording --limit 20`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validateSymbolArg("callers", args[0]); err != nil {
+			return err
+		}
 		return runCodeSearch(cmd, fmt.Sprintf(`calledby:%s`, args[0]))
 	},
 }
@@ -44,6 +82,9 @@ Examples:
   ox code callees authenticate --depth 3`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validateSymbolArg("callees", args[0]); err != nil {
+			return err
+		}
 		depth, _ := cmd.Flags().GetInt("depth")
 		q := fmt.Sprintf(`calls:%s`, args[0])
 		if depth > 0 {
@@ -66,6 +107,9 @@ Examples:
   ox code defs Handler --limit 5`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validateSymbolArg("defs", args[0]); err != nil {
+			return err
+		}
 		return runCodeSearch(cmd, fmt.Sprintf(`%s type:symbol`, args[0]))
 	},
 }
@@ -87,8 +131,14 @@ Examples:
   ox code refs migration --lang go`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validateSymbolArg("refs", args[0]); err != nil {
+			return err
+		}
 		q := fmt.Sprintf(`%s type:code`, args[0])
 		if lang, _ := cmd.Flags().GetString("lang"); lang != "" {
+			if err := validateSymbolArg("--lang", lang); err != nil {
+				return err
+			}
 			q += fmt.Sprintf(` lang:%s`, lang)
 		}
 		return runCodeSearch(cmd, q)
@@ -110,12 +160,25 @@ Examples:
   ox code log cmd/ox/code.go --author rupak --after 2026-04-01`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if err := validatePathArg("log", args[0]); err != nil {
+			return err
+		}
 		var parts []string
 		parts = append(parts, fmt.Sprintf(`file:%s`, args[0]))
 		parts = append(parts, "type:commit")
 		author, _ := cmd.Flags().GetString("author")
 		after, _ := cmd.Flags().GetString("after")
 		before, _ := cmd.Flags().GetString("before")
+		for _, v := range []struct{ name, val string }{
+			{"--author", author}, {"--after", after}, {"--before", before},
+		} {
+			if v.val == "" {
+				continue
+			}
+			if err := validateSymbolArg(v.name, v.val); err != nil {
+				return err
+			}
+		}
 
 		// The CodeDB commit-search executor requires at least one of
 		// author:/before:/after:/message: alongside file: (the file filter
