@@ -123,15 +123,27 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	sb.WriteString("Team rules apply to every supported AI coding agent (Claude, Codex, Amp, etc.) used by teammates running ox — but only for teammates running ox. Project-local .claude/rules/ only reaches Claude users.\n")
 	sb.WriteString("</rule-promotion-guidance>\n")
 
-	// code-search: behavioral instruction to prefer ox code search over built-in tools
+	// code-search: behavioral instruction to prefer ox code search over built-in tools.
+	// Demonstrates the unique value (call graph, indexed PRs/comments, history+content
+	// in one query) rather than prescribing a "PREFER" rule — agents follow examples
+	// of capability that grep cannot match more reliably than they follow soft directives.
 	if output.CodeDBAvailable {
 		sb.WriteString("\n<code-search status=\"indexed\">\n")
-		sb.WriteString("This repo has a live code search index. PREFER `ox code search \"&lt;query&gt;\"` over Grep/Glob/ripgrep for:\n")
-		sb.WriteString("- Cross-file symbol search, function lookup, type definitions\n")
-		sb.WriteString("- Git history, diffs, and blame queries\n")
-		sb.WriteString("- Exploratory searches where you don't know the exact file\n")
-		sb.WriteString("Use `ox code insights` before planning multi-file changes (shows hotspots, contention, open PRs).\n")
-		sb.WriteString("Reserve Grep/Glob for: exact-string matches in a known file, or when ox code search returns no results.\n")
+		sb.WriteString("This repo has a live CodeDB index. Use `ox code` for things grep CANNOT do:\n\n")
+		sb.WriteString("  ox code search \"ResolveSession\" type:symbol          # symbol defs, not text matches\n")
+		sb.WriteString("  ox code search \"\" calledby:authenticate              # who calls authenticate() (resolved call graph)\n")
+		sb.WriteString("  ox code search \"\" calls:Handler depth:2              # what Handler calls, 2 hops out\n")
+		sb.WriteString("  ox code search \"rate limit\" type:pr                  # indexed PR titles/bodies/comments\n")
+		sb.WriteString("  ox code search \"TODO\" type:comment ckind:todo        # indexed source comments by kind\n")
+		sb.WriteString("  ox code search \"migration\" author:&lt;name&gt; after:2026-04-01  # git log + content together\n")
+		sb.WriteString("  ox code prs --sort stalled --limit 5                 # PR triage (no grep equivalent)\n")
+		sb.WriteString("  ox code insights                                     # hotspots, contention, open PRs/issues\n")
+		sb.WriteString("  ox code activity --since 7d                          # recent GitHub events (PRs, issues, commits)\n\n")
+		sb.WriteString("DSL keywords: type:{code,symbol,diff,commit,comment,pr,issue}, repo:, file:, lang:,\n")
+		sb.WriteString("author:, before:, after:, message:, calls:, calledby:, returns:, depth:, confidence:,\n")
+		sb.WriteString("ckind:, state:, OR, /regex/. Negate any filter with a leading `-`.\n\n")
+		sb.WriteString("Use Grep/Glob ONLY when: (a) exact-string match in a known file, or (b) `ox code` returned 0 results\n")
+		sb.WriteString("and you suspect typo or stale index. See `.claude/rules/ox-code.md` for the full decision tree.\n")
 		sb.WriteString("</code-search>\n")
 	}
 

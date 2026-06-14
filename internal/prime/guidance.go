@@ -69,11 +69,30 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		})
 	}
 
-	// code search — BEFORE ox query so agents see it first (code search is more common)
+	// code search — BEFORE ox query so agents see it first (code search is more common).
+	// Multiple rows surface the DSL's unique capabilities (calls/calledby, type:pr,
+	// type:comment) explicitly — a single "search" row leaves agents pattern-matching
+	// to grep instead of reaching for the call-graph/PR/comment filters.
 	if p.CodeDBExists {
 		cmds = append(cmds, IntentCommand{
-			Intent:  fmt.Sprintf("find/search/grep code in %s: symbols, functions, git history, file contents, diffs — PREFER over grep/ripgrep", p.RepoSlug),
-			Command: `ox code search "<pattern>"`,
+			Intent:  fmt.Sprintf("find symbol definitions, code, diffs, or git history in %s — uses CodeDB index, not text scan", p.RepoSlug),
+			Command: `ox code search "<pattern>" [type:symbol|code|diff|commit|comment|pr|issue]`,
+		})
+		cmds = append(cmds, IntentCommand{
+			Intent:  "who calls / what does X call: resolved call graph (ADR-019) — impossible via grep",
+			Command: `ox code search "" calledby:<name>   # or calls:<name> depth:N`,
+		})
+		cmds = append(cmds, IntentCommand{
+			Intent:  "search indexed pull requests or issues by content (title, body, comments)",
+			Command: `ox code search "<text>" type:pr   # or type:issue, with optional state:open`,
+		})
+		cmds = append(cmds, IntentCommand{
+			Intent:  "pull-request triage: most-stalled / oldest / most-discussed PRs",
+			Command: "ox code prs --sort stalled",
+		})
+		cmds = append(cmds, IntentCommand{
+			Intent:  "recent GitHub activity (PRs, issues, commits) clustered for a time window",
+			Command: "ox code activity --since 7d",
 		})
 		cmds = append(cmds, IntentCommand{
 			Intent:  "recent code changes, hotspots, contention risk, open PRs/issues — use before planning multi-file changes",

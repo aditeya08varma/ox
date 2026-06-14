@@ -45,5 +45,26 @@ ox doctor
 ```
 Run diagnostic checks on SageOx configuration and integrations.
 
+## Search Code, History, PRs
+
+`ox code` queries the local CodeDB index. Reach for it before grep/ripgrep on this repo.
+
+```bash
+ox code search "<name>" type:symbol               # symbol definitions
+ox code search "" calledby:<name>                 # who calls X (resolved call graph)
+ox code search "" calls:<name> depth:2            # what X calls, 2 hops
+ox code search "<text>" type:pr                   # indexed PR titles/bodies/comments
+ox code search "<text>" type:comment ckind:todo   # source comments by kind
+ox code search "<text>" author:<n> after:<date>   # git history + content together
+ox code prs --sort stalled                        # PR triage
+ox code activity --since 7d                       # recent GitHub events
+ox code insights                                  # hotspots, contention, open PRs/issues
+ox code status                                    # index health
+```
+
+DSL: `type:{code,symbol,diff,commit,comment,pr,issue}`, `repo:`, `file:`, `lang:`, `author:`, `before:`/`after:`, `message:`, `calls:`/`calledby:`, `depth:`, `confidence:{extracted,inferred,ambiguous}`, `ckind:`, `state:`, `OR`, `/regex/`. Negate any filter with `-` prefix.
+
+Fall back to grep only for exact-string matches in a known file or when `ox code` returns 0 results.
+
 ---
 Run `ox --help` for full command list.
