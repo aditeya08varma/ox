@@ -245,7 +245,7 @@ func runCodeSearch(cmd *cobra.Command, query string) error {
 	quiet, _ := cmd.Flags().GetBool("quiet")
 	if !quiet {
 		fmt.Fprintf(os.Stderr, "codedb: %d results in %s (dirty overlays: %d)\n",
-			len(results), formatDurationBrief(searchElapsed), dirtyCount)
+			len(results), formatSearchLatency(searchElapsed), dirtyCount)
 	}
 
 	outputBytes := buf.Len()
@@ -323,9 +323,15 @@ type compactSearchResult struct {
 	File        string `json:"file,omitempty"`
 	Line        int    `json:"line,omitempty"`
 	Lang        string `json:"lang,omitempty"`
-	Snippet     string `json:"snippet"`
+	Snippet     string `json:"snippet,omitempty"`
 	Symbol      string `json:"symbol,omitempty"`
 	CommentKind string `json:"comment_kind,omitempty"`
+
+	// Commit fields — populated for type:commit (e.g. `ox code log <path>`).
+	// Empty for code/symbol/comment results.
+	CommitHash    string `json:"commit_hash,omitempty"`
+	Author        string `json:"author,omitempty"`
+	CommitMessage string `json:"commit_message,omitempty"`
 
 	// PR/issue fields
 	Number int    `json:"number,omitempty"`
@@ -357,16 +363,19 @@ func compactSearchResults(results []search.Result, limit, snippetLen int) compac
 		snippet := stripANSIEscapes(r.Content)
 		snippet = compactSnippet(snippet, snippetLen)
 		cr := compactSearchResult{
-			File:        r.FilePath,
-			Line:        r.Line,
-			Lang:        r.Language,
-			Snippet:     snippet,
-			Symbol:      r.SymbolName,
-			CommentKind: r.CommentKind,
-			Number:      r.Number,
-			Title:       r.Title,
-			State:       r.State,
-			URL:         r.URL,
+			File:          r.FilePath,
+			Line:          r.Line,
+			Lang:          r.Language,
+			Snippet:       snippet,
+			Symbol:        r.SymbolName,
+			CommentKind:   r.CommentKind,
+			CommitHash:    r.CommitHash,
+			Author:        r.Author,
+			CommitMessage: compactSnippet(r.Message, snippetLen),
+			Number:        r.Number,
+			Title:         r.Title,
+			State:         r.State,
+			URL:           r.URL,
 		}
 		compact = append(compact, cr)
 	}
@@ -938,6 +947,24 @@ var codeStatusCmd = &cobra.Command{
 		fmt.Print(b.String())
 		return nil
 	},
+}
+
+// formatSearchLatency formats a per-query latency for the agent-facing stderr
+// stats line. Sub-second precision matters here so the agent learns ox code is
+// fast (formatDurationBrief floors to "<1s", which hides the signal). Uses
+// microsecond/millisecond resolution under one second, then falls back to the
+// human-friendly brief format for anything slower.
+func formatSearchLatency(d time.Duration) string {
+	switch {
+	case d < time.Microsecond:
+		return "<1µs"
+	case d < time.Millisecond:
+		return fmt.Sprintf("%dµs", d.Microseconds())
+	case d < time.Second:
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	default:
+		return formatDurationBrief(d)
+	}
 }
 
 // formatDurationBrief formats a duration as a compact human string (e.g., "4m 30s").
