@@ -208,7 +208,7 @@ func executeQuery(qa *queryArgs, agentID string, agentType string) (int, error) 
 		TeamContext: combined.TeamContext,
 	}
 	if len(codeResults) > 0 {
-		compact := compactSearchResults(codeResults, qa.limit)
+		compact := compactSearchResults(codeResults, qa.limit, 0)
 		resp.CodeResults = compact.Results
 		resp.Guidance = compact.Guidance
 	}
