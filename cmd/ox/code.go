@@ -86,8 +86,23 @@ var isCodeDBIndexing = func(useLedger bool) bool {
 
 var codeCmd = &cobra.Command{
 	Use:   "code",
-	Short: "Search code in this repo",
-	Long:  "Search git history and current code of this repo using queries.",
+	Short: "Search code, symbols, history, PRs, and comments in this repo",
+	Long: `Search the indexed CodeDB for this repo.
+
+CodeDB indexes more than text: symbols, resolved call edges (ADR-019), git
+history, diffs, PR/issue bodies and comments, and source comments. Queries
+use a Sourcegraph-style DSL with filters that grep cannot match.
+
+Examples:
+  ox code search "ResolveSession" type:symbol
+  ox code search "" calledby:authenticate
+  ox code search "" calls:Handler depth:2
+  ox code search "rate limit" type:pr state:open
+  ox code search "TODO" type:comment ckind:todo
+  ox code prs --sort stalled
+  ox code insights
+
+Run 'ox code search --help' for the full DSL grammar and more examples.`,
 }
 
 // codeIndexCmd is an alias for 'ox index code' — kept for back-compat and discoverability
@@ -100,8 +115,51 @@ var codeIndexCmd = &cobra.Command{
 
 var codeSearchCmd = &cobra.Command{
 	Use:   "search <query>",
-	Short: "Search indexed code using queries",
-	Args:  cobra.MinimumNArgs(1),
+	Short: "Search the CodeDB index using a query DSL",
+	Long: `Search the indexed CodeDB for symbols, code, diffs, commits, comments, PRs, and issues.
+
+DSL grammar:
+  type:{code,symbol,diff,commit,comment,pr,issue}   what kind of record to match
+  repo:<name>[@<rev>]    file:<glob>    lang:<id>
+  author:<name>          message:<text>
+  before:<date>          after:<date>                ISO 8601 or relative
+  calls:<name>           calledby:<name>             resolved call graph (ADR-019)
+  returns:<type>         depth:1..10                 transitive call depth
+  confidence:{extracted,inferred,ambiguous}          ADR-019 edge confidence
+  ckind:<kind>           state:<pr_state>
+  select:{repo,file,symbol,symbol.<kind>}
+  count:<N>              case:yes
+  patterntype:{literal,keyword,regexp}
+  OR                                                 boolean across groups
+  /pattern/                                          forced regex
+  -<filter>                                          negate any filter
+
+Examples:
+  # symbol definition (what grep usually misses among text matches)
+  ox code search "ResolveSession" type:symbol
+
+  # resolved call graph — who calls authenticate()?
+  ox code search "" calledby:authenticate
+
+  # what does Handler call, two hops deep?
+  ox code search "" calls:Handler depth:2
+
+  # indexed PR titles + bodies + review comments
+  ox code search "rate limit" type:pr state:open
+
+  # source comments tagged TODO
+  ox code search "TODO" type:comment ckind:todo
+
+  # git log + content match together
+  ox code search "migration" author:rupak after:2026-04-01
+
+  # cross-language regex via /pattern/
+  ox code search "/Resolve[A-Z]\w+Recording/"
+
+When the index is unavailable (still building, not yet created), agent-context
+invocations emit a structured JSON status instead of erroring — callers should
+parse the status field before treating output as results.`,
+	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		root, err := repotools.FindRepoRoot(repotools.VCSGit)
 		if err != nil {

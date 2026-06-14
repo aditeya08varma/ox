@@ -18,7 +18,7 @@ import (
 
 var codeActivityCmd = &cobra.Command{
 	Use:   "activity",
-	Short: "Assemble GitHub activity clusters for the fact extractor",
+	Short: "Recent GitHub activity (PRs, issues, commits) over a time window",
 	Long: `Query CodeDB for recent GitHub activity and output event clusters
 as a flat JSON array suitable for the fact extractor pipeline.
 
