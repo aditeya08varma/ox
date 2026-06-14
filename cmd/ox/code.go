@@ -323,7 +323,7 @@ type compactSearchResult struct {
 	File        string `json:"file,omitempty"`
 	Line        int    `json:"line,omitempty"`
 	Lang        string `json:"lang,omitempty"`
-	Snippet     string `json:"snippet,omitempty"`
+	Snippet     string `json:"snippet"`
 	Symbol      string `json:"symbol,omitempty"`
 	CommentKind string `json:"comment_kind,omitempty"`
 
