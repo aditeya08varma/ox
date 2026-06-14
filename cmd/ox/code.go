@@ -160,107 +160,104 @@ invocations emit a structured JSON status instead of erroring — callers should
 parse the status field before treating output as results.`,
 	Args: cobra.MinimumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		root, err := repotools.FindRepoRoot(repotools.VCSGit)
-		if err != nil {
-			return fmt.Errorf("not in a git repository")
-		}
-
-		query := strings.Join(args, " ")
-		dataDir, useLedger := resolvePreferredCodeDBDir(root)
-
-		agentID, _ := detectAgentContext()
-
-		// Index-not-ready paths: emit structured JSON when an agent is calling
-		// so it can branch on `status` instead of treating an error as terminal.
-		// Humans still get the human-readable error.
-		if isCodeDBIndexing(useLedger) {
-			if agentID != "" {
-				return emitIndexNotReadyJSON(cmd, indexStatusIndexing,
-					"Code index is currently being built. Search will be available once indexing completes.",
-					"Use Grep/Glob until indexing completes; rerun 'ox code search' afterward.")
-			}
-			return fmt.Errorf("code index is currently being built — search is unavailable until indexing completes. Run 'ox code status' to check progress")
-		}
-
-		db, err := codedb.Open(dataDir)
-		if err != nil {
-			return fmt.Errorf("open codedb: %w", err)
-		}
-		defer db.Close()
-
-		// attach all daemon-built dirty overlays for uncommitted file search
-		// (supports multiple simultaneous worktrees)
-		dirtyCount := db.AttachAllDirtyIndexes()
-		if dirtyCount > 0 {
-			slog.Debug("attached dirty overlays", "count", dirtyCount)
-		}
-
-		searchStart := time.Now()
-		results, err := db.Search(context.Background(), query)
-		searchElapsed := time.Since(searchStart)
-		if err != nil {
-			return fmt.Errorf("search: %w", err)
-		}
-
-		// Attach result count to the root span. We record the *raw* count
-		// from the index, not the count after --limit truncation, so the
-		// metric reflects index recall and not display preferences.
-		observability.SetResultCount(len(results))
-
-		fullJSON, _ := cmd.Flags().GetBool("full-json")
-		limit, _ := cmd.Flags().GetInt("limit")
-		snippetLen, _ := cmd.Flags().GetInt("snippet")
-		if snippetLen <= 0 {
-			snippetLen = defaultSnippetLen
-		}
-
-		var buf bytes.Buffer
-		enc := json.NewEncoder(&buf)
-		enc.SetIndent("", "  ")
-
-		if fullJSON {
-			resp := &combinedQueryResponse{CodeResults: results}
-			if err := enc.Encode(resp); err != nil {
-				return fmt.Errorf("encode: %w", err)
-			}
-		} else {
-			compact := compactSearchResults(results, limit, snippetLen)
-			// JIT DSL hint: if the agent issued a bare query (no DSL filters)
-			// and we returned non-zero results, append a one-line nudge toward
-			// the call-graph / type-filter capabilities they likely didn't
-			// know about. Cheap discovery channel; only fires when we have
-			// something useful to teach.
-			if isBareQuery(query) && len(compact.Results) > 0 {
-				if compact.Guidance != "" {
-					compact.Guidance += " "
-				}
-				compact.Guidance += "Tip: refine with `type:symbol` for defs, `calledby:<name>`/`calls:<name>` for the resolved call graph, `type:pr`/`type:issue` for indexed GitHub records, or `before:`/`after:` to scope by time."
-			}
-			if err := enc.Encode(compact); err != nil {
-				return fmt.Errorf("encode: %w", err)
-			}
-		}
-
-		// Stderr stats one-liner: gives the agent (and humans) a feel for
-		// latency and scope on every call. Stderr only, so JSON-strict
-		// stdout consumers are unaffected. Suppressed by --quiet.
-		quiet, _ := cmd.Flags().GetBool("quiet")
-		if !quiet {
-			fmt.Fprintf(os.Stderr, "codedb: %d results in %s (dirty overlays: %d)\n",
-				len(results), formatDurationBrief(searchElapsed), dirtyCount)
-		}
-
-		outputBytes := buf.Len()
-		if _, err := buf.WriteTo(os.Stdout); err != nil {
-			return err
-		}
-
-		if agentID != "" {
-			slog.Debug("code search context cost", "agent_id", agentID, "bytes", outputBytes)
-			trackContextBytes(int64(outputBytes))
-		}
-		return nil
+		return runCodeSearch(cmd, strings.Join(args, " "))
 	},
+}
+
+// runCodeSearch is the shared executor used by `ox code search` and the verb
+// wrappers (`ox code callers`, `callees`, `defs`, `refs`, `log`). All callers
+// build a DSL query string; this function does the index check, dirty-overlay
+// attach, search, output formatting, and stats one-liner.
+//
+// The verb wrappers must inherit the same flags as codeSearchCmd
+// (`--limit`, `--snippet`, `--full-json`) so they read identically.
+func runCodeSearch(cmd *cobra.Command, query string) error {
+	root, err := repotools.FindRepoRoot(repotools.VCSGit)
+	if err != nil {
+		return fmt.Errorf("not in a git repository")
+	}
+
+	dataDir, useLedger := resolvePreferredCodeDBDir(root)
+	agentID, _ := detectAgentContext()
+
+	// Index-not-ready paths: emit structured JSON when an agent is calling
+	// so it can branch on `status` instead of treating an error as terminal.
+	if isCodeDBIndexing(useLedger) {
+		if agentID != "" {
+			return emitIndexNotReadyJSON(cmd, indexStatusIndexing,
+				"Code index is currently being built. Search will be available once indexing completes.",
+				"Use Grep/Glob until indexing completes; rerun 'ox code search' afterward.")
+		}
+		return fmt.Errorf("code index is currently being built — search is unavailable until indexing completes. Run 'ox code status' to check progress")
+	}
+
+	db, err := codedb.Open(dataDir)
+	if err != nil {
+		return fmt.Errorf("open codedb: %w", err)
+	}
+	defer db.Close()
+
+	dirtyCount := db.AttachAllDirtyIndexes()
+	if dirtyCount > 0 {
+		slog.Debug("attached dirty overlays", "count", dirtyCount)
+	}
+
+	searchStart := time.Now()
+	results, err := db.Search(context.Background(), query)
+	searchElapsed := time.Since(searchStart)
+	if err != nil {
+		return fmt.Errorf("search: %w", err)
+	}
+
+	observability.SetResultCount(len(results))
+
+	fullJSON, _ := cmd.Flags().GetBool("full-json")
+	limit, _ := cmd.Flags().GetInt("limit")
+	snippetLen, _ := cmd.Flags().GetInt("snippet")
+	if snippetLen <= 0 {
+		snippetLen = defaultSnippetLen
+	}
+
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetIndent("", "  ")
+
+	if fullJSON {
+		resp := &combinedQueryResponse{CodeResults: results}
+		if err := enc.Encode(resp); err != nil {
+			return fmt.Errorf("encode: %w", err)
+		}
+	} else {
+		compact := compactSearchResults(results, limit, snippetLen)
+		// JIT DSL hint — only when caller issued a bare term, so verb wrappers
+		// (which always pass DSL-shaped queries) never re-teach the DSL.
+		if isBareQuery(query) && len(compact.Results) > 0 {
+			if compact.Guidance != "" {
+				compact.Guidance += " "
+			}
+			compact.Guidance += "Tip: refine with `type:symbol` for defs, `calledby:<name>`/`calls:<name>` for the resolved call graph, `type:pr`/`type:issue` for indexed GitHub records, or `before:`/`after:` to scope by time."
+		}
+		if err := enc.Encode(compact); err != nil {
+			return fmt.Errorf("encode: %w", err)
+		}
+	}
+
+	quiet, _ := cmd.Flags().GetBool("quiet")
+	if !quiet {
+		fmt.Fprintf(os.Stderr, "codedb: %d results in %s (dirty overlays: %d)\n",
+			len(results), formatDurationBrief(searchElapsed), dirtyCount)
+	}
+
+	outputBytes := buf.Len()
+	if _, err := buf.WriteTo(os.Stdout); err != nil {
+		return err
+	}
+
+	if agentID != "" {
+		slog.Debug("code search context cost", "agent_id", agentID, "bytes", outputBytes)
+		trackContextBytes(int64(outputBytes))
+	}
+	return nil
 }
 
 // defaultSnippetLen bounds the per-result snippet returned in compact mode.

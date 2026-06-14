@@ -6,15 +6,19 @@ is the **default** for the cases below.
 
 ## Decision tree
 
+Verb-mode wraps the DSL — reach for verbs first; drop into `ox code search`
+only when the intent doesn't match a verb.
+
 ```
 Agent intent                                | First tool to try
 --------------------------------------------+-------------------------------------------
-"Where is function X defined?"              | ox code search "X" type:symbol
-"Who calls X?"                              | ox code search "" calledby:X
-"What does X call?"                         | ox code search "" calls:X depth:2
+"Where is function X defined?"              | ox code defs X
+"Who calls X?"                              | ox code callers X
+"What does X call?"                         | ox code callees X --depth 2
+"Where is X referenced in code text?"       | ox code refs X
+"What changed in path Y?"                   | ox code log Y --author <n> --after <date>
 "Find PR / issue mentioning Y"              | ox code search "Y" type:pr   (or type:issue)
 "TODO / FIXME comments in this repo"        | ox code search "" type:comment ckind:todo
-"What changed about Y last month?"          | ox code search "Y" type:commit after:<date>
 "Diff search: when did string Z appear?"    | ox code search "Z" type:diff
 "Open PRs blocked / stalled"                | ox code prs --sort stalled
 "What's hot in this repo right now?"        | ox code insights

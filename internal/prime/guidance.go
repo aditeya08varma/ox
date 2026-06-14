@@ -75,13 +75,32 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 	// type:comment) explicitly — a single "search" row leaves agents pattern-matching
 	// to grep instead of reaching for the call-graph/PR/comment filters.
 	if p.CodeDBExists {
+		// Verb-mode wrappers are listed first — agents pattern-match on verbs
+		// before DSL filters, so surfacing them up front leads more queries to
+		// the resolved call graph and indexed history that grep cannot reach.
 		cmds = append(cmds, IntentCommand{
-			Intent:  fmt.Sprintf("find symbol definitions, code, diffs, or git history in %s — uses CodeDB index, not text scan", p.RepoSlug),
-			Command: `ox code search "<pattern>" [type:symbol|code|diff|commit|comment|pr|issue]`,
+			Intent:  "where is <name> defined? (symbol search via CodeDB)",
+			Command: "ox code defs <name>",
 		})
 		cmds = append(cmds, IntentCommand{
-			Intent:  "who calls / what does X call: resolved call graph (ADR-019) — impossible via grep",
-			Command: `ox code search "" calledby:<name>   # or calls:<name> depth:N`,
+			Intent:  "who calls <name>? (resolved call graph, ADR-019 — impossible via grep)",
+			Command: "ox code callers <name>",
+		})
+		cmds = append(cmds, IntentCommand{
+			Intent:  "what does <name> call? (resolved call graph, transitive via --depth)",
+			Command: "ox code callees <name> --depth 2",
+		})
+		cmds = append(cmds, IntentCommand{
+			Intent:  "text references to <name> across the index (optionally --lang)",
+			Command: "ox code refs <name>",
+		})
+		cmds = append(cmds, IntentCommand{
+			Intent:  "commits touching <path>, with optional --author / --after / --before",
+			Command: "ox code log <path>",
+		})
+		cmds = append(cmds, IntentCommand{
+			Intent:  fmt.Sprintf("full DSL search in %s — when verbs don't fit, use search with DSL filters", p.RepoSlug),
+			Command: `ox code search "<pattern>" [type:symbol|code|diff|commit|comment|pr|issue]`,
 		})
 		cmds = append(cmds, IntentCommand{
 			Intent:  "search indexed pull requests or issues by content (title, body, comments)",
