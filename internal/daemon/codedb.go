@@ -315,6 +315,11 @@ func (m *CodeDBManager) BuildLedgerIndex(ctx context.Context, ledgerPath string)
 		// non-fatal
 	}
 
+	// ADR-019 edge backfill for ledger codedb (non-fatal, idempotent).
+	if _, err := db.BackfillSymbolEdges(indexCtx, nil); err != nil {
+		m.logger.Warn("codedb ledger: edge backfill failed", "error", err)
+	}
+
 	cached := queryStatsFromDB(db, ledgerDir)
 	m.mu.Lock()
 	m.ledgerStats = cached
@@ -544,6 +549,22 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 	}
 	commentDuration := time.Since(commentStart)
 	m.logger.Info("codedb stage complete", "stage", "comments", "duration", commentDuration.Round(time.Millisecond), "extracted", cStats.CommentsExtracted)
+
+	// stage 3.5: backfill resolved symbol edges (ADR-019). Cheap, pure-SQL
+	// pass over blobs that were parsed before the resolver version landed;
+	// no-op on freshly-indexed codedbs (ParseSymbols stamps the version
+	// inline). Best-effort: a failure here logs a warning but doesn't fail
+	// the indexing run — search still works on symbol_refs without edges.
+	if backfillStats, bfErr := db.BackfillSymbolEdges(ctx, func(msg string) {
+		if pw != nil {
+			_ = pw.WriteMessage(msg)
+		}
+	}); bfErr != nil {
+		m.logger.Warn("codedb symbol-edge backfill failed (non-fatal)", "error", bfErr)
+	} else if backfillStats.BlobsProcessed > 0 {
+		m.logger.Info("codedb stage complete", "stage", "edge-backfill",
+			"blobs", backfillStats.BlobsProcessed, "edges", backfillStats.EdgesInserted)
+	}
 
 	// stage 4: build dirty overlay index for uncommitted worktree files
 	// Skip when fsnotify already rebuilt the dirty overlay recently — BuildDirtyIndex
