@@ -801,11 +801,11 @@ func formatGCStatus(ws WorkspaceSyncStatus, verbose bool) string {
 	if remaining <= 0 {
 		s = styleMuted.Render(" · gc due")
 	} else {
-		s = styleMuted.Render(" · gc in " + formatRelativeTime(remaining))
+		s = styleMuted.Render(" · gc in " + formatDurationShort(remaining))
 	}
 
 	if verbose {
-		s += styleMuted.Render(" (last " + formatRelativeTime(age) + " ago)")
+		s += styleMuted.Render(" (last " + formatDurationShort(age) + " ago)")
 	}
 
 	return s
@@ -999,6 +999,25 @@ func formatDurationCompact(d time.Duration) string {
 }
 
 // formatRelativeTime formats a duration as relative time (e.g., "5m ago").
+// formatDurationShort formats a duration as a bare single-unit magnitude
+// (e.g. "6d", "4h", "3m", "5s") with NO "ago" suffix. Use for countdowns
+// ("gc in 6d") and where the caller supplies its own suffix ("last 1h ago").
+// For elapsed timestamps that should read "... ago", use formatRelativeTime.
+func formatDurationShort(d time.Duration) string {
+	d = d.Round(time.Second)
+
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
 func formatRelativeTime(d time.Duration) string {
 	d = d.Round(time.Second)
 
