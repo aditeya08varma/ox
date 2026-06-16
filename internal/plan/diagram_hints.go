@@ -199,16 +199,226 @@ func reasonFor(kind DiagramKind, sec Section, fileN int) string {
 	}
 }
 
+// --- data-visualization hints (the parameterized catalog, derived from use:) ---
+//
+// computeDiagramHints covers Mermaid/CSS FORMS. computeVizHints covers the
+// PARAMETERIZED data-viz catalog (risk-matrix, file-impact-map, cost-waterfall,
+// stat-cards, flag-rollout-matrix, …) so a Risks / Files-changed / cost / metrics
+// section gets a content-aware push, not just a menu it has to browse.
+//
+// The match signal is DERIVED from each pattern's `use:` line — there is no
+// separate cue field in the catalog (that would duplicate `use:` and drift). The
+// only code-side knobs are a shared stopword/generic list and the scoring weights
+// (heading match counts double), mirroring how diagram_hints keeps its cues in
+// code rather than in the catalog.
+
+const maxVizHints = 3
+
+// minVizScore is the fire threshold: a single heading-noun match (weight 2) or two
+// distinct body-term matches. Precision over recall — a wrong push is worse than
+// none, same discipline as minCueScore.
+const minVizScore = 2
+
+// vizStopwords drops grammar, catalog-meta shape words, and domain-generic terms
+// so cue derivation from a `use:` line keeps only DISTINCTIVE triggers (e.g.
+// "memory"/"disk"/"layout" are too ambiguous to fire partition on their own —
+// "flash"/"partition"/"offset" carry it).
+var vizStopwords = map[string]bool{
+	// grammar
+	"and": true, "the": true, "for": true, "are": true, "its": true, "with": true,
+	"per": true, "where": true, "when": true, "that": true, "each": true, "than": true,
+	"more": true, "not": true, "just": true, "into": true, "from": true, "out": true,
+	// catalog-meta / generic shape words
+	"use": true, "show": true, "story": true, "section": true, "list": true,
+	"flat": true, "full": true, "few": true, "many": true, "handful": true,
+	"layout": true, "share": true, "takes": true, "step": true, "steps": true,
+	"thing": true, "things": true, "kind": true, "matter": true, "matters": true,
+	"some": true, "which": true, "what": true,
+	// domain-generic (too ambiguous to trigger on alone)
+	"memory": true, "disk": true, "data": true, "component": true, "subsystem": true,
+}
+
+// vizUseCues derives distinctive trigger terms from a pattern's `use:` line. It
+// reads only the LEAD clause (before the em-dash): the catalog convention is
+// "use: <trigger> — <elaboration / contrast>", and the contrast ("instead of a
+// flat list") would otherwise pollute the cues. Hyphenated tokens also yield their
+// parts, and plural nouns their singular stem, so "Files changed" matches "files"
+// and "Feature flags" matches the "flag" from "feature-flag".
+func vizUseCues(use string) []string {
+	lead := use
+	if i := strings.Index(lead, "—"); i >= 0 {
+		lead = lead[:i]
+	}
+	var sb strings.Builder
+	for _, r := range strings.ToLower(lead) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-' {
+			sb.WriteRune(r)
+		} else {
+			sb.WriteRune(' ')
+		}
+	}
+	seen := map[string]bool{}
+	var cues []string
+	add := func(tok string) {
+		tok = strings.Trim(tok, "-")
+		if len(tok) < 3 || vizStopwords[tok] || seen[tok] {
+			return
+		}
+		seen[tok] = true
+		cues = append(cues, tok)
+	}
+	for _, tok := range strings.Fields(sb.String()) {
+		tok = strings.Trim(tok, "-")
+		if tok == "" {
+			continue
+		}
+		add(tok)
+		if strings.Contains(tok, "-") { // feature-flag → feature, flag
+			for _, part := range strings.Split(tok, "-") {
+				add(part)
+			}
+		}
+		if strings.HasSuffix(tok, "s") && len(tok) >= 5 { // risks → risk, files → file
+			add(strings.TrimSuffix(tok, "s"))
+		}
+	}
+	return cues
+}
+
+// scoreVizSection scores one section against a pattern's cues. A heading match
+// counts double (the agent TITLED the section that — a strong signal); a body
+// match counts once. Returns the score and the distinct terms that hit.
+func scoreVizSection(heading, body string, cues []string) (int, []string) {
+	h := strings.ToLower(" " + heading + " ")
+	bd := strings.ToLower(" " + body + " ")
+	score := 0
+	var hits []string
+	for _, c := range cues {
+		switch {
+		case strings.Contains(h, c):
+			score += 2
+			hits = append(hits, c)
+		case strings.Contains(bd, c):
+			score++
+			hits = append(hits, c)
+		}
+	}
+	return score, hits
+}
+
+type vizCueSet struct {
+	id   string
+	cues []string
+}
+
+// computeVizHints returns the strongest few per-section data-viz suggestions.
+// Fail-open: it only reads the already-parsed Input and the embedded catalog, and
+// never errors. Only patterns with a deterministic renderer (Param != "") are
+// candidates — every hint is therefore actionable via `ox plan viz render`.
+func computeVizHints(in Input) []VizHint {
+	var sets []vizCueSet
+	for _, p := range VizCatalog() {
+		if p.Param == "" {
+			continue
+		}
+		if cues := vizUseCues(p.Use); len(cues) > 0 {
+			sets = append(sets, vizCueSet{p.ID, cues})
+		}
+	}
+	if len(sets) == 0 {
+		return nil
+	}
+
+	type cand struct {
+		order int
+		score int
+		hint  VizHint
+	}
+	var cands []cand
+	for i, sec := range in.Sections {
+		if strings.TrimSpace(sec.Heading) == "" {
+			continue
+		}
+		bestID, bestScore, bestHits := "", 0, []string(nil)
+		for _, s := range sets {
+			if score, hits := scoreVizSection(sec.Heading, sec.Body, s.cues); score > bestScore {
+				bestID, bestScore, bestHits = s.id, score, hits
+			}
+		}
+		if bestScore < minVizScore || bestID == "" {
+			continue
+		}
+		cands = append(cands, cand{i, bestScore, VizHint{
+			Section:   sec.Heading,
+			PatternID: bestID,
+			Reason:    "section names " + joinAnd(topVizCues(bestHits, 2)),
+		}})
+	}
+	if len(cands) == 0 {
+		return nil
+	}
+	// top-N by confidence (stable), then restore section order for reading.
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].score != cands[j].score {
+			return cands[i].score > cands[j].score
+		}
+		return cands[i].order < cands[j].order
+	})
+	if len(cands) > maxVizHints {
+		cands = cands[:maxVizHints]
+	}
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].order < cands[j].order })
+	out := make([]VizHint, 0, len(cands))
+	for _, c := range cands {
+		out = append(out, c.hint)
+	}
+	return out
+}
+
+// topVizCues picks the first n matched terms for the reason, dropping any that are
+// a substring of another already chosen (so "risks"/"risk" don't both show).
+func topVizCues(hits []string, n int) []string {
+	var out []string
+	for _, h := range hits {
+		dup := false
+		for _, o := range out {
+			if strings.Contains(o, h) || strings.Contains(h, o) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			if out = append(out, h); len(out) == n {
+				break
+			}
+		}
+	}
+	return out
+}
+
 // buildGuidance produces the concise, cross-agent authoring contract surfaced in
 // `ox plan enrich --json` (Result.Guidance). It is deliberately lean — a checklist, not
 // the 259-line skill spec — and folds in the plan-specific diagram hints so the
 // agent gets concrete direction. Returns "" for a plan with no sections.
-func buildGuidance(in Input, hints []DiagramHint) string {
+//
+// It LEADS with the plan-specific team-context evidence (sig) the agent is already
+// holding: only `ox plan render` surfaces those signals and saves the plan to the
+// ledger — a self-authored HTML render (the agent's own skill, which ox can't see
+// or control, and there may be several) structurally cannot. Specific evidence the
+// agent can verify beats a generic pitch, and wins on a capability competitors
+// lack rather than trying to out-style them.
+func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []VizHint) string {
 	if len(in.Sections) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("Render with `ox plan render --open` (self-contained, cross-agent). Author for a reviewer who has ~10 minutes: ")
+	if lead := guidanceLead(sig); lead != "" {
+		b.WriteString(lead)
+		b.WriteString(" ")
+	} else {
+		b.WriteString("Render with `ox plan render --open` (self-contained, cross-agent): it folds in team context and saves the plan to the ledger where teammates find it — a self-authored HTML render does neither. ")
+	}
+	b.WriteString("Author for a reviewer who has ~10 minutes: ")
 	b.WriteString("lead with the conclusion and the biggest risk; keep every file/ID/PR framed enough to stand on its own; ")
 	b.WriteString("let one hero diagram and a few tables replace prose rather than decorate it; cut anything that does not change the decision. ")
 	b.WriteString("Explore visualization patterns with `ox plan viz` (sparklines, dependency graphs, swimlane timelines, budget sequences, Tufte tables, device mockups) and weave in the ones that compress understanding.")
@@ -221,5 +431,59 @@ func buildGuidance(in Input, hints []DiagramHint) string {
 		b.WriteString(strings.Join(parts, "; "))
 		b.WriteString(".")
 	}
+	if len(vizHints) > 0 {
+		// Name the pattern AND its render command so select→render is one step.
+		b.WriteString(" Data visualizations that fit this plan: ")
+		parts := make([]string, 0, len(vizHints))
+		for _, v := range vizHints {
+			parts = append(parts, fmt.Sprintf("%q → %s (`ox plan viz render %s --data`)", v.Section, v.PatternID, v.PatternID))
+		}
+		b.WriteString(strings.Join(parts, "; "))
+		b.WriteString(".")
+	}
 	return b.String()
+}
+
+// guidanceLead frames the render call with the SPECIFIC team-context evidence the
+// plan triggered, so the agent reaches for `ox plan render` because it can see what
+// a self-authored render would silently drop — not because we asserted authority.
+// Returns "" when no team-context signal fired (the caller falls back to the
+// generic capability line).
+func guidanceLead(sig SignalSummary) string {
+	var parts []string
+	if n := sig.Collisions; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d file%s in open PRs / active work", n, plural(n)))
+	}
+	if n := sig.ExpertRoutes; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d expert route%s", n, plural(n)))
+	}
+	if n := sig.PriorArt; n > 0 {
+		parts = append(parts, fmt.Sprintf("%d prior-art hit%s", n, plural(n)))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "This plan touches " + joinAnd(parts) +
+		" — `ox plan render --open` is the only renderer that surfaces them and saves the plan to the ledger; a self-authored HTML render drops all of it."
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
+}
+
+// joinAnd renders a human list: "a", "a and b", or "a, b, and c".
+func joinAnd(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	case 2:
+		return parts[0] + " and " + parts[1]
+	default:
+		return strings.Join(parts[:len(parts)-1], ", ") + ", and " + parts[len(parts)-1]
+	}
 }
