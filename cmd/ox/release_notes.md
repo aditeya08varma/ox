@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ox plan render --artifact` produces a CSP-safe page you can publish as a Claude Code Artifact** — a strictly self-contained variant that drops the three things a Claude Code Artifact's strict Content-Security-Policy would block (the Google-Fonts link, the Mermaid CDN script, and the live SSE review loop), while keeping the SageOx enrichment references as clickable absolute links. Outbound `<a href>` navigation isn't CSP-blocked, so a published artifact stays a hub back into the Ledger — collision PRs, prior-art sessions, and expert routes remain one click away. Artifact mode is a pure export: the ledger's canonical, review-capable render is left untouched.
+
 ## [0.10.1] - 2026-06-15
 
 ### Added

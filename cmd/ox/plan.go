@@ -121,11 +121,12 @@ var planRenderCmd = &cobra.Command{
 	RunE: func(cmd *cobra.Command, args []string) error {
 		out, _ := cmd.Flags().GetString("output")
 		open, _ := cmd.Flags().GetBool("open")
+		artifact, _ := cmd.Flags().GetBool("artifact")
 		if len(args) == 1 {
-			return runPlanRenderSaved(cmd, args[0], out, open)
+			return runPlanRenderSaved(cmd, args[0], out, open, artifact)
 		}
 		file, _ := cmd.Flags().GetString("file")
-		return runPlanRenderFresh(cmd, file, out, open)
+		return runPlanRenderFresh(cmd, file, out, open, artifact)
 	},
 }
 
@@ -510,7 +511,7 @@ func priorArtURLResolver(gitRoot string) func(refKind, ref string) string {
 	}
 }
 
-func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open bool) error {
+func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact bool) error {
 	in, err := plan.Resolve(file, cmd.InOrStdin())
 	if err != nil {
 		return err
@@ -523,7 +524,7 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open bool) err
 	gitRoot := findGitRoot()
 	result := plan.Enrich(context.Background(), in, gitRoot)
 
-	htmlBytes, err := plan.RenderHTMLOpts(in, result, plan.RenderOptions{Slug: plan.Slugify(planTopic(in)), PriorArtURL: priorArtURLResolver(gitRoot)})
+	htmlBytes, err := plan.RenderHTMLOpts(in, result, plan.RenderOptions{Slug: plan.Slugify(planTopic(in)), PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}
@@ -531,9 +532,15 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open bool) err
 	for _, f := range plan.LintMermaidMarkdown(in.Raw) {
 		cli.PrintHint(fmt.Sprintf("plan-diagram [%s]: %s", f.Rule, f.Message))
 	}
-	// Persist into the ledger when capture is on, so the render is re-openable.
+	// Artifact mode is a pure export target — leave the ledger's canonical
+	// (review-capable) render untouched, and check the page is CSP-clean.
 	savedDir := ""
-	if gitRoot != "" && config.PlanSave(gitRoot) {
+	if artifact {
+		for _, f := range plan.LintArtifact(htmlBytes) {
+			cli.PrintHint(fmt.Sprintf("plan-artifact [%s]: %s", f.Rule, f.Message))
+		}
+	} else if gitRoot != "" && config.PlanSave(gitRoot) {
+		// Persist into the ledger when capture is on, so the render is re-openable.
 		savedDir = savePlanWithProvenance(gitRoot, in, result, htmlBytes)
 	}
 	name := "plan"
@@ -546,7 +553,7 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open bool) err
 
 // runPlanRenderSaved renders a plan already in the ledger (with its review
 // state), writing/opening per the flags. It never re-persists.
-func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open bool) error {
+func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact bool) error {
 	gitRoot := findGitRoot()
 	planMD, res, info, err := plan.Load(gitRoot, slug)
 	if err != nil {
@@ -554,9 +561,14 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open bool) err
 	}
 	in := plan.Parse(planMD)
 	review, _ := plan.AssembleReview(info.Dir)
-	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot)})
+	htmlBytes, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
+	}
+	if artifact {
+		for _, f := range plan.LintArtifact(htmlBytes) {
+			cli.PrintHint(fmt.Sprintf("plan-artifact [%s]: %s", f.Rule, f.Message))
+		}
 	}
 	emitRenderedHTML(cmd, htmlBytes, info.Dir, outPath, open, slug)
 	return nil
@@ -850,6 +862,7 @@ func init() {
 	planRenderCmd.Flags().String("file", "", "plan source file when no slug is given (default: stdin, else newest ~/.claude/plans/*.md)")
 	planRenderCmd.Flags().StringP("output", "o", "", "write the rendered HTML to this path")
 	planRenderCmd.Flags().Bool("open", false, "open the rendered HTML in your browser")
+	planRenderCmd.Flags().Bool("artifact", false, "render a strictly self-contained, CSP-safe page for publishing as a Claude Code Artifact (no external fonts/scripts, no review loop; enrichment links preserved)")
 
 	planListCmd.Flags().Bool("json", false, "emit the plan list as JSON (scripting path)")
 

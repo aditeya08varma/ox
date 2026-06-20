@@ -54,7 +54,49 @@ var (
 	// banned: a LIVE remote avatar image. The mark must be data:-inlined or
 	// inline-SVG so the page renders from file:// with no runtime network.
 	remoteAvatarRe = regexp.MustCompile(`(?i)<img[^>]+src\s*=\s*["']https?://[^"']*avatars\.githubusercontent\.com`)
+
+	// artifact-mode CSP checks: a page published as a Claude Code Artifact is
+	// served under a strict CSP that blocks every cross-origin resource load and
+	// all fetch/XHR/WebSocket. These match the resource-loading constructs only —
+	// NOT <a href="https://…"> navigation, which is allowed and is how the SageOx
+	// enrichment references stay clickable in a published artifact.
+	extScriptRe   = regexp.MustCompile(`(?i)<script[^>]+src\s*=\s*["']https?://`)
+	extLinkRe     = regexp.MustCompile(`(?i)<link[^>]+href\s*=\s*["']https?://`)
+	extImgRe      = regexp.MustCompile(`(?i)<img[^>]+src\s*=\s*["']https?://`)
+	cssURLRe      = regexp.MustCompile(`(?i)url\(\s*["']?https?://`)
+	eventSourceRe = regexp.MustCompile(`(?i)\bEventSource\b`)
 )
+
+// LintArtifact verifies a rendered plan HTML is safe to publish as a Claude Code
+// Artifact: strictly self-contained, with no construct that the artifact CSP
+// would block at view time. It checks resource loads (external script/style/
+// font/img, CSS url() to a remote host) and the SSE review layer (EventSource).
+// It deliberately does NOT flag <a href="https://…"> — outbound navigation is
+// allowed, and the SageOx enrichment links rely on it. Fail-open: an empty page
+// returns nil; callers warn, never block.
+func LintArtifact(htmlBytes []byte) []Finding {
+	if len(htmlBytes) == 0 {
+		return nil
+	}
+	h := string(htmlBytes)
+	var findings []Finding
+	check := func(re *regexp.Regexp, rule, msg string) {
+		if re.MatchString(h) {
+			findings = append(findings, Finding{Rule: rule, Message: msg})
+		}
+	}
+	check(extScriptRe, "artifact.external-script",
+		`artifact render loads a <script src="https://…"> — the artifact CSP blocks it; vendor and inline the script instead`)
+	check(extLinkRe, "artifact.external-stylesheet",
+		`artifact render loads a remote <link href="https://…"> (stylesheet/font/preconnect) — the artifact CSP blocks it; inline the CSS and drop the web-font link (system-font fallback)`)
+	check(extImgRe, "artifact.external-image",
+		`artifact render loads a remote <img src="https://…"> — the artifact CSP blocks it; embed it as a data: URI or inline SVG`)
+	check(cssURLRe, "artifact.external-css-url",
+		`artifact render references a remote url(https://…) in CSS — the artifact CSP blocks it; inline the asset as a data: URI`)
+	check(eventSourceRe, "artifact.eventsource",
+		`artifact render includes an EventSource (SSE review loop) — the artifact CSP blocks it; render --artifact omits the review layer`)
+	return findings
+}
 
 // LintBranding verifies a rendered plan HTML carries the conditional SageOx
 // attribution the html-plan skill is spec'd to produce. The contract

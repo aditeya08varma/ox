@@ -59,6 +59,16 @@ type RenderOptions struct {
 	// command layer builds the closure from the local project config, and
 	// `ox plan enrich --json` (no config) never embeds an environment URL.
 	PriorArtURL func(refKind, ref string) string
+	// Artifact renders a strictly self-contained page with NO external resource
+	// requests, suitable for publishing as a Claude Code Artifact (served under a
+	// strict CSP that blocks all cross-origin script/style/font/img and all
+	// fetch/XHR/WebSocket). In this mode the Google-Fonts <link> is dropped (the
+	// font stacks fall back to system fonts), the Mermaid CDN <script> is omitted
+	// (lean on the pure-Go viz catalog; vendored-inline Mermaid is a follow-up),
+	// and the SSE review layer is left out entirely. The SageOx enrichment
+	// reference links are preserved — top-level <a href> navigation is not
+	// CSP-blocked, so a published artifact stays a hub back into the Ledger.
+	Artifact bool
 }
 
 // reviewStateItem is the slim per-item shape injected into the page for the
@@ -141,6 +151,9 @@ type renderData struct {
 	Plural         string
 	Signals        []renderSignal // unanchored signals (no matching section)
 	FooterCredit   bool
+	// Artifact toggles the CSP-safe variant: the template drops the Google-Fonts
+	// link, the Mermaid CDN script, and the SSE review layer when set.
+	Artifact bool
 	// WordmarkDark/Light are the inline SageOx wordmark SVGs for the subtle
 	// side-nav corner badge; CSS shows the variant matching the active theme.
 	WordmarkDark  template.HTML
@@ -197,6 +210,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		ReviewEndpoint: opts.ReviewEndpoint,
 		ReviewToken:    opts.ReviewToken,
 		FooterCredit:   len(res.Annotations) > 0 || len(res.Context) > 0,
+		Artifact:       opts.Artifact,
 		WordmarkDark:   template.HTML(wordmarkDark),  //nolint:gosec // first-party embedded asset
 		WordmarkLight:  template.HTML(wordmarkLight), //nolint:gosec // first-party embedded asset
 	}
