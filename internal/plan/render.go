@@ -36,7 +36,7 @@ import (
 //   - verdict cells (yes/no/✓/✗) colored so matrices read at a glance.
 // All degrade gracefully: a plan with none of these conventions just renders.
 
-//go:embed assets/scaffold.css assets/scaffold.js assets/review.js assets/plan.html.tmpl assets/wordmark-dark.svg assets/wordmark-light.svg
+//go:embed assets/scaffold.css assets/scaffold.js assets/review.js assets/plan.html.tmpl assets/wordmark-dark.svg assets/wordmark-light.svg assets/mermaid.min.js
 var renderAssets embed.FS
 
 // RenderOptions carries optional render-time context that isn't part of the
@@ -59,6 +59,17 @@ type RenderOptions struct {
 	// command layer builds the closure from the local project config, and
 	// `ox plan enrich --json` (no config) never embeds an environment URL.
 	PriorArtURL func(refKind, ref string) string
+	// Artifact renders a strictly self-contained page with NO external resource
+	// requests, suitable for publishing as a Claude Code Artifact (served under a
+	// strict CSP that blocks all cross-origin script/style/font/img and all
+	// fetch/XHR/WebSocket). In this mode the Google-Fonts <link> is dropped (the
+	// font stacks fall back to system fonts), the SSE review layer is omitted, and
+	// the Mermaid CDN <script> is replaced by the vendored library inlined in
+	// place (only when the plan carries a diagram), so diagrams render at full
+	// parity with zero network. The SageOx enrichment reference links are
+	// preserved — top-level <a href> navigation is not CSP-blocked, so a published
+	// artifact stays a hub back into the Ledger.
+	Artifact bool
 }
 
 // reviewStateItem is the slim per-item shape injected into the page for the
@@ -123,10 +134,15 @@ type reviewSummary struct {
 }
 
 type renderData struct {
-	Title          string
-	Slug           string
-	CSS            template.CSS
-	JS             template.JS
+	Title string
+	Slug  string
+	CSS   template.CSS
+	JS    template.JS
+	// MermaidJS is the vendored mermaid library, inlined ONLY in artifact mode
+	// when the plan actually contains a diagram — so a CSP-locked artifact still
+	// renders diagrams with zero network, and a diagram-free artifact pays none of
+	// the weight. Empty in the normal render, which loads Mermaid from the CDN.
+	MermaidJS      template.JS
 	ReviewJS       template.JS
 	ReviewJSON     template.JS // JSON island: merged review state for the page
 	ReviewEndpoint string      // set only when served by `ox plan review`
@@ -141,6 +157,9 @@ type renderData struct {
 	Plural         string
 	Signals        []renderSignal // unanchored signals (no matching section)
 	FooterCredit   bool
+	// Artifact toggles the CSP-safe variant: the template drops the Google-Fonts
+	// link, the Mermaid CDN script, and the SSE review layer when set.
+	Artifact bool
 	// WordmarkDark/Light are the inline SageOx wordmark SVGs for the subtle
 	// side-nav corner badge; CSS shows the variant matching the active theme.
 	WordmarkDark  template.HTML
@@ -197,6 +216,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		ReviewEndpoint: opts.ReviewEndpoint,
 		ReviewToken:    opts.ReviewToken,
 		FooterCredit:   len(res.Annotations) > 0 || len(res.Context) > 0,
+		Artifact:       opts.Artifact,
 		WordmarkDark:   template.HTML(wordmarkDark),  //nolint:gosec // first-party embedded asset
 		WordmarkLight:  template.HTML(wordmarkLight), //nolint:gosec // first-party embedded asset
 	}
@@ -279,11 +299,41 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		slog.Warn("plan render: mermaid lint", "rule", f.Rule, "detail", f.Message)
 	}
 
+	// Artifact mode is served under a CSP that blocks the Mermaid CDN. When the
+	// plan carries a diagram, inline the vendored library so the artifact renders
+	// it with zero network — at full parity with the normal render (same dark/
+	// light theme vars in scaffold.js). A diagram-free artifact skips the weight.
+	if opts.Artifact && renderHasMermaid(data) {
+		mermaidJS, err := renderAssets.ReadFile("assets/mermaid.min.js")
+		if err != nil {
+			return nil, fmt.Errorf("read mermaid.min.js: %w", err)
+		}
+		data.MermaidJS = template.JS(mermaidJS) //nolint:gosec // first-party vendored asset, SRI-verified against the CDN copy
+	}
+
 	var out bytes.Buffer
 	if err := tmpl.Execute(&out, data); err != nil {
 		return nil, fmt.Errorf("execute template: %w", err)
 	}
 	return out.Bytes(), nil
+}
+
+// renderHasMermaid reports whether the rendered body contains a Mermaid block
+// (mermaidFence rewrites fenced ```mermaid into <pre class="mermaid">), so the
+// artifact path only pays the vendored library's weight when a diagram exists.
+func renderHasMermaid(data renderData) bool {
+	const marker = `class="mermaid"`
+	// TLDR is split out of the preamble into its own callout, so a diagram inside
+	// a "TL;DR" block lands here, not in Preamble — check it too.
+	if strings.Contains(string(data.TLDR), marker) || strings.Contains(string(data.Preamble), marker) {
+		return true
+	}
+	for _, s := range data.Sections {
+		if strings.Contains(string(s.HTML), marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func newMarkdown() goldmark.Markdown {
