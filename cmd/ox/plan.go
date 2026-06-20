@@ -565,12 +565,17 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}
+	// Artifact mode is a pure export of the CSP-safe bytes — never open the
+	// ledger's canonical (non-artifact) plan.html in its place, so pass no
+	// savedDir and let emitRenderedHTML serve the artifact bytes directly.
+	savedDir := info.Dir
 	if artifact {
+		savedDir = ""
 		for _, f := range plan.LintArtifact(htmlBytes) {
 			cli.PrintHint(fmt.Sprintf("plan-artifact [%s]: %s", f.Rule, f.Message))
 		}
 	}
-	emitRenderedHTML(cmd, htmlBytes, info.Dir, outPath, open, slug)
+	emitRenderedHTML(cmd, htmlBytes, savedDir, outPath, open, slug)
 	return nil
 }
 

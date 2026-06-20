@@ -72,9 +72,36 @@ func TestRenderArtifactIsCSPClean(t *testing.T) {
 		t.Error("artifact render lost the SageOx footer credit")
 	}
 
+	// Diagrams still render: the block is present and the Mermaid library is
+	// inlined (no CDN), so the page is self-contained yet beautiful.
+	if !strings.Contains(html, `class="mermaid"`) {
+		t.Error("artifact render dropped the diagram block")
+	}
+	if len(out) < 500_000 {
+		t.Errorf("artifact render with a diagram should inline the Mermaid library (got %d bytes)", len(out))
+	}
+
 	// LintArtifact agrees the page is publishable.
 	if findings := LintArtifact(out); len(findings) != 0 {
 		t.Errorf("LintArtifact found issues in a clean artifact render: %+v", findings)
+	}
+}
+
+// A diagram-free plan must NOT pay the vendored Mermaid library's weight.
+func TestArtifactSkipsMermaidWhenAbsent(t *testing.T) {
+	in, res, opts := artifactFixture()
+	opts.Artifact = true
+	in.Sections[1].Body = "Just prose, no diagram here.\n" // drop the mermaid fence
+
+	out, err := RenderHTMLOpts(in, res, opts)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if strings.Contains(string(out), `class="mermaid"`) {
+		t.Error("diagram-free artifact unexpectedly contains a mermaid block")
+	}
+	if len(out) > 200_000 {
+		t.Errorf("diagram-free artifact must not inline the Mermaid library (got %d bytes)", len(out))
 	}
 }
 
