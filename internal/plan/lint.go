@@ -59,12 +59,16 @@ var (
 	// served under a strict CSP that blocks every cross-origin resource load and
 	// all fetch/XHR/WebSocket. These match the resource-loading constructs only —
 	// NOT <a href="https://…"> navigation, which is allowed and is how the SageOx
-	// enrichment references stay clickable in a published artifact.
-	extScriptRe   = regexp.MustCompile(`(?i)<script[^>]+src\s*=\s*["']https?://`)
-	extLinkRe     = regexp.MustCompile(`(?i)<link[^>]+href\s*=\s*["']https?://`)
-	extImgRe      = regexp.MustCompile(`(?i)<img[^>]+src\s*=\s*["']https?://`)
-	cssURLRe      = regexp.MustCompile(`(?i)url\(\s*["']?https?://`)
-	eventSourceRe = regexp.MustCompile(`(?i)\bEventSource\b`)
+	// enrichment references stay clickable in a published artifact. The host part
+	// is `(?:https?:)?//` so protocol-relative refs (`src="//cdn…"`) are caught
+	// too, and the EventSource check is scoped to the `new EventSource(`
+	// instantiation so it can't false-positive on plan prose that merely mentions
+	// the word.
+	extScriptRe   = regexp.MustCompile(`(?i)<script[^>]+src\s*=\s*["'](?:https?:)?//`)
+	extLinkRe     = regexp.MustCompile(`(?i)<link[^>]+href\s*=\s*["'](?:https?:)?//`)
+	extImgRe      = regexp.MustCompile(`(?i)<img[^>]+src\s*=\s*["'](?:https?:)?//`)
+	cssURLRe      = regexp.MustCompile(`(?i)url\(\s*["']?(?:https?:)?//`)
+	eventSourceRe = regexp.MustCompile(`(?i)\bnew\s+EventSource\s*\(`)
 )
 
 // LintArtifact verifies a rendered plan HTML is safe to publish as a Claude Code

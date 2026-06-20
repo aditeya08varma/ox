@@ -77,8 +77,8 @@ func TestRenderArtifactIsCSPClean(t *testing.T) {
 	if !strings.Contains(html, `class="mermaid"`) {
 		t.Error("artifact render dropped the diagram block")
 	}
-	if len(out) < 500_000 {
-		t.Errorf("artifact render with a diagram should inline the Mermaid library (got %d bytes)", len(out))
+	if !strings.Contains(html, mermaidLibSignature(t)) {
+		t.Error("artifact render with a diagram did not inline the Mermaid library")
 	}
 
 	// LintArtifact agrees the page is publishable.
@@ -100,8 +100,32 @@ func TestArtifactSkipsMermaidWhenAbsent(t *testing.T) {
 	if strings.Contains(string(out), `class="mermaid"`) {
 		t.Error("diagram-free artifact unexpectedly contains a mermaid block")
 	}
-	if len(out) > 200_000 {
-		t.Errorf("diagram-free artifact must not inline the Mermaid library (got %d bytes)", len(out))
+	if strings.Contains(string(out), mermaidLibSignature(t)) {
+		t.Error("diagram-free artifact must not inline the Mermaid library")
+	}
+}
+
+// mermaidLibSignature returns a stable interior slice of the vendored Mermaid
+// library — a content-based marker for "the library is inlined" that doesn't
+// depend on brittle absolute output sizes.
+func mermaidLibSignature(t *testing.T) string {
+	t.Helper()
+	b, err := renderAssets.ReadFile("assets/mermaid.min.js")
+	if err != nil {
+		t.Fatalf("read vendored mermaid: %v", err)
+	}
+	if len(b) < 1256 {
+		t.Fatalf("vendored mermaid unexpectedly small (%d bytes)", len(b))
+	}
+	return string(b[1000:1256])
+}
+
+// A plan that merely mentions EventSource in prose must not trip the artifact
+// SSE check — only an actual `new EventSource(` instantiation should.
+func TestLintArtifactIgnoresEventSourceProse(t *testing.T) {
+	page := `<!doctype html><html><body><p>The client connects via <code>EventSource</code> for SSE.</p></body></html>`
+	if findings := LintArtifact([]byte(page)); len(findings) != 0 {
+		t.Errorf("LintArtifact flagged prose that only mentions EventSource: %+v", findings)
 	}
 }
 

@@ -323,7 +323,9 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 // artifact path only pays the vendored library's weight when a diagram exists.
 func renderHasMermaid(data renderData) bool {
 	const marker = `class="mermaid"`
-	if strings.Contains(string(data.Preamble), marker) {
+	// TLDR is split out of the preamble into its own callout, so a diagram inside
+	// a "TL;DR" block lands here, not in Preamble — check it too.
+	if strings.Contains(string(data.TLDR), marker) || strings.Contains(string(data.Preamble), marker) {
 		return true
 	}
 	for _, s := range data.Sections {
