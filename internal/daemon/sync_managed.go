@@ -170,10 +170,10 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 		return ManagedRepoPullResult{CorruptRepo: true}
 	}
 
-	// Rebase-in-progress: skip — will resolve on its own or needs manual fix
-	if gitutil.IsRebaseInProgress(path) {
-		logger.Debug("repo in rebase state, skipping pull", "path", path)
-		return ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRebaseInProgress}
+	// Rebase-in-progress handling: leave a fresh rebase alone, auto-recover
+	// a stale wedge, or surface an unrecoverable one. See recoverPreexistingRebase.
+	if stop, res := s.recoverPreexistingRebase(ctx, path, repoName, logger); stop {
+		return res
 	}
 
 	// Lock files: auto-remove stale ones, skip and report if still present
@@ -393,6 +393,63 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	}
 
 	return result
+}
+
+// staleRebaseThreshold separates a fresh, in-flight rebase from an abandoned
+// wedge. The daemon's own `git pull --rebase` completes in seconds, so 5
+// minutes cleanly distinguishes "someone is actively rebasing" from "a rebase
+// has been stuck here for a while" and guarantees we never abort a rebase out
+// from under an in-progress operation.
+const staleRebaseThreshold = 5 * time.Minute
+
+// recoverPreexistingRebase handles a rebase that is ALREADY in progress when a
+// sync cycle starts (as opposed to one this call's own pull --rebase just
+// triggered, which the post-pull recovery ladder handles).
+//
+//   - No rebase, or a FRESH one (younger than staleRebaseThreshold): a fresh
+//     rebase is almost always the daemon's own concurrent pull or a human/CLI
+//     mid-operation — leave it alone. Returns stop=false for "no rebase" so the
+//     caller proceeds to pull; stop=true with a Skipped result for a fresh one.
+//   - A STALE rebase: a genuine wedge (abandoned by a crash, or stopped at an
+//     "edit"/conflict and never continued). Bare-skipping it forever was a
+//     deadlock — the post-pull ladder only fires for a rebase THIS call
+//     started, so a pre-existing wedge never got recovered, stranding every
+//     new session behind it and churning the sync loop. Auto-recover via
+//     AuditAndAbort (logs everything discarded before resetting; session data
+//     is the store's to re-publish, per .claude/rules/daemon-git.md), then
+//     return stop=false so the caller falls through to a clean pull and
+//     re-syncs this same cycle.
+//   - If the abort itself fails the repo is genuinely stuck: return stop=true
+//     with a confirm-required IssueTypeRebaseStuck so doctor / the scheduled
+//     doctor agent task picks it up instead of silently re-looping.
+func (s *SyncScheduler) recoverPreexistingRebase(ctx context.Context, path, repoName string, logger *slog.Logger) (stop bool, result ManagedRepoPullResult) {
+	age, inProgress := gitutil.RebaseAge(path)
+	if !inProgress {
+		return false, ManagedRepoPullResult{}
+	}
+	if age < staleRebaseThreshold {
+		logger.Debug("repo in fresh rebase, skipping pull this cycle", "path", path, "age", age)
+		return true, ManagedRepoPullResult{Skipped: true, SkipReason: skipReasonRebaseInProgress}
+	}
+	logger.Warn("recovering stale wedged rebase",
+		"op", "stale_rebase_recover", "repo", repoName, "age", age.Round(time.Second))
+	if abortErr := gitutil.AuditAndAbort(ctx, path, gitutil.AuditOpRebase, "stale wedged rebase auto-recovery", logger); abortErr != nil {
+		logger.Error("stale rebase recovery failed",
+			"op", "stale_rebase_recover_failed", "repo", repoName, "error", abortErr)
+		return true, ManagedRepoPullResult{
+			Skipped:    true,
+			SkipReason: "stale rebase recovery failed",
+			Issue: &DaemonIssue{
+				Type:            IssueTypeRebaseStuck,
+				Severity:        SeverityError,
+				Repo:            repoName,
+				Summary:         fmt.Sprintf("%s is stuck in a wedged rebase and auto-recovery failed. Run 'ox doctor --fix' to recover.", repoName),
+				RequiresConfirm: true,
+			},
+		}
+	}
+	logger.Info("recovered stale wedged rebase", "op", "stale_rebase_recovered", "repo", repoName)
+	return false, ManagedRepoPullResult{}
 }
 
 // detectDivergedBranchesAt checks if local and remote branches have both
