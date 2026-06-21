@@ -131,6 +131,92 @@ func TestIsRebaseInProgress(t *testing.T) {
 	})
 }
 
+// TestRebaseAge pins the fresh-vs-stale distinction the daemon relies on to
+// decide whether to auto-recover a wedged rebase.
+// Failure prevented: without an age signal the daemon either skips a
+// pre-existing wedge forever (stranding every new session — the original bug)
+// or aborts a rebase its own pull just started seconds ago.
+func TestRebaseAge(t *testing.T) {
+	t.Run("no rebase in progress", func(t *testing.T) {
+		repo := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git"), 0755))
+
+		_, inProgress := RebaseAge(repo)
+		assert.False(t, inProgress)
+	})
+
+	// A non-ENOENT stat error (here ENOTDIR: .git is a file, not a dir) is NOT
+	// proof the repo is clean. RebaseAge must conservatively report in-progress
+	// so the caller skips rather than pulling on a possibly-wedged repo, and
+	// fresh (age 0) so it never auto-aborts on a guess.
+	t.Run("non-not-exist stat error treated as in-progress fresh", func(t *testing.T) {
+		repo := t.TempDir()
+		require.NoError(t, os.WriteFile(filepath.Join(repo, ".git"), []byte("not a dir"), 0644))
+
+		age, inProgress := RebaseAge(repo)
+		assert.True(t, inProgress)
+		assert.Equal(t, time.Duration(0), age)
+	})
+
+	t.Run("fresh rebase reports small age", func(t *testing.T) {
+		repo := t.TempDir()
+		require.NoError(t, os.MkdirAll(filepath.Join(repo, ".git", "rebase-merge"), 0755))
+
+		age, inProgress := RebaseAge(repo)
+		assert.True(t, inProgress)
+		// just-created dir → well under any sane stale threshold
+		assert.Less(t, age, time.Minute)
+	})
+
+	t.Run("stale rebase reports large age via backdated mtime", func(t *testing.T) {
+		repo := t.TempDir()
+		dir := filepath.Join(repo, ".git", "rebase-merge")
+		require.NoError(t, os.MkdirAll(dir, 0755))
+		// backdate the dir mtime to simulate a wedge abandoned an hour ago
+		old := time.Now().Add(-time.Hour)
+		require.NoError(t, os.Chtimes(dir, old, old))
+
+		age, inProgress := RebaseAge(repo)
+		assert.True(t, inProgress)
+		assert.Greater(t, age, 30*time.Minute)
+	})
+
+	// rebase-apply (git am-style / older interactive rebases) hits the same
+	// loop; a typo skipping it would silently bypass stale recovery for that
+	// backend, so pin its stale path independently.
+	t.Run("stale rebase-apply backend reports large age", func(t *testing.T) {
+		repo := t.TempDir()
+		dir := filepath.Join(repo, ".git", "rebase-apply")
+		require.NoError(t, os.MkdirAll(dir, 0755))
+		old := time.Now().Add(-time.Hour)
+		require.NoError(t, os.Chtimes(dir, old, old))
+
+		age, inProgress := RebaseAge(repo)
+		assert.True(t, inProgress)
+		assert.Greater(t, age, 30*time.Minute)
+	})
+
+	// Blind-spot guard: a partial/failed `rebase --abort` can bump the dir's
+	// own mtime to "now" while the rebase metadata files keep their original
+	// (old) mtime. Age must follow the OLDEST entry so a genuinely stuck wedge
+	// still reads as stale instead of looking fresh for another threshold.
+	t.Run("fresh dir mtime but old entry still reads stale", func(t *testing.T) {
+		repo := t.TempDir()
+		dir := filepath.Join(repo, ".git", "rebase-merge")
+		require.NoError(t, os.MkdirAll(dir, 0755))
+		oldFile := filepath.Join(dir, "onto")
+		require.NoError(t, os.WriteFile(oldFile, []byte("deadbeef\n"), 0644))
+		old := time.Now().Add(-time.Hour)
+		require.NoError(t, os.Chtimes(oldFile, old, old)) // metadata file is old
+		now := time.Now()
+		require.NoError(t, os.Chtimes(dir, now, now)) // dir mtime bumped to "now"
+
+		age, inProgress := RebaseAge(repo)
+		assert.True(t, inProgress)
+		assert.Greater(t, age, 30*time.Minute, "age must follow the oldest entry, not the bumped dir mtime")
+	})
+}
+
 func TestIsSafeForGitOps(t *testing.T) {
 	t.Run("clean repo", func(t *testing.T) {
 		repo := t.TempDir()

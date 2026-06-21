@@ -81,6 +81,49 @@ func IsRebaseInProgress(repoPath string) bool {
 	return false
 }
 
+// RebaseAge returns how long a rebase has been in progress, based on the
+// mtime of the .git/rebase-merge or .git/rebase-apply directory. The bool is
+// false if no rebase is in progress (age is then meaningless).
+//
+// Used to distinguish a transient, in-flight rebase (seconds old — leave it
+// alone) from a genuinely wedged one abandoned by a prior crash or a rebase
+// that stopped at an "edit"/conflict and was never continued (minutes/days
+// old — safe to auto-recover). A fresh rebase that the daemon's own pull just
+// started must NOT be aborted out from under itself.
+func RebaseAge(repoPath string) (time.Duration, bool) {
+	gitDir := filepath.Join(repoPath, ".git")
+	for _, dir := range []string{"rebase-merge", "rebase-apply"} {
+		p := filepath.Join(gitDir, dir)
+		info, err := os.Stat(p)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // this backend's dir is absent; check the other
+			}
+			// A genuine stat failure (permission, I/O) is NOT proof the repo is
+			// clean. Treat it conservatively as an in-progress rebase so the
+			// caller skips rather than pulling on a possibly-wedged repo, and
+			// report it as fresh (age 0) so we never auto-abort on a guess.
+			return 0, true
+		}
+		// Use the OLDEST mtime among the dir and its entries. The rebase
+		// metadata files are written once at rebase start and not rewritten
+		// while it sits stuck, but a partial/failed `rebase --abort` can bump
+		// the directory's own mtime to "now". Keying off the oldest entry keeps
+		// a wedge stuck after a failed abort reading as stale on the next cycle,
+		// instead of masking it as "fresh" for another staleRebaseThreshold.
+		oldest := info.ModTime()
+		if entries, derr := os.ReadDir(p); derr == nil {
+			for _, e := range entries {
+				if fi, ferr := e.Info(); ferr == nil && fi.ModTime().Before(oldest) {
+					oldest = fi.ModTime()
+				}
+			}
+		}
+		return time.Since(oldest), true
+	}
+	return 0, false
+}
+
 // IsSafeForGitOps combines lock file and rebase state checks into a single
 // pre-flight check. Returns nil if safe to proceed, or an error describing
 // why the repo is blocked.

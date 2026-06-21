@@ -81,7 +81,21 @@ Target: 85%+ for internal packages. Check: `go test ./internal/... -coverprofile
 
 ## Bug Fix Regression Tests
 
-Every bug fix MUST include a regression test. Reproduce exact conditions; test must fail without fix, pass with it. Integration-level regressions go in `sageox/ox-test-harness`.
+Every bug fix MUST include a regression test that **fails without the fix and passes with it** — verify this explicitly (neuter the fix, watch the test go red, restore it). A test that passes both ways guards nothing.
+
+**Test the CLASS of failure, not the specific patch.** A bug is one instance of a broader failure mode. The patch fixes the instance; the test suite must cover the class. Before writing the test, ask: *what is the general failure here, and where else can it occur?* Then test those too.
+
+- Generalize the trigger: the reported wedge was a stale `rebase-merge`, but the class is "the repo is stuck in a persistent git state that blocks sync." So also cover `rebase-apply`, an aborted merge/cherry-pick, leftover lock files — same recovery contract, different entry point.
+- Generalize the input axis: if a bug hit one path/encoding/timing, test the target in *each* possible location/state, not only the one that broke.
+- Name the test after the class it prevents, not the ticket number.
+
+**Simulate the ENVIRONMENT the failure occurred in, not a stripped-down stub.** Reproduce the conditions that produced the bug — real subprocesses, real divergent history, real concurrent writers, real multi-cycle loops — so the test exercises the actual interaction, not a mock that can't reproduce it. Build up reusable harnesses (a real wedged-repo factory, a bare-remote-plus-clone fixture) that future tests in the same domain reuse; this makes the suite progressively more cross-cutting instead of a pile of isolated unit checks.
+
+- A unit test on a helper (e.g. "does `RebaseAge` read the mtime") does NOT prove the daemon recovers — it would pass even if recovery were never wired in. Drive the actual decision path.
+- Prove the system *makes progress after recovery* (un-wedged AND the next pull reconciles), not merely that one function returned the right value.
+- Where a true end-to-end belongs above the unit layer, put the integration regression in `sageox/ox-test-harness`.
+
+**The intent is what's under test — the durable behavior the user relies on — across the whole class of bugs, not a snapshot of one code path.** Optimize each regression test to catch the *next* variant of the same mistake, not just a re-run of the exact one already fixed.
 
 ## Handling Test Failures
 
