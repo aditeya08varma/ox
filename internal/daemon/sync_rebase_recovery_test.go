@@ -85,7 +85,7 @@ func discardLogger() *slog.Logger {
 // gitEnv is the hermetic env every git subprocess in these tests runs under:
 // no system/global config, fixed identity, signing off.
 func gitEnv() []string {
-	return append(os.Environ(),
+	return append(os.Environ(), // safe: hermetic git subprocess env (GIT_CONFIG_NOSYSTEM + HOME override below), not an ox subprocess
 		"GIT_CONFIG_NOSYSTEM=1", "HOME="+os.TempDir(),
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
