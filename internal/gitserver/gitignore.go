@@ -29,6 +29,50 @@ var checkoutRequiredEntries = []string{
 	"!sync.manifest",
 }
 
+// rejGitignoreEntry is the root-.gitignore pattern that keeps `git apply
+// --reject` patch-reject artifacts out of ledger/team history at any depth.
+const rejGitignoreEntry = "*.rej"
+
+// ensureRootGitignoreEntry appends a single pattern to the repo's ROOT
+// .gitignore if absent. Unlike the .sageox/.gitignore (which only governs
+// files under .sageox/), the root file governs the whole repo — needed for
+// session-dir artifacts like sessions/<id>/meta.json.rej. Idempotent.
+func ensureRootGitignoreEntry(repoPath, entry string) error {
+	if repoPath == "" {
+		return nil
+	}
+	gitignorePath := filepath.Join(repoPath, ".gitignore")
+	data, err := os.ReadFile(gitignorePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read .gitignore: %w", err)
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if strings.TrimSpace(line) == entry {
+			return nil // already present
+		}
+	}
+	content := string(data)
+	if content != "" && !strings.HasSuffix(content, "\n") {
+		content += "\n"
+	}
+	content += entry + "\n"
+	return os.WriteFile(gitignorePath, []byte(content), 0644)
+}
+
+// RejFilesTracked reports whether any *.rej patch-reject files are tracked by
+// git. Used by doctor to detect .rej artifacts swept into ledger history. A
+// non-nil error means detection itself failed (e.g. git unavailable, not a
+// repo) — callers MUST NOT treat that as "no .rej tracked", or doctor could
+// report a clean ledger when the check never ran.
+func RejFilesTracked(repoPath string) (bool, error) {
+	cmd := exec.Command("git", "-C", repoPath, "ls-files", "*.rej")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("git ls-files *.rej: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return len(strings.TrimSpace(string(out))) > 0, nil
+}
+
 // EnsureCheckoutGitignore ensures .sageox/.gitignore exists in the given repo
 // with required entries to prevent daemon-written files from appearing as untracked.
 // Without this, isCheckoutClean() in the GC path sees these files as dirty and
@@ -154,6 +198,28 @@ func EnsureGitignoreBeforeCommitCtx(ctx context.Context, repoPath string) {
 		slog.Debug("pre-commit gitignore guard failed", "path", repoPath, "error", err)
 	}
 
+	// ensure *.rej is ignored repo-wide. .rej patch-reject files are junk left
+	// by `git apply --reject` (blue-green GC carry); without a root ignore, the
+	// broad `git add -A`/per-session `add` paths sweep them into ledger history.
+	if err := ensureRootGitignoreEntry(repoPath, rejGitignoreEntry); err != nil {
+		slog.Debug("pre-commit .rej ignore guard failed", "path", repoPath, "error", err)
+	} else {
+		// stage the root .gitignore we just wrote so the caller's commit tracks
+		// it. Symmetric with the *.rej untrack below: both the ignore file and
+		// its untracking must land in the caller's next commit. Callers that
+		// stage narrowly (an explicit pathspec, not `git add -A` — e.g.
+		// commitAndPushLedger / commitPointerRewriteAndPush) would otherwise
+		// leave this newly-written root .gitignore untracked, so the post-commit
+		// worktree stays dirty and trips the pointer-commit clean-worktree
+		// (autostash-race) invariant. --sparse mirrors the untrack ops below
+		// (harmless when no sparse cone is set).
+		addIgnoreCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+			"add", "--sparse", ".gitignore")
+		if out, err := addIgnoreCmd.CombinedOutput(); err != nil {
+			slog.Debug("pre-commit root .gitignore stage failed", "path", repoPath, "error", err, "output", strings.TrimSpace(string(out)))
+		}
+	}
+
 	// untrack cache files that were committed before .gitignore existed.
 	// --cached removes from git index only, local files are preserved.
 	// --ignore-unmatch avoids errors when nothing is tracked.
@@ -161,6 +227,17 @@ func EnsureGitignoreBeforeCommitCtx(ctx context.Context, repoPath string) {
 		"rm", "--cached", "-r", "--ignore-unmatch", ".sageox/cache/")
 	if out, err := rmCmd.CombinedOutput(); err != nil {
 		slog.Debug("pre-commit cache untrack failed", "path", repoPath, "error", err, "output", strings.TrimSpace(string(out)))
+	}
+
+	// untrack any .rej files committed before the ignore was in place. Pathspec
+	// '*.rej' matches at any depth; --cached preserves the local files (then
+	// gitignore keeps them out of future commits). --sparse is required so the
+	// removal also reaches tracked paths OUTSIDE the sparse-checkout cone
+	// (e.g. data/github/**/*.rej), which git otherwise silently skips.
+	rmRejCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"rm", "--cached", "--sparse", "--ignore-unmatch", "*.rej")
+	if out, err := rmRejCmd.CombinedOutput(); err != nil {
+		slog.Debug("pre-commit .rej untrack failed", "path", repoPath, "error", err, "output", strings.TrimSpace(string(out)))
 	}
 
 	// untrack root-level codedb/ that was committed before the path was fixed

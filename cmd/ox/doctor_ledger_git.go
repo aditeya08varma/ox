@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -29,6 +30,7 @@ const (
 	CheckSlugLedgerCleanWorkdir    = "ledger-clean-workdir"
 	CheckSlugLedgerURLAPIMatch     = "ledger-url-api-match"
 	CheckSlugLedgerCacheTracked    = "ledger-cache-tracked"
+	CheckSlugLedgerRejTracked      = "ledger-rej-tracked"
 	// CheckSlugLedgerUnmergedPaths detects an in-progress merge/rebase/cherry-pick
 	// that has left files in U-state. These wedges silently block every future
 	// commit on the ledger (push-summary, doctor auto-commit, session uploads)
@@ -112,6 +114,15 @@ func init() {
 		FixLevel:    FixLevelAuto,
 		Description: "Detects local-only cache files that were accidentally committed to the ledger",
 		Run:         func(fix bool) checkResult { return checkLedgerCacheTracked(fix) },
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugLedgerRejTracked,
+		Name:        "Ledger .rej files untracked",
+		Category:    "Ledger Git Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Detects git apply --reject artifacts (.rej) swept into the ledger",
+		Run:         func(fix bool) checkResult { return checkLedgerRejTracked(fix) },
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
@@ -810,6 +821,16 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 	// without this, git add -A will commit local-only files like sync-state.json.
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
+	// Persist commit.gpgsign=false into the ledger's local config so every
+	// FUTURE CLI/daemon commit succeeds too. A ledger that inherited the
+	// user's SSH/GPG signing config commits non-interactively and dies on the
+	// passphrase prompt; this is the root cause of a wedged, non-syncing
+	// ledger. The commit below routes through gitutil.RunGit (which forces the
+	// flag inline regardless), so a persistence failure doesn't block THIS
+	// recovery — but we surface it so `ox doctor --fix` doesn't report a clean
+	// repair while the durable fix silently didn't land.
+	_, signErr := gitserver.DisableCommitSigning(ledgerPath)
+
 	// stage all changes
 	// --sparse: ledger repos use sparse-checkout
 	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "-A")
@@ -819,17 +840,29 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(output))))
 	}
 
-	// commit
-	commitCmd := exec.Command("git", "-C", ledgerPath, "commit", "-m", "ox doctor: auto-commit ledger changes")
-	if output, err := commitCmd.CombinedOutput(); err != nil {
-		errStr := strings.TrimSpace(string(output))
-		// "nothing to commit" is fine (race with session auto-stage)
-		if strings.Contains(errStr, "nothing to commit") {
+	// commit via RunGit: it owns the commit.gpgsign=false override plus the
+	// GIT_TERMINAL_PROMPT=0 / cmd.Dir safeguards, so the auto-commit can't
+	// drift from the managed-git execution contract.
+	out, err := gitutil.RunGit(context.Background(), ledgerPath,
+		"commit", "-m", "ox doctor: auto-commit ledger changes")
+	if err != nil {
+		// "nothing to commit" is fine (race with session auto-stage). RunGit
+		// folds git's output into the error, so check there.
+		if strings.Contains(out, "nothing to commit") || strings.Contains(err.Error(), "nothing to commit") {
 			return PassedCheck("Ledger clean workdir", "clean (already committed)")
 		}
 		return FailedCheck("Ledger clean workdir",
 			"commit failed",
-			fmt.Sprintf("git commit error: %s", errStr))
+			fmt.Sprintf("git commit error: %s", strings.TrimSpace(err.Error())))
+	}
+
+	// Commit landed, but flag a partial repair: the inline override saved this
+	// commit while the persisted local config didn't take, so future non-ox
+	// commits in this ledger could still wedge.
+	if signErr != nil {
+		return WarningCheck("Ledger clean workdir",
+			fmt.Sprintf("committed %d file(s), but could not persist commit.gpgsign=false", fileCount),
+			fmt.Sprintf("persist signing config: %v — rerun `ox doctor --fix` or set it manually: git -C %s config --local commit.gpgsign false", signErr, ledgerPath))
 	}
 
 	return PassedCheck("Ledger clean workdir",
@@ -879,6 +912,92 @@ func checkLedgerCacheTracked(fix bool) checkResult {
 	}
 
 	return PassedCheck(name, "untracked cache files from ledger")
+}
+
+// checkLedgerRejTracked detects *.rej patch-reject artifacts tracked in the
+// ledger. These come from `git apply --reject` during blue-green GC carry and
+// are junk conflict markers, never real ledger content. With fix=true it adds
+// the *.rej ignore, untracks them (git rm --cached, local files preserved),
+// removes the working-tree copies, and commits.
+func checkLedgerRejTracked(fix bool) checkResult {
+	const name = "Ledger .rej files untracked"
+
+	ledgerPath := getLedgerPath()
+	if ledgerPath == "" {
+		return SkippedCheck(name, "no ledger found", "")
+	}
+	if !isGitRepo(ledgerPath) {
+		return SkippedCheck(name, "ledger not a git repo", "")
+	}
+
+	tracked, err := gitserver.RejFilesTracked(ledgerPath)
+	if err != nil {
+		return FailedCheck(name, ".rej detection failed",
+			fmt.Sprintf("could not check tracked .rej files: %v", err))
+	}
+	if !tracked {
+		return PassedCheck(name, "no .rej files tracked")
+	}
+
+	if !fix {
+		return WarningCheck(name,
+			".rej patch-reject artifacts are tracked in ledger git history",
+			"run `ox doctor --fix` to untrack and ignore them (local files preserved)")
+	}
+
+	// EnsureGitignoreBeforeCommit now adds the *.rej ignore and untracks any
+	// tracked .rej (git rm --cached). Run it, then delete working-tree copies so
+	// they don't linger as ignored-but-present clutter, then commit the removal.
+	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
+
+	// delete the working-tree .rej copies so they don't linger as ignored
+	// clutter (the index removal alone leaves the files on disk).
+	_ = filepath.WalkDir(ledgerPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// regular files only (skip symlinks); ledger tree is ox-managed.
+		if strings.HasSuffix(d.Name(), ".rej") && d.Type().IsRegular() {
+			_ = os.Remove(path) //nolint:gosec // G122: ox-managed ledger tree, symlinks skipped above
+		}
+		return nil
+	})
+
+	// stage the untrack + the updated .gitignore
+	addCmd := exec.Command("git", "-C", ledgerPath, "add", "--sparse", "-A")
+	if out, err := addCmd.CombinedOutput(); err != nil {
+		return FailedCheck(name, "staging failed",
+			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(out))))
+	}
+
+	out, err := gitutil.RunGit(context.Background(), ledgerPath,
+		"commit", "-m", "chore: untrack and ignore .rej patch-reject artifacts")
+	if err != nil && !strings.Contains(out, "nothing to commit") && !strings.Contains(err.Error(), "nothing to commit") {
+		return FailedCheck(name, "commit failed after untracking",
+			fmt.Sprintf("git commit error: %s", strings.TrimSpace(err.Error())))
+	}
+
+	// re-verify before claiming success: EnsureGitignoreBeforeCommit, the
+	// deletion walk, and the commit all tolerate individual failures, so a
+	// tracked .rej could survive every step. Without this guard `ox doctor
+	// --fix` would report a clean repair while the artifacts remain in history.
+	stillTracked, err := gitserver.RejFilesTracked(ledgerPath)
+	if err != nil {
+		return FailedCheck(name, ".rej verification failed",
+			fmt.Sprintf("could not re-check tracked .rej files after commit: %v", err))
+	}
+	if stillTracked {
+		return FailedCheck(name, "fix incomplete",
+			".rej files are still tracked after untrack and commit")
+	}
+
+	return PassedCheck(name, "untracked .rej files from ledger")
 }
 
 // checkLedgerURLAPIMatch compares the local ledger's git remote URL path against
