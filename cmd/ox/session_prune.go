@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log/slog"
 	"path/filepath"
+	"strings"
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/session"
@@ -89,7 +90,7 @@ func runSessionPrune(cmd *cobra.Command, _ []string) error {
 
 	fmt.Printf("Sessions to prune (%s):\n", scope)
 	for _, c := range candidates {
-		fmt.Printf("  %s  %s\n", c.name, cli.StyleDim.Render(fmt.Sprintf("(%s · %s)", c.status, c.origin)))
+		fmt.Printf("  %s  %s\n", c.name, cli.StyleDim.Render(fmt.Sprintf("(%s · %s)", c.status, c.originLabel())))
 	}
 	fmt.Println()
 
@@ -105,28 +106,63 @@ func runSessionPrune(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	var removed int
-	for _, c := range candidates {
-		if err := c.store.Delete(c.name); err != nil {
-			fmt.Printf("  Warning: failed to remove %s (%s): %v\n", c.name, c.origin, err)
-			continue
-		}
-		removed++
-	}
+	removed := deletePruneCandidates(candidates)
 
 	cli.PrintSuccess(fmt.Sprintf("Pruned %d session(s)", removed))
 	if skippedRecording > 0 {
 		cli.PrintHint(fmt.Sprintf("Skipped %d active recording(s). Stop them with 'ox session stop' to prune.", skippedRecording))
 	}
-	return nil
+	return prunePartialFailureError(removed, len(candidates))
 }
 
-// pruneCandidate is a session selected for deletion.
+// deletePruneCandidates deletes every physical location of each candidate,
+// printing a warning per failed location but still attempting the rest — a
+// failure on one copy (e.g. a concurrent prune, or a race with another
+// process) must not stop the others from being cleaned up. Returns how many
+// candidates had ALL of their locations deleted successfully.
+func deletePruneCandidates(candidates []pruneCandidate) int {
+	var removed int
+	for _, c := range candidates {
+		ok := true
+		for _, loc := range c.locations {
+			if err := loc.store.Delete(c.name); err != nil {
+				fmt.Printf("  Warning: failed to remove %s (%s): %v\n", c.name, loc.origin, err)
+				ok = false
+			}
+		}
+		if ok {
+			removed++
+		}
+	}
+	return removed
+}
+
+// prunePartialFailureError reports a non-nil error when some sessions failed
+// to delete, so scripts and CI relying on exit code don't see a false success.
+func prunePartialFailureError(removed, total int) error {
+	if removed >= total {
+		return nil
+	}
+	return fmt.Errorf("pruned %d of %d session(s); check the warnings above for what's left", removed, total)
+}
+
+// pruneCandidate is a logical session selected for deletion. It may have more
+// than one physical location — e.g. a not-yet-uploaded session already staged
+// into the ledger cache alongside its per-user copy — all of which get deleted.
 type pruneCandidate struct {
-	name   string
-	status session.SessionStatus
-	store  *session.Store
-	origin string // human-readable: "local" or "ledger-cache"
+	name      string
+	status    session.SessionStatus
+	locations []prunableStore
+}
+
+// originLabel renders where this candidate's copies live, e.g. "local" or
+// "local+ledger-cache" when the session exists in both stores.
+func (c pruneCandidate) originLabel() string {
+	labels := make([]string, len(c.locations))
+	for i, loc := range c.locations {
+		labels[i] = loc.origin
+	}
+	return strings.Join(labels, "+")
 }
 
 // prunableStore pairs a store with a human-readable origin label.
@@ -140,6 +176,13 @@ type prunableStore struct {
 func buildPruneStores(localStore *session.Store, ledgerPath string) []prunableStore {
 	out := []prunableStore{{store: localStore, origin: "local"}}
 
+	// NewStore treats its argument as a repo-context root and appends "sessions"
+	// itself, so passing ledgerPath/.sageox/cache here (not ledgerPath) is
+	// deliberate — the result lands on ledgerPath/.sageox/cache/sessions. Do not
+	// "fix" this to pass ledgerPath directly: that aliases loadUploadedKeys'
+	// ledgerStore (which scans ledgerPath/sessions), making every cache-store
+	// session resolve as already-uploaded and silently no-op the entire
+	// ledger-cache half of prune.
 	cachePath := filepath.Join(ledgerPath, ".sageox", "cache")
 	cacheStore, err := session.NewStore(cachePath)
 	if err != nil {
@@ -152,11 +195,14 @@ func buildPruneStores(localStore *session.Store, ledgerPath string) []prunableSt
 
 // collectPruneCandidates iterates every local store, classifies each session,
 // and returns the ones eligible for deletion. Sessions appearing in multiple
-// stores under the same merge key are deduplicated — local store wins.
+// stores under the same merge key are merged into a single logical candidate
+// (classification from the first store wins — local is scanned first) that
+// carries every physical location, so all copies get deleted together.
 // Active recordings (StatusRecording) are always excluded; the count is
 // returned separately so the caller can report it.
 func collectPruneCandidates(stores []prunableStore, uploaded map[string]bool, pruneAll bool) ([]pruneCandidate, int, error) {
-	seen := make(map[string]bool)
+	const indexRejected = -1
+	index := make(map[string]int) // merge key -> candidates[] index, or indexRejected
 	var (
 		candidates       []pruneCandidate
 		skippedRecording int
@@ -169,20 +215,26 @@ func collectPruneCandidates(stores []prunableStore, uploaded map[string]bool, pr
 		}
 		for _, s := range sessions {
 			key := sessionMergeKey(s)
-			if seen[key] {
+
+			if idx, ok := index[key]; ok {
+				if idx != indexRejected {
+					// same logical session, another physical copy — prune it too.
+					candidates[idx].locations = append(candidates[idx].locations, prunableStore{store: ps.store, origin: ps.origin})
+				}
 				continue
 			}
-			seen[key] = true
 
 			isUploaded := uploaded[key]
 			status := session.ClassifySession(s, isUploaded)
 
 			if status == session.StatusRecording {
 				skippedRecording++
+				index[key] = indexRejected
 				continue
 			}
 
 			if !shouldPrune(status, pruneAll) {
+				index[key] = indexRejected
 				continue
 			}
 
@@ -190,11 +242,11 @@ func collectPruneCandidates(stores []prunableStore, uploaded map[string]bool, pr
 			if name == "" {
 				name = s.Filename
 			}
+			index[key] = len(candidates)
 			candidates = append(candidates, pruneCandidate{
-				name:   name,
-				status: status,
-				store:  ps.store,
-				origin: ps.origin,
+				name:      name,
+				status:    status,
+				locations: []prunableStore{{store: ps.store, origin: ps.origin}},
 			})
 		}
 	}
