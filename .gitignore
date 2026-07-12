@@ -115,3 +115,6 @@ issues.jsonl
 .beads-credential-key
 .sageox/kb/
 security/.output/
+
+# Rust build artifacts
+/target/

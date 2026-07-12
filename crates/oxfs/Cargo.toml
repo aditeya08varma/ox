@@ -1,0 +1,17 @@
+[package]
+name = "oxfs"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "macOS-first WYSIWYG context filesystem"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "oxfsd"
+path = "src/main.rs"
+
+[lints.rust]
+unsafe_code = "forbid"
+
