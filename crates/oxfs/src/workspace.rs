@@ -172,13 +172,30 @@ impl Workspace {
         candidate.insert(manifest.session_id.clone(), manifest);
         // Validate the entire union before the first transfer.
         self.validate_union(&candidate)?;
-        let protected: BTreeMap<_, _> = candidate
+        let mut protected = BTreeMap::new();
+        let mut available = BTreeSet::new();
+        for entry in candidate.values().flat_map(|manifest| &manifest.entries) {
+            if self.cache.resident(&entry.content)?.is_some() {
+                let key = self.cache.storage_key(&entry.content);
+                protected.insert(key.clone(), entry.content.size);
+                available.insert(key);
+            }
+        }
+        // The old namespace remains published until the replacement is fully
+        // durable. Pin all of its backing objects through this reconciliation,
+        // including objects the candidate deliberately drops.
+        let published = self.snapshot();
+        for file in published
+            .nodes
             .values()
-            .flat_map(|m| m.entries.iter())
-            .filter(|e| self.cache.resident(&e.content).ok().flatten().is_some())
-            .map(|e| (self.cache.storage_key(&e.content), e.content.size))
-            .collect();
-        let mut available: BTreeSet<_> = protected.keys().cloned().collect();
+            .filter_map(|node| node.file.as_ref())
+            .filter(|file| file.synthetic.is_none())
+        {
+            let key = self.cache.storage_key(&file.content);
+            if !protected.contains_key(&key) && self.cache.resident(&file.content)?.is_some() {
+                protected.insert(key, file.content.size);
+            }
+        }
         let mut missing_keys = BTreeSet::new();
         let mut missing = Vec::new();
         for entry in &admissions {

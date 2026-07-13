@@ -189,18 +189,15 @@ impl Catalog {
         }
 
         let mut was_evicted = existing.is_some_and(|(state, _, _)| state == STATE_EVICTED);
+        let clear_existing =
+            existing.is_some_and(|(state, _, _)| matches!(state, STATE_PENDING | STATE_RESIDENT));
+        let mut planned_used = self.used_bytes;
         let mut victims = Vec::new();
         if let Some((state, stored_size, access)) = existing
             && matches!(state, STATE_PENDING | STATE_RESIDENT)
         {
             let stored_size = from_sql_u64(stored_size)?;
-            self.connection
-                .execute(
-                    "UPDATE cache_objects SET state=2, pin_epoch=0 WHERE key=?1",
-                    params![key],
-                )
-                .map_err(sql_error)?;
-            self.used_bytes = self.used_bytes.saturating_sub(stored_size);
+            planned_used = planned_used.saturating_sub(stored_size);
             if state == STATE_RESIDENT {
                 was_evicted = true;
                 victims.push(Victim {
@@ -210,43 +207,62 @@ impl Catalog {
                 });
             }
         }
-        while self.used_bytes > capacity.saturating_sub(size) {
-            let victim = self
+        if planned_used > capacity.saturating_sub(size) {
+            let mut statement = self
                 .connection
-                .query_row(
+                .prepare_cached(
                     "SELECT key, size, access_epoch FROM cache_objects
-					 WHERE state=1 AND pin_epoch<>?1
-					 ORDER BY access_epoch, key LIMIT 1",
-                    params![to_sql_i64(self.epoch)?],
-                    |row| {
-                        Ok((
-                            row.get::<_, String>(0)?,
-                            row.get::<_, i64>(1)?,
-                            row.get::<_, i64>(2)?,
-                        ))
-                    },
+					 WHERE state=1 AND pin_epoch<>?1 AND key<>?2
+					 ORDER BY access_epoch, key",
                 )
-                .optional()
                 .map_err(sql_error)?;
-            let Some((victim_key, victim_size, access)) = victim else {
-                return Err(io::Error::new(
-                    io::ErrorKind::StorageFull,
-                    "cache limit reached",
-                ));
-            };
+            let rows = statement
+                .query_map(params![to_sql_i64(self.epoch)?, key], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(sql_error)?;
+            for row in rows {
+                let (victim_key, victim_size, access) = row.map_err(sql_error)?;
+                let victim_size = from_sql_u64(victim_size)?;
+                planned_used = planned_used.saturating_sub(victim_size);
+                victims.push(Victim {
+                    key: victim_key,
+                    size: victim_size,
+                    access: from_sql_u64(access)?,
+                });
+                if planned_used <= capacity.saturating_sub(size) {
+                    break;
+                }
+            }
+        }
+        if planned_used > capacity.saturating_sub(size) {
+            return Err(io::Error::new(
+                io::ErrorKind::StorageFull,
+                "cache limit reached",
+            ));
+        }
+
+        if clear_existing {
             self.connection
                 .execute(
                     "UPDATE cache_objects SET state=2, pin_epoch=0 WHERE key=?1",
-                    params![&victim_key],
+                    params![key],
                 )
                 .map_err(sql_error)?;
-            self.used_bytes = self.used_bytes.saturating_sub(from_sql_u64(victim_size)?);
-            victims.push(Victim {
-                key: victim_key,
-                size: from_sql_u64(victim_size)?,
-                access: from_sql_u64(access)?,
-            });
         }
+        for victim in victims.iter().filter(|victim| victim.key != key) {
+            self.connection
+                .execute(
+                    "UPDATE cache_objects SET state=2, pin_epoch=0 WHERE key=?1",
+                    params![&victim.key],
+                )
+                .map_err(sql_error)?;
+        }
+        self.used_bytes = planned_used;
         self.connection
             .execute(
                 "INSERT INTO cache_objects(key,size,access_epoch,pin_epoch,state)
@@ -444,4 +460,39 @@ fn from_sql_u64(value: i64) -> io::Result<u64> {
 
 fn sql_error(error: rusqlite::Error) -> io::Error {
     io::Error::other(format!("cache catalog: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn failed_reservation_does_not_consume_partial_victims() {
+        let root = std::env::temp_dir().join(format!(
+            "oxfs-catalog-reserve-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let mut catalog = Catalog::open(&root.join("catalog.sqlite")).unwrap();
+        catalog.import_resident("victim", 4, 1).unwrap();
+        catalog.import_resident("protected", 4, 2).unwrap();
+        catalog.begin_batch(["protected"].into_iter()).unwrap();
+
+        let error = catalog.reserve("incoming", 7, 10).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::StorageFull);
+        let gauges = catalog.gauges().unwrap();
+        assert_eq!(gauges.resident_objects, 2);
+        assert_eq!(gauges.resident_bytes, 8);
+        assert_eq!(gauges.pending_objects, 0);
+
+        catalog.rollback().unwrap();
+        drop(catalog);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

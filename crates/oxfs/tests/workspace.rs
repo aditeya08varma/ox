@@ -290,6 +290,54 @@ fn conflicting_session_content_does_not_replace_live_snapshot() {
 }
 
 #[test]
+fn failed_replacement_keeps_published_snapshot_backing_resident() {
+    let root = temp("failed-replacement-pins-live");
+    let live_bytes = b"abc".to_vec();
+    let spare_bytes = b"xyz".to_vec();
+    let live = ContentRef::for_sha256("t", &live_bytes);
+    let spare = ContentRef::for_sha256("t", &spare_bytes);
+    let missing = ContentRef::for_sha256("t", b"CCCCCC");
+    let ws = Workspace::open_with_config(
+        &root,
+        Arc::new(MemorySource {
+            objects: BTreeMap::from([
+                (live.digest.clone(), live_bytes.clone()),
+                (spare.digest.clone(), spare_bytes),
+            ]),
+        }),
+        oxfs::CacheConfig { max_bytes: 9 },
+    )
+    .unwrap();
+    let selected = |session: &str, generation: u64, path: &str, content: ContentRef| Manifest {
+        session_id: session.into(),
+        generation,
+        entries: vec![
+            ManifestEntry::new(path, "src", "Session", 0o444, 0, content, "selected").unwrap(),
+        ],
+    };
+    ws.apply(selected("live", 1, "live", live)).unwrap();
+    ws.apply(selected("spare", 1, "spare", spare)).unwrap();
+    ws.apply(Manifest {
+        session_id: "spare".into(),
+        generation: 2,
+        entries: vec![],
+    })
+    .unwrap();
+    let live_inode = ws.snapshot().by_path("live").unwrap().inode;
+
+    assert!(
+        ws.apply(selected("live", 2, "replacement", missing))
+            .is_err()
+    );
+    assert!(ws.snapshot().by_path("live").is_some());
+    assert_eq!(
+        ws.open_inode(live_inode).unwrap().read(0, 99).unwrap(),
+        live_bytes
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn synthetic_index_is_resident_and_aggregates_selectors() {
     let root = temp("index");
     let ws = Workspace::open(&root, source(b"abc")).unwrap();
@@ -435,14 +483,18 @@ fn ranked_admission_stops_but_keeps_later_resident_content() {
 fn dropped_content_is_evicted_and_oversize_never_fetches() {
     let root = temp("evict");
     let calls = Arc::new(AtomicUsize::new(0));
+    let pressure = ContentRef::for_sha256("t", b"def");
     struct Source {
         calls: Arc<AtomicUsize>,
+        pressure_digest: String,
     }
     impl ContentSource for Source {
         fn fetch(&self, r: &ContentRef, w: &mut dyn Write) -> Result<(), FetchError> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             if r.digest == reference().digest {
                 w.write_all(b"abc")?
+            } else if r.digest == self.pressure_digest {
+                w.write_all(b"def")?
             } else {
                 w.write_all(b"xyz")?
             };
@@ -453,8 +505,11 @@ fn dropped_content_is_evicted_and_oversize_never_fetches() {
         &root,
         Arc::new(Source {
             calls: calls.clone(),
+            pressure_digest: pressure.digest.clone(),
         }),
-        oxfs::CacheConfig { max_bytes: 3 },
+        // Replacement publication requires room for both the old and new
+        // three-byte objects until the namespace swap is complete.
+        oxfs::CacheConfig { max_bytes: 6 },
     )
     .unwrap();
     ws.apply(manifest(1)).unwrap();
@@ -476,7 +531,19 @@ fn dropped_content_is_evicted_and_oversize_never_fetches() {
     })
     .unwrap();
     assert!(ws.snapshot().by_path("replacement").is_some());
-    let oversized = ContentRef::new("t", "sha256", "00", 4).unwrap();
+    ws.apply(Manifest {
+        session_id: "pressure".into(),
+        generation: 1,
+        entries: vec![
+            ManifestEntry::new("pressure", "x", "Session", 0o444, 0, pressure, "pressure").unwrap(),
+        ],
+    })
+    .unwrap();
+    assert!(ws.snapshot().by_path("pressure").is_some());
+    assert_eq!(ws.cache_telemetry().unwrap().resident_bytes, 6);
+    assert_eq!(ws.eviction_counters().0, 1);
+
+    let oversized = ContentRef::new("t", "sha256", "00", 7).unwrap();
     let before = calls.load(Ordering::SeqCst);
     let outcome = ws
         .apply(Manifest {
