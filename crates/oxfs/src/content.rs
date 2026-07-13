@@ -1,5 +1,5 @@
 use std::fmt;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 /// Immutable, tenant-scoped identity for a complete object.
 ///
@@ -25,6 +25,27 @@ impl ContentRef {
             digest: hash.hex_digest(),
             size: bytes.len() as u64,
         }
+    }
+
+    /// Build a content reference without holding the complete object in memory.
+    pub fn for_sha256_reader(tenant: impl Into<String>, mut input: impl Read) -> io::Result<Self> {
+        let mut hash = crate::sha256::Sha256::new();
+        let mut size = 0u64;
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let read = input.read(&mut buffer)?;
+            if read == 0 {
+                break;
+            }
+            hash.update(&buffer[..read]);
+            size = size.saturating_add(read as u64);
+        }
+        Ok(Self {
+            tenant: tenant.into(),
+            algorithm: "sha256".into(),
+            digest: hash.hex_digest(),
+            size,
+        })
     }
 
     pub fn new(
@@ -97,5 +118,18 @@ impl std::error::Error for FetchError {}
 impl From<io::Error> for FetchError {
     fn from(value: io::Error) -> Self {
         Self::Io(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn streaming_sha256_matches_complete_bytes() {
+        let bytes = vec![0x5a; 128 * 1024 + 17];
+        let complete = ContentRef::for_sha256("test", &bytes);
+        let streaming = ContentRef::for_sha256_reader("test", bytes.as_slice()).unwrap();
+        assert_eq!(streaming, complete);
     }
 }

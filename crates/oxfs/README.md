@@ -205,6 +205,38 @@ Ctrl-C (or SIGTERM) unmounts, shuts down the server, and removes the temporary
 workspace. Like `gate`, `serve` requires macOS and non-interactive `sudo` for
 `mount_nfs`/`umount`.
 
+### Human-selected local directories (`oxdirtest`)
+
+`oxdirtest` mounts complete directory selections from a large local tree while
+using the real oxFS hashing, verified cache, manifest, and NFS paths. It walks
+only the selected directories. Each `select` command atomically replaces the
+previous mounted working set after every selected regular file has been hashed
+and materialized. Symlinks and special files are skipped.
+
+```bash
+sudo -v
+cargo run -p oxfs --bin oxdirtest -- \
+  --source /path/to/large-tree \
+  --mountpoint /tmp/oxdirtest \
+  --cache-bytes 10737418240
+```
+
+Commands are read from standard input:
+
+```text
+select projects/foo docs/reference
+status
+clear
+quit
+```
+
+Selections are relative to `--source`; absolute paths and `..` are rejected.
+The cache defaults to 10 GiB. A selection whose unique content is larger than
+the cache is rejected without changing the mount. Use `--state DIR` to retain
+the verified cache between runs; otherwise temporary state is removed during
+clean shutdown. Directory names containing whitespace are not supported by
+the interactive command parser.
+
 The integration suite sends real ONC RPC records over TCP. It does not bypass
 the wire adapter. Coverage includes mountd `MNT`, hierarchical `LOOKUP`, ranged
 `READ`, and a mutation returning `NFS3ERR_ROFS`. Core tests cover unsafe paths,

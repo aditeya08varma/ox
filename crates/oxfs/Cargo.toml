@@ -26,5 +26,9 @@ path = "src/main.rs"
 name = "oxjtest"
 path = "src/oxjtest.rs"
 
+[[bin]]
+name = "oxdirtest"
+path = "src/oxdirtest.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
