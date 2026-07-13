@@ -1,7 +1,8 @@
 use oxfs::mount;
 use oxfs::nfs::{NfsServer, ServerConfig};
 use oxfs::{
-    CacheConfig, ContentRef, ContentSource, FetchError, Manifest, ManifestEntry, Workspace,
+    CacheConfig, CacheTelemetrySnapshot, ContentRef, ContentSource, FetchError, Manifest,
+    ManifestEntry, Workspace,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -397,6 +398,9 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
         "new open sees replacement",
         fs::read(mountpoint.join("current.bin"))? == replacement_bytes,
     );
+    // macOS refuses to unmount an NFS volume while this deliberate stale-open
+    // descriptor is still live. Its mutation semantics have been fully checked.
+    drop(open);
     let index = fs::read_to_string(mountpoint.join(".sageox/INDEX.json"))?;
     check(
         &mut checks,
@@ -754,6 +758,7 @@ struct GenStats {
     source_fetches: u64,
     cache_capacity: u64,
     cache_remaining: u64,
+    cache: CacheTelemetrySnapshot,
 }
 
 fn evolve_loop(
@@ -769,6 +774,7 @@ fn evolve_loop(
     let mut prev_fetches = 0u64;
     let mut prev_evicted = 0u64;
     let mut prev_blocked = 0u64;
+    let mut prev_cache = CacheTelemetrySnapshot::default();
     while !stop.load(Ordering::SeqCst) {
         generation += 1;
         // Generation 1 publishes the whole freshly seeded set; later
@@ -790,6 +796,8 @@ fn evolve_loop(
         let (capacity, remaining) = workspace.cache_capacity();
         let (evicted_total, blocked_total) = workspace.eviction_counters();
         let fetches_total = source.fetch_total();
+        let cache_total = workspace.cache_telemetry()?;
+        let cache = cache_delta(cache_total, prev_cache);
         let stats = GenStats {
             generation,
             files: corpus.len(),
@@ -805,10 +813,12 @@ fn evolve_loop(
             source_fetches: fetches_total,
             cache_capacity: capacity,
             cache_remaining: remaining,
+            cache,
         };
         prev_fetches = fetches_total;
         prev_evicted = evicted_total;
         prev_blocked = blocked_total;
+        prev_cache = cache_total;
         emit_serve_stats(config, &stats, table);
 
         if config.generations.is_some_and(|total| generation >= total) {
@@ -854,7 +864,7 @@ fn emit_serve_stats(config: &ServeConfig, stats: &GenStats, table: bool) {
             .unwrap_or_default()
             .as_secs();
         println!(
-            "{{\"schema\":\"oxjtest.serve.v1\",\"ts_unix\":{ts},\"generation\":{},\"mountpoint\":\"{}\",\"files\":{},\"total_bytes\":{},\"added\":{},\"removed\":{},\"evicted\":{},\"evict_blocked\":{},\"stopped\":{},\"applied\":{},\"materialize_us\":{},\"fetched\":{},\"source_fetches\":{},\"cache_capacity\":{},\"cache_remaining\":{}}}",
+            "{{\"schema\":\"oxjtest.serve.v3\",\"ts_unix\":{ts},\"generation\":{},\"mountpoint\":\"{}\",\"files\":{},\"total_bytes\":{},\"added\":{},\"removed\":{},\"evicted\":{},\"evicted_bytes\":{},\"evict_blocked\":{},\"stopped\":{},\"applied\":{},\"materialize_us\":{},\"fetched\":{},\"fetched_bytes\":{},\"refetched\":{},\"refetched_bytes\":{},\"catalog_lookups\":{},\"resident_hits\":{},\"resident_misses\":{},\"opened_objects\":{},\"opened_bytes\":{},\"catalog_transactions\":{},\"catalog_commit_us\":{},\"object_sync_us\":{},\"directory_syncs\":{},\"directory_sync_us\":{},\"source_fetches\":{},\"resident_objects\":{},\"resident_bytes\":{},\"pending_objects\":{},\"catalog_bytes\":{},\"wal_bytes\":{},\"cache_capacity\":{},\"cache_remaining\":{}}}",
             stats.generation,
             json_escape(&config.mountpoint.display().to_string()),
             stats.files,
@@ -862,17 +872,90 @@ fn emit_serve_stats(config: &ServeConfig, stats: &GenStats, table: bool) {
             stats.added,
             stats.removed,
             stats.evicted,
+            stats.cache.evicted_bytes,
             stats.evict_blocked,
             stats.stopped,
             stats.applied,
             stats.materialize_us,
             stats.fetched,
+            stats.cache.fetched_bytes,
+            stats.cache.refetched_objects,
+            stats.cache.refetched_bytes,
+            stats.cache.catalog_lookups,
+            stats.cache.resident_hits,
+            stats.cache.resident_misses,
+            stats.cache.opened_objects,
+            stats.cache.opened_bytes,
+            stats.cache.catalog_transactions,
+            stats.cache.catalog_commit_us,
+            stats.cache.object_sync_us,
+            stats.cache.directory_syncs,
+            stats.cache.directory_sync_us,
             stats.source_fetches,
+            stats.cache.resident_objects,
+            stats.cache.resident_bytes,
+            stats.cache.pending_objects,
+            stats.cache.catalog_bytes,
+            stats.cache.wal_bytes,
             stats.cache_capacity,
             stats.cache_remaining,
         );
     }
     let _ = io::stdout().flush();
+}
+
+fn cache_delta(
+    current: CacheTelemetrySnapshot,
+    previous: CacheTelemetrySnapshot,
+) -> CacheTelemetrySnapshot {
+    CacheTelemetrySnapshot {
+        catalog_lookups: current
+            .catalog_lookups
+            .saturating_sub(previous.catalog_lookups),
+        resident_hits: current.resident_hits.saturating_sub(previous.resident_hits),
+        resident_misses: current
+            .resident_misses
+            .saturating_sub(previous.resident_misses),
+        opened_objects: current
+            .opened_objects
+            .saturating_sub(previous.opened_objects),
+        opened_bytes: current.opened_bytes.saturating_sub(previous.opened_bytes),
+        fetched_objects: current
+            .fetched_objects
+            .saturating_sub(previous.fetched_objects),
+        fetched_bytes: current.fetched_bytes.saturating_sub(previous.fetched_bytes),
+        refetched_objects: current
+            .refetched_objects
+            .saturating_sub(previous.refetched_objects),
+        refetched_bytes: current
+            .refetched_bytes
+            .saturating_sub(previous.refetched_bytes),
+        evicted_objects: current
+            .evicted_objects
+            .saturating_sub(previous.evicted_objects),
+        evicted_bytes: current.evicted_bytes.saturating_sub(previous.evicted_bytes),
+        evict_blocked: current.evict_blocked.saturating_sub(previous.evict_blocked),
+        catalog_transactions: current
+            .catalog_transactions
+            .saturating_sub(previous.catalog_transactions),
+        catalog_commit_us: current
+            .catalog_commit_us
+            .saturating_sub(previous.catalog_commit_us),
+        object_sync_us: current
+            .object_sync_us
+            .saturating_sub(previous.object_sync_us),
+        directory_syncs: current
+            .directory_syncs
+            .saturating_sub(previous.directory_syncs),
+        directory_sync_us: current
+            .directory_sync_us
+            .saturating_sub(previous.directory_sync_us),
+        resident_objects: current.resident_objects,
+        resident_bytes: current.resident_bytes,
+        pending_objects: current.pending_objects,
+        catalog_bytes: current.catalog_bytes,
+        wal_bytes: current.wal_bytes,
+    }
 }
 
 fn human_bytes(bytes: u64) -> String {
@@ -1094,17 +1177,9 @@ fn write_report(path: &Path, report: &Report) -> io::Result<()> {
     if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
         fs::create_dir_all(parent)?;
     }
-    let mut latencies = report.latencies_us.clone();
-    latencies.sort_unstable();
-    let percentile = |n: usize| -> u128 {
-        if latencies.is_empty() {
-            0
-        } else {
-            latencies[(latencies.len() - 1) * n / 100]
-        }
-    };
+    let latencies = &report.latencies_us;
     let mut json = format!(
-        "{{\n  \"schema\":\"oxjtest.v1\",\n  \"seed\":{},\n  \"config\":{{\"generations\":{},\"readers\":{},\"reads_per_reader\":{},\"source_delay_ms\":{}}},\n  \"passed\":{},\n  \"error\":{},\n  \"checks\":[",
+        "{{\n  \"schema\":\"oxjtest.v2\",\n  \"seed\":{},\n  \"config\":{{\"generations\":{},\"readers\":{},\"reads_per_reader\":{},\"source_delay_ms\":{}}},\n  \"passed\":{},\n  \"error\":{},\n  \"checks\":[",
         report.config.seed,
         report.config.generations,
         report.config.readers,
@@ -1130,14 +1205,11 @@ fn write_report(path: &Path, report: &Report) -> io::Result<()> {
     }
     write!(
         json,
-        "],\n  \"counters\":{{\"source_fetches\":{},\"cache_capacity\":{},\"cache_remaining\":{}}},\n  \"materialize_latency_us\":{{\"samples\":{},\"p50\":{},\"p95\":{},\"p99\":{},\"values\":[",
+        "],\n  \"counters\":{{\"source_fetches\":{},\"cache_capacity\":{},\"cache_remaining\":{}}},\n  \"materialize_latency_us\":{{\"samples\":{},\"values\":[",
         report.source_calls,
         report.cache_capacity,
         report.cache_remaining,
-        latencies.len(),
-        percentile(50),
-        percentile(95),
-        percentile(99)
+        latencies.len()
     )
     .expect("writing JSON to a String cannot fail");
     for (index, latency) in latencies.iter().enumerate() {
@@ -1182,8 +1254,8 @@ mod tests {
         };
         write_report(&path, &report).unwrap();
         let value = fs::read_to_string(&path).unwrap();
-        assert!(value.contains("\"schema\":\"oxjtest.v1\""));
-        assert!(value.contains("\"p50\":20"));
+        assert!(value.contains("\"schema\":\"oxjtest.v2\""));
+        assert!(value.contains("\"values\":[30,10,20]"));
         fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

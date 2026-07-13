@@ -5,7 +5,7 @@ use crate::manifest::{Manifest, ManifestError};
 use crate::namespace::{FileNode, Namespace, Node, NodeKind, Selector};
 use crate::observations::{ObservationKind, ObservationLog};
 use crate::selections::SelectionStore;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::File;
 use std::io;
@@ -60,7 +60,7 @@ impl Workspace {
         });
         // Restore as much of the persisted desired set as the configured cap
         // permits. Corrupt objects are removed by `resident` before admission.
-        let protected: std::collections::BTreeSet<_> = {
+        let protected: BTreeMap<_, _> = {
             let sessions = workspace
                 .sessions
                 .lock()
@@ -76,38 +76,51 @@ impl Workspace {
                         .flatten()
                         .is_some()
                 })
-                .map(|e| workspace.cache.storage_key(&e.content))
+                .map(|e| (workspace.cache.storage_key(&e.content), e.content.size))
                 .collect()
         };
+        let mut available: BTreeSet<_> = protected.keys().cloned().collect();
         {
             let sessions = workspace
                 .sessions
                 .lock()
                 .map_err(|_| WorkspaceError::Poisoned)?;
+            let admissions: Vec<_> = sessions
+                .values()
+                .flat_map(|manifest| manifest.entries.iter().map(|entry| entry.content.clone()))
+                .collect();
+            workspace.cache.begin_batch(&admissions, &protected)?;
             let mut stopped = false;
             for entry in sessions.values().flat_map(|m| m.entries.iter()) {
-                if workspace.cache.resident(&entry.content)?.is_some() {
+                let key = workspace.cache.storage_key(&entry.content);
+                if available.contains(&key) {
                     continue;
                 }
                 if stopped || entry.content.size > workspace.cache.capacity() {
                     stopped = true;
                     continue;
                 }
-                match workspace.cache.materialize(&entry.content, &protected) {
-                    Ok(_) => {}
+                match workspace
+                    .cache
+                    .materialize_missing(&entry.content, &protected)
+                {
+                    Ok(_) => {
+                        available.insert(key);
+                    }
                     Err(FetchError::Io(error)) if error.kind() == io::ErrorKind::StorageFull => {
                         stopped = true
                     }
                     Err(_) => stopped = true,
                 }
             }
+            workspace.cache.commit_batch()?;
         }
         let recovered = {
             let sessions = workspace
                 .sessions
                 .lock()
                 .map_err(|_| WorkspaceError::Poisoned)?;
-            workspace.build_namespace_recovered(&sessions)?
+            workspace.build_namespace_recovered(&sessions, &available)?
         };
         *workspace
             .namespace
@@ -159,28 +172,50 @@ impl Workspace {
         candidate.insert(manifest.session_id.clone(), manifest);
         // Validate the entire union before the first transfer.
         self.validate_union(&candidate)?;
-        let protected: std::collections::BTreeSet<_> = candidate
+        let protected: BTreeMap<_, _> = candidate
             .values()
             .flat_map(|m| m.entries.iter())
             .filter(|e| self.cache.resident(&e.content).ok().flatten().is_some())
-            .map(|e| self.cache.storage_key(&e.content))
+            .map(|e| (self.cache.storage_key(&e.content), e.content.size))
             .collect();
-        let mut stopped = false;
+        let mut available: BTreeSet<_> = protected.keys().cloned().collect();
+        let mut missing_keys = BTreeSet::new();
+        let mut missing = Vec::new();
         for entry in &admissions {
-            if self.cache.resident(&entry.content)?.is_some() {
+            let key = self.cache.storage_key(&entry.content);
+            if available.contains(&key) || !missing_keys.insert(key) {
                 continue;
             }
-            if stopped || entry.content.size > self.cache.capacity() {
-                stopped = true;
-                continue;
+            if entry.content.size > self.cache.capacity() {
+                break;
             }
-            match self.cache.materialize(&entry.content, &protected) {
-                Ok(_) => {}
-                Err(FetchError::Io(e)) if e.kind() == io::ErrorKind::StorageFull => stopped = true,
-                Err(e) => return Err(e.into()),
+            missing.push(entry.content.clone());
+        }
+        let admission_content: Vec<_> = admissions
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect();
+        self.cache.begin_batch(&admission_content, &protected)?;
+        match self.cache.materialize_missing_batch(&missing, &protected) {
+            Ok(materialized) => {
+                available.extend(materialized);
+            }
+            Err(error) => {
+                let _ = self.cache.rollback_batch();
+                return Err(error.into());
             }
         }
-        let next = self.build_namespace(&candidate)?;
+        let next = match self.build_namespace(&candidate, &available) {
+            Ok(next) => next,
+            Err(error) => {
+                let _ = self.cache.rollback_batch();
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.cache.commit_batch() {
+            let _ = self.cache.rollback_batch();
+            return Err(error.into());
+        }
         let available = next
             .nodes
             .values()
@@ -221,6 +256,7 @@ impl Workspace {
     fn build_namespace(
         &self,
         sessions: &BTreeMap<String, Manifest>,
+        available: &BTreeSet<String>,
     ) -> Result<Namespace, WorkspaceError> {
         let mut desired: BTreeMap<String, DesiredIndex> = BTreeMap::new();
         let mut max_generation = 0;
@@ -255,7 +291,7 @@ impl Workspace {
         let index_desired = desired.clone();
         for (path, desired) in desired {
             let entry = &desired.entry;
-            if self.cache.resident(&entry.content)?.is_none() {
+            if !available.contains(&self.cache.storage_key(&entry.content)) {
                 continue;
             }
             let parts: Vec<_> = path.split('/').collect();
@@ -321,7 +357,11 @@ impl Workspace {
             max_generation,
             &index_desired,
             &self.cache,
+            available,
         )?;
+        // Allocate paths freely while constructing the private candidate, then
+        // cross one durability boundary immediately before it can be published.
+        inodes.sync()?;
         Ok(Namespace {
             generation: max_generation,
             nodes: nodes
@@ -335,8 +375,9 @@ impl Workspace {
     fn build_namespace_recovered(
         &self,
         sessions: &BTreeMap<String, Manifest>,
+        available: &BTreeSet<String>,
     ) -> Result<Namespace, WorkspaceError> {
-        self.build_namespace(sessions)
+        self.build_namespace(sessions, available)
     }
 
     pub fn cache_capacity(&self) -> (u64, u64) {
@@ -347,6 +388,10 @@ impl Workspace {
     /// object was pinned by the live namespace or an in-flight fetch).
     pub fn eviction_counters(&self) -> (u64, u64) {
         self.cache.eviction_counters()
+    }
+
+    pub fn cache_telemetry(&self) -> io::Result<crate::cache::CacheTelemetrySnapshot> {
+        self.cache.telemetry()
     }
 
     pub fn open_inode(self: &Arc<Self>, inode: u64) -> Result<OpenFile, WorkspaceError> {
@@ -432,6 +477,7 @@ fn add_indexes(
     generation: u64,
     desired: &BTreeMap<String, DesiredIndex>,
     cache: &ContentCache,
+    available: &BTreeSet<String>,
 ) -> Result<(), WorkspaceError> {
     let dir_inode = inodes.inode_for(".sageox")?;
     let md_inode = inodes.inode_for(".sageox/INDEX.md")?;
@@ -442,7 +488,7 @@ fn add_indexes(
     let mut json = format!("{{\"generation\":{generation},\"files\":[");
     for (index, (path, item)) in desired.iter().enumerate() {
         let file = &item.entry;
-        let status = if cache.resident(&file.content)?.is_some() {
+        let status = if available.contains(&cache.storage_key(&file.content)) {
             "available"
         } else if file.content.size > cache.capacity() {
             "stopped: exceeds_cache_limit"

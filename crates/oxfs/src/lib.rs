@@ -5,6 +5,7 @@
 //! observations. The [`nfs`] module is only a protocol adapter around that API.
 
 pub mod cache;
+mod cache_catalog;
 pub mod content;
 pub mod inode;
 pub mod manifest;
@@ -17,7 +18,7 @@ mod selections;
 mod sha256;
 pub mod workspace;
 
-pub use cache::{CacheConfig, DEFAULT_CACHE_MAX_BYTES};
+pub use cache::{CacheConfig, CacheTelemetrySnapshot, DEFAULT_CACHE_MAX_BYTES};
 pub use content::{ContentRef, ContentSource, FetchError};
 pub use manifest::{Manifest, ManifestEntry};
 pub use workspace::{ApplyOutcome, OpenFile, Workspace, WorkspaceError};

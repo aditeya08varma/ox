@@ -43,15 +43,17 @@ validate paths ──► fetch immutable objects ──► verify + fsync + rena
 | `namespace` | In-memory inode tree independent of NFS and process connections |
 | `inode` | Append-only stable path-to-inode persistence |
 | `content` | Tenant-scoped immutable content identity and storage-neutral fetch trait |
-| `cache` | Tenant-separated objects, coalesced fetch, verification, crash-safe publication |
+| `cache` | Tenant-separated loose objects, SQLite catalog, verification, crash-safe publication |
 | `observations` | Append-only open/read/dismiss JSONL |
 | `selections` | Transactional persistence of complete per-Session generations |
 | synthetic index | Always-resident `.sageox/INDEX.md` and `.sageox/INDEX.json` with all selectors |
 | `nfs` | XDR, ONC RPC record marking, mountd v3, and read-only NFSv3 |
 
-The crate intentionally has no third-party dependencies. This is useful for the
-walking skeleton, but not a permanent objection to small permissively licensed
-libraries where they reduce risk.
+The cache catalog uses bundled SQLite through the MIT-licensed `rusqlite`
+binding. SQLite replaces the former rewritten text index: startup opens the
+catalog directly, each manifest is one transaction, and NFS reads perform no
+durable recency write. An apply-scoped recovery journal bounds crash cleanup to
+the keys in the interrupted manifest rather than scanning the object tree.
 
 ## Mount on macOS
 
@@ -133,7 +135,7 @@ capacity gate reports `stopped > 0` in the stats and hides the overflow.
 
 Each generation emits one stats record. **In an interactive terminal** it is a
 human-readable table (the header reprints every 20 rows); **when stdout is
-piped** it is a single-line `oxjtest.serve.v1` JSON object instead, so
+piped** it is a single-line `oxjtest.serve.v3` JSON object instead, so
 `| jq` keeps working.
 
 ```
@@ -161,11 +163,25 @@ The JSON form carries the same fields plus `ts_unix`, `applied`, and cumulative
 `source_fetches`:
 
 ```json
-{"schema":"oxjtest.serve.v1","ts_unix":...,"generation":3,"mountpoint":"/tmp/oxjfs",
+{"schema":"oxjtest.serve.v3","ts_unix":...,"generation":3,"mountpoint":"/tmp/oxjfs",
  "files":1000,"total_bytes":37025792,"added":100,"removed":100,
- "evicted":73,"evict_blocked":0,"stopped":0,"applied":true,"materialize_us":11912,
- "fetched":100,"source_fetches":1200,"cache_capacity":268435456,"cache_remaining":158613504}
+ "evicted":73,"evicted_bytes":4194304,"evict_blocked":0,"stopped":0,
+ "applied":true,"materialize_us":11912,"fetched":100,"fetched_bytes":3702579,
+ "refetched":2,"refetched_bytes":8192,"catalog_lookups":3300,
+ "resident_hits":3000,"resident_misses":300,
+ "opened_objects":1000,"opened_bytes":37025792,"catalog_transactions":1,
+ "catalog_commit_us":420,"object_sync_us":9100,
+ "directory_syncs":1,"directory_sync_us":1600,"source_fetches":1200,"resident_objects":1000,
+ "resident_bytes":109821952,"pending_objects":0,"catalog_bytes":262144,
+ "wal_bytes":131072,"cache_capacity":268435456,"cache_remaining":158613504}
 ```
+
+Manifest admission remains deterministic: capacity is reserved in manifest
+order, then up to eight independent immutable objects are fetched, verified,
+and synced concurrently before the namespace is published. `object_sync_us`
+is therefore aggregate worker time and can exceed `materialize_us`;
+`directory_syncs` counts coalesced directory durability barriers (normally one
+per generation for a single tenant).
 
 To see **every** eviction (victim key, size, LRU access, occupancy) rather than
 just the per-generation count, set `OXFS_CACHE_LOG=1` — the cache then emits a

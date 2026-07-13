@@ -42,6 +42,13 @@ impl ContentRef {
         if value.tenant.is_empty() || value.algorithm.is_empty() || value.digest.is_empty() {
             return Err(FetchError::InvalidReference);
         }
+        if !value
+            .algorithm
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        {
+            return Err(FetchError::InvalidReference);
+        }
         if !value.digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(FetchError::InvalidReference);
         }

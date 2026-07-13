@@ -36,6 +36,14 @@ fn reference() -> ContentRef {
     )
     .unwrap()
 }
+
+#[test]
+fn content_algorithm_cannot_escape_the_cache_namespace() {
+    assert!(ContentRef::new("tenant", "../sha256", "00", 1).is_err());
+    assert!(ContentRef::new("tenant", "sha256/other", "00", 1).is_err());
+    assert!(ContentRef::new("tenant", "blake3-preview_1", "00", 1).is_ok());
+}
+
 fn source(bytes: &[u8]) -> Arc<dyn ContentSource> {
     Arc::new(MemorySource {
         objects: BTreeMap::from([(reference().digest, bytes.to_vec())]),
@@ -81,6 +89,97 @@ fn wysiwyg_and_stable_restart() {
             .unwrap()
             .inode
     );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sqlite_catalog_is_persistent_and_telemetry_is_observable() {
+    let root = temp("catalog");
+    let ws = Workspace::open(&root, source(b"abc")).unwrap();
+    ws.apply(manifest(1)).unwrap();
+    let telemetry = ws.cache_telemetry().unwrap();
+    assert_eq!(telemetry.fetched_objects, 1);
+    assert_eq!(telemetry.fetched_bytes, 3);
+    assert_eq!(telemetry.resident_objects, 1);
+    assert_eq!(telemetry.resident_bytes, 3);
+    assert_eq!(telemetry.pending_objects, 0);
+    assert_eq!(telemetry.catalog_transactions, 2); // empty restore + generation 1
+    assert_eq!(telemetry.directory_syncs, 1);
+    assert!(root.join("cache/catalog.sqlite").is_file());
+    assert!(!root.join("cache/metadata.v1").exists());
+    assert!(!root.join("cache/active-apply.v1").exists());
+
+    drop(ws);
+    let ws = Workspace::open(&root, source(b"abc")).unwrap();
+    assert_eq!(ws.cache_telemetry().unwrap().resident_objects, 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn manifest_batch_materializes_unique_objects_and_syncs_directory_once() {
+    let root = temp("parallel-batch");
+    let mut objects = BTreeMap::new();
+    let mut entries = Vec::new();
+    for index in 0..64 {
+        let bytes = format!("object-{index}").into_bytes();
+        let reference = ContentRef::for_sha256("t", &bytes);
+        objects.insert(reference.digest.clone(), bytes);
+        entries.push(
+            ManifestEntry::new(
+                format!("objects/{index}"),
+                "src",
+                "Session",
+                0o444,
+                0,
+                reference,
+                "batch",
+            )
+            .unwrap(),
+        );
+    }
+    let ws = Workspace::open(&root, Arc::new(MemorySource { objects })).unwrap();
+    ws.apply(Manifest {
+        session_id: "batch".into(),
+        generation: 1,
+        entries,
+    })
+    .unwrap();
+    let telemetry = ws.cache_telemetry().unwrap();
+    assert_eq!(telemetry.fetched_objects, 64);
+    assert_eq!(telemetry.resident_objects, 64);
+    assert_eq!(telemetry.directory_syncs, 1);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn legacy_metadata_migrates_without_scanning_the_object_tree() {
+    let root = temp("catalog-migration");
+    let ws = Workspace::open(&root, source(b"abc")).unwrap();
+    ws.apply(manifest(1)).unwrap();
+    drop(ws);
+
+    let object = walk_files(&root.join("cache/objects"))
+        .into_iter()
+        .find(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .starts_with("sha256-")
+        })
+        .unwrap();
+    let key = object
+        .strip_prefix(root.join("cache/objects"))
+        .unwrap()
+        .to_string_lossy();
+    for suffix in ["catalog.sqlite", "catalog.sqlite-wal", "catalog.sqlite-shm"] {
+        let _ = std::fs::remove_file(root.join("cache").join(suffix));
+    }
+    std::fs::write(root.join("cache/metadata.v1"), format!("{key}\t3\t7\n")).unwrap();
+
+    let ws = Workspace::open(&root, source(b"abc")).unwrap();
+    assert_eq!(ws.cache_telemetry().unwrap().resident_objects, 1);
+    assert!(!root.join("cache/metadata.v1").exists());
+    assert!(root.join("cache/catalog.sqlite").is_file());
     std::fs::remove_dir_all(root).unwrap();
 }
 #[test]

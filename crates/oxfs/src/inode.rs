@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub const ROOT_INODE: u64 = 1;
 
@@ -11,9 +11,10 @@ pub const ROOT_INODE: u64 = 1;
 /// avoidable kernel cache churn. Compaction can be added when measurements say
 /// the tiny mapping warrants it.
 pub struct InodeTable {
-    path: PathBuf,
+    append: File,
     by_path: BTreeMap<String, u64>,
     next: u64,
+    dirty: bool,
 }
 
 impl InodeTable {
@@ -45,10 +46,12 @@ impl InodeTable {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error),
         }
+        let append = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
-            path,
+            append,
             by_path,
             next,
+            dirty: false,
         })
     }
 
@@ -64,14 +67,20 @@ impl InodeTable {
             .next
             .checked_add(1)
             .ok_or_else(|| io::Error::other("inode number exhausted"))?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
-        writeln!(file, "{number}\t{}", escape(path))?;
-        file.sync_data()?;
+        writeln!(self.append, "{number}\t{}", escape(path))?;
+        self.dirty = true;
         self.by_path.insert(path.into(), number);
         Ok(number)
+    }
+
+    /// Make every inode allocated since the previous sync durable before the
+    /// namespace that references those inode numbers becomes visible.
+    pub fn sync(&mut self) -> io::Result<()> {
+        if self.dirty {
+            self.append.sync_data()?;
+            self.dirty = false;
+        }
+        Ok(())
     }
 }
 
@@ -124,7 +133,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let first = InodeTable::open(&dir).unwrap().inode_for("a/b").unwrap();
+        let mut table = InodeTable::open(&dir).unwrap();
+        let first = table.inode_for("a/b").unwrap();
+        table.sync().unwrap();
+        drop(table);
         let second = InodeTable::open(&dir).unwrap().inode_for("a/b").unwrap();
         assert_eq!(first, second);
         fs::remove_dir_all(dir).unwrap();
