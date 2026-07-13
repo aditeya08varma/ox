@@ -147,7 +147,14 @@ fn parse_uid(output: &[u8]) -> io::Result<u32> {
 }
 
 fn mount_command(state: &MountState) -> Command {
+    mount_command_for(state, false)
+}
+
+fn mount_command_for(state: &MountState, non_interactive: bool) -> Command {
     let mut command = Command::new("/usr/bin/sudo");
+    if non_interactive {
+        command.arg("-n");
+    }
     command
         .arg("/sbin/mount_nfs")
         .arg("-o")
@@ -158,6 +165,63 @@ fn mount_command(state: &MountState) -> Command {
         .arg("127.0.0.1:/oxfs")
         .arg(&state.mountpoint);
     command
+}
+
+/// A real macOS NFS mount backed by an already-running in-process server.
+///
+/// Call [`MountedFilesystem::unmount`] explicitly so cleanup failures can fail
+/// a release gate. Drop intentionally makes one best-effort cleanup attempt.
+pub struct MountedFilesystem {
+    mountpoint: PathBuf,
+    mounted: bool,
+}
+
+impl MountedFilesystem {
+    pub fn unmount(mut self) -> io::Result<()> {
+        self.unmount_inner(true)
+    }
+
+    fn unmount_inner(&mut self, non_interactive: bool) -> io::Result<()> {
+        if !self.mounted {
+            return Ok(());
+        }
+        let mut command = Command::new("/usr/bin/sudo");
+        if non_interactive {
+            command.arg("-n");
+        }
+        let status = command.arg("/sbin/umount").arg(&self.mountpoint).status()?;
+        if !status.success() {
+            return Err(command_failed("umount", status));
+        }
+        self.mounted = false;
+        Ok(())
+    }
+}
+
+impl Drop for MountedFilesystem {
+    fn drop(&mut self) {
+        let _ = self.unmount_inner(true);
+    }
+}
+
+/// Mount an already-running loopback NFS server without allowing sudo to
+/// prompt. This is the privilege boundary used by end-to-end release gates.
+pub fn mount_server(port: u16, mountpoint: &Path) -> io::Result<MountedFilesystem> {
+    ensure_unprivileged()?;
+    fs::create_dir_all(mountpoint)?;
+    let state = MountState {
+        pid: std::process::id(),
+        port,
+        mountpoint: mountpoint.to_owned(),
+    };
+    let status = mount_command_for(&state, true).status()?;
+    if !status.success() {
+        return Err(command_failed("mount_nfs", status));
+    }
+    Ok(MountedFilesystem {
+        mountpoint: mountpoint.to_owned(),
+        mounted: true,
+    })
 }
 
 pub fn unmount(state_dir: &Path) -> io::Result<()> {
@@ -224,6 +288,21 @@ mod tests {
                 "/tmp/oxfs"
             ]
         );
+    }
+
+    #[test]
+    fn release_gate_mount_disables_sudo_prompts() {
+        let state = MountState {
+            pid: 42,
+            port: 20490,
+            mountpoint: PathBuf::from("/tmp/oxfs"),
+        };
+        let command = mount_command_for(&state, true);
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args.first().map(String::as_str), Some("-n"));
     }
 
     #[test]

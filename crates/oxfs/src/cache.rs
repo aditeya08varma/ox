@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -47,6 +48,12 @@ pub struct ContentCache {
     config: CacheConfig,
     state: Mutex<State>,
     validated: Mutex<BTreeSet<String>>,
+    /// Objects unlinked to make room (cumulative).
+    evicted: AtomicU64,
+    /// Times a reservation needed space but every resident object was pinned
+    /// (in the live namespace or an in-flight fetch), so nothing could be
+    /// evicted (cumulative). This is the "could not evict, it's in use" signal.
+    evict_blocked: AtomicU64,
 }
 
 impl ContentCache {
@@ -70,6 +77,8 @@ impl ContentCache {
             config,
             state: Mutex::new(State::default()),
             validated: Mutex::new(BTreeSet::new()),
+            evicted: AtomicU64::new(0),
+            evict_blocked: AtomicU64::new(0),
         };
         cache.remove_orphan_temps()?;
         cache.load_and_reconcile()?;
@@ -87,6 +96,14 @@ impl ContentCache {
     }
     pub fn remaining(&self) -> u64 {
         self.config.max_bytes.saturating_sub(self.used())
+    }
+
+    /// Cumulative (objects evicted, reservations blocked by all-pinned).
+    pub fn eviction_counters(&self) -> (u64, u64) {
+        (
+            self.evicted.load(Ordering::Relaxed),
+            self.evict_blocked.load(Ordering::Relaxed),
+        )
     }
 
     fn key(&self, r: &ContentRef) -> String {
@@ -173,8 +190,19 @@ impl ContentCache {
                 .iter()
                 .filter(|(k, _)| !protected.contains(*k) && !state.reserved.contains_key(*k))
                 .min_by(|a, b| (a.1.access, a.0).cmp(&(b.1.access, b.0)))
-                .map(|(k, _)| k.clone());
-            let Some(victim) = victim else {
+                .map(|(k, r)| (k.clone(), r.size, r.access));
+            let Some((victim, victim_size, victim_access)) = victim else {
+                // Everything resident is pinned by the live namespace or an
+                // in-flight fetch — there is nothing evictable. Always logged:
+                // this is rare and is the signal for "could not evict, in use".
+                self.evict_blocked.fetch_add(1, Ordering::Relaxed);
+                eprintln!(
+                    "level=WARN action=evict_blocked reason=all_pinned need={size} occupancy={} capacity={} protected={} reserved={}",
+                    total(&state),
+                    self.config.max_bytes,
+                    protected.len(),
+                    state.reserved.len(),
+                );
                 return Err(io::Error::new(
                     io::ErrorKind::StorageFull,
                     "cache limit reached",
@@ -186,6 +214,18 @@ impl ContentCache {
                 .lock()
                 .map_err(|_| io::Error::other("cache validation lock poisoned"))?
                 .remove(&victim);
+            self.evicted.fetch_add(1, Ordering::Relaxed);
+            // Per-object eviction detail is high volume under churn, so it is
+            // opt-in via OXFS_CACHE_LOG; the counters (and oxjtest stats) are
+            // always available regardless.
+            if std::env::var_os("OXFS_CACHE_LOG").is_some() {
+                eprintln!(
+                    "level=INFO action=evict key={victim} size={victim_size} access={victim_access} clock={} occupancy={} capacity={}",
+                    state.clock,
+                    total(&state),
+                    self.config.max_bytes,
+                );
+            }
         }
         state.reserved.insert(key.to_owned(), size);
         self.persist_locked(&state)

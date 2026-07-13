@@ -83,6 +83,112 @@ cargo clippy -p oxfs --all-targets -- -D warnings
 cargo test -p oxfs
 ```
 
+The mount-required end-to-end release gate runs on macOS and refuses to prompt
+for elevation. Its runner must allow non-interactive `sudo` only for the system
+`mount_nfs` and `umount` commands:
+
+```bash
+cargo run -p oxfs --bin oxjtest -- gate --artifact oxjtest-results.json
+```
+
+`oxjtest` creates a deterministic million-file virtual corpus, materializing
+only selected objects from a weighted tiny-file/media size distribution. It
+mutates per-Session working sets under concurrent reads through a real NFS
+mount, injects a partial fetch, forces LRU eviction, and verifies restart
+healing. Correctness, capacity, and
+mount cleanup are gating; materialization latency percentiles are recorded in
+the JSON artifact but are not gating in E1. Use `--seed`, `--generations`,
+`--readers`, `--reads-per-reader`, and `--source-delay-ms` to reproduce or scale
+a run. A non-macOS host or unavailable passwordless mount privilege is a hard
+failure, not a skipped test.
+
+### Interactive mount (`serve`)
+
+`gate` owns its mount for the duration of one automated run and unmounts on the
+way out, so there is no window to inspect the live filesystem by hand. The
+`serve` subcommand fills that gap: it generates a working set of manifests,
+mounts it at a mountpoint you choose, and evolves it in place until you press
+Ctrl-C.
+
+```bash
+sudo -v    # cache mount privilege; serve uses non-interactive `sudo -n`
+cargo run -p oxfs --bin oxjtest -- serve \
+  --mountpoint /tmp/oxjfs \
+  --seed 1 \
+  --files 1000 \
+  --churn 10 \
+  --evolve-forever
+```
+
+Each generation applies a manifest for a synthetic working set of `--files`
+files laid out as `shelf-NN/obj-NNNNNN.bin`, drawn from the same weighted
+tiny-file/media size distribution as `gate`. Every `--interval-ms` (default
+1000) a `--churn` percentage of the set turns over — that many files are
+removed and that many fresh files are added — so the mounted tree visibly
+evolves while staying near `--files` in size. Content is immutable
+(content-addressed, write-once, matching ox-fs); files are never rewritten in
+place, only added and removed. Cache capacity is derived from `--files`
+(override with `--cache-bytes`); if a generation exceeds it, the eager
+capacity gate reports `stopped > 0` in the stats and hides the overflow.
+
+Each generation emits one stats record. **In an interactive terminal** it is a
+human-readable table (the header reprints every 20 rows); **when stdout is
+piped** it is a single-line `oxjtest.serve.v1` JSON object instead, so
+`| jq` keeps working.
+
+```
+  GEN   FILES    BYTES  ADD  RMV EVICT  BLK STOP  FETCH   MAT_MS         CACHE
+    1    1000    35.2M 1000    0     0    0    0   1000     84.2   35.2M/256.0M
+    2    1000    35.1M  100  100     0    0    0    100     12.7   70.1M/256.0M
+    3    1000    35.3M  100  100    73    0    0    100     11.9  105.0M/256.0M
+```
+
+| Column   | Meaning |
+|----------|---------|
+| `GEN`    | Generation number (one manifest applied per row). |
+| `FILES`  | Files in the working set right now (held near `--files`). |
+| `BYTES`  | Sum of the working set's file sizes. |
+| `ADD`    | Files that **entered** this generation. |
+| `RMV`    | Files that **left** this generation. |
+| `EVICT`  | Cache objects **unlinked** to make room this generation (churned-out content reclaimed once the cache fills). |
+| `BLK`    | `evict_blocked`: times a reservation needed space but **every resident object was pinned** by the live namespace or an in-flight fetch, so nothing could be evicted. This is the "could not evict, it's in use" signal — `> 0` means capacity pressure against pinned content. |
+| `STOP`   | Entries the eager capacity gate **refused to admit** this generation (they stay invisible). |
+| `FETCH`  | Origin fetches this generation (new bytes pulled from the source). |
+| `MAT_MS` | Wall-clock milliseconds to fetch + admit this generation's new content. |
+| `CACHE`  | Cache used / capacity. |
+
+The JSON form carries the same fields plus `ts_unix`, `applied`, and cumulative
+`source_fetches`:
+
+```json
+{"schema":"oxjtest.serve.v1","ts_unix":...,"generation":3,"mountpoint":"/tmp/oxjfs",
+ "files":1000,"total_bytes":37025792,"added":100,"removed":100,
+ "evicted":73,"evict_blocked":0,"stopped":0,"applied":true,"materialize_us":11912,
+ "fetched":100,"source_fetches":1200,"cache_capacity":268435456,"cache_remaining":158613504}
+```
+
+To see **every** eviction (victim key, size, LRU access, occupancy) rather than
+just the per-generation count, set `OXFS_CACHE_LOG=1` — the cache then emits a
+`level=INFO action=evict …` line per unlink on stderr. `action=evict_blocked`
+WARN lines are always emitted regardless, since they are rare and important. To
+force eviction pressure (and watch `EVICT`/`BLK`/`STOP` climb), shrink the cache
+with `--cache-bytes`.
+
+Pass `--generations N` to stop after N generations instead of `--evolve-forever`,
+and `--source-delay-ms` to simulate a slow origin. From another terminal, watch
+the working set evolve:
+
+```bash
+find /tmp/oxjfs -type f | wc -l
+du -sh /tmp/oxjfs
+cat /tmp/oxjfs/.sageox/INDEX.json | jq '.entries | length'
+while true; do find /tmp/oxjfs -type f | wc -l; sleep 1; done
+```
+
+Ctrl-C (or SIGTERM) unmounts, shuts down the server, and removes the temporary
+workspace. Like `gate`, `serve` requires macOS and non-interactive `sudo` for
+`mount_nfs`/`umount`.
+
 The integration suite sends real ONC RPC records over TCP. It does not bypass
 the wire adapter. Coverage includes mountd `MNT`, hierarchical `LOOKUP`, ranged
 `READ`, and a mutation returning `NFS3ERR_ROFS`. Core tests cover unsafe paths,

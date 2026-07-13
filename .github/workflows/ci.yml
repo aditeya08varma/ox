@@ -10,6 +10,39 @@ permissions:
   contents: read
 
 jobs:
+  oxfs-release-gate:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - name: Rust unit, wire, and workspace tests
+        run: |
+          cargo fmt --all --check
+          cargo clippy -p oxfs --all-targets -- -D warnings
+          cargo test -p oxfs
+
+      - name: Mount-required oxFS release gate
+        run: |
+          cargo run -p oxfs --bin oxjtest -- gate \
+            --seed 1 \
+            --generations 12 \
+            --readers 4 \
+            --reads-per-reader 40 \
+            --source-delay-ms 2 \
+            --artifact oxjtest-results.json
+
+      - name: Upload oxjtest results
+        if: always() && hashFiles('oxjtest-results.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: oxjtest-results
+          path: oxjtest-results.json
+          retention-days: 14
+
   test:
     runs-on: ubuntu-latest
     steps:

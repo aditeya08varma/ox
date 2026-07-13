@@ -8,10 +8,19 @@ description = "macOS-first WYSIWYG context filesystem"
 [lib]
 path = "src/lib.rs"
 
+[target.'cfg(unix)'.dependencies]
+# Clean SIGINT/SIGTERM handling for the `oxjtest serve` interactive mode.
+# The crate is `unsafe_code = "forbid"`, so the raw signal handler has to live
+# in a dependency. ctrlc is dual MIT/Apache-2.0 (within licensing policy).
+ctrlc = "3"
+
 [[bin]]
 name = "oxfsd"
 path = "src/main.rs"
 
+[[bin]]
+name = "oxjtest"
+path = "src/oxjtest.rs"
+
 [lints.rust]
 unsafe_code = "forbid"
-

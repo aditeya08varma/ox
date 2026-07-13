@@ -14,6 +14,19 @@ pub struct ContentRef {
 }
 
 impl ContentRef {
+    /// Build a content reference from complete bytes using oxFS's canonical
+    /// SHA-256 implementation.
+    pub fn for_sha256(tenant: impl Into<String>, bytes: &[u8]) -> Self {
+        let mut hash = crate::sha256::Sha256::new();
+        hash.update(bytes);
+        Self {
+            tenant: tenant.into(),
+            algorithm: "sha256".into(),
+            digest: hash.hex_digest(),
+            size: bytes.len() as u64,
+        }
+    }
+
     pub fn new(
         tenant: impl Into<String>,
         algorithm: impl Into<String>,

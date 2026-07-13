@@ -343,6 +343,12 @@ impl Workspace {
         (self.cache.capacity(), self.cache.remaining())
     }
 
+    /// Cumulative (objects evicted, reservations blocked because every resident
+    /// object was pinned by the live namespace or an in-flight fetch).
+    pub fn eviction_counters(&self) -> (u64, u64) {
+        self.cache.eviction_counters()
+    }
+
     pub fn open_inode(self: &Arc<Self>, inode: u64) -> Result<OpenFile, WorkspaceError> {
         let node = self
             .snapshot()
