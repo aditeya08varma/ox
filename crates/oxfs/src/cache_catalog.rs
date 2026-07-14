@@ -58,13 +58,44 @@ impl Catalog {
 				   key TEXT PRIMARY KEY,
 				   size INTEGER NOT NULL CHECK (size >= 0),
 				   access_epoch INTEGER NOT NULL,
-				   pin_epoch INTEGER NOT NULL,
 				   state INTEGER NOT NULL CHECK (state IN (0, 1, 2))
 				 ) WITHOUT ROWID;
 				 CREATE INDEX IF NOT EXISTS cache_objects_evict
-				   ON cache_objects(state, pin_epoch, access_epoch, key);",
+				   ON cache_objects(state, access_epoch, key);",
             )
             .map_err(sql_error)?;
+        let has_legacy_pin = {
+            let mut statement = connection
+                .prepare("PRAGMA table_info(cache_objects)")
+                .map_err(sql_error)?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .map_err(sql_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(sql_error)?;
+            columns.iter().any(|column| column == "pin_epoch")
+        };
+        if has_legacy_pin {
+            connection
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                     DROP INDEX IF EXISTS cache_objects_evict;
+                     ALTER TABLE cache_objects RENAME TO cache_objects_with_pins;
+                     CREATE TABLE cache_objects (
+                       key TEXT PRIMARY KEY,
+                       size INTEGER NOT NULL CHECK (size >= 0),
+                       access_epoch INTEGER NOT NULL,
+                       state INTEGER NOT NULL CHECK (state IN (0, 1, 2))
+                     ) WITHOUT ROWID;
+                     INSERT INTO cache_objects(key,size,access_epoch,state)
+                       SELECT key,size,access_epoch,state FROM cache_objects_with_pins;
+                     DROP TABLE cache_objects_with_pins;
+                     CREATE INDEX cache_objects_evict
+                       ON cache_objects(state, access_epoch, key);
+                     COMMIT;",
+                )
+                .map_err(sql_error)?;
+        }
         let (epoch, used_bytes) = connection
             .query_row(
                 "SELECT epoch, used_bytes FROM cache_meta WHERE singleton=1",
@@ -81,7 +112,7 @@ impl Catalog {
         })
     }
 
-    pub fn begin_batch<'a>(&mut self, protected: impl Iterator<Item = &'a str>) -> io::Result<()> {
+    pub fn begin_batch(&mut self) -> io::Result<()> {
         if self.in_batch {
             return Err(io::Error::other("cache catalog batch already active"));
         }
@@ -91,28 +122,14 @@ impl Catalog {
         self.in_batch = true;
         self.batch_used_start = Some(self.used_bytes);
         self.epoch = self.epoch.saturating_add(1);
-        let result = (|| {
-            self.connection
-                .execute(
-                    "UPDATE cache_meta SET epoch=?1 WHERE singleton=1",
-                    params![to_sql_i64(self.epoch)?],
-                )
-                .map_err(sql_error)?;
-            let mut statement = self
-                .connection
-                .prepare_cached(
-                    "UPDATE cache_objects
-					 SET pin_epoch=?2, access_epoch=?2
-					 WHERE key=?1 AND state=1",
-                )
-                .map_err(sql_error)?;
-            for key in protected {
-                statement
-                    .execute(params![key, to_sql_i64(self.epoch)?])
-                    .map_err(sql_error)?;
-            }
-            Ok(())
-        })();
+        let result = self
+            .connection
+            .execute(
+                "UPDATE cache_meta SET epoch=?1 WHERE singleton=1",
+                params![to_sql_i64(self.epoch)?],
+            )
+            .map(|_| ())
+            .map_err(sql_error);
         if let Err(error) = result {
             let _ = self.rollback();
             return Err(error);
@@ -212,12 +229,12 @@ impl Catalog {
                 .connection
                 .prepare_cached(
                     "SELECT key, size, access_epoch FROM cache_objects
-					 WHERE state=1 AND pin_epoch<>?1 AND key<>?2
+					 WHERE state=1 AND key<>?1
 					 ORDER BY access_epoch, key",
                 )
                 .map_err(sql_error)?;
             let rows = statement
-                .query_map(params![to_sql_i64(self.epoch)?, key], |row| {
+                .query_map(params![key], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
@@ -249,7 +266,7 @@ impl Catalog {
         if clear_existing {
             self.connection
                 .execute(
-                    "UPDATE cache_objects SET state=2, pin_epoch=0 WHERE key=?1",
+                    "UPDATE cache_objects SET state=2 WHERE key=?1",
                     params![key],
                 )
                 .map_err(sql_error)?;
@@ -257,7 +274,7 @@ impl Catalog {
         for victim in victims.iter().filter(|victim| victim.key != key) {
             self.connection
                 .execute(
-                    "UPDATE cache_objects SET state=2, pin_epoch=0 WHERE key=?1",
+                    "UPDATE cache_objects SET state=2 WHERE key=?1",
                     params![&victim.key],
                 )
                 .map_err(sql_error)?;
@@ -265,12 +282,11 @@ impl Catalog {
         self.used_bytes = planned_used;
         self.connection
             .execute(
-                "INSERT INTO cache_objects(key,size,access_epoch,pin_epoch,state)
-				 VALUES(?1,?2,?3,?3,0)
+                "INSERT INTO cache_objects(key,size,access_epoch,state)
+				 VALUES(?1,?2,?3,0)
 				 ON CONFLICT(key) DO UPDATE SET
 				   size=excluded.size,
 				   access_epoch=excluded.access_epoch,
-				   pin_epoch=excluded.pin_epoch,
 				   state=0",
                 params![key, to_sql_i64(size)?, to_sql_i64(self.epoch)?],
             )
@@ -291,7 +307,7 @@ impl Catalog {
         let changed = self
             .connection
             .execute(
-                "UPDATE cache_objects SET size=?2, state=1, access_epoch=?3, pin_epoch=?3
+                "UPDATE cache_objects SET size=?2, state=1, access_epoch=?3
 				 WHERE key=?1 AND state=0",
                 params![key, to_sql_i64(size)?, to_sql_i64(self.epoch)?],
             )
@@ -314,7 +330,7 @@ impl Catalog {
             .map_err(sql_error)?;
         self.connection
             .execute(
-                "UPDATE cache_objects SET state=2, pin_epoch=0 WHERE key=?1 AND state=0",
+                "UPDATE cache_objects SET state=2 WHERE key=?1 AND state=0",
                 params![key],
             )
             .map_err(sql_error)?;
@@ -337,7 +353,7 @@ impl Catalog {
             .map_err(sql_error)?;
         self.connection
             .execute(
-                "UPDATE cache_objects SET state=2, pin_epoch=0 WHERE key=?1",
+                "UPDATE cache_objects SET state=2 WHERE key=?1",
                 params![key],
             )
             .map_err(sql_error)?;
@@ -352,8 +368,8 @@ impl Catalog {
         let inserted = self
             .connection
             .execute(
-                "INSERT OR IGNORE INTO cache_objects(key,size,access_epoch,pin_epoch,state)
-				 VALUES(?1,?2,?3,0,1)",
+                "INSERT OR IGNORE INTO cache_objects(key,size,access_epoch,state)
+				 VALUES(?1,?2,?3,1)",
                 params![key, to_sql_i64(size)?, to_sql_i64(access)?],
             )
             .map_err(sql_error)?;
@@ -392,10 +408,7 @@ impl Catalog {
             .map_err(sql_error)
             .and_then(from_sql_u64)?;
         self.connection
-            .execute(
-                "UPDATE cache_objects SET state=2, pin_epoch=0 WHERE state=0",
-                [],
-            )
+            .execute("UPDATE cache_objects SET state=2 WHERE state=0", [])
             .map_err(sql_error)?;
         self.used_bytes = self.used_bytes.saturating_sub(pending_bytes);
         self.persist_used_if_autocommit()?;
@@ -481,17 +494,67 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let mut catalog = Catalog::open(&root.join("catalog.sqlite")).unwrap();
         catalog.import_resident("victim", 4, 1).unwrap();
-        catalog.import_resident("protected", 4, 2).unwrap();
-        catalog.begin_batch(["protected"].into_iter()).unwrap();
+        catalog.begin_batch().unwrap();
+        catalog.reserve("inflight", 6, 10).unwrap();
 
         let error = catalog.reserve("incoming", 7, 10).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::StorageFull);
         let gauges = catalog.gauges().unwrap();
-        assert_eq!(gauges.resident_objects, 2);
-        assert_eq!(gauges.resident_bytes, 8);
-        assert_eq!(gauges.pending_objects, 0);
+        assert_eq!(gauges.resident_objects, 1);
+        assert_eq!(gauges.resident_bytes, 4);
+        assert_eq!(gauges.pending_objects, 1);
 
         catalog.rollback().unwrap();
+        drop(catalog);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn opens_and_migrates_catalogs_with_legacy_pin_epochs() {
+        let root = std::env::temp_dir().join(format!(
+            "oxfs-catalog-pin-migration-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let path = root.join("catalog.sqlite");
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE cache_meta (
+                   singleton INTEGER PRIMARY KEY,
+                   epoch INTEGER NOT NULL,
+                   used_bytes INTEGER NOT NULL
+                 );
+                 INSERT INTO cache_meta VALUES(1, 7, 4);
+                 CREATE TABLE cache_objects (
+                   key TEXT PRIMARY KEY,
+                   size INTEGER NOT NULL,
+                   access_epoch INTEGER NOT NULL,
+                   pin_epoch INTEGER NOT NULL,
+                   state INTEGER NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO cache_objects VALUES('resident', 4, 2, 7, 1);
+                 CREATE INDEX cache_objects_evict
+                   ON cache_objects(state, pin_epoch, access_epoch, key);",
+            )
+            .unwrap();
+        drop(connection);
+
+        let catalog = Catalog::open(&path).unwrap();
+        assert_eq!(catalog.gauges().unwrap().resident_bytes, 4);
+        let columns: Vec<String> = catalog
+            .connection
+            .prepare("PRAGMA table_info(cache_objects)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!columns.iter().any(|column| column == "pin_epoch"));
         drop(catalog);
         fs::remove_dir_all(root).unwrap();
     }

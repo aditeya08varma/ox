@@ -16,7 +16,7 @@
 //!   1. READDIR resume is not cookieverf-guarded and the cookie is a positional
 //!      skip  (`nfs/server.rs:322` discards the incoming verifier; `:342`
 //!      does `.skip(cookie as usize)` over a per-apply-rebuilt `BTreeMap`).
-//!   2. There is no server-side open-handle pin: `read()` re-resolves the inode
+//!   2. There is no server-side open-handle binding: `read()` re-resolves the inode
 //!      to *current* content on every RPC (`nfs/server.rs:300`), so an apply()
 //!      mid-read either 404s the handle or splices two objects into one file.
 //!
@@ -381,9 +381,9 @@ fn open_handle_to_dropped_path_returns_stale_not_noent() {
 // ---------------------------------------------------------------------------
 // Avenue 2b — the scary one. A handle read across a same-path content swap
 // splices two different objects into one logical file, silently. There is no
-// server-side open pin: `read()` re-resolves the inode to *current* content on
+// server-side open binding: `read()` re-resolves the inode to *current* content on
 // every RPC (nfs/server.rs:300). The design doc promises "existing handles keep
-// reading their pinned generation"; this proves that invariant is false.
+// reading their bound generation"; this proves that invariant is false.
 //
 //   read(H, 0..4) from A -> "AAAA"
 //   apply(): same path "p" now -> object B
@@ -391,7 +391,7 @@ fn open_handle_to_dropped_path_returns_stale_not_noent() {
 //   client's file = "AAAABBBB": A's head spliced onto B's tail.
 // ---------------------------------------------------------------------------
 #[test]
-#[ignore = "KNOWN BUG: no open-handle pin — READ across a same-path content swap splices two objects (nfs/server.rs:300)"]
+#[ignore = "KNOWN BUG: no open-handle binding — READ across a same-path content swap splices two objects (nfs/server.rs:300)"]
 fn open_handle_across_same_path_content_swap_splices_two_objects() {
     let root = temp();
     let src = Arc::new(MemorySource(BTreeMap::from([
@@ -430,16 +430,16 @@ fn open_handle_across_same_path_content_swap_splices_two_objects() {
 
     let (s2, second) = read(&mut stream, 4, &handle, 4, 4);
 
-    // Correct: the two halves come from the SAME object (pin held), or the
+    // Correct: the two halves come from the SAME object (generation binding held), or the
     // second read fails STALE so the client reopens. A silent "BBBB" is a
     // cross-object splice presented as one file.
-    let pinned = s2 == NFS3_OK && second.as_deref() == Some(&b"AAAA"[..]);
+    let bound = s2 == NFS3_OK && second.as_deref() == Some(&b"AAAA"[..]);
     let reopened = s2 == NFS3ERR_STALE;
     assert!(
-        pinned || reopened,
+        bound || reopened,
         "READ across a same-path content swap: status={s2} second_half={:?}. \
          Got a splice of A's head + B's tail in one file — the 'handles keep reading their \
-         pinned generation' invariant is false; nothing pins the inode->content binding.",
+         bound generation' invariant is false; nothing retains the inode->content binding.",
         second.as_deref().map(String::from_utf8_lossy)
     );
 

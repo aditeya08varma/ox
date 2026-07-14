@@ -34,12 +34,15 @@ struct LocalSource {
 }
 
 impl LocalSource {
-    fn replace(&self, files: BTreeMap<String, SourceFile>) -> io::Result<()> {
-        *self
+    fn replace(
+        &self,
+        files: BTreeMap<String, SourceFile>,
+    ) -> io::Result<BTreeMap<String, SourceFile>> {
+        let mut current = self
             .files
             .write()
-            .map_err(|_| io::Error::other("local source lock poisoned"))? = files;
-        Ok(())
+            .map_err(|_| io::Error::other("local source lock poisoned"))?;
+        Ok(std::mem::replace(&mut *current, files))
     }
 }
 
@@ -132,9 +135,11 @@ fn run_session(
     let server = NfsServer::new(workspace.clone(), ServerConfig::default()).spawn()?;
     let mounted = mount::mount_server(server.address().port(), mountpoint)?;
     eprintln!(
-        "oxdirtest: mounted {} from {}\ncommands: select DIR [DIR ...] | clear | status | help | quit",
+        "oxdirtest: mounted {} from {}\nstate: {}\naccess log: {}\ncommands: select DIR [DIR ...] | clear | status | metrics | help | quit",
         mountpoint.display(),
-        source_root.display()
+        source_root.display(),
+        state.display(),
+        state.join("workspace/state/access.jsonl").display(),
     );
     let interaction = command_loop(source_root, mountpoint, &source, &workspace, &stop);
     eprintln!("oxdirtest: unmounting {}...", mountpoint.display());
@@ -157,7 +162,7 @@ fn command_loop(
     let stdin = io::stdin();
     let interactive = stdin.is_terminal();
     let mut generation = 0u64;
-    let mut selected = Vec::new();
+    let mut selected = BTreeSet::new();
     while !stop.load(Ordering::SeqCst) {
         if interactive {
             eprint!("oxdirtest> ");
@@ -173,67 +178,36 @@ fn command_loop(
         };
         match command {
             "select" if words.len() > 1 => {
-                let paths = parse_selections(source_root, &words[1..])?;
-                eprintln!("oxdirtest: scanning {} selection(s)...", paths.len());
-                let indexed = index_files(source_root, &paths)?;
-                let (capacity, _) = workspace.cache_capacity();
-                if indexed.bytes > capacity {
-                    eprintln!(
-                        "oxdirtest: selection needs {} bytes but cache capacity is {}; selection unchanged",
-                        indexed.bytes, capacity
-                    );
+                let mut candidate = selected.clone();
+                candidate.extend(parse_selections(source_root, &words[1..])?);
+                if candidate == selected {
+                    eprintln!("oxdirtest: directories already selected; selection unchanged");
                     continue;
                 }
-                generation += 1;
-                source.replace(indexed.sources)?;
-                let outcome = match workspace.apply(Manifest {
-                    session_id: "human-selection".into(),
-                    generation,
-                    entries: indexed.entries,
-                }) {
-                    Ok(outcome) => outcome,
-                    // A rejected selection is a normal interactive outcome, not
-                    // a reason to tear down the mount. The previous selection is
-                    // still published and still readable.
-                    Err(error) => {
-                        eprintln!("oxdirtest: selection rejected: {error}");
-                        eprintln!(
-                            "oxdirtest: selection unchanged; run `clear` first, or restart with a larger --cache-bytes"
-                        );
-                        continue;
-                    }
-                };
-                selected = paths;
-                eprintln!(
-                    "oxdirtest: generation={} files={} bytes={} available={} stopped={} mountpoint={}",
-                    generation,
-                    indexed.files,
-                    indexed.bytes,
-                    outcome.available,
-                    outcome.stopped,
-                    mountpoint.display()
-                );
-                if outcome.stopped > 0 {
-                    eprintln!(
-                        "oxdirtest: WARNING {} of {} file(s) did not fit the cache and are NOT in the mount",
-                        outcome.stopped, indexed.files
-                    );
+                if publish_selection(
+                    source_root,
+                    mountpoint,
+                    source,
+                    workspace,
+                    &mut generation,
+                    &candidate,
+                )? {
+                    selected = candidate;
                 }
             }
             "select" => eprintln!("usage: select DIR [DIR ...]"),
             "clear" => {
-                generation += 1;
-                let outcome = workspace.apply(Manifest {
-                    session_id: "human-selection".into(),
-                    generation,
-                    entries: Vec::new(),
-                })?;
-                source.replace(BTreeMap::new())?;
-                selected.clear();
-                eprintln!(
-                    "oxdirtest: generation={} cleared available={}",
-                    generation, outcome.available
-                );
+                let candidate = BTreeSet::new();
+                if publish_selection(
+                    source_root,
+                    mountpoint,
+                    source,
+                    workspace,
+                    &mut generation,
+                    &candidate,
+                )? {
+                    selected = candidate;
+                }
             }
             "status" => eprintln!(
                 "oxdirtest: generation={} selections={} [{}]",
@@ -245,13 +219,106 @@ fn command_loop(
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            "metrics" => print_metrics(workspace)?,
             "help" => eprintln!(
-                "commands:\n  select DIR [DIR ...]  replace mounted contents\n  clear                 mount an empty selection\n  status                show current selection\n  quit                  unmount and exit"
+                "commands:\n  select DIR [DIR ...]  add backing directories to the mount\n  clear                 reset the mount to no selected directories\n  status                show current selection\n  metrics               show cumulative cache and durability metrics\n  quit                  unmount and exit"
             ),
             "quit" | "exit" => break,
             other => eprintln!("oxdirtest: unknown command {other:?}; type help"),
         }
     }
+    Ok(())
+}
+
+fn publish_selection(
+    source_root: &Path,
+    mountpoint: &Path,
+    source: &LocalSource,
+    workspace: &Workspace,
+    generation: &mut u64,
+    selected: &BTreeSet<PathBuf>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let paths: Vec<_> = selected.iter().cloned().collect();
+    eprintln!(
+        "oxdirtest: scanning {} selected directories...",
+        paths.len()
+    );
+    let indexed = index_files(source_root, &paths)?;
+    let next_generation = generation.saturating_add(1);
+    let previous_sources = source.replace(indexed.sources)?;
+    let outcome = match workspace.apply(Manifest {
+        session_id: "human-selection".into(),
+        generation: next_generation,
+        entries: indexed.entries,
+    }) {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            source.replace(previous_sources)?;
+            eprintln!("oxdirtest: selection rejected: {error}");
+            eprintln!("oxdirtest: selection unchanged; remove directories or raise --cache-bytes");
+            return Ok(false);
+        }
+    };
+    *generation = next_generation;
+    eprintln!(
+        "oxdirtest: generation={} directories={} files={} bytes={} available={} stopped={} mountpoint={}",
+        generation,
+        selected.len(),
+        indexed.files,
+        indexed.bytes,
+        outcome.available,
+        outcome.stopped,
+        mountpoint.display()
+    );
+    if outcome.stopped > 0 {
+        eprintln!(
+            "oxdirtest: WARNING {} of {} file(s) did not fit the cache and are NOT in the mount",
+            outcome.stopped, indexed.files
+        );
+    }
+    Ok(true)
+}
+
+fn print_metrics(workspace: &Workspace) -> io::Result<()> {
+    let telemetry = workspace.cache_telemetry()?;
+    let (capacity, remaining) = workspace.cache_capacity();
+    eprintln!(
+        concat!(
+            "level=INFO action=metrics ",
+            "catalog_lookups={} resident_hits={} resident_misses={} ",
+            "opened_objects={} opened_bytes={} ",
+            "fetched_objects={} fetched_bytes={} refetched_objects={} refetched_bytes={} ",
+            "evicted_objects={} evicted_bytes={} evict_blocked={} ",
+            "catalog_transactions={} catalog_commit_us={} object_sync_us={} ",
+            "directory_syncs={} directory_sync_us={} ",
+            "resident_objects={} resident_bytes={} pending_objects={} ",
+            "catalog_bytes={} wal_bytes={} cache_capacity={} cache_remaining={}"
+        ),
+        telemetry.catalog_lookups,
+        telemetry.resident_hits,
+        telemetry.resident_misses,
+        telemetry.opened_objects,
+        telemetry.opened_bytes,
+        telemetry.fetched_objects,
+        telemetry.fetched_bytes,
+        telemetry.refetched_objects,
+        telemetry.refetched_bytes,
+        telemetry.evicted_objects,
+        telemetry.evicted_bytes,
+        telemetry.evict_blocked,
+        telemetry.catalog_transactions,
+        telemetry.catalog_commit_us,
+        telemetry.object_sync_us,
+        telemetry.directory_syncs,
+        telemetry.directory_sync_us,
+        telemetry.resident_objects,
+        telemetry.resident_bytes,
+        telemetry.pending_objects,
+        telemetry.catalog_bytes,
+        telemetry.wal_bytes,
+        capacity,
+        remaining,
+    );
     Ok(())
 }
 
@@ -555,6 +622,55 @@ mod tests {
             })
             .unwrap();
         assert!(workspace.snapshot().by_path("one/nested/b.txt").is_none());
+        drop(workspace);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn publishing_an_additional_directory_preserves_the_existing_selection() {
+        let root = fixture();
+        let source = Arc::new(LocalSource::default());
+        let workspace = Workspace::open_with_config(
+            &root.join("state"),
+            source.clone(),
+            CacheConfig {
+                max_bytes: 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let mut generation = 0;
+        let mut selected = BTreeSet::from([PathBuf::from("one")]);
+
+        assert!(
+            publish_selection(
+                &root,
+                &root.join("mount"),
+                &source,
+                &workspace,
+                &mut generation,
+                &selected,
+            )
+            .unwrap()
+        );
+        selected.insert(PathBuf::from("two"));
+        assert!(
+            publish_selection(
+                &root,
+                &root.join("mount"),
+                &source,
+                &workspace,
+                &mut generation,
+                &selected,
+            )
+            .unwrap()
+        );
+
+        let snapshot = workspace.snapshot();
+        assert!(snapshot.by_path("one/a.txt").is_some());
+        assert!(snapshot.by_path("one/nested/b.txt").is_some());
+        assert!(snapshot.by_path("two/c.txt").is_some());
+        assert_eq!(generation, 2);
+        drop(snapshot);
         drop(workspace);
         fs::remove_dir_all(root).unwrap();
     }

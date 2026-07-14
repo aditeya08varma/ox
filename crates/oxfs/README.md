@@ -5,6 +5,24 @@ Rust NFSv3 service with an EdenFS-shaped core: immutable namespace generations,
 stable inodes, a storage-neutral object source, a verified materialization
 cache, and a thin operating-system protocol adapter.
 
+The core keeps intent, policy, storage, and presentation separate:
+
+```text
+Desired manifests       What Insight wants
+        ↓
+Admission + eviction    What fits and wins priority
+        ↓
+Resident cache          What complete objects exist locally
+        ↓
+Visible namespace       What users can read right now
+```
+
+Manifest membership is not a cache pin. Desired content may be nonresident when
+capacity policy prefers other content; only complete resident objects appear in
+the namespace, while `.sageox/INDEX` explains stopped entries. In-flight fetches
+are reserved. Already-open files remain readable through their OS file descriptor
+if their cache pathname is later evicted.
+
 The service itself remains rootless. Its mount command asks `sudo` to run only
 macOS's built-in `mount_nfs`/`umount` tools at the privilege boundary.
 
@@ -153,7 +171,7 @@ piped** it is a single-line `oxjtest.serve.v3` JSON object instead, so
 | `ADD`    | Files that **entered** this generation. |
 | `RMV`    | Files that **left** this generation. |
 | `EVICT`  | Cache objects **unlinked** to make room this generation (churned-out content reclaimed once the cache fills). |
-| `BLK`    | `evict_blocked`: times a reservation needed space but **every resident object was pinned** by the live namespace or an in-flight fetch, so nothing could be evicted. This is the "could not evict, it's in use" signal — `> 0` means capacity pressure against pinned content. |
+| `BLK`    | `evict_blocked`: times a reservation needed space but no resident object was evictable, typically because capacity was reserved by pending transfers. |
 | `STOP`   | Entries the eager capacity gate **refused to admit** this generation (they stay invisible). |
 | `FETCH`  | Origin fetches this generation (new bytes pulled from the source). |
 | `MAT_MS` | Wall-clock milliseconds to fetch + admit this generation's new content. |
@@ -209,9 +227,11 @@ workspace. Like `gate`, `serve` requires macOS and non-interactive `sudo` for
 
 `oxdirtest` mounts complete directory selections from a large local tree while
 using the real oxFS hashing, verified cache, manifest, and NFS paths. It walks
-only the selected directories. Each `select` command atomically replaces the
-previous mounted working set after every selected regular file has been hashed
-and materialized. Symlinks and special files are skipped.
+only the selected directories. `select` is additive: each command adds backing
+directories to the desired set. Files that win admission become visible only
+after hashing and complete verified materialization; capacity-stopped files stay
+absent and are explained in `.sageox/INDEX`. Symlinks and special files are
+skipped.
 
 ```bash
 sudo -v
@@ -225,17 +245,77 @@ Commands are read from standard input:
 
 ```text
 select projects/foo docs/reference
+select projects/bar
 status
+metrics
 clear
 quit
 ```
 
 Selections are relative to `--source`; absolute paths and `..` are rejected.
-The cache defaults to 10 GiB. A selection whose unique content is larger than
-the cache is rejected without changing the mount. Use `--state DIR` to retain
-the verified cache between runs; otherwise temporary state is removed during
-clean shutdown. Directory names containing whitespace are not supported by
-the interactive command parser.
+Repeated `select` commands grow the mounted set; selecting an already-selected
+directory is a no-op. `clear` is an explicit test reset. The cache defaults to
+10 GiB. An expanded selection whose unique content is larger than the cache is
+rejected without changing the mount. Use `--state DIR` to retain the verified
+cache between runs; otherwise temporary state is removed during clean shutdown.
+Directory names containing whitespace are not supported by the interactive
+command parser.
+
+#### Manual observability walkthrough
+
+Keep a named state directory so another terminal can follow oxFS activity.
+`OXFS_CACHE_LOG=1` enables one line per evicted cache object; blocked evictions
+are always logged.
+
+```bash
+cargo build -p oxfs --bin oxdirtest
+sudo -v
+mkdir -p /tmp/oxdirtest-mount /tmp/oxdirtest-state
+OXFS_CACHE_LOG=1 target/debug/oxdirtest \
+  --source "$HOME/src" \
+  --mountpoint /tmp/oxdirtest-mount \
+  --state /tmp/oxdirtest-state \
+  --cache-bytes 268435456 \
+  2>&1 | tee /tmp/oxdirtest.log
+```
+
+In a second terminal, follow file activity through the mounted NFS filesystem.
+The JSONL records contain `open`, ranged `read`, and `dismiss` observations with
+path, inode, byte offset, and byte count.
+
+```bash
+tail -F /tmp/oxdirtest-state/workspace/state/access.jsonl | jq -c .
+```
+
+Drive one action at a time from the `oxdirtest>` prompt and compare cumulative
+snapshots:
+
+```text
+metrics
+select sageox/oxfs-v1/crates/oxfs
+select sageox/oxfs-v1/docs
+metrics
+```
+
+Then read through the mount:
+
+```bash
+head -c 4096 /tmp/oxdirtest-mount/sageox/oxfs-v1/crates/oxfs/README.md >/dev/null
+find /tmp/oxdirtest-mount -maxdepth 6 -type f | head
+```
+
+Run `metrics` again. A cold selection increases `resident_misses`,
+`fetched_objects`, `fetched_bytes`, and the durability timings. Re-selecting the
+same directory primarily increases `resident_hits` without increasing
+`fetched_objects`. Adding directories with a deliberately small cache can emit
+`action=evict` and increase `evicted_objects`. The desired set may exceed the
+cache: older resident files disappear from the namespace as newer content wins
+admission, while `.sageox/INDEX` records desired paths that are stopped.
+
+`metrics` reports cumulative process-lifetime counters plus current
+cache/catalog gauges. Subtract two snapshots to attribute changes to the action
+between them. There are currently no per-NFS-RPC counters: mounted activity is
+observed at the workspace `open`/`read`/`dismiss` boundary instead.
 
 The integration suite sends real ONC RPC records over TCP. It does not bypass
 the wire adapter. Coverage includes mountd `MNT`, hierarchical `LOOKUP`, ranged
@@ -268,8 +348,7 @@ used only as validation prior art.
 ## Intentionally incomplete
 
 - No GitLab-LFS HTTP adapter yet; tests and the demo use local sources.
-- No byte-limit admission, physical free-space watermark, LRU eviction, or open
-  pin accounting yet.
+- No physical free-space watermark yet.
 - No RPC authentication policy beyond loopback-only listening and mount auth
   flavor advertisement.
 - No graceful connection takeover across daemon restart.

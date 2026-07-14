@@ -390,7 +390,7 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
     prefix.extend(suffix);
     check(
         &mut checks,
-        "open descriptor pins original bytes",
+        "open descriptor retains original bytes",
         prefix == current_bytes,
     );
     check(
