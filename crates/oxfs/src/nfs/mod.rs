@@ -24,4 +24,5 @@ pub const NFS3ERR_NOTDIR: u32 = 20;
 pub const NFS3ERR_ISDIR: u32 = 21;
 pub const NFS3ERR_INVAL: u32 = 22;
 pub const NFS3ERR_ROFS: u32 = 30;
+pub const NFS3ERR_NAMETOOLONG: u32 = 63;
 pub const NFS3ERR_BADHANDLE: u32 = 10001;

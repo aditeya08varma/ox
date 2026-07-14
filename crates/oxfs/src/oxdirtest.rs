@@ -186,11 +186,23 @@ fn command_loop(
                 }
                 generation += 1;
                 source.replace(indexed.sources)?;
-                let outcome = workspace.apply(Manifest {
+                let outcome = match workspace.apply(Manifest {
                     session_id: "human-selection".into(),
                     generation,
                     entries: indexed.entries,
-                })?;
+                }) {
+                    Ok(outcome) => outcome,
+                    // A rejected selection is a normal interactive outcome, not
+                    // a reason to tear down the mount. The previous selection is
+                    // still published and still readable.
+                    Err(error) => {
+                        eprintln!("oxdirtest: selection rejected: {error}");
+                        eprintln!(
+                            "oxdirtest: selection unchanged; run `clear` first, or restart with a larger --cache-bytes"
+                        );
+                        continue;
+                    }
+                };
                 selected = paths;
                 eprintln!(
                     "oxdirtest: generation={} files={} bytes={} available={} stopped={} mountpoint={}",
@@ -201,6 +213,12 @@ fn command_loop(
                     outcome.stopped,
                     mountpoint.display()
                 );
+                if outcome.stopped > 0 {
+                    eprintln!(
+                        "oxdirtest: WARNING {} of {} file(s) did not fit the cache and are NOT in the mount",
+                        outcome.stopped, indexed.files
+                    );
+                }
             }
             "select" => eprintln!("usage: select DIR [DIR ...]"),
             "clear" => {

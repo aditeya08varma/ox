@@ -1,7 +1,7 @@
 use super::{
     Decoder, Encoder, MOUNT_PROGRAM, MOUNT_VERSION, NFS_PROGRAM, NFS_VERSION, NFS3_OK,
-    NFS3ERR_BADHANDLE, NFS3ERR_INVAL, NFS3ERR_ISDIR, NFS3ERR_NOENT, NFS3ERR_NOTDIR, NFS3ERR_ROFS,
-    rpc,
+    NFS3ERR_BADHANDLE, NFS3ERR_INVAL, NFS3ERR_ISDIR, NFS3ERR_NAMETOOLONG, NFS3ERR_NOENT,
+    NFS3ERR_NOTDIR, NFS3ERR_ROFS, rpc,
 };
 use crate::Workspace;
 use crate::inode::ROOT_INODE;
@@ -215,7 +215,13 @@ fn getattr(ws: &Arc<Workspace>, args: &[u8]) -> Result<Vec<u8>, super::XdrError>
 fn lookup(ws: &Arc<Workspace>, args: &[u8]) -> Result<Vec<u8>, super::XdrError> {
     let mut d = Decoder::new(args);
     let parent = decode_handle(&mut d);
-    let name = d.string(255)?;
+    // filename3 is opaque octets (RFC 1813), not required to be UTF-8. Read the
+    // raw bytes: a name over NFS3_MAXNAMLEN or one that is not valid UTF-8 simply
+    // cannot name an entry in this UTF-8 namespace, so it is answered at the NFS
+    // layer (NAMETOOLONG / NOENT) rather than propagated as an XdrError, which
+    // dispatch would turn into a whole-RPC GARBAGE_ARGS the client sees as EIO.
+    // A truncated wire buffer still errors here, which is the correct GARBAGE_ARGS.
+    let name_bytes = d.opaque(64 * 1024)?;
     let snap = ws.snapshot();
     let mut e = Encoder::new();
     match parent.and_then(|p| snap.get(p)) {
@@ -228,7 +234,15 @@ fn lookup(ws: &Arc<Workspace>, args: &[u8]) -> Result<Vec<u8>, super::XdrError> 
             e.boolean(true);
             encode_attr(&mut e, parent_node);
         }
-        Some(parent_node) => match snap.lookup(parent_node.inode, name) {
+        Some(parent_node) if name_bytes.len() > 255 => {
+            e.u32(NFS3ERR_NAMETOOLONG);
+            e.boolean(true);
+            encode_attr(&mut e, parent_node);
+        }
+        Some(parent_node) => match std::str::from_utf8(name_bytes)
+            .ok()
+            .and_then(|name| snap.lookup(parent_node.inode, name))
+        {
             None => {
                 e.u32(NFS3ERR_NOENT);
                 e.boolean(true);

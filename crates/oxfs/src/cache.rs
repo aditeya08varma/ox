@@ -1,4 +1,4 @@
-use crate::cache_catalog::{Catalog, Reservation};
+use crate::cache_catalog::{Catalog, Reservation, Victim};
 use crate::content::{ContentRef, ContentSource, FetchError};
 use crate::sha256::Sha256;
 use std::collections::{BTreeMap, BTreeSet};
@@ -83,6 +83,13 @@ pub struct ContentCache {
     config: CacheConfig,
     catalog: Mutex<Catalog>,
     batch_directories: Mutex<Option<BTreeSet<PathBuf>>>,
+    // Victims chosen during a batch, unlinked only AFTER the catalog commit
+    // that marks them evicted is durable. Deleting them at reserve() time (while
+    // the marking transaction is still open) meant a crash before commit rolled
+    // the rows back to resident while their files were already gone — permanent
+    // phantom-resident accounting. `None` outside a batch: the non-batch path
+    // commits per op in SQLite autocommit and unlinks inline.
+    batch_victims: Mutex<Option<Vec<Victim>>>,
     validated: Mutex<BTreeSet<String>>,
     temp_nonce: AtomicU64,
     telemetry: Telemetry,
@@ -110,6 +117,7 @@ impl ContentCache {
             config,
             catalog: Mutex::new(catalog),
             batch_directories: Mutex::new(None),
+            batch_victims: Mutex::new(None),
             validated: Mutex::new(BTreeSet::new()),
             temp_nonce: AtomicU64::new(0),
             telemetry: Telemetry::default(),
@@ -267,6 +275,10 @@ impl ContentCache {
             .lock()
             .map_err(|_| io::Error::other("cache directory batch lock poisoned"))? =
             Some(BTreeSet::new());
+        *self
+            .batch_victims
+            .lock()
+            .map_err(|_| io::Error::other("cache victim batch lock poisoned"))? = Some(Vec::new());
         let mut catalog = self
             .catalog
             .lock()
@@ -274,6 +286,9 @@ impl ContentCache {
         if let Err(error) = catalog.begin_batch(protected.keys().map(String::as_str)) {
             if let Ok(mut directories) = self.batch_directories.lock() {
                 *directories = None;
+            }
+            if let Ok(mut victims) = self.batch_victims.lock() {
+                *victims = None;
             }
             let _ = fs::remove_file(journal_path);
             return Err(error);
@@ -305,6 +320,34 @@ impl ContentCache {
                 Ordering::Relaxed,
             );
         }
+        // Take the deferred victims and record their keys in the apply journal
+        // BEFORE the commit makes their evicted state durable. Recovery removes
+        // any journalled key that is not resident after restart, so:
+        //   crash before commit -> catalog rolls back to resident, file still
+        //     present (unlink is post-commit) -> key is resident -> file kept.
+        //   crash after commit  -> catalog is evicted, key is not resident ->
+        //     recovery reclaims any file the unlink below did not reach.
+        // Either way the catalog and the object tree stay consistent.
+        let victims = self
+            .batch_victims
+            .lock()
+            .map_err(|_| io::Error::other("cache victim batch lock poisoned"))?
+            .take()
+            .unwrap_or_default();
+        if !victims.is_empty() {
+            let journal_path = self.root.join("active-apply.v1");
+            let mut journal = BufWriter::new(
+                OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(&journal_path)?,
+            );
+            for victim in &victims {
+                writeln!(journal, "{}", victim.key)?;
+            }
+            journal.flush()?;
+            journal.get_ref().sync_all()?;
+        }
         let commit_us = self
             .catalog
             .lock()
@@ -313,6 +356,15 @@ impl ContentCache {
         self.telemetry
             .catalog_commit_us
             .fetch_add(saturating_u64(commit_us), Ordering::Relaxed);
+        {
+            let catalog = self
+                .catalog
+                .lock()
+                .map_err(|_| io::Error::other("cache catalog lock poisoned"))?;
+            for victim in &victims {
+                self.evict_victim(victim, &catalog)?;
+            }
+        }
         *self
             .batch_directories
             .lock()
@@ -321,6 +373,13 @@ impl ContentCache {
     }
 
     pub fn rollback_batch(&self) -> io::Result<()> {
+        // Drop the deferred victims WITHOUT unlinking: the rollback restores
+        // their rows to resident, and their files were never deleted, so the two
+        // stay in agreement.
+        *self
+            .batch_victims
+            .lock()
+            .map_err(|_| io::Error::other("cache victim batch lock poisoned"))? = None;
         self.catalog
             .lock()
             .map_err(|_| io::Error::other("cache catalog lock poisoned"))?
@@ -465,30 +524,51 @@ impl ContentCache {
             }
             Err(error) => return Err(error),
         };
-        for victim in victims {
-            remove_if_exists(&self.key_path(&victim.key))?;
-            self.validated
-                .lock()
-                .map_err(|_| io::Error::other("cache validation lock poisoned"))?
-                .remove(&victim.key);
-            self.telemetry
-                .evicted_objects
-                .fetch_add(1, Ordering::Relaxed);
-            self.telemetry
-                .evicted_bytes
-                .fetch_add(victim.size, Ordering::Relaxed);
-            if std::env::var_os("OXFS_CACHE_LOG").is_some() {
-                eprintln!(
-                    "level=INFO action=evict key={} size={} access={} occupancy={} capacity={}",
-                    victim.key,
-                    victim.size,
-                    victim.access,
-                    catalog.gauges()?.resident_bytes,
-                    self.config.max_bytes,
-                );
+        // In a batch, defer every victim side effect — file unlink, validation
+        // drop, telemetry, log — until commit_batch, so the catalog marking and
+        // the file deletion become durable together. Outside a batch the marking
+        // already committed (autocommit), so evict inline as before.
+        let mut deferred = self
+            .batch_victims
+            .lock()
+            .map_err(|_| io::Error::other("cache victim batch lock poisoned"))?;
+        if let Some(pending) = deferred.as_mut() {
+            pending.extend(victims);
+        } else {
+            drop(deferred);
+            for victim in victims {
+                self.evict_victim(&victim, &catalog)?;
             }
         }
         Ok(reservation == Reservation::Refetch)
+    }
+
+    /// Physically evict one victim: unlink its object, drop its verified flag,
+    /// and record telemetry. The caller guarantees the catalog row is already,
+    /// or is about to be, durably marked evicted.
+    fn evict_victim(&self, victim: &Victim, catalog: &Catalog) -> io::Result<()> {
+        remove_if_exists(&self.key_path(&victim.key))?;
+        self.validated
+            .lock()
+            .map_err(|_| io::Error::other("cache validation lock poisoned"))?
+            .remove(&victim.key);
+        self.telemetry
+            .evicted_objects
+            .fetch_add(1, Ordering::Relaxed);
+        self.telemetry
+            .evicted_bytes
+            .fetch_add(victim.size, Ordering::Relaxed);
+        if std::env::var_os("OXFS_CACHE_LOG").is_some() {
+            eprintln!(
+                "level=INFO action=evict key={} size={} access={} occupancy={} capacity={}",
+                victim.key,
+                victim.size,
+                victim.access,
+                catalog.gauges()?.resident_bytes,
+                self.config.max_bytes,
+            );
+        }
+        Ok(())
     }
 
     fn fetch_reserved(&self, r: &ContentRef, key: &str) -> Result<ResidentContent, FetchError> {
@@ -767,4 +847,101 @@ pub fn read_range(file: &File, offset: u64, count: usize) -> io::Result<Vec<u8>>
     let n = f.read(&mut out)?;
     out.truncate(n);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::content::ContentRef;
+    use std::collections::BTreeMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct MemorySource(BTreeMap<String, Vec<u8>>);
+    impl ContentSource for MemorySource {
+        fn fetch(&self, r: &ContentRef, w: &mut dyn Write) -> Result<(), FetchError> {
+            w.write_all(self.0.get(&r.digest).ok_or(FetchError::NotFound)?)?;
+            Ok(())
+        }
+    }
+
+    fn temp() -> PathBuf {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        std::env::temp_dir().join(format!(
+            "oxfs-cache-crash-{}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    // A SIGKILL after a victim is chosen but before the apply commits must not
+    // leave the catalog claiming the victim is resident while its file is gone.
+    // Failure prevented: eviction unlinked the victim inside the still-open
+    // marking transaction; a crash before commit rolled the row back to resident
+    // while the file stayed deleted, so used()/resident() lied about ~victim-size
+    // bytes forever and the recovery journal (admissions only) never healed it.
+    #[test]
+    fn crash_before_commit_keeps_evicted_victim_resident_and_on_disk() {
+        let root = temp();
+        let a_bytes = vec![b'A'; 4000];
+        let b_bytes = vec![b'B'; 4000];
+        let a = ContentRef::for_sha256("t", &a_bytes);
+        let b = ContentRef::for_sha256("t", &b_bytes);
+        let source = Arc::new(MemorySource(BTreeMap::from([
+            (a.digest.clone(), a_bytes.clone()),
+            (b.digest.clone(), b_bytes),
+        ])));
+        // Capacity holds exactly one object, so admitting B must evict A.
+        let config = CacheConfig { max_bytes: 4000 };
+        let empty = BTreeMap::new();
+
+        // Admit A and commit it.
+        let cache = ContentCache::open(&root, source.clone(), config).unwrap();
+        cache.begin_batch(std::slice::from_ref(&a), &empty).unwrap();
+        cache
+            .materialize_missing_batch(std::slice::from_ref(&a), &empty)
+            .unwrap();
+        cache.commit_batch().unwrap();
+        assert!(cache.resident(&a).unwrap().is_some());
+        assert!(cache.object_path(&a).exists());
+
+        // Start admitting B — this evicts A — but simulate a crash by dropping the
+        // cache before commit_batch, which rolls back the open catalog transaction.
+        cache.begin_batch(std::slice::from_ref(&b), &empty).unwrap();
+        cache
+            .materialize_missing_batch(std::slice::from_ref(&b), &empty)
+            .unwrap();
+        assert!(
+            cache.object_path(&a).exists(),
+            "victim file must survive until the eviction commits"
+        );
+        drop(cache);
+
+        // Restart through the real recovery path.
+        let cache = ContentCache::open(&root, source, config).unwrap();
+        assert!(
+            cache.resident(&a).unwrap().is_some(),
+            "A rolled back to resident, so it must still be resident after recovery"
+        );
+        assert!(
+            cache.object_path(&a).exists(),
+            "A's object file must exist: the catalog says it is resident"
+        );
+        assert_eq!(
+            cache.used(),
+            4000,
+            "used() must match the one resident object"
+        );
+        assert!(
+            cache.resident(&b).unwrap().is_none(),
+            "B never committed, so it must not be resident"
+        );
+
+        drop(cache);
+        fs::remove_dir_all(root).unwrap();
+    }
 }

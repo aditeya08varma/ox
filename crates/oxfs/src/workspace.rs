@@ -196,6 +196,33 @@ impl Workspace {
                 protected.insert(key, file.content.size);
             }
         }
+        // Peak cache demand for this reconciliation is every unique object the
+        // candidate needs plus every resident object the still-published
+        // namespace needs and the candidate drops: the old namespace stays
+        // readable until the swap, so both sets are pinned at once. A candidate
+        // that fits the cache on its own but not beside the live selection is a
+        // transient replacement squeeze, not an oversized selection. Admitting
+        // it partially would silently publish a subset of what the caller asked
+        // for, so refuse before the first transfer and leave the live namespace
+        // exactly as it is.
+        let mut candidate_bytes = BTreeMap::new();
+        for entry in candidate.values().flat_map(|manifest| &manifest.entries) {
+            candidate_bytes.insert(self.cache.storage_key(&entry.content), entry.content.size);
+        }
+        let needed: u64 = candidate_bytes.values().sum();
+        let pinned: u64 = protected
+            .iter()
+            .filter(|(key, _)| !candidate_bytes.contains_key(*key))
+            .map(|(_, size)| *size)
+            .sum();
+        let capacity = self.cache.capacity();
+        if needed <= capacity && needed.saturating_add(pinned) > capacity {
+            return Err(WorkspaceError::ReplacementCapacity {
+                needed,
+                pinned,
+                capacity,
+            });
+        }
         let mut missing_keys = BTreeSet::new();
         let mut missing = Vec::new();
         for entry in &admissions {
@@ -641,6 +668,13 @@ pub enum WorkspaceError {
     IsDirectory,
     ReadOnly,
     PathConflict(String),
+    /// The candidate fits the cache alone, but not while the still-published
+    /// namespace keeps its own objects pinned through the swap.
+    ReplacementCapacity {
+        needed: u64,
+        pinned: u64,
+        capacity: u64,
+    },
     Poisoned,
 }
 impl fmt::Display for WorkspaceError {
@@ -653,6 +687,16 @@ impl fmt::Display for WorkspaceError {
             Self::IsDirectory => write!(f, "is a directory"),
             Self::ReadOnly => write!(f, "read-only filesystem"),
             Self::PathConflict(path) => write!(f, "sessions select conflicting content at {path}"),
+            Self::ReplacementCapacity {
+                needed,
+                pinned,
+                capacity,
+            } => write!(
+                f,
+                "selection needs {needed} bytes and the still-published selection pins {pinned} more \
+                 through the swap, exceeding the {capacity} byte cache; drop the current selection \
+                 first or raise the cache capacity"
+            ),
             Self::Poisoned => write!(f, "workspace lock poisoned"),
         }
     }

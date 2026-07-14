@@ -337,6 +337,114 @@ fn failed_replacement_keeps_published_snapshot_backing_resident() {
     std::fs::remove_dir_all(root).unwrap();
 }
 
+// The old namespace stays pinned until the swap, so a replacement transiently
+// needs room for both selections. These three tests pin the whole class: a
+// candidate that fits alone but not beside the live one must be REFUSED (never
+// partially published), a candidate too big for the cache outright keeps the
+// designed ranked-admission behavior, and a replacement that genuinely fits
+// beside the live one must still land in full.
+fn sized(session: &str, generation: u64, path: &str, content: ContentRef) -> Manifest {
+    Manifest {
+        session_id: session.into(),
+        generation,
+        entries: vec![
+            ManifestEntry::new(path, "src", "Session", 0o444, 0, content, "selected").unwrap(),
+        ],
+    }
+}
+
+fn workspace_with(
+    objects: &[(&ContentRef, &[u8])],
+    max_bytes: u64,
+) -> (std::path::PathBuf, Arc<Workspace>) {
+    let root = temp("replacement-capacity");
+    let ws = Workspace::open_with_config(
+        &root,
+        Arc::new(MemorySource {
+            objects: objects
+                .iter()
+                .map(|(r, b)| (r.digest.clone(), b.to_vec()))
+                .collect(),
+        }),
+        oxfs::CacheConfig { max_bytes },
+    )
+    .unwrap();
+    (root, ws)
+}
+
+#[test]
+fn replacement_that_only_fits_without_the_live_selection_is_refused_not_truncated() {
+    let live_bytes = vec![b'a'; 40];
+    let next_bytes = vec![b'b'; 84];
+    let live = ContentRef::for_sha256("t", &live_bytes);
+    let next = ContentRef::for_sha256("t", &next_bytes);
+    // 84 fits in 100 on its own, but not while the live 40 is pinned through the swap.
+    let (root, ws) = workspace_with(&[(&live, &live_bytes), (&next, &next_bytes)], 100);
+
+    ws.apply(sized("s", 1, "live", live)).unwrap();
+    let live_inode = ws.snapshot().by_path("live").unwrap().inode;
+
+    let error = ws.apply(sized("s", 2, "next", next)).unwrap_err();
+    assert!(
+        matches!(error, oxfs::WorkspaceError::ReplacementCapacity { .. }),
+        "expected a loud replacement-capacity refusal, got {error:?}"
+    );
+    // The refusal must be total: the live selection is untouched and still readable,
+    // and the replacement is nowhere to be seen.
+    assert!(ws.snapshot().by_path("next").is_none());
+    assert!(ws.snapshot().by_path("live").is_some());
+    assert_eq!(
+        ws.open_inode(live_inode).unwrap().read(0, 99).unwrap(),
+        live_bytes
+    );
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn selection_larger_than_the_whole_cache_still_ranks_and_stops() {
+    let small_bytes = vec![b'a'; 30];
+    let huge_bytes = vec![b'b'; 200];
+    let small = ContentRef::for_sha256("t", &small_bytes);
+    let huge = ContentRef::for_sha256("t", &huge_bytes);
+    // 200 exceeds the 100 cache outright — that is an oversized selection, not a
+    // replacement squeeze, and must keep the documented ranked-admission gate.
+    let (root, ws) = workspace_with(&[(&small, &small_bytes), (&huge, &huge_bytes)], 100);
+
+    let outcome = ws
+        .apply(Manifest {
+            session_id: "s".into(),
+            generation: 1,
+            entries: vec![
+                ManifestEntry::new("small", "src", "Session", 0o444, 0, small, "sel").unwrap(),
+                ManifestEntry::new("huge", "src", "Session", 0o444, 0, huge, "sel").unwrap(),
+            ],
+        })
+        .expect("an oversized selection ranks and stops, it does not error");
+    assert_eq!(outcome.available, 1);
+    assert_eq!(outcome.stopped, 1);
+    assert!(ws.snapshot().by_path("small").is_some());
+    assert!(ws.snapshot().by_path("huge").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn replacement_that_fits_beside_the_live_selection_still_applies_in_full() {
+    let live_bytes = vec![b'a'; 40];
+    let next_bytes = vec![b'b'; 50];
+    let live = ContentRef::for_sha256("t", &live_bytes);
+    let next = ContentRef::for_sha256("t", &next_bytes);
+    // 40 + 50 = 90 <= 100: the swap has room for both, so nothing is refused.
+    let (root, ws) = workspace_with(&[(&live, &live_bytes), (&next, &next_bytes)], 100);
+
+    ws.apply(sized("s", 1, "live", live)).unwrap();
+    let outcome = ws.apply(sized("s", 2, "next", next)).unwrap();
+    assert_eq!(outcome.available, 1);
+    assert_eq!(outcome.stopped, 0);
+    assert!(ws.snapshot().by_path("next").is_some());
+    assert!(ws.snapshot().by_path("live").is_none());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn synthetic_index_is_resident_and_aggregates_selectors() {
     let root = temp("index");
