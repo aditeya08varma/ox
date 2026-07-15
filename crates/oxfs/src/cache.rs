@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -95,6 +95,7 @@ pub struct ContentCache {
     batch_victims: Mutex<Option<Vec<Victim>>>,
     validated: Mutex<BTreeSet<String>>,
     temp_nonce: AtomicU64,
+    fail_next_commit: AtomicBool,
     telemetry: Telemetry,
 }
 
@@ -123,6 +124,7 @@ impl ContentCache {
             batch_victims: Mutex::new(None),
             validated: Mutex::new(BTreeSet::new()),
             temp_nonce: AtomicU64::new(0),
+            fail_next_commit: AtomicBool::new(false),
             telemetry: Telemetry::default(),
         };
         cache.remove_orphan_temps()?;
@@ -336,6 +338,9 @@ impl ContentCache {
                 Ordering::Relaxed,
             );
         }
+        if self.fail_next_commit.swap(false, Ordering::SeqCst) {
+            return Err(io::Error::other("injected cache commit failure"));
+        }
         // Take the deferred victims and record their keys in the apply journal
         // BEFORE the commit makes their evicted state durable. Recovery removes
         // any journalled key that is not resident after restart, so:
@@ -386,6 +391,12 @@ impl ContentCache {
             .lock()
             .map_err(|_| io::Error::other("cache directory batch lock poisoned"))? = None;
         remove_if_exists(&self.root.join("active-apply.v1"))
+    }
+
+    /// Arm one deterministic failure immediately before the next batch commit.
+    /// Used by the joint test harness to exercise the production rollback path.
+    pub fn fail_next_commit(&self) {
+        self.fail_next_commit.store(true, Ordering::SeqCst);
     }
 
     pub fn rollback_batch(&self) -> io::Result<()> {

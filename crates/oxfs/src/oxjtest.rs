@@ -1,4 +1,5 @@
 use cachesim::{CacheModel, EvictionOrder};
+use oxfs::cache::ContentCache;
 use oxfs::mount;
 use oxfs::nfs::{NfsServer, ServerConfig};
 use oxfs::{
@@ -379,6 +380,7 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
         return Err("the oxjtest release gate requires macOS mount_nfs".into());
     }
     let root = temp_root(config.seed);
+    rollback_fault_check(&root.join("rollback-fault"))?;
     let mountpoint = root.join("mount");
     let source = Arc::new(SyntheticSource::new(Duration::from_millis(
         config.source_delay_ms,
@@ -639,6 +641,42 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
         cache_remaining: remaining,
         error: None,
     })
+}
+
+fn rollback_fault_check(root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let source = Arc::new(SyntheticSource::new(Duration::ZERO));
+    let old_bytes = vec![b'A'; 64];
+    let new_bytes = vec![b'B'; 64];
+    let old = source.insert("rollback", old_bytes.clone());
+    let new = source.insert("rollback", new_bytes);
+    let cache = ContentCache::open(
+        root,
+        source,
+        CacheConfig {
+            max_bytes: old.size,
+            ..CacheConfig::default()
+        },
+    )?;
+
+    cache.begin_batch(std::slice::from_ref(&old))?;
+    cache.materialize(&old)?;
+    cache.commit_batch()?;
+
+    cache.begin_batch(std::slice::from_ref(&new))?;
+    cache.materialize(&new)?;
+    cache.fail_next_commit();
+    let failed = cache.commit_batch().is_err();
+    cache.rollback_batch()?;
+
+    let old_resident = cache.resident(&old)?;
+    if !failed
+        || old_resident.is_none()
+        || cache.resident(&new)?.is_some()
+        || fs::read(old_resident.expect("checked above").path)? != old_bytes
+    {
+        return Err("cache rollback fault check failed".into());
+    }
+    Ok(())
 }
 
 /// A tiny xorshift64 PRNG. The corpus and its churn are driven entirely from
@@ -1415,6 +1453,13 @@ fn json_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn injected_commit_failure_rolls_back_eviction() {
+        let root = temp_root(0xFA17);
+        rollback_fault_check(&root).unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn gate_probability_parses_and_rejects_out_of_range_values() {

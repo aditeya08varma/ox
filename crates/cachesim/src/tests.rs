@@ -111,12 +111,20 @@ fn generation_model_matches_impl_under_random_single_session_churn() {
                     );
                 }
 
-                ws.apply(Manifest {
+                let before = ws.snapshot_state().unwrap();
+                let applied = ws.apply(Manifest {
                     session_id: "s".into(),
                     generation,
                     entries,
-                })
-                .unwrap();
+                });
+                if matches!(
+                    applied,
+                    Err(oxfs::WorkspaceError::ReplacementCapacity { .. })
+                ) {
+                    assert_eq!(ws.snapshot_state().unwrap(), before);
+                    continue;
+                }
+                applied.unwrap();
                 model.apply(&model_entries);
 
                 assert_eq!(

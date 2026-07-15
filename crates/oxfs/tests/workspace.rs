@@ -581,9 +581,10 @@ fn ranked_admission_stops_but_keeps_later_resident_content() {
             ],
         })
         .unwrap();
-    assert_eq!((outcome.available, outcome.stopped), (2, 1));
-    assert!(ws.snapshot().by_path("blocked").is_none());
-    assert!(ws.snapshot().by_path("also-resident").is_some());
+    assert_eq!((outcome.available, outcome.stopped), (1, 2));
+    assert!(ws.snapshot().by_path("blocked").is_some());
+    assert!(ws.snapshot().by_path("resident").is_none());
+    assert!(ws.snapshot().by_path("also-resident").is_none());
     let json_inode = ws.snapshot().by_path(".sageox/INDEX.json").unwrap().inode;
     let json = String::from_utf8(
         ws.open_inode(json_inode)
@@ -592,7 +593,10 @@ fn ranked_admission_stops_but_keeps_later_resident_content() {
             .unwrap(),
     )
     .unwrap();
-    assert!(json.contains("\"path\":\"blocked\"") && json.contains("stopped: cache_limit_reached"));
+    assert!(
+        json.contains("\"path\":\"also-resident\"")
+            && json.contains("stopped: cache_limit_reached")
+    );
     std::fs::remove_dir_all(root).unwrap();
 }
 

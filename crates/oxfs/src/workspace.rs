@@ -1,4 +1,5 @@
 use crate::cache::{CacheConfig, ContentCache, read_range};
+use crate::cache_policy::{AdmissionCandidate, AdmitEverything};
 use crate::content::{ContentSource, FetchError};
 use crate::inode::{InodeTable, ROOT_INODE};
 use crate::manifest::{Manifest, ManifestError};
@@ -33,6 +34,19 @@ pub struct ApplyOutcome {
     pub applied: bool,
     pub available: usize,
     pub stopped: usize,
+}
+
+fn resident_desired_keys<'a>(
+    cache: &ContentCache,
+    manifests: impl Iterator<Item = &'a Manifest>,
+) -> Result<BTreeSet<String>, WorkspaceError> {
+    let mut resident = BTreeSet::new();
+    for entry in manifests.flat_map(|manifest| &manifest.entries) {
+        if cache.resident(&entry.content)?.is_some() {
+            resident.insert(cache.storage_key(&entry.content));
+        }
+    }
+    Ok(resident)
 }
 
 impl Workspace {
@@ -100,10 +114,7 @@ impl Workspace {
                     stopped = true;
                     continue;
                 }
-                match workspace
-                    .cache
-                    .materialize_missing(&entry.content)
-                {
+                match workspace.cache.materialize_missing(&entry.content) {
                     Ok(_) => {
                         available.insert(key);
                     }
@@ -223,18 +234,19 @@ impl Workspace {
                 capacity,
             });
         }
-        let mut missing_keys = BTreeSet::new();
-        let mut missing = Vec::new();
-        for entry in &admissions {
-            let key = self.cache.storage_key(&entry.content);
-            if available.contains(&key) || !missing_keys.insert(key) {
-                continue;
-            }
-            if entry.content.size > self.cache.capacity() {
-                break;
-            }
-            missing.push(entry.content.clone());
-        }
+        let keyed: Vec<_> = admissions
+            .iter()
+            .map(|entry| (self.cache.storage_key(&entry.content), &entry.content))
+            .collect();
+        let candidates: Vec<_> = keyed
+            .iter()
+            .map(|(key, content)| AdmissionCandidate {
+                key,
+                value: *content,
+                size: content.size,
+            })
+            .collect();
+        let missing = AdmitEverything::select(self.cache.capacity(), &available, &candidates);
         let admission_content: Vec<_> = admissions
             .iter()
             .map(|entry| entry.content.clone())
@@ -249,7 +261,7 @@ impl Workspace {
                 return Err(error.into());
             }
         }
-        let next = match self.build_namespace(&candidate, &available) {
+        let _next = match self.build_namespace(&candidate, &available) {
             Ok(next) => next,
             Err(error) => {
                 let _ = self.cache.rollback_batch();
@@ -260,6 +272,8 @@ impl Workspace {
             let _ = self.cache.rollback_batch();
             return Err(error.into());
         }
+        available = resident_desired_keys(&self.cache, candidate.values())?;
+        let next = self.build_namespace(&candidate, &available)?;
         let available = next
             .nodes
             .values()
