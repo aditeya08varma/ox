@@ -89,7 +89,7 @@ impl Workspace {
                 .values()
                 .flat_map(|manifest| manifest.entries.iter().map(|entry| entry.content.clone()))
                 .collect();
-            workspace.cache.begin_batch(&admissions, &protected)?;
+            workspace.cache.begin_batch(&admissions)?;
             let mut stopped = false;
             for entry in sessions.values().flat_map(|m| m.entries.iter()) {
                 let key = workspace.cache.storage_key(&entry.content);
@@ -102,7 +102,7 @@ impl Workspace {
                 }
                 match workspace
                     .cache
-                    .materialize_missing(&entry.content, &protected)
+                    .materialize_missing(&entry.content)
                 {
                     Ok(_) => {
                         available.insert(key);
@@ -239,8 +239,8 @@ impl Workspace {
             .iter()
             .map(|entry| entry.content.clone())
             .collect();
-        self.cache.begin_batch(&admission_content, &protected)?;
-        match self.cache.materialize_missing_batch(&missing, &protected) {
+        self.cache.begin_batch(&admission_content)?;
+        match self.cache.materialize_missing_batch(&missing) {
             Ok(materialized) => {
                 available.extend(materialized);
             }
@@ -436,6 +436,18 @@ impl Workspace {
 
     pub fn cache_telemetry(&self) -> io::Result<crate::cache::CacheTelemetrySnapshot> {
         self.cache.telemetry()
+    }
+
+    pub fn resident_keys(&self) -> io::Result<Vec<String>> {
+        self.cache.resident_keys()
+    }
+
+    pub fn storage_key(&self, reference: &crate::content::ContentRef) -> String {
+        self.cache.storage_key(reference)
+    }
+
+    pub fn snapshot_state(&self) -> io::Result<crate::cache_catalog::CatalogSnapshot> {
+        self.cache.snapshot_state()
     }
 
     pub fn open_inode(self: &Arc<Self>, inode: u64) -> Result<OpenFile, WorkspaceError> {
