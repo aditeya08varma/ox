@@ -1,7 +1,8 @@
 use crate::cache_catalog::{Catalog, Reservation, Victim};
+use crate::cache_policy::EvictionOrder;
 use crate::content::{ContentRef, ContentSource, FetchError};
 use crate::sha256::Sha256;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,12 +15,14 @@ pub const DEFAULT_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CacheConfig {
     pub max_bytes: u64,
+    pub eviction: EvictionOrder,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             max_bytes: DEFAULT_CACHE_MAX_BYTES,
+            eviction: EvictionOrder::default(),
         }
     }
 }
@@ -110,7 +113,7 @@ impl ContentCache {
         let root = root.into();
         fs::create_dir_all(root.join("objects"))?;
         fs::create_dir_all(root.join("tmp"))?;
-        let catalog = Catalog::open(&root.join("catalog.sqlite"))?;
+        let catalog = Catalog::open(&root.join("catalog.sqlite"), config.eviction)?;
         let cache = Self {
             root,
             source,
@@ -143,12 +146,29 @@ impl ContentCache {
         self.config.max_bytes.saturating_sub(self.used())
     }
 
-    /// Cumulative (objects evicted, reservations blocked by all-pinned).
+    /// Cumulative (objects evicted, reservations blocked with no evictable object).
     pub fn eviction_counters(&self) -> (u64, u64) {
         (
             self.telemetry.evicted_objects.load(Ordering::Relaxed),
             self.telemetry.evict_blocked.load(Ordering::Relaxed),
         )
+    }
+
+    /// Resident keys in deterministic order — differential-oracle ground truth.
+    /// O(rows) scan; test/introspection only, never on the hot path.
+    pub fn resident_keys(&self) -> io::Result<Vec<String>> {
+        self.catalog
+            .lock()
+            .map_err(|_| io::Error::other("cache catalog lock poisoned"))?
+            .resident_keys()
+    }
+
+    /// Full resident+scalar snapshot for the differential oracle.
+    pub fn snapshot_state(&self) -> io::Result<crate::cache_catalog::CatalogSnapshot> {
+        self.catalog
+            .lock()
+            .map_err(|_| io::Error::other("cache catalog lock poisoned"))?
+            .snapshot_state()
     }
 
     pub fn telemetry(&self) -> io::Result<CacheTelemetrySnapshot> {
@@ -256,11 +276,7 @@ impl ContentCache {
 
     /// Start one manifest-sized catalog transaction. The recovery journal is
     /// fsynced first, so a crash only requires checking this bounded key set.
-    pub fn begin_batch(
-        &self,
-        admissions: &[ContentRef],
-        protected: &BTreeMap<String, u64>,
-    ) -> io::Result<()> {
+    pub fn begin_batch(&self, admissions: &[ContentRef]) -> io::Result<()> {
         let journal_path = self.root.join("active-apply.v1");
         let mut journal = BufWriter::new(File::create(&journal_path)?);
         for reference in admissions {
@@ -283,7 +299,7 @@ impl ContentCache {
             .catalog
             .lock()
             .map_err(|_| io::Error::other("cache catalog lock poisoned"))?;
-        if let Err(error) = catalog.begin_batch(protected.keys().map(String::as_str)) {
+        if let Err(error) = catalog.begin_batch() {
             if let Ok(mut directories) = self.batch_directories.lock() {
                 *directories = None;
             }
@@ -392,15 +408,11 @@ impl ContentCache {
         recovered
     }
 
-    pub fn materialize(
-        &self,
-        r: &ContentRef,
-        protected: &BTreeMap<String, u64>,
-    ) -> Result<ResidentContent, FetchError> {
+    pub fn materialize(&self, r: &ContentRef) -> Result<ResidentContent, FetchError> {
         if let Some(v) = self.resident(r)? {
             return Ok(v);
         }
-        self.materialize_missing(r, protected)
+        self.materialize_missing(r)
     }
 
     /// Materialize content already proven absent by the caller's current
@@ -408,10 +420,9 @@ impl ContentCache {
     pub(crate) fn materialize_missing(
         &self,
         r: &ContentRef,
-        protected: &BTreeMap<String, u64>,
     ) -> Result<ResidentContent, FetchError> {
         let key = self.key(r);
-        let refetch = self.reserve(&key, r.size, protected)?;
+        let refetch = self.reserve(&key, r.size)?;
         let result = self.fetch_reserved(r, &key);
         if result.is_err() {
             let _ = self.release(&key);
@@ -431,12 +442,11 @@ impl ContentCache {
     pub(crate) fn materialize_missing_batch(
         &self,
         references: &[ContentRef],
-        protected: &BTreeMap<String, u64>,
     ) -> Result<Vec<String>, FetchError> {
         let mut reserved = Vec::with_capacity(references.len());
         for reference in references {
             let key = self.key(reference);
-            let refetch = match self.reserve(&key, reference.size, protected) {
+            let refetch = match self.reserve(&key, reference.size) {
                 Ok(refetch) => refetch,
                 Err(error) if error.kind() == io::ErrorKind::StorageFull => {
                     break;
@@ -498,7 +508,7 @@ impl ContentCache {
         Ok(materialized)
     }
 
-    fn reserve(&self, key: &str, size: u64, protected: &BTreeMap<String, u64>) -> io::Result<bool> {
+    fn reserve(&self, key: &str, size: u64) -> io::Result<bool> {
         if size > self.config.max_bytes {
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
@@ -515,10 +525,9 @@ impl ContentCache {
             Err(error) if error.kind() == io::ErrorKind::StorageFull => {
                 self.telemetry.evict_blocked.fetch_add(1, Ordering::Relaxed);
                 eprintln!(
-                    "level=WARN action=evict_blocked reason=all_pinned need={size} occupancy={} capacity={} protected={}",
+                    "level=WARN action=evict_blocked reason=no_evictable_object need={size} occupancy={} capacity={}",
                     catalog.gauges()?.resident_bytes,
                     self.config.max_bytes,
-                    protected.len(),
                 );
                 return Err(error);
             }
@@ -663,6 +672,7 @@ impl ContentCache {
     }
 
     pub fn open_file(&self, r: &ContentRef) -> io::Result<File> {
+        let key = self.key(r);
         let resident = self
             .resident(r)?
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "content is not resident"))?;
@@ -672,7 +682,12 @@ impl ContentCache {
         self.telemetry
             .opened_bytes
             .fetch_add(r.size, Ordering::Relaxed);
-        File::open(resident.path)
+        let file = File::open(resident.path)?;
+        self.catalog
+            .lock()
+            .map_err(|_| io::Error::other("cache catalog lock poisoned"))?
+            .touch(&key)?;
+        Ok(file)
     }
 
     pub fn storage_key(&self, r: &ContentRef) -> String {
@@ -896,14 +911,15 @@ mod tests {
             (b.digest.clone(), b_bytes),
         ])));
         // Capacity holds exactly one object, so admitting B must evict A.
-        let config = CacheConfig { max_bytes: 4000 };
-        let empty = BTreeMap::new();
-
+        let config = CacheConfig {
+            max_bytes: 4000,
+            ..CacheConfig::default()
+        };
         // Admit A and commit it.
         let cache = ContentCache::open(&root, source.clone(), config).unwrap();
-        cache.begin_batch(std::slice::from_ref(&a), &empty).unwrap();
+        cache.begin_batch(std::slice::from_ref(&a)).unwrap();
         cache
-            .materialize_missing_batch(std::slice::from_ref(&a), &empty)
+            .materialize_missing_batch(std::slice::from_ref(&a))
             .unwrap();
         cache.commit_batch().unwrap();
         assert!(cache.resident(&a).unwrap().is_some());
@@ -911,9 +927,9 @@ mod tests {
 
         // Start admitting B — this evicts A — but simulate a crash by dropping the
         // cache before commit_batch, which rolls back the open catalog transaction.
-        cache.begin_batch(std::slice::from_ref(&b), &empty).unwrap();
+        cache.begin_batch(std::slice::from_ref(&b)).unwrap();
         cache
-            .materialize_missing_batch(std::slice::from_ref(&b), &empty)
+            .materialize_missing_batch(std::slice::from_ref(&b))
             .unwrap();
         assert!(
             cache.object_path(&a).exists(),

@@ -87,6 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         source,
         CacheConfig {
             max_bytes: cache_max_bytes,
+            ..CacheConfig::default()
         },
     )?;
     let content = ContentRef::new("demo", "sha256", digest, bytes.len() as u64)?;

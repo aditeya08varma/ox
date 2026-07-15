@@ -27,7 +27,7 @@ jobs:
 
       - name: Mount-required oxFS release gate
         run: |
-          cargo run -p oxfs --bin oxjtest -- gate \
+          cargo run -p oxjtest -- gate \
             --seed 1 \
             --generations 12 \
             --readers 4 \

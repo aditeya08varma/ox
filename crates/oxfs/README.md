@@ -108,7 +108,7 @@ for elevation. Its runner must allow non-interactive `sudo` only for the system
 `mount_nfs` and `umount` commands:
 
 ```bash
-cargo run -p oxfs --bin oxjtest -- gate --artifact oxjtest-results.json
+cargo run -p oxjtest -- --artifact oxjtest-results.json --oracle-probability 0.1
 ```
 
 `oxjtest` creates a deterministic million-file virtual corpus, materializing
@@ -132,7 +132,7 @@ Ctrl-C.
 
 ```bash
 sudo -v    # cache mount privilege; serve uses non-interactive `sudo -n`
-cargo run -p oxfs --bin oxjtest -- serve \
+cargo run -p oxjtest -- serve \
   --mountpoint /tmp/oxjfs \
   --seed 1 \
   --files 1000 \

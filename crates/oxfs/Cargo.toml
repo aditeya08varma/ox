@@ -23,10 +23,6 @@ name = "oxfsd"
 path = "src/main.rs"
 
 [[bin]]
-name = "oxjtest"
-path = "src/oxjtest.rs"
-
-[[bin]]
 name = "oxdirtest"
 path = "src/oxdirtest.rs"
 

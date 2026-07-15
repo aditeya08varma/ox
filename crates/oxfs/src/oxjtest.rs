@@ -1,3 +1,4 @@
+use cachesim::{CacheModel, EvictionOrder};
 use oxfs::mount;
 use oxfs::nfs::{NfsServer, ServerConfig};
 use oxfs::{
@@ -10,6 +11,7 @@ use std::fs::{self, File};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26,6 +28,7 @@ struct Config {
     reads_per_reader: usize,
     source_delay_ms: u64,
     artifact: PathBuf,
+    oracle_probability: f64,
 }
 
 impl Default for Config {
@@ -37,6 +40,7 @@ impl Default for Config {
             reads_per_reader: 40,
             source_delay_ms: 2,
             artifact: PathBuf::from("oxjtest-results.json"),
+            oracle_probability: 0.1,
         }
     }
 }
@@ -170,18 +174,149 @@ struct Report {
     error: Option<String>,
 }
 
-fn main() {
+enum OracleEvent {
+    Apply(Vec<(String, u64)>),
+    MarkMissing(String),
+    Snapshot(mpsc::Sender<(Vec<String>, u64)>),
+    Stop,
+}
+
+struct ShadowOracle {
+    sender: mpsc::SyncSender<OracleEvent>,
+    worker: Option<std::thread::JoinHandle<()>>,
+    seed: u64,
+    probability: f64,
+    checkpoint: u64,
+}
+
+impl ShadowOracle {
+    fn spawn(capacity: u64, seed: u64, probability: f64) -> Self {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let worker = std::thread::spawn(move || {
+            let mut model =
+                CacheModel::new(capacity, EvictionOrder::LeastRecentlySelectedGeneration);
+            while let Ok(event) = receiver.recv() {
+                match event {
+                    OracleEvent::Apply(entries) => model.apply(&entries),
+                    OracleEvent::MarkMissing(key) => model.mark_missing(&key),
+                    OracleEvent::Snapshot(reply) => {
+                        let _ = reply.send((model.resident_keys(), model.used_bytes()));
+                    }
+                    OracleEvent::Stop => break,
+                }
+            }
+        });
+        Self {
+            sender,
+            worker: Some(worker),
+            seed,
+            probability,
+            checkpoint: 0,
+        }
+    }
+
+    fn successful_apply(
+        &mut self,
+        workspace: &Workspace,
+        manifest: &Manifest,
+        force_check: bool,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let entries = manifest
+            .entries
+            .iter()
+            .map(|entry| (workspace.storage_key(&entry.content), entry.content.size))
+            .collect();
+        self.sender.send(OracleEvent::Apply(entries))?;
+        self.checkpoint = self.checkpoint.saturating_add(1);
+        if !force_check && !self.sampled() {
+            return Ok(false);
+        }
+        self.compare(workspace)?;
+        Ok(true)
+    }
+
+    fn compare(&self, workspace: &Workspace) -> Result<(), Box<dyn std::error::Error>> {
+        let (reply, receive) = mpsc::channel();
+        self.sender.send(OracleEvent::Snapshot(reply))?;
+        let (model_keys, model_bytes) = receive.recv()?;
+        let real_keys = workspace.resident_keys()?;
+        let real_bytes = workspace.cache_telemetry()?.resident_bytes;
+        if real_keys != model_keys || real_bytes != model_bytes {
+            return Err(format!(
+                "cache oracle mismatch at checkpoint {}: real_keys={:?} model_keys={:?} real_bytes={} model_bytes={}",
+                self.checkpoint,
+                real_keys,
+                model_keys,
+                real_bytes,
+                model_bytes,
+            )
+            .into());
+        }
+        Ok(())
+    }
+
+    fn sampled(&self) -> bool {
+        if self.probability <= 0.0 {
+            return false;
+        }
+        if self.probability >= 1.0 {
+            return true;
+        }
+        let mut value = self.seed ^ self.checkpoint.wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        value ^= value >> 30;
+        value = value.wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        let unit = value as f64 / u64::MAX as f64;
+        unit < self.probability
+    }
+
+    fn recover_missing(
+        &mut self,
+        workspace: &Workspace,
+        missing_key: String,
+        desired: &[&Manifest],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.sender.send(OracleEvent::MarkMissing(missing_key))?;
+        for manifest in desired {
+            let entries = manifest
+                .entries
+                .iter()
+                .map(|entry| (workspace.storage_key(&entry.content), entry.content.size))
+                .collect();
+            self.sender.send(OracleEvent::Apply(entries))?;
+        }
+        self.checkpoint = self.checkpoint.saturating_add(1);
+        self.compare(workspace)?;
+        Ok(())
+    }
+}
+
+impl Drop for ShadowOracle {
+    fn drop(&mut self) {
+        let _ = self.sender.send(OracleEvent::Stop);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+pub(crate) fn main() {
     let mut args = std::env::args().skip(1);
     match args.next().as_deref() {
+        None => run_gate(Vec::new()),
         Some("gate") => run_gate(args.collect()),
         Some("serve") => run_serve(args.collect()),
+        Some(first) if first.starts_with('-') => {
+            let mut gate_args = vec![first.to_owned()];
+            gate_args.extend(args);
+            run_gate(gate_args);
+        }
         other => {
             if let Some(other) = other {
                 eprintln!("oxjtest: unknown subcommand {other}");
             }
             eprintln!(
-                "usage: oxjtest <gate|serve> [options]\n  \
-                 gate   run the deterministic release gate (in-process mount, self-unmounts)\n  \
+                "usage: oxjtest [gate options] | oxjtest gate [options] | oxjtest serve [options]\n  \
+                 default/gate  run the joint client/server release gate (in-process mount, self-unmounts)\n  \
                  serve  mount an evolving synthetic filesystem for manual inspection"
             );
             std::process::exit(2);
@@ -263,15 +398,14 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
         source.clone(),
         CacheConfig {
             max_bytes: cache_bytes,
+            ..CacheConfig::default()
         },
     )?;
-    workspace.apply(manifest(
-        "stable",
-        1,
-        "shared.bin",
-        stable_ref,
-        "stable reader",
-    ))?;
+    let mut oracle = ShadowOracle::spawn(cache_bytes, config.seed, config.oracle_probability);
+    let mut oracle_checks = 0u64;
+    let stable_manifest = manifest("stable", 1, "shared.bin", stable_ref, "stable reader");
+    workspace.apply(stable_manifest.clone())?;
+    oracle_checks += u64::from(oracle.successful_apply(&workspace, &stable_manifest, false)?);
 
     let server = NfsServer::new(workspace.clone(), ServerConfig::default()).spawn()?;
     let mounted = mount::mount_server(server.address().port(), &mountpoint)?;
@@ -298,13 +432,15 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
         "failed content remains invisible",
         !mountpoint.join("current.bin").exists(),
     );
-    workspace.apply(manifest(
+    let retry_manifest = manifest(
         "moving",
         1,
         "current.bin",
         first_ref.clone(),
         "fault recovery",
-    ))?;
+    );
+    workspace.apply(retry_manifest.clone())?;
+    oracle_checks += u64::from(oracle.successful_apply(&workspace, &retry_manifest, true)?);
     check(
         &mut checks,
         "fault retry publishes whole content",
@@ -346,13 +482,15 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
         current_bytes = object_bytes(config.seed, generation);
         let current_ref = source.insert("oxjtest", current_bytes.clone());
         let started = Instant::now();
-        workspace.apply(manifest(
+        let moving_manifest = manifest(
             "moving",
             generation,
             "current.bin",
             current_ref.clone(),
             "evolving hotset",
-        ))?;
+        );
+        workspace.apply(moving_manifest.clone())?;
+        oracle_checks += u64::from(oracle.successful_apply(&workspace, &moving_manifest, false)?);
         latencies.push(started.elapsed().as_micros());
         check(
             &mut checks,
@@ -378,13 +516,15 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
     open.read_exact(&mut prefix)?;
     let replacement_bytes = object_bytes(config.seed, config.generations + 1000);
     let replacement_ref = source.insert("oxjtest", replacement_bytes.clone());
-    workspace.apply(manifest(
+    let replacement_manifest = manifest(
         "moving",
         config.generations.max(2) + 1,
         "current.bin",
         replacement_ref.clone(),
         "open under mutation",
-    ))?;
+    );
+    workspace.apply(replacement_manifest.clone())?;
+    oracle_checks += u64::from(oracle.successful_apply(&workspace, &replacement_manifest, true)?);
     let mut suffix = Vec::new();
     open.read_to_end(&mut suffix)?;
     prefix.extend(suffix);
@@ -412,6 +552,7 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
 
     mounted.unmount()?;
     server.shutdown()?;
+    let corrupted_key = workspace.storage_key(&replacement_ref);
     drop(workspace);
     corrupt_cached_object(&root.join("workspace/cache/objects"), &replacement_ref)?;
     let workspace = Workspace::open_with_config(
@@ -419,7 +560,13 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
         source.clone(),
         CacheConfig {
             max_bytes: cache_bytes,
+            ..CacheConfig::default()
         },
+    )?;
+    oracle.recover_missing(
+        &workspace,
+        corrupted_key,
+        &[&replacement_manifest, &stable_manifest],
     )?;
     let server = NfsServer::new(workspace.clone(), ServerConfig::default()).spawn()?;
     let mounted = mount::mount_server(server.address().port(), &mountpoint)?;
@@ -431,13 +578,15 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
 
     let oversized = vec![7; usize::try_from(cache_bytes).unwrap_or(usize::MAX - 1) + 1];
     let oversized_ref = source.insert("oxjtest", oversized);
-    let outcome = workspace.apply(manifest(
+    let oversized_manifest = manifest(
         "oversized",
         1,
         "too-big.bin",
         oversized_ref,
         "capacity gate",
-    ))?;
+    );
+    let outcome = workspace.apply(oversized_manifest.clone())?;
+    oracle_checks += u64::from(oracle.successful_apply(&workspace, &oversized_manifest, true)?);
     check(
         &mut checks,
         "oversized object is stopped",
@@ -454,6 +603,17 @@ fn run(config: Config) -> Result<Report, Box<dyn std::error::Error>> {
         &mut checks,
         "cache usage stays within capacity",
         physical_bytes <= capacity,
+    );
+    let allocated_bytes = cache_object_allocated_bytes(&root.join("workspace/cache/objects"))?;
+    check(
+        &mut checks,
+        "allocated cache usage stays within small-file headroom",
+        allocated_bytes <= capacity.saturating_mul(8),
+    );
+    check(
+        &mut checks,
+        "parallel cache oracle performed deep comparisons",
+        oracle_checks > 0,
     );
     mounted.unmount()?;
     server.shutdown()?;
@@ -687,6 +847,7 @@ fn serve_session(config: &ServeConfig, root: &Path) -> Result<(), Box<dyn std::e
         source.clone(),
         CacheConfig {
             max_bytes: cache_bytes,
+            ..CacheConfig::default()
         },
     )?;
 
@@ -1074,6 +1235,24 @@ fn cache_object_bytes(root: &Path) -> io::Result<u64> {
     Ok(bytes)
 }
 
+fn cache_object_allocated_bytes(root: &Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+
+    let mut bytes = 0u64;
+    for tenant in fs::read_dir(root)? {
+        for object in fs::read_dir(tenant?.path())? {
+            let metadata = object?.metadata()?;
+            #[cfg(unix)]
+            let allocated = metadata.blocks().saturating_mul(512);
+            #[cfg(not(unix))]
+            let allocated = metadata.len();
+            bytes = bytes.saturating_add(allocated);
+        }
+    }
+    Ok(bytes)
+}
+
 fn is_mounted(mountpoint: &Path) -> io::Result<bool> {
     let mounts = fs::read_to_string("/etc/mtab")
         .or_else(|_| fs::read_to_string("/proc/mounts"))
@@ -1105,11 +1284,15 @@ fn parse_gate_args(args: Vec<String>) -> Result<Config, String> {
             "--reads-per-reader" => config.reads_per_reader = parse(&flag, &value)?,
             "--source-delay-ms" => config.source_delay_ms = parse(&flag, &value)?,
             "--artifact" => config.artifact = PathBuf::from(value),
+            "--oracle-probability" => config.oracle_probability = parse(&flag, &value)?,
             _ => return Err(format!("unknown option {flag}")),
         }
     }
     if config.generations < 2 || config.readers == 0 || config.reads_per_reader == 0 {
         return Err("generations must be at least 2 and reader counts must be positive".into());
+    }
+    if !config.oracle_probability.is_finite() || !(0.0..=1.0).contains(&config.oracle_probability) {
+        return Err("--oracle-probability must be between 0 and 1".into());
     }
     Ok(config)
 }
@@ -1232,6 +1415,57 @@ fn json_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gate_probability_parses_and_rejects_out_of_range_values() {
+        assert_eq!(
+            parse_gate_args(vec!["--oracle-probability".into(), "0.25".into()])
+                .unwrap()
+                .oracle_probability,
+            0.25
+        );
+        assert!(parse_gate_args(vec!["--oracle-probability".into(), "1.01".into()]).is_err());
+    }
+
+    #[test]
+    fn parallel_oracle_agrees_and_detects_a_divergent_lane() {
+        let root = temp_root(0x0fac1e);
+        let source = Arc::new(SyntheticSource::new(Duration::ZERO));
+        let content = source.insert("oracle", b"shadow-check".to_vec());
+        let workspace = Workspace::open_with_config(
+            &root.join("workspace"),
+            source,
+            CacheConfig {
+                max_bytes: 1024,
+                ..CacheConfig::default()
+            },
+        )
+        .unwrap();
+        let selected = manifest("oracle", 1, "proof.bin", content, "oracle proof");
+        workspace.apply(selected.clone()).unwrap();
+
+        let mut agreeing = ShadowOracle::spawn(1024, 1, 1.0);
+        assert!(
+            agreeing
+                .successful_apply(&workspace, &selected, true)
+                .unwrap()
+        );
+
+        let mut divergent = ShadowOracle::spawn(1024, 1, 1.0);
+        let phantom = manifest(
+            "phantom",
+            1,
+            "phantom.bin",
+            ContentRef::for_sha256("oracle", b"not-in-real-cache"),
+            "intentional divergence",
+        );
+        assert!(
+            divergent
+                .successful_apply(&workspace, &phantom, true)
+                .is_err()
+        );
+        fs::remove_dir_all(root).ok();
+    }
 
     #[test]
     fn synthetic_objects_are_seeded_and_stable() {

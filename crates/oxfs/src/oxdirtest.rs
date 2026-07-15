@@ -128,6 +128,7 @@ fn run_session(
         source.clone(),
         CacheConfig {
             max_bytes: cache_bytes,
+            ..CacheConfig::default()
         },
     )?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -594,6 +595,7 @@ mod tests {
             source,
             CacheConfig {
                 max_bytes: 1024 * 1024,
+                ..CacheConfig::default()
             },
         )
         .unwrap();
@@ -635,6 +637,7 @@ mod tests {
             source.clone(),
             CacheConfig {
                 max_bytes: 1024 * 1024,
+                ..CacheConfig::default()
             },
         )
         .unwrap();

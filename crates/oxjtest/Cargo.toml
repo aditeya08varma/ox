@@ -1,0 +1,14 @@
+[package]
+name = "oxjtest"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Joint client/server stress and differential oracle for oxFS"
+
+[dependencies]
+oxfs = { path = "../oxfs" }
+cachesim = { path = "../cachesim" }
+ctrlc = "3"
+
+[lints.rust]
+unsafe_code = "forbid"

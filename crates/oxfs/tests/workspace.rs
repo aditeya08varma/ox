@@ -305,7 +305,10 @@ fn failed_replacement_keeps_published_snapshot_backing_resident() {
                 (spare.digest.clone(), spare_bytes),
             ]),
         }),
-        oxfs::CacheConfig { max_bytes: 9 },
+        oxfs::CacheConfig {
+            max_bytes: 9,
+            ..oxfs::CacheConfig::default()
+        },
     )
     .unwrap();
     let selected = |session: &str, generation: u64, path: &str, content: ContentRef| Manifest {
@@ -366,7 +369,10 @@ fn workspace_with(
                 .map(|(r, b)| (r.digest.clone(), b.to_vec()))
                 .collect(),
         }),
-        oxfs::CacheConfig { max_bytes },
+        oxfs::CacheConfig {
+            max_bytes,
+            ..oxfs::CacheConfig::default()
+        },
     )
     .unwrap();
     (root, ws)
@@ -532,7 +538,10 @@ fn ranked_admission_stops_but_keeps_later_resident_content() {
     let ws = Workspace::open_with_config(
         &root,
         Arc::new(MemorySource { objects }),
-        oxfs::CacheConfig { max_bytes: 3 },
+        oxfs::CacheConfig {
+            max_bytes: 3,
+            ..oxfs::CacheConfig::default()
+        },
     )
     .unwrap();
     ws.apply(Manifest {
@@ -617,7 +626,10 @@ fn dropped_content_is_evicted_and_oversize_never_fetches() {
         }),
         // Replacement publication requires room for both the old and new
         // three-byte objects until the namespace swap is complete.
-        oxfs::CacheConfig { max_bytes: 6 },
+        oxfs::CacheConfig {
+            max_bytes: 6,
+            ..oxfs::CacheConfig::default()
+        },
     )
     .unwrap();
     ws.apply(manifest(1)).unwrap();

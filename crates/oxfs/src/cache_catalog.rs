@@ -1,3 +1,4 @@
+use crate::cache_policy::{EvictionOrder, Touch};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::io;
 use std::path::Path;
@@ -21,6 +22,39 @@ pub(crate) struct Gauges {
     pub pending_objects: u64,
 }
 
+/// One resident object as seen by the differential oracle.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResidentRow {
+    pub key: String,
+    pub size: u64,
+    pub access_epoch: u64,
+    pub insert_seq: u64,
+    pub slot: u32,
+}
+
+/// Ground-truth resident+scalar snapshot for the differential oracle.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct CatalogSnapshot {
+    pub resident: Vec<ResidentRow>,
+    pub used_bytes: u64,
+    pub epoch: u64,
+    pub clock_hand: u64,
+    pub policy_values: Vec<(String, u8)>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SlotState {
+    key: Option<String>,
+    reference: bool,
+    frequency: u8,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PolicyState {
+    slots: Vec<SlotState>,
+    clock_hand: u64,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Reservation {
     Resident,
@@ -34,10 +68,13 @@ pub(crate) struct Catalog {
     epoch: u64,
     used_bytes: u64,
     batch_used_start: Option<u64>,
+    order: EvictionOrder,
+    policy: PolicyState,
+    batch_policy_start: Option<PolicyState>,
 }
 
 impl Catalog {
-    pub fn open(path: &Path) -> io::Result<Self> {
+    pub fn open(path: &Path, order: EvictionOrder) -> io::Result<Self> {
         let connection = Connection::open(path).map_err(sql_error)?;
         connection
             .busy_timeout(Duration::from_secs(5))
@@ -60,7 +97,7 @@ impl Catalog {
 				   access_epoch INTEGER NOT NULL,
 				   state INTEGER NOT NULL CHECK (state IN (0, 1, 2))
 				 ) WITHOUT ROWID;
-				 CREATE INDEX IF NOT EXISTS cache_objects_evict
+                 CREATE INDEX IF NOT EXISTS cache_objects_evict
 				   ON cache_objects(state, access_epoch, key);",
             )
             .map_err(sql_error)?;
@@ -96,19 +133,81 @@ impl Catalog {
                 )
                 .map_err(sql_error)?;
         }
-        let (epoch, used_bytes) = connection
+        let object_columns = table_columns(&connection, "cache_objects")?;
+        if !object_columns.iter().any(|column| column == "insert_seq") {
+            connection
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                     ALTER TABLE cache_objects ADD COLUMN insert_seq INTEGER NOT NULL DEFAULT 0;
+                     ALTER TABLE cache_objects ADD COLUMN slot INTEGER NOT NULL DEFAULT 0;
+                     UPDATE cache_objects SET
+                       insert_seq=(SELECT COUNT(*) FROM cache_objects AS earlier
+                         WHERE (earlier.access_epoch, earlier.key) <= (cache_objects.access_epoch, cache_objects.key)),
+                       slot=(SELECT COUNT(*)-1 FROM cache_objects AS earlier
+                         WHERE (earlier.access_epoch, earlier.key) <= (cache_objects.access_epoch, cache_objects.key));
+                     CREATE INDEX cache_objects_clock ON cache_objects(state, insert_seq, key);
+                     ALTER TABLE cache_meta ADD COLUMN next_insert_seq INTEGER NOT NULL DEFAULT 1;
+                     ALTER TABLE cache_meta ADD COLUMN clock_hand INTEGER NOT NULL DEFAULT 0;
+                     UPDATE cache_meta SET next_insert_seq=MAX(1,(SELECT COALESCE(MAX(insert_seq),0)+1 FROM cache_objects));
+                     COMMIT;",
+                )
+                .map_err(sql_error)?;
+        }
+        let (epoch, used_bytes, clock_hand) = connection
             .query_row(
-                "SELECT epoch, used_bytes FROM cache_meta WHERE singleton=1",
+                "SELECT epoch, used_bytes, clock_hand FROM cache_meta WHERE singleton=1",
                 [],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
             )
             .map_err(sql_error)?;
+        let mut policy = PolicyState {
+            clock_hand: from_sql_u64(clock_hand)?,
+            ..PolicyState::default()
+        };
+        {
+            let mut statement = connection
+                .prepare(
+                    "SELECT key, insert_seq, slot FROM cache_objects WHERE state=1 ORDER BY slot",
+                )
+                .map_err(sql_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })
+                .map_err(sql_error)?;
+            for row in rows {
+                let (key, seq, slot) = row.map_err(sql_error)?;
+                let slot = usize::try_from(from_sql_u64(slot)?).map_err(|_| {
+                    io::Error::new(io::ErrorKind::InvalidData, "slot exceeds usize")
+                })?;
+                policy.slots.resize_with(slot + 1, SlotState::default);
+                let _ = from_sql_u64(seq)?;
+                policy.slots[slot] = SlotState {
+                    key: Some(key),
+                    reference: false,
+                    frequency: 0,
+                };
+            }
+        }
         Ok(Self {
             connection,
             in_batch: false,
             epoch: from_sql_u64(epoch)?,
             used_bytes: from_sql_u64(used_bytes)?,
             batch_used_start: None,
+            order,
+            policy,
+            batch_policy_start: None,
         })
     }
 
@@ -121,6 +220,7 @@ impl Catalog {
             .map_err(sql_error)?;
         self.in_batch = true;
         self.batch_used_start = Some(self.used_bytes);
+        self.batch_policy_start = Some(self.policy.clone());
         self.epoch = self.epoch.saturating_add(1);
         let result = self
             .connection
@@ -146,6 +246,7 @@ impl Catalog {
         self.connection.execute_batch("COMMIT").map_err(sql_error)?;
         self.in_batch = false;
         self.batch_used_start = None;
+        self.batch_policy_start = None;
         Ok(started.elapsed().as_micros())
     }
 
@@ -156,6 +257,7 @@ impl Catalog {
                 .map_err(sql_error)?;
             self.in_batch = false;
             self.used_bytes = self.batch_used_start.take().unwrap_or(self.used_bytes);
+            self.policy = self.batch_policy_start.take().unwrap_or_default();
         }
         Ok(())
     }
@@ -173,6 +275,35 @@ impl Catalog {
             .map_err(sql_error)
     }
 
+    pub fn touch(&mut self, key: &str) -> io::Result<()> {
+        if self.order.touch() == Touch::None {
+            return Ok(());
+        }
+        let slot = self
+            .connection
+            .query_row(
+                "SELECT slot FROM cache_objects WHERE key=?1 AND state=1",
+                params![key],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(sql_error)?;
+        let Some(slot) = slot else {
+            return Ok(());
+        };
+        let slot = usize::try_from(from_sql_u64(slot)?)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "slot exceeds usize"))?;
+        let Some(state) = self.policy.slots.get_mut(slot) else {
+            return Ok(());
+        };
+        match self.order.touch() {
+            Touch::None => {}
+            Touch::SetRefBit => state.reference = true,
+            Touch::BumpFrequency => state.frequency = state.frequency.saturating_add(1),
+        }
+        Ok(())
+    }
+
     pub fn reserve(
         &mut self,
         key: &str,
@@ -182,35 +313,38 @@ impl Catalog {
         let existing = self
             .connection
             .query_row(
-                "SELECT state, size, access_epoch FROM cache_objects WHERE key=?1",
+                "SELECT state, size, access_epoch, insert_seq, slot FROM cache_objects WHERE key=?1",
                 params![key],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
                     ))
                 },
             )
             .optional()
             .map_err(sql_error)?;
-        if existing.is_some_and(|(state, stored_size, _)| {
+        if existing.is_some_and(|(state, stored_size, _, _, _)| {
             state == STATE_RESIDENT && stored_size == i64::try_from(size).unwrap_or(-1)
         }) {
             return Ok((Reservation::Resident, Vec::new()));
         }
-        if existing.is_some_and(|(state, stored_size, _)| {
+        if existing.is_some_and(|(state, stored_size, _, _, _)| {
             state == STATE_PENDING && stored_size == i64::try_from(size).unwrap_or(-1)
         }) {
             return Ok((Reservation::Pending, Vec::new()));
         }
 
-        let mut was_evicted = existing.is_some_and(|(state, _, _)| state == STATE_EVICTED);
-        let clear_existing =
-            existing.is_some_and(|(state, _, _)| matches!(state, STATE_PENDING | STATE_RESIDENT));
+        let policy_before = self.policy.clone();
+        let mut was_evicted = existing.is_some_and(|(state, _, _, _, _)| state == STATE_EVICTED);
+        let clear_existing = existing
+            .is_some_and(|(state, _, _, _, _)| matches!(state, STATE_PENDING | STATE_RESIDENT));
         let mut planned_used = self.used_bytes;
         let mut victims = Vec::new();
-        if let Some((state, stored_size, access)) = existing
+        if let Some((state, stored_size, access, _, slot)) = existing
             && matches!(state, STATE_PENDING | STATE_RESIDENT)
         {
             let stored_size = from_sql_u64(stored_size)?;
@@ -222,41 +356,60 @@ impl Catalog {
                     size: stored_size,
                     access: from_sql_u64(access)?,
                 });
+                self.clear_slot(from_sql_u64(slot)?)?;
             }
         }
         if planned_used > capacity.saturating_sub(size) {
-            let mut statement = self
-                .connection
-                .prepare_cached(
-                    "SELECT key, size, access_epoch FROM cache_objects
-					 WHERE state=1 AND key<>?1
-					 ORDER BY access_epoch, key",
-                )
-                .map_err(sql_error)?;
+            let sql = match self.order {
+                EvictionOrder::LeastRecentlySelectedGeneration => {
+                    "SELECT key,size,access_epoch,insert_seq,slot FROM cache_objects WHERE state=1 AND key<>?1 ORDER BY access_epoch,key"
+                }
+                _ => {
+                    "SELECT key,size,access_epoch,insert_seq,slot FROM cache_objects WHERE state=1 AND key<>?1 ORDER BY insert_seq,key"
+                }
+            };
+            let mut statement = self.connection.prepare(sql).map_err(sql_error)?;
             let rows = statement
                 .query_map(params![key], |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
                     ))
                 })
                 .map_err(sql_error)?;
+            let mut candidates = Vec::new();
             for row in rows {
-                let (victim_key, victim_size, access) = row.map_err(sql_error)?;
-                let victim_size = from_sql_u64(victim_size)?;
+                let (victim_key, victim_size, access, seq, slot) = row.map_err(sql_error)?;
+                candidates.push((
+                    victim_key,
+                    from_sql_u64(victim_size)?,
+                    from_sql_u64(access)?,
+                    from_sql_u64(seq)?,
+                    from_sql_u64(slot)?,
+                ));
+            }
+            drop(statement);
+            for (victim_key, victim_size, access, seq, slot) in self.policy_order(candidates) {
                 planned_used = planned_used.saturating_sub(victim_size);
                 victims.push(Victim {
                     key: victim_key,
                     size: victim_size,
-                    access: from_sql_u64(access)?,
+                    access,
                 });
+                if self.order == EvictionOrder::ClockSecondChance {
+                    self.policy.clock_hand = seq.saturating_add(1);
+                }
+                self.clear_slot(slot)?;
                 if planned_used <= capacity.saturating_sub(size) {
                     break;
                 }
             }
         }
         if planned_used > capacity.saturating_sub(size) {
+            self.policy = policy_before;
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
                 "cache limit reached",
@@ -280,15 +433,24 @@ impl Catalog {
                 .map_err(sql_error)?;
         }
         self.used_bytes = planned_used;
+        let (insert_seq, slot) = self.allocate_slot(key)?;
         self.connection
             .execute(
-                "INSERT INTO cache_objects(key,size,access_epoch,state)
-				 VALUES(?1,?2,?3,0)
+                "INSERT INTO cache_objects(key,size,access_epoch,state,insert_seq,slot)
+				 VALUES(?1,?2,?3,0,?4,?5)
 				 ON CONFLICT(key) DO UPDATE SET
 				   size=excluded.size,
 				   access_epoch=excluded.access_epoch,
+				   insert_seq=excluded.insert_seq,
+				   slot=excluded.slot,
 				   state=0",
-                params![key, to_sql_i64(size)?, to_sql_i64(self.epoch)?],
+                params![
+                    key,
+                    to_sql_i64(size)?,
+                    to_sql_i64(self.epoch)?,
+                    to_sql_i64(insert_seq)?,
+                    to_sql_i64(slot)?
+                ],
             )
             .map_err(sql_error)?;
         self.used_bytes = self.used_bytes.saturating_add(size);
@@ -301,6 +463,85 @@ impl Catalog {
             },
             victims,
         ))
+    }
+
+    fn policy_order(
+        &mut self,
+        mut rows: Vec<(String, u64, u64, u64, u64)>,
+    ) -> Vec<(String, u64, u64, u64, u64)> {
+        match self.order {
+            EvictionOrder::LeastRecentlySelectedGeneration => rows,
+            EvictionOrder::ClockSecondChance => {
+                rows.sort_by_key(|row| (row.3 < self.policy.clock_hand, row.3, row.0.clone()));
+                let mut cold = Vec::new();
+                let mut hot = Vec::new();
+                for row in rows {
+                    self.policy
+                        .slots
+                        .resize_with(row.4 as usize + 1, SlotState::default);
+                    let state = &mut self.policy.slots[row.4 as usize];
+                    if state.reference {
+                        state.reference = false;
+                        hot.push(row);
+                    } else {
+                        cold.push(row);
+                    }
+                }
+                cold.extend(hot);
+                cold
+            }
+            EvictionOrder::ApproxLeastFrequentlyUsed => {
+                rows.sort_by_key(|row| {
+                    let frequency = self
+                        .policy
+                        .slots
+                        .get(row.4 as usize)
+                        .map_or(0, |state| state.frequency);
+                    (frequency, row.3, row.0.clone())
+                });
+                rows
+            }
+        }
+    }
+
+    fn clear_slot(&mut self, slot: u64) -> io::Result<()> {
+        let slot = usize::try_from(slot)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "slot exceeds usize"))?;
+        if let Some(state) = self.policy.slots.get_mut(slot) {
+            *state = SlotState::default();
+        }
+        Ok(())
+    }
+
+    fn allocate_slot(&mut self, key: &str) -> io::Result<(u64, u64)> {
+        let next = self
+            .connection
+            .query_row(
+                "SELECT next_insert_seq FROM cache_meta WHERE singleton=1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(sql_error)
+            .and_then(from_sql_u64)?;
+        self.connection
+            .execute(
+                "UPDATE cache_meta SET next_insert_seq=?1 WHERE singleton=1",
+                params![to_sql_i64(next.saturating_add(1))?],
+            )
+            .map_err(sql_error)?;
+        let slot = self
+            .policy
+            .slots
+            .iter()
+            .position(|state| state.key.is_none())
+            .unwrap_or(self.policy.slots.len());
+        self.policy.slots.resize_with(slot + 1, SlotState::default);
+        self.policy.slots[slot] = SlotState {
+            key: Some(key.to_owned()),
+            reference: false,
+            frequency: 0,
+        };
+        Ok((next, slot as u64))
     }
 
     pub fn finish(&mut self, key: &str, size: u64) -> io::Result<()> {
@@ -335,6 +576,18 @@ impl Catalog {
             )
             .map_err(sql_error)?;
         if let Some(size) = released {
+            if let Some(slot) = self
+                .connection
+                .query_row(
+                    "SELECT slot FROM cache_objects WHERE key=?1",
+                    params![key],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(sql_error)?
+            {
+                self.clear_slot(from_sql_u64(slot)?)?;
+            }
             self.used_bytes = self.used_bytes.saturating_sub(from_sql_u64(size)?);
             self.persist_used_if_autocommit()?;
         }
@@ -358,6 +611,18 @@ impl Catalog {
             )
             .map_err(sql_error)?;
         if let Some(size) = missing {
+            if let Some(slot) = self
+                .connection
+                .query_row(
+                    "SELECT slot FROM cache_objects WHERE key=?1",
+                    params![key],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(sql_error)?
+            {
+                self.clear_slot(from_sql_u64(slot)?)?;
+            }
             self.used_bytes = self.used_bytes.saturating_sub(from_sql_u64(size)?);
             self.persist_used_if_autocommit()?;
         }
@@ -365,12 +630,32 @@ impl Catalog {
     }
 
     pub fn import_resident(&mut self, key: &str, size: u64, access: u64) -> io::Result<()> {
+        if self
+            .connection
+            .query_row(
+                "SELECT 1 FROM cache_objects WHERE key=?1",
+                params![key],
+                |_| Ok(()),
+            )
+            .optional()
+            .map_err(sql_error)?
+            .is_some()
+        {
+            return Ok(());
+        }
+        let (insert_seq, slot) = self.allocate_slot(key)?;
         let inserted = self
             .connection
             .execute(
-                "INSERT OR IGNORE INTO cache_objects(key,size,access_epoch,state)
-				 VALUES(?1,?2,?3,1)",
-                params![key, to_sql_i64(size)?, to_sql_i64(access)?],
+                "INSERT OR IGNORE INTO cache_objects(key,size,access_epoch,state,insert_seq,slot)
+				 VALUES(?1,?2,?3,1,?4,?5)",
+                params![
+                    key,
+                    to_sql_i64(size)?,
+                    to_sql_i64(access)?,
+                    to_sql_i64(insert_seq)?,
+                    to_sql_i64(slot)?
+                ],
             )
             .map_err(sql_error)?;
         if inserted == 1 {
@@ -395,6 +680,74 @@ impl Catalog {
             .query_map([], |row| row.get::<_, String>(0))
             .map_err(sql_error)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
+    }
+
+    /// Resident (state=1) keys in deterministic key order. Introspection/oracle
+    /// accessor — an O(rows) scan, never called on the hot path. Mirrors
+    /// `pending_keys`. See docs/eviction-policy-design-1.1.md §6.
+    pub fn resident_keys(&self) -> io::Result<Vec<String>> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT key FROM cache_objects WHERE state=1 ORDER BY key")
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(sql_error)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(sql_error)
+    }
+
+    /// Full resident+scalar snapshot for the differential oracle: resident
+    /// `(key, size, access_epoch)` rows in key order plus `used_bytes` and
+    /// `epoch`. O(rows); test/introspection only.
+    pub fn snapshot_state(&self) -> io::Result<CatalogSnapshot> {
+        let mut statement = self
+            .connection
+            .prepare("SELECT key,size,access_epoch,insert_seq,slot FROM cache_objects WHERE state=1 ORDER BY key")
+            .map_err(sql_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(sql_error)?;
+        let mut resident = Vec::new();
+        for row in rows {
+            let (key, size, access_epoch, insert_seq, slot) = row.map_err(sql_error)?;
+            resident.push(ResidentRow {
+                key,
+                size: from_sql_u64(size)?,
+                access_epoch: from_sql_u64(access_epoch)?,
+                insert_seq: from_sql_u64(insert_seq)?,
+                slot: u32::try_from(from_sql_u64(slot)?)
+                    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "slot exceeds u32"))?,
+            });
+        }
+        let policy_values =
+            resident
+                .iter()
+                .map(|row| {
+                    let value = self.policy.slots.get(row.slot as usize).map_or(0, |state| {
+                        match self.order {
+                            EvictionOrder::ClockSecondChance => u8::from(state.reference),
+                            EvictionOrder::ApproxLeastFrequentlyUsed => state.frequency,
+                            EvictionOrder::LeastRecentlySelectedGeneration => 0,
+                        }
+                    });
+                    (row.key.clone(), value)
+                })
+                .collect();
+        Ok(CatalogSnapshot {
+            resident,
+            used_bytes: self.used_bytes,
+            epoch: self.epoch,
+            clock_hand: self.policy.clock_hand,
+            policy_values,
+        })
     }
 
     pub fn clear_pending(&mut self) -> io::Result<()> {
@@ -453,8 +806,11 @@ impl Catalog {
     fn persist_used_bytes(&self) -> io::Result<()> {
         self.connection
             .execute(
-                "UPDATE cache_meta SET used_bytes=?1 WHERE singleton=1",
-                params![to_sql_i64(self.used_bytes)?],
+                "UPDATE cache_meta SET used_bytes=?1,clock_hand=?2 WHERE singleton=1",
+                params![
+                    to_sql_i64(self.used_bytes)?,
+                    to_sql_i64(self.policy.clock_hand)?
+                ],
             )
             .map_err(sql_error)?;
         Ok(())
@@ -464,6 +820,17 @@ impl Catalog {
 fn to_sql_i64(value: u64) -> io::Result<i64> {
     i64::try_from(value)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "value exceeds SQLite INTEGER"))
+}
+
+fn table_columns(connection: &Connection, table: &str) -> io::Result<Vec<String>> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(sql_error)?;
+    statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(sql_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sql_error)
 }
 
 fn from_sql_u64(value: i64) -> io::Result<u64> {
@@ -492,7 +859,8 @@ mod tests {
                 .as_nanos()
         ));
         fs::create_dir_all(&root).unwrap();
-        let mut catalog = Catalog::open(&root.join("catalog.sqlite")).unwrap();
+        let mut catalog =
+            Catalog::open(&root.join("catalog.sqlite"), EvictionOrder::default()).unwrap();
         catalog.import_resident("victim", 4, 1).unwrap();
         catalog.begin_batch().unwrap();
         catalog.reserve("inflight", 6, 10).unwrap();
@@ -544,7 +912,7 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let catalog = Catalog::open(&path).unwrap();
+        let catalog = Catalog::open(&path, EvictionOrder::default()).unwrap();
         assert_eq!(catalog.gauges().unwrap().resident_bytes, 4);
         let columns: Vec<String> = catalog
             .connection
@@ -557,5 +925,38 @@ mod tests {
         assert!(!columns.iter().any(|column| column == "pin_epoch"));
         drop(catalog);
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn use_based_policies_protect_a_touched_resident() {
+        for order in [
+            EvictionOrder::ClockSecondChance,
+            EvictionOrder::ApproxLeastFrequentlyUsed,
+        ] {
+            let root = std::env::temp_dir().join(format!(
+                "oxfs-catalog-policy-{order:?}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            fs::create_dir_all(&root).unwrap();
+            let mut catalog = Catalog::open(&root.join("catalog.sqlite"), order).unwrap();
+            catalog.import_resident("a", 4, 1).unwrap();
+            catalog.import_resident("b", 4, 1).unwrap();
+            catalog.touch("a").unwrap();
+
+            let (_, victims) = catalog.reserve("c", 4, 8).unwrap();
+            assert_eq!(
+                victims
+                    .iter()
+                    .map(|victim| victim.key.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["b"]
+            );
+            assert!(catalog.is_resident("a", 4).unwrap());
+            fs::remove_dir_all(root).ok();
+        }
     }
 }

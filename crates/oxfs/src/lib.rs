@@ -6,6 +6,7 @@
 
 pub mod cache;
 mod cache_catalog;
+mod cache_policy;
 pub mod content;
 pub mod inode;
 pub mod manifest;
@@ -19,6 +20,8 @@ mod sha256;
 pub mod workspace;
 
 pub use cache::{CacheConfig, CacheTelemetrySnapshot, DEFAULT_CACHE_MAX_BYTES};
+pub use cache_catalog::{CatalogSnapshot, ResidentRow};
+pub use cache_policy::EvictionOrder;
 pub use content::{ContentRef, ContentSource, FetchError};
 pub use manifest::{Manifest, ManifestEntry};
 pub use workspace::{ApplyOutcome, OpenFile, Workspace, WorkspaceError};

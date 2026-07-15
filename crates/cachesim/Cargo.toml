@@ -1,0 +1,18 @@
+# cachesim — pure in-memory reference model + policy lab for the oxfs cache.
+#
+# It depends on `oxfs` for the shared spec vocabulary (EvictionOrder, ContentRef)
+# but `oxfs` MUST NOT depend on `cachesim`. That dependency-graph isolation — not
+# a feature flag — is what keeps the model out of the shipped `oxfsd` binary.
+# Verify with: cargo tree -p oxfs --bin oxfsd  (must contain no `cachesim`).
+[package]
+name = "cachesim"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Reference cache model and differential oracle for oxfs (test/dev only)"
+
+[dependencies]
+oxfs = { path = "../oxfs" }
+
+[lints.rust]
+unsafe_code = "forbid"
