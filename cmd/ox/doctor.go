@@ -163,7 +163,11 @@ common issues, or --fix-slug to target specific checks.`,
 
 		gitRoot := findGitRoot()
 
-		// trigger daemon health checks (anti-entropy, etc.) if daemon is running
+		// ensure daemon is running so anti-entropy detection can execute.
+		// like ox sync, we rely on the daemon for background health checks.
+		_ = autoStartDaemon()
+
+		// trigger daemon health checks (anti-entropy, etc.)
 		// runs in background goroutine to not block CLI
 		if daemon.IsRunning() {
 			go func() {
