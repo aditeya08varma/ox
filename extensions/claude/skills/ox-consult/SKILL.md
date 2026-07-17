@@ -26,8 +26,9 @@ The user's message carries a consult cue — STOP and search before reasoning:
 - References recent or specific work: "I just pushed...", "this request", "did X fix Y?", "is the alert gone now?"
 - Touches a prior decision, a prod anomaly, or a metric/cost change — anything with a before/after.
 
-## Route the cue (different retrieval modes — not interchangeable)
+## Route the cue
 
-- Recency / "I just did X" → `ox session list --limit 20 --json` (chronological; the summary is in the list).
-- Conceptual / "did we decide or discuss X?" → `ox query "<question>"` (semantic; add `--source=all` to include code).
-- "Who or what touched this code?" → `ox code search "<pattern>"`.
+The authoritative cue→corpus routing (recency vs conceptual vs code-provenance, with the
+exact commands) lives in the `<consult-first>` block of your `ox agent prime` output —
+follow it from there rather than from this file. If it is not in context (session not
+primed), run `ox agent prime` first, then route.
