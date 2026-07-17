@@ -182,9 +182,12 @@ the contract:
 # For now: no-op copy.
 ```
 
-Implement inline: copy `raw.jsonl` from cache → `/tmp/ox-optimized-
-<session>.jsonl` unchanged. Log: "token_optimize: no-op pass-through (N
-bytes in / N bytes out)".
+Implement inline: create a private per-run scratch dir via `mktemp -d` and
+copy `raw.jsonl` from cache → `$scratch/optimized-<session>.jsonl` unchanged.
+Never use a fixed shared path like `/tmp/ox-optimized-<session>.jsonl` —
+concurrent reviews of the same session would race on it (same rule as the
+no-shared-path warning in Step 4e). Remove the scratch dir when the review
+ends. Log: "token_optimize: no-op pass-through (N bytes in / N bytes out)".
 
 **Step 4c — Chunked Full-Session Analysis.**
 
@@ -253,9 +256,14 @@ Generate them when the session has material worth capturing:
   tripped the session, and followups other coworkers should inherit.
   Skip only if no reusable knowledge.
 
-If invoking a headless LLM (Claude Code in `-p` mode), pass
-`--permission-mode bypassPermissions`. Without it the LLM hangs waiting
-for a tool-permission prompt that no one will answer.
+If invoking a headless LLM (Claude Code in `-p` mode), it must never hang
+on a tool-permission prompt no one will answer — but session content is
+untrusted input, so do NOT grant blanket permissions on the host. Run it
+with tools disabled or a read-only allowlist (e.g. `--allowedTools ""`, or
+`--allowedTools "Read"` if it must re-read chunk files); the summarize
+prompts need nothing else. Use `--permission-mode bypassPermissions` ONLY
+when the process runs inside an isolated sandbox/container — never
+unsandboxed.
 
 **Step 4e — Push.**
 1. Pipe the synthesized JSON to push-summary via stdin. Do NOT write to `/tmp/` or any shared path — multiple agents may run concurrently on the same machine and race on shared filenames; macOS tmpfs GC can also reap the file between write and read.

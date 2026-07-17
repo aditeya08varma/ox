@@ -167,14 +167,20 @@ common issues, or --fix-slug to target specific checks.`,
 		// like ox sync, we rely on the daemon for background health checks.
 		_ = autoStartDaemon()
 
-		// trigger daemon health checks (anti-entropy, etc.)
-		// runs in background goroutine to not block CLI
-		if daemon.IsRunning() {
-			go func() {
-				client := daemon.NewClientForCurrentRepo()
-				_, _ = client.Doctor()
-			}()
-		}
+		// trigger daemon health checks (anti-entropy, etc.) in a background
+		// goroutine to not block CLI. on a fresh auto-start the IPC socket
+		// comes up asynchronously, so poll briefly for readiness instead of
+		// silently skipping the pass.
+		go func() {
+			for range 20 {
+				if daemon.IsRunning() {
+					client := daemon.NewClientForCurrentRepo()
+					_, _ = client.Doctor()
+					return
+				}
+				time.Sleep(150 * time.Millisecond)
+			}
+		}()
 
 		// determine endpoint for this context
 		projectEndpoint := endpoint.GetForProject(gitRoot)
