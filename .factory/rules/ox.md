@@ -1,7 +1,7 @@
 ---
 description: SageOx behavioral guidance for AI coworkers
 ---
-<!-- agentx-hash: 898b8cbf7f9c ver: 0.7.2 -->
+<!-- agentx-hash: 28b4db70eda3 ver: 0.11.1 -->
 # SageOx Rules
 
 This project uses [SageOx](https://sageox.ai) for team context and session recording.
