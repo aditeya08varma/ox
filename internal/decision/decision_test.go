@@ -200,6 +200,38 @@ func TestCorpusDetected(t *testing.T) {
 	}
 }
 
+func TestInvalidConfiguredPathsIgnored(t *testing.T) {
+	root := t.TempDir()
+	cfg := &config.DecisionConfig{Paths: []string{"../outside/**/*.md"}}
+	if got := LoadCorpus(root, cfg); len(got) != 0 {
+		t.Fatalf("invalid configured path should not load corpus: %+v", got)
+	}
+	if got := SearchPathPatterns(root); len(got) != 0 {
+		t.Fatalf("empty repo search patterns: %+v", got)
+	}
+
+	cfgDir := filepath.Join(root, ".sageox")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), []byte(`{
+  "config_version": "2",
+  "update_frequency_hours": 24,
+  "decision": {"paths": ["../outside/**/*.md"]}
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if CorpusDetected(root) {
+		t.Error("invalid configured path should not count as a detected corpus")
+	}
+	if PathMatcher(root)("outside/ADR-001-x.md") {
+		t.Error("invalid configured path should not match code-search results")
+	}
+	if got := SearchPathPatterns(root); len(got) != 0 {
+		t.Fatalf("invalid configured path should not produce search patterns: %+v", got)
+	}
+}
+
 // PathMatcher powers the `ox code search --decisions` filter and the
 // doc_type:"decision" result tag — a wrong match either hides DRs from the
 // filter or mislabels code as a decision.
@@ -232,6 +264,17 @@ func TestPathMatcher(t *testing.T) {
 	}
 	if PathMatcher("")("docs/adr/x.md") {
 		t.Error("empty root should match nothing")
+	}
+}
+
+func TestSearchPathPatterns(t *testing.T) {
+	root := t.TempDir()
+	writeCorpus(t, root, map[string]string{
+		"docs/adr/ADR-001-x.md": "# ADR-001: X\n**Status**: Accepted\n",
+	})
+	got := SearchPathPatterns(root)
+	if len(got) != 1 || got[0] != "docs/adr/*.md" {
+		t.Fatalf("default dir search patterns: %v", got)
 	}
 }
 

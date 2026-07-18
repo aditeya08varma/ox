@@ -74,6 +74,24 @@ func TestTranslateCodeWithFilters(t *testing.T) {
 	}
 }
 
+func TestTranslateCodeWithInternalFileRestriction(t *testing.T) {
+	q := mustParse(t, "count:7 foo")
+	q.RestrictFiles([]string{"docs/adr/*.md", "docs/decisions/*.md"})
+	tq, err := Translate(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(tq.SQL, "(lower(fr.path) GLOB ?") || !strings.Contains(tq.SQL, " OR lower(fr.path) GLOB ?") {
+		t.Errorf("sql missing internal file restriction OR: %s", tq.SQL)
+	}
+	if !strings.Contains(tq.SQL, "LIMIT 7") {
+		t.Errorf("sql missing query limit: %s", tq.SQL)
+	}
+	if !hasParam(tq.Params, "docs/adr/*.md") || !hasParam(tq.Params, "docs/decisions/*.md") {
+		t.Errorf("missing file restriction params: %v", tq.Params)
+	}
+}
+
 func TestTranslateCodeNegFile(t *testing.T) {
 	tq := mustTranslate(t, "-file:test foo")
 	if !strings.Contains(tq.SQL, "NOT") {

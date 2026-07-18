@@ -143,6 +143,21 @@ func addFileFilter(p *paramCollector, conditions *[]string, file, negFile, col s
 	}
 }
 
+func addFileAnyFilter(p *paramCollector, conditions *[]string, patterns []string, col string) {
+	var clauses []string
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		clauses = append(clauses, patternMatchClause(col, pattern, p))
+	}
+	if len(clauses) == 0 {
+		return
+	}
+	*conditions = append(*conditions, "AND ("+strings.Join(clauses, " OR ")+")")
+}
+
 // addLangFilter appends language conditions.
 func addLangFilter(p *paramCollector, conditions *[]string, lang, negLang string) {
 	if lang != "" {
@@ -244,6 +259,7 @@ func translateCode(query *ParsedQuery) (*TranslatedQuery, error) {
 
 	addRepoFilter(p, &joins, &conditions, f.Repo, f.NegRepo, "r.repo_id")
 	addFileFilter(p, &conditions, f.File, f.NegFile, "fr.path")
+	addFileAnyFilter(p, &conditions, f.fileAny, "fr.path")
 	addLangFilter(p, &conditions, f.Lang, f.NegLang)
 	addRevFilter(p, &conditions, f.Rev)
 
@@ -316,6 +332,7 @@ func translateDiff(query *ParsedQuery) (*TranslatedQuery, error) {
 
 	addRepoFilter(p, &joins, &conditions, f.Repo, f.NegRepo, "c.repo_id")
 	addFileFilter(p, &conditions, f.File, f.NegFile, "d.path")
+	addFileAnyFilter(p, &conditions, f.fileAny, "d.path")
 	addAuthorFilter(p, &conditions, f.Author, f.NegAuthor)
 	addTimeFilter(p, &conditions, f.Before, f.After)
 
@@ -413,6 +430,7 @@ func translateSymbol(query *ParsedQuery) (*TranslatedQuery, error) {
 	}
 	addRepoFilter(p, &joins, &conditions, f.Repo, f.NegRepo, "r.repo_id")
 	addFileFilter(p, &conditions, f.File, f.NegFile, "fr.path")
+	addFileAnyFilter(p, &conditions, f.fileAny, "fr.path")
 	addLangFilter(p, &conditions, f.Lang, f.NegLang)
 	if f.Select == SelectSymbolKind {
 		ph := p.add(f.SelectKind)
@@ -466,6 +484,7 @@ func translateComment(query *ParsedQuery) (*TranslatedQuery, error) {
 
 	addRepoFilter(p, &joins, &conditions, f.Repo, f.NegRepo, "r.repo_id")
 	addFileFilter(p, &conditions, f.File, f.NegFile, "fr.path")
+	addFileAnyFilter(p, &conditions, f.fileAny, "fr.path")
 	addLangFilter(p, &conditions, f.Lang, f.NegLang)
 	addRevFilter(p, &conditions, f.Rev)
 
@@ -523,6 +542,7 @@ func translateCallers(query *ParsedQuery) (*TranslatedQuery, error) {
 
 	addRepoFilter(p, &joins, &conditions, f.Repo, f.NegRepo, "r.repo_id")
 	addFileFilter(p, &conditions, f.File, f.NegFile, "fr.path")
+	addFileAnyFilter(p, &conditions, f.fileAny, "fr.path")
 	addLangFilter(p, &conditions, f.Lang, f.NegLang)
 	addRevFilter(p, &conditions, f.Rev)
 
@@ -612,6 +632,7 @@ func translateCallees(query *ParsedQuery) (*TranslatedQuery, error) {
 
 	addRepoFilter(p, &joins, &conditions, f.Repo, f.NegRepo, "r.repo_id")
 	addFileFilter(p, &conditions, f.File, f.NegFile, "fr.path")
+	addFileAnyFilter(p, &conditions, f.fileAny, "fr.path")
 	addLangFilter(p, &conditions, f.Lang, f.NegLang)
 	addRevFilter(p, &conditions, f.Rev)
 

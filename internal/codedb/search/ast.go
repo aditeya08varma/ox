@@ -51,6 +51,7 @@ type Filters struct {
 	NegRepo     string
 	File        string
 	NegFile     string
+	fileAny     []string
 	Lang        string
 	NegLang     string
 	Rev         string
@@ -103,6 +104,16 @@ func (q *ParsedQuery) HasEmptyPattern() bool {
 		}
 	}
 	return true
+}
+
+// RestrictFiles adds an internal file-path OR filter. It is intentionally not
+// parsed from query text; callers use it for UI flags that need pre-limit
+// filtering without extending the public query syntax.
+func (q *ParsedQuery) RestrictFiles(patterns []string) {
+	if q == nil {
+		return
+	}
+	q.Filters.fileAny = append([]string(nil), patterns...)
 }
 
 // TranslatedQuery is SQL ready for execution with bound parameters.

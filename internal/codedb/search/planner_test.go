@@ -70,6 +70,21 @@ func TestPlanCodeWithFileFilter(t *testing.T) {
 	}
 }
 
+func TestPlanCodeWithInternalFileRestriction(t *testing.T) {
+	q := &ParsedQuery{
+		SearchTerms: []string{"baz"},
+		Type:        SearchTypeCode,
+	}
+	q.RestrictFiles([]string{"docs/adr/*.md"})
+	plan, err := Plan(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Strategy != JoinIntersect {
+		t.Errorf("strategy = %v, want Intersect", plan.Strategy)
+	}
+}
+
 func TestPlanCodeWithNegFilters(t *testing.T) {
 	q := &ParsedQuery{
 		SearchTerms: []string{"baz"},

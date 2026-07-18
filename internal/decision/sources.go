@@ -19,7 +19,17 @@ func resolvePaths(gitRoot string, cfg *config.DecisionConfig) []string {
 		return nil
 	}
 	if !cfg.IsEmpty() {
-		return cfg.Paths
+		if err := config.ValidateDecisionConfig(cfg); err != nil {
+			slog.Debug("decision: invalid decision config ignored", "error", err)
+			return nil
+		}
+		var paths []string
+		for _, p := range cfg.Paths {
+			if p = strings.TrimSpace(p); p != "" {
+				paths = append(paths, p)
+			}
+		}
+		return paths
 	}
 	return existingDefaultDirs(gitRoot)
 }
@@ -42,7 +52,7 @@ func CorpusDetected(gitRoot string) bool {
 	}
 	cfg, _ := config.LoadProjectConfig(gitRoot)
 	if cfg != nil && !cfg.Decision.IsEmpty() {
-		return true
+		return len(resolvePaths(gitRoot, cfg.Decision)) > 0
 	}
 	return len(existingDefaultDirs(gitRoot)) > 0
 }
@@ -175,6 +185,29 @@ func PathMatcher(gitRoot string) func(relPath string) bool {
 		}
 		return false
 	}
+}
+
+// SearchPathPatterns returns repo-relative file patterns suitable for CodeDB's
+// file filter. Directory entries become recursive markdown globs; explicit
+// globs are passed through and checked precisely by PathMatcher after search.
+func SearchPathPatterns(gitRoot string) []string {
+	var cfg *config.DecisionConfig
+	if pc, _ := config.LoadProjectConfig(gitRoot); pc != nil {
+		cfg = pc.Decision
+	}
+	var patterns []string
+	for _, p := range resolvePaths(gitRoot, cfg) {
+		p = filepath.ToSlash(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(gitRoot, p)); err == nil && fi.IsDir() {
+			patterns = append(patterns, strings.TrimSuffix(p, "/")+"/*.md")
+			continue
+		}
+		patterns = append(patterns, p)
+	}
+	return patterns
 }
 
 // PrimaryDir returns the corpus dir new DRs should land in: the first

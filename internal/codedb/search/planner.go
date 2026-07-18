@@ -112,6 +112,7 @@ func planCodeSearch(query *ParsedQuery) (*ExecutionPlan, error) {
 	// Determine if we need SQL metadata filtering
 	hasMetadataFilters := query.Filters.Repo != "" || query.Filters.NegRepo != "" ||
 		query.Filters.File != "" || query.Filters.NegFile != "" ||
+		len(query.Filters.fileAny) > 0 ||
 		query.Filters.Lang != "" || query.Filters.NegLang != "" ||
 		query.Filters.Rev != "" ||
 		query.Filters.Select != SelectNone
@@ -154,6 +155,7 @@ func planDiffSearch(query *ParsedQuery) (*ExecutionPlan, error) {
 
 	hasMetadataFilters := query.Filters.Repo != "" || query.Filters.NegRepo != "" ||
 		query.Filters.File != "" || query.Filters.NegFile != "" ||
+		len(query.Filters.fileAny) > 0 ||
 		query.Filters.Author != "" || query.Filters.NegAuthor != "" ||
 		query.Filters.Before != "" || query.Filters.After != "" ||
 		query.Filters.Select != SelectNone
@@ -196,6 +198,7 @@ func planCommentSearch(query *ParsedQuery) (*ExecutionPlan, error) {
 
 	hasMetadataFilters := query.Filters.Repo != "" || query.Filters.NegRepo != "" ||
 		query.Filters.File != "" || query.Filters.NegFile != "" ||
+		len(query.Filters.fileAny) > 0 ||
 		query.Filters.Lang != "" || query.Filters.NegLang != "" ||
 		query.Filters.Rev != "" ||
 		query.Filters.CommentKind != ""

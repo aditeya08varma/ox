@@ -127,9 +127,30 @@ var codeSearchCmd = &cobra.Command{
 			slog.Debug("attached dirty overlays", "count", n)
 		}
 
-		results, err := db.Search(context.Background(), query)
+		decisionsOnly, _ := cmd.Flags().GetBool("decisions")
+		isDecision := decision.PathMatcher(root)
+		var results []search.Result
+		if decisionsOnly {
+			patterns := decision.SearchPathPatterns(root)
+			if len(patterns) > 0 {
+				results, err = db.SearchRestrictedFiles(context.Background(), query, patterns)
+			}
+		} else {
+			results, err = db.Search(context.Background(), query)
+		}
 		if err != nil {
 			return fmt.Errorf("search: %w", err)
+		}
+		if decisionsOnly {
+			// Keep the exact corpus predicate as a precision guard for configured
+			// doublestar globs; the DB filter above is the pre-limit recall gate.
+			filtered := results[:0]
+			for _, r := range results {
+				if isDecision(r.FilePath) {
+					filtered = append(filtered, r)
+				}
+			}
+			results = filtered
 		}
 
 		// Attach result count to the root span. We record the *raw* count
@@ -139,22 +160,6 @@ var codeSearchCmd = &cobra.Command{
 
 		fullJSON, _ := cmd.Flags().GetBool("full-json")
 		limit, _ := cmd.Flags().GetInt("limit")
-		decisionsOnly, _ := cmd.Flags().GetBool("decisions")
-
-		// Decision Records live in the same index as code; tag hits under the
-		// repo's decision paths (doc_type:"decision") so agents recognize them,
-		// and honor --decisions as a pre-limit filter. Filtering happens on the
-		// RAW result set, so a corpus hit is never crowded out by code hits.
-		isDecision := decision.PathMatcher(root)
-		if decisionsOnly {
-			filtered := results[:0]
-			for _, r := range results {
-				if isDecision(r.FilePath) {
-					filtered = append(filtered, r)
-				}
-			}
-			results = filtered
-		}
 
 		var buf bytes.Buffer
 		enc := json.NewEncoder(&buf)

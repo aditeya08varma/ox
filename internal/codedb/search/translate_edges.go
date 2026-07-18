@@ -62,6 +62,7 @@ func translateCallersEdges(query *ParsedQuery) (*TranslatedQuery, error) {
 
 	addRepoFilter(p, &joins, &conditions, f.Repo, f.NegRepo, "r.repo_id")
 	addFileFilter(p, &conditions, f.File, f.NegFile, "fr.path")
+	addFileAnyFilter(p, &conditions, f.fileAny, "fr.path")
 	addLangFilter(p, &conditions, f.Lang, f.NegLang)
 	addRevFilter(p, &conditions, f.Rev)
 
@@ -89,6 +90,8 @@ func translateCallersEdgesRecursive(query *ParsedQuery, p *paramCollector) (*Tra
 	confRecurseClause := confidenceClause(p, f.Confidence) // separate params for the recursive arm
 
 	var revConditions []string
+	addFileFilter(p, &revConditions, f.File, f.NegFile, "fr.path")
+	addFileAnyFilter(p, &revConditions, f.fileAny, "fr.path")
 	addRevFilter(p, &revConditions, f.Rev)
 	revSQL := conditionsSQL(revConditions)
 
@@ -156,6 +159,7 @@ func translateCalleesEdges(query *ParsedQuery) (*TranslatedQuery, error) {
 
 	addRepoFilter(p, &joins, &conditions, f.Repo, f.NegRepo, "r.repo_id")
 	addFileFilter(p, &conditions, f.File, f.NegFile, "fr.path")
+	addFileAnyFilter(p, &conditions, f.fileAny, "fr.path")
 	addLangFilter(p, &conditions, f.Lang, f.NegLang)
 	addRevFilter(p, &conditions, f.Rev)
 
@@ -183,6 +187,8 @@ func translateCalleesEdgesRecursive(query *ParsedQuery, p *paramCollector) (*Tra
 	confRecurseClause := confidenceClause(p, f.Confidence)
 
 	var revConditions []string
+	addFileFilter(p, &revConditions, f.File, f.NegFile, "fr.path")
+	addFileAnyFilter(p, &revConditions, f.fileAny, "fr.path")
 	addRevFilter(p, &revConditions, f.Rev)
 	revSQL := conditionsSQL(revConditions)
 
