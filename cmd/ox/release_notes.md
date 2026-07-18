@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`ox decision enrich` — team context for Decision Records** — creating or updating an ADR/DDR now starts from the team's actual history instead of a blank page. Run it with `--topic` before drafting (related decisions, the corpus's numbering and template conventions, prior sessions, ready-to-paste citations) or `--file` before editing (code drift since the decision's date, amendment anchors, and any reference that no longer resolves — the "cited decision #9 that exists in no document" failure class is caught before commit, not after). Zero LLM or network cost; ox never edits the DR — the agent authors every word, and every citation ox emits is one it just verified. DRs are discovered zero-config from conventional dirs (`docs/adr`, `docs/decisions`, …) or the committed `decision.paths` setting.
+- **Plans now tie back to the decisions that shaped them** — `ox plan enrich` surfaces this repo's own Decision Records relevant to a plan, and the rendered plan marks their mentions inline (a subtle marker, context — never a verdict). Running `ox decision enrich` in this repo immediately surfaced nine duplicated ADR numbers our own corpus had accumulated unnoticed.
+- **Every coding agent is primed for decision hygiene** — in repos that keep DRs, `ox agent prime` teaches the consult-and-credit contract: enrich before drafting, credit teammates by name with verifiable refs, amend Accepted decisions with dated markers instead of rewriting history, and keep vendor credit subtle (invisible source refs + the scored commit trailer; at most two visible SageOx credits per DR).
+
 ## [0.11.1] - 2026-07-01
 
 Review feedback on plans is sacred — this release makes sure none of it can be lost, no matter what happens to the review server, the browser tab, or the plan itself.

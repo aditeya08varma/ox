@@ -1,0 +1,53 @@
+---
+title: "ox decision enrich"
+description: "CLI reference for ox decision enrich"
+sidebar_position: 34
+---
+
+## ox decision enrich
+
+Enrich a Decision Record (or DR topic) with team context (JSON by default)
+
+### Synopsis
+
+Enrich a Decision Record with deterministic team context: related-decision
+candidates, corpus conventions (numbering, template, statuses), unresolved-ref
+and credit-cap checks, code drift, prior sessions, and ready-to-paste
+citations. ox computes everything locally — no LLM or network call — and never
+edits the DR; the agent authors every word.
+
+Input modes (precedence order):
+  --topic "<subject>"   consult BEFORE drafting a new DR
+  --file <dr.md>        an existing DR (adds drift + ref verification)
+  stdin                 a draft to verify before presenting
+
+Output is JSON by default (the agent path). Use --text for a human summary.
+
+```
+ox decision enrich [flags]
+```
+
+### Options
+
+```
+      --file string    an existing DR file to enrich (adds drift + ref checks)
+  -h, --help           help for enrich
+      --text           human summary instead of JSON
+      --topic string   consult mode: the DR subject, before drafting
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox decision](/decision)	 - Work with Decision Records (ADRs, DDRs) — enrich with team context
+
