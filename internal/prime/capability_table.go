@@ -108,7 +108,7 @@ func OxCapabilities() []Capability {
 				},
 				{
 					Cue:     `A decision record (ADR/DDR) is being created, edited, or cited by number`,
-					Command: "`ox decision enrich --topic \"<subject>\"` before drafting, `--file <dr.md>` before editing (related DRs, numbering, ref verification). DR text itself is searchable via `ox code search`.",
+					Command: "`ox decision enrich --topic \"<subject>\"` (new) / `--file <dr.md>` (edit) — related DRs, numbering, ref verification.",
 				},
 			},
 		},
@@ -167,5 +167,6 @@ func OxCapabilities() []Capability {
 //
 // The map value documents WHY each skill is additive rather than a table row.
 var additiveSkills = map[string]string{
-	"ox-consult": "additive Layer-2 ergonomics; its deterministic floor is the consult-first floor entry (ConsultRoutes), so it is not a separate conformance surface",
+	"ox-consult":  "additive Layer-2 ergonomics; its deterministic floor is the consult-first floor entry (ConsultRoutes), so it is not a separate conformance surface",
+	"ox-decision": "additive Layer-2 ergonomics; its deterministic floor is the decision-record-guidance floor entry plus the consult-first decision route, so it is not a separate conformance surface",
 }

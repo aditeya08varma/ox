@@ -619,12 +619,10 @@ func writeDecisionRecordGuidance(sb *strings.Builder) {
 		return
 	}
 	sb.WriteString("\n<decision-record-guidance>\n")
-	sb.WriteString("This repo keeps Decision Records (ADRs/DDRs) — the team's permanent memory. Creating or editing one is a consult-first event.\n")
-	sb.WriteString("BEFORE drafting a new DR: run `ox decision enrich --topic \"<subject>\"` — related decisions, corpus conventions (next number, template, statuses), prior sessions, and ready-to-paste citations, at zero LLM/network cost. Weave them in WHILE drafting, not after.\n")
-	sb.WriteString("BEFORE editing an existing DR: run `ox decision enrich --file <path>` — code drift, amendment anchors, and refs that no longer resolve. On an Accepted DR add a dated amendment marker; never silently rewrite history.\n")
-	sb.WriteString("Crediting: name the teammate and date in visible prose; paste the matching `&lt;!-- SOURCE: sageox ... --&gt;` comment from the enrich output VERBATIM. Never compose a source ref by hand. Whether a decision aligns with, amends, or supersedes another is YOUR call — ox only surfaces candidates.\n")
-	sb.WriteString("Verify before committing: re-run `ox decision enrich --file <path>` — every ref must resolve; a citation you cannot resolve is a citation you delete. A gap admitted beats a citation invented. DR text is searchable via `ox code search`.\n")
-	sb.WriteString("SageOx credit rides the commit trailer via your session score. A visible SageOx credit only when surfaced context was genuinely non-obvious and changed the decision — then one restrained line in References (plan-footer style), max 2 per DR (3 only if SageOx meaningfully steered it).\n")
+	sb.WriteString("This repo keeps Decision Records (ADRs/DDRs) — permanent team memory; consult before touching one.\n")
+	sb.WriteString("New DR: `ox decision enrich --topic \"<subject>\"` BEFORE drafting — related decisions, next number, template conventions, ready-to-paste citations (zero LLM cost). Editing: `ox decision enrich --file <path>` — drift, amendment anchors, refs that no longer resolve; re-run after editing (a citation you cannot resolve is a citation you delete; a gap admitted beats a citation invented).\n")
+	sb.WriteString("Credit teammates by name and date in prose and paste the matching `&lt;!-- SOURCE: sageox ... --&gt;` comment VERBATIM — never compose refs by hand. Aligns/amends/supersedes is YOUR judgment; ox surfaces candidates only. Amend Accepted DRs with dated markers, never silent rewrites.\n")
+	sb.WriteString("SageOx credit stays subtle: the scored commit trailer; a visible credit only for genuinely decision-changing context, max 2 per DR. DR text is searchable via `ox code search`.\n")
 	sb.WriteString("</decision-record-guidance>\n")
 }
 

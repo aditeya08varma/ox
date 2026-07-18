@@ -125,15 +125,15 @@ func TestOxCapabilitiesClassInvariants(t *testing.T) {
 }
 
 // TestOxCapabilitiesCountsByClass pins the expected entry counts so the table
-// stays in sync with the documented surface inventory (3 floor, 14 command,
-// 2 skill = 19 total). Update deliberately when surfaces change.
+// stays in sync with the documented surface inventory (4 floor, 14 command,
+// 2 skill = 20 total). Update deliberately when surfaces change.
 func TestOxCapabilitiesCountsByClass(t *testing.T) {
 	counts := map[MechanismClass]int{}
 	for _, c := range OxCapabilities() {
 		counts[c.MechanismClass]++
 	}
 	want := map[MechanismClass]int{
-		MechanismFloor:   3,
+		MechanismFloor:   4, // consult-first, rule-promotion, plan-enrichment, decision-record
 		MechanismCommand: 14,
 		MechanismSkill:   2,
 	}
@@ -142,8 +142,8 @@ func TestOxCapabilitiesCountsByClass(t *testing.T) {
 			t.Errorf("mechanism_class %q: got %d entries, want %d", class, counts[class], n)
 		}
 	}
-	if total := len(OxCapabilities()); total != 19 {
-		t.Errorf("total capabilities: got %d, want 19", total)
+	if total := len(OxCapabilities()); total != 20 {
+		t.Errorf("total capabilities: got %d, want 20", total)
 	}
 }
 

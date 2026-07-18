@@ -1001,7 +1001,14 @@ func TestOutputAgentPrimeXML_SageoxOverheadBudget_Regression(t *testing.T) {
 	// marker on references it surfaced context for; the rest use the
 	// `ox plan viz ox-annotation` pattern. ~51 tokens, accepted to stop agents
 	// shipping context-blind brand look-alikes that compete with ox's own.
-	const sageoxOverheadCeiling = 1610
+	//
+	// Raised 1610 -> 1950 (ox decision v1): the <decision-record-guidance>
+	// floor block + its intent row + consult route (~290 tokens). NOTE the
+	// block is corpus-gated (decision.CorpusDetected): repos without Decision
+	// Records pay none of it — this test measures the ox repo itself, which
+	// keeps docs/adr/, so the measured floor includes the block by design.
+	// Deliberately accepted: consult-and-credit for permanent decision docs.
+	const sageoxOverheadCeiling = 1950
 	sageoxTokens := budget.Get(prime.BudgetSourceSageox)
 	if sageoxTokens > sageoxOverheadCeiling {
 		t.Errorf("SageOx overhead floor for minimal prime = %d tokens, exceeds ceiling %d.\n"+
