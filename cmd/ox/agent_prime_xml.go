@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/decision"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/teamdocs"
@@ -165,7 +166,9 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		sb.WriteString("- Git history, diffs, and blame queries\n")
 		sb.WriteString("- Exploratory searches where you don't know the exact file\n")
 		sb.WriteString("Use `ox code insights` before planning multi-file changes (shows hotspots, contention, open PRs).\n")
-		sb.WriteString("Decision Records are in this index too: hits under docs/adr etc. carry doc_type:\"decision\"; add --decisions to search only them.\n")
+		if root := findGitRoot(); decision.CorpusDetected(root) && config.DecisionEnrichEnabled(root) {
+			sb.WriteString("Decision Records are in this index too: hits under docs/adr etc. carry doc_type:\"decision\"; add --decisions to search only them.\n")
+		}
 		sb.WriteString("Reserve Grep/Glob for: exact-string matches in a known file, or when ox code search returns no results.\n")
 		sb.WriteString("</code-search>\n")
 	}
@@ -616,14 +619,16 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 // without DRs spend zero prime tokens here. Static once emitted (no
 // per-session variance) → stays in the cacheable static tier.
 func writeDecisionRecordGuidance(sb *strings.Builder) {
-	if !decision.CorpusDetected(findGitRoot()) {
+	gitRoot := findGitRoot()
+	if !decision.CorpusDetected(gitRoot) || !config.DecisionEnrichEnabled(gitRoot) {
 		return
 	}
 	sb.WriteString("\n<decision-record-guidance>\n")
 	sb.WriteString("This repo keeps Decision Records (ADRs/DDRs) — permanent team memory; consult before touching one.\n")
 	sb.WriteString("New DR: `ox decision enrich --topic \"<subject>\"` BEFORE drafting — related decisions, next number, template conventions, ready-to-paste citations (zero LLM cost). Editing: `ox decision enrich --file <path>` — drift, amendment anchors, refs that no longer resolve; re-run after editing (a citation you cannot resolve is a citation you delete; a gap admitted beats a citation invented).\n")
 	sb.WriteString("Credit teammates by name and date in prose and paste the matching `&lt;!-- SOURCE: sageox ... --&gt;` comment VERBATIM — never compose refs by hand. Aligns/amends/supersedes is YOUR judgment; ox surfaces candidates only. Amend Accepted DRs with dated markers, never silent rewrites.\n")
-	sb.WriteString("SageOx credit stays subtle: the scored commit trailer; a visible credit only for genuinely decision-changing context, max 2 per DR. DR text is searchable via `ox code search`.\n")
+	sb.WriteString("Mid-implementation, before a nontrivial design choice: check whether a standing decision already constrains it — `ox code search \"<topic>\" --decisions`.\n")
+	sb.WriteString("SageOx credit stays subtle: the scored commit trailer; a visible credit only for genuinely decision-changing context, max 2 per DR.\n")
 	sb.WriteString("</decision-record-guidance>\n")
 }
 

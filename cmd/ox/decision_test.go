@@ -125,6 +125,38 @@ func TestWriteDecisionRecordGuidance_GatedOnCorpus(t *testing.T) {
 			t.Fatalf("block emitted for DR-less repo:\n%s", sb.String())
 		}
 	})
+	t.Run("config opt-out wins over corpus", func(t *testing.T) {
+		root := newDecisionTestRepo(t, true)
+		writeProjectDecisionEnrich(t, root, false)
+		var sb strings.Builder
+		writeDecisionRecordGuidance(&sb)
+		if sb.Len() != 0 {
+			t.Fatalf("block emitted despite decision.enrich=false:\n%s", sb.String())
+		}
+	})
+}
+
+// writeProjectDecisionEnrich writes a minimal committed config with the
+// decision.enrich toggle set — priming must default ON (nil) and honor an
+// explicit false.
+func writeProjectDecisionEnrich(t *testing.T, root string, enabled bool) {
+	t.Helper()
+	cfgDir := filepath.Join(root, ".sageox")
+	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := map[string]any{
+		"config_version":         "2",
+		"update_frequency_hours": 24,
+		"decision":               map[string]any{"enrich": enabled},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cfgDir, "config.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCheckDecisionPaths(t *testing.T) {

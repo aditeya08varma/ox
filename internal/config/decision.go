@@ -19,6 +19,13 @@ type DecisionConfig struct {
 	// Paths are directories (scanned recursively for *.md) or doublestar
 	// globs, relative to the repo root.
 	Paths []string `yaml:"paths,omitempty" json:"paths,omitempty"`
+
+	// Enrich toggles decision-record PRIMING: the <decision-record-guidance>
+	// prime block and the decision hint in <code-search>. Default true (nil =
+	// on). Off does NOT disable the `ox decision enrich` command itself — an
+	// explicit invocation is explicit intent — nor the passive
+	// doc_type:"decision" tagging on search results (metadata, not priming).
+	Enrich *bool `yaml:"enrich,omitempty" json:"enrich,omitempty"`
 }
 
 // DefaultDecisionDirs are scanned (existing dirs only) when no decision config
@@ -34,6 +41,19 @@ var DefaultDecisionDirs = []string{
 // IsEmpty reports whether no decision path is explicitly configured.
 func (c *DecisionConfig) IsEmpty() bool {
 	return c == nil || len(c.Paths) == 0
+}
+
+// DecisionEnrichEnabled resolves whether decision-record priming is on for a
+// project. Default TRUE — the committed `decision.enrich: false` is the
+// explicit opt-out (mirrors the plan.* resolver shape, project-scope only).
+func DecisionEnrichEnabled(projectRoot string) bool {
+	if projectRoot == "" {
+		return true
+	}
+	if cfg, _ := LoadProjectConfig(projectRoot); cfg != nil && cfg.Decision != nil && cfg.Decision.Enrich != nil {
+		return *cfg.Decision.Enrich
+	}
+	return true
 }
 
 // ValidateDecisionConfig checks the decision block for the errors doctor and

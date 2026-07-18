@@ -36,6 +36,17 @@ func TestValidateDecisionConfig(t *testing.T) {
 	}
 }
 
+// Priming must be on by default: nil config, nil block, and nil Enrich all
+// resolve true; only an explicit committed `decision.enrich: false` opts out.
+func TestDecisionEnrichEnabled_DefaultOn(t *testing.T) {
+	if !DecisionEnrichEnabled("") {
+		t.Error("empty root should default on")
+	}
+	if !DecisionEnrichEnabled(t.TempDir()) {
+		t.Error("no config should default on")
+	}
+}
+
 func TestDecisionConfigIsEmpty(t *testing.T) {
 	var nilCfg *DecisionConfig
 	if !nilCfg.IsEmpty() {
