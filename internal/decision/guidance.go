@@ -27,7 +27,7 @@ func buildGuidance(in Input, sum SignalSummary, conv Conventions, annotations []
 	case isUpdate && hasDrift:
 		b.WriteString("This DR has drifted: cited files changed after its date. If the decision still stands, add a dated amendment noting the new context; if not, amend or supersede per the corpus convention — your call. ")
 	case sum.Related > 0 || sum.PriorSessions > 0:
-		fmt.Fprintf(&b, "This topic has team history: %d related decision(s), %d prior session(s)/plan(s). Read the related DRs via ref_path and reconcile explicitly — state whether this aligns with, amends, or supersedes them; that judgment is yours, ox only surfaces candidates. ", sum.Related, sum.PriorSessions)
+		fmt.Fprintf(&b, "This topic has team history: %d related decision(s), %d prior session(s)/plan(s). Read the related DRs via ref_path and reconcile explicitly — state whether this aligns with, amends, or supersedes them; that judgment is yours, ox only surfaces candidates. Merge items that point at the same underlying fact into one citation rather than citing it three times; if a surfaced candidate turns out not to apply, say so and why instead of dropping it silently — a reviewer can't tell considered-and-rejected from missed. ", sum.Related, sum.PriorSessions)
 	case !isUpdate:
 		b.WriteString("No related decisions, sessions, or plans matched this topic. Draft from first principles and say so — 'no prior team decision found' is itself a verifiable claim. Do not invent citations; a gap admitted beats a citation invented. ")
 	}
