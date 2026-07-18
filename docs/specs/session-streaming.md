@@ -3,14 +3,24 @@
 **Status:** Proposed (design ahead of implementation). No code ships in this PR.
 **Scope:** design contract for `internal/moq` (PR 2a) and `internal/daemon/sessionstream` (PR 2b).
 **Reviewed by:** four adversarial principal-engineer panels (security, streaming correctness,
-daemon fit, simplicity). Their confirmed findings are folded into the requirements below.
+daemon fit, simplicity), then remapped onto the current conversation model
+(mono ADR-057/076/081/087, `packages/conversation`, `packages/chat`).
 
 ## Purpose
 
-Stream each active coding session's redacted `raw.jsonl` to the cloud live, in parallel with
-the existing stop-time git-commit upload. The git path remains the durability authority; the
-stream is a best-effort live duplicate. Applies uniformly to every shimmed agent because both
-live producers (daemon tail mode and the Claude Code hook process) converge on `raw.jsonl`.
+Stream each active coding session's redacted conversation to the cloud live, in parallel with
+the existing stop-time git-commit upload. The git path remains the durability and fidelity
+authority; the stream is a best-effort live feed. Applies uniformly to every shimmed agent
+because both live producers (daemon tail mode and the Claude Code hook process) converge on
+`raw.jsonl`.
+
+The stream is **conversation-native**: it speaks the ontology's vocabulary (mono ADR-057/076/081)
+so the server ingests it as a first-class conversation of `type='session'`. Coding sessions are
+the first real consumer of live `type='session'` ingestion — this spec defines that producer
+contract. Anything legacy-shaped (the git `data/sessions/…/{meta.json, turns.jsonl, …}` folder)
+is a **server-side projection** of the conversation, per ADR-081's settled principle ("the git
+folder is the conversation's projection") — the stream never contorts itself to look like the
+old JSONL; the server down-converts when a legacy layer is wanted.
 
 Gated by `FEATURE_SESSION_STREAMING` (default off). The env flag is a local opt-in only —
 streaming starts only after the authenticated coordinates call succeeds, so the cloud's
@@ -19,20 +29,36 @@ account-level feature check is the authoritative enable.
 ## Non-goals (v1)
 
 - Durability via the stream (git upload owns that; see Ack semantics).
+- Losslessness. `raw.jsonl` reaches the ledger via git/LFS at stop; the stream is the live
+  conversation feed, not a byte-replica channel.
 - Bi-directional control (reserved: ADR-071 composition — a parallel Subscriber on a control
   track; nothing wired in v1).
-- Conversation-native (`KBTurnLine`) emission — mapping documented below as future.
+- Rich workspace events (`artifact.*`, `widget.*`, `approval.*` from `workspace.events.jsonl`)
+  — the envelope's `kind` space leaves room; v1 emits turns + tool events + lifecycle only.
+
+## Identity & conversation binding
+
+- The coding session id is **`ses_<UUIDv7>`**, minted at session start (already the case:
+  `lfs.SessionMeta.EffectiveSessionID`). Its conversation is the twin **`cnv_<same-uuid>`** —
+  a pure prefix swap (`ids.SessionIDToConversationID`), no lookup, lossless. The stream
+  carries `conversation_id`; the server can swap back for the git projection.
+- Never mint a `cnv_` payload different from the session's (keeps the 1:N-deferral twin rule
+  intact). `cli_` is the `ox login` auth-session prefix and has nothing to do with this.
+- The destination (team) binds on the first coordinates call and is immutable for the
+  conversation's life, mirroring the `CaptureTurns` contract.
+- Sub-references (`tool_use_id`, future `art_`/`wid_`) travel as separate fields, never
+  `:`-joined composites.
 
 ## Data flow
 
 ```mermaid
 flowchart LR
     RW["RawWriter.WriteEntry<br/>(inline redaction + seq/eid stamp)"] --> RJ["raw.jsonl<br/>(session cache, append-only, the local buffer)"]
-    RJ --> TAIL["sessionstream tailer<br/>(newline-terminated lines only, pause-range filter)"]
-    TAIL --> PUB["envelope frame, fragment 16 KiB,<br/>publish moq-lite-04 over wss"]
+    RJ --> TAIL["sessionstream tailer<br/>(newline-terminated lines only, pause-aware)"]
+    TAIL --> PUB["conversation-native frames,<br/>fragment 16 KiB, publish moq-lite-04 over wss"]
     PUB --> RELAY["moq-relay"]
-    RELAY --> SUB["cloud subscriber<br/>(mono, not yet built)"]
-    RJ --> GIT["stop-time git commit + LFS upload<br/>(unchanged, authoritative)"]
+    RELAY --> SUB["cloud subscriber (mono, not yet built):<br/>ingest as cnv_ conversation,<br/>project legacy git layer on demand"]
+    RJ --> GIT["stop-time git commit + LFS upload<br/>(unchanged, authoritative fidelity)"]
 ```
 
 Cursor (`stream-cursor.json`, session cache dir, 0600, atomic temp+rename) records the last
@@ -41,49 +67,117 @@ at-least-once. Clamped to file size on load.
 
 ## Envelope (v1)
 
-One JSON object per published payload, wrapping raw.jsonl lines verbatim:
+One JSON object per published payload. Vocabulary follows `conversation.TurnLine` (ADR-076)
+extended with fidelity fields the transport can afford (MoQ fragments large objects; the
+32 KiB/turn cap is a property of the MCP `CaptureTurns` endpoint, not of this stream — the
+server applies caps at projection time):
 
 ```json
-{"v":1, "session_id":"ses_<uuidv7>", "seq":42, "kind":"entry", "payload":{ "...redacted SessionEntry..." }}
+{"v":1, "conversation_id":"cnv_<uuidv7>", "seq":42, "kind":"turn",
+ "turn":{
+   "role":"assistant", "author_kind":"coworker", "participant_kind":"agent",
+   "content":"…redacted content…", "ts":"2026-07-17T01:02:03.456Z",
+   "client_turn_id":"<eid>", "redacted":false,
+   "tool_calls":[{"tool_use_id":"…", "name":"Bash", "summary":"…",
+                   "input":{…}, "output":"…", "is_error":false}]
+ }}
 ```
 
-- `kind`: `header` | `entry` | `footer`, mirroring raw.jsonl's three line shapes.
-- `header` payload additionally carries `session_name`, `repo_id`, `team_id`, agent/coworker
-  identity (from `StoreMeta`).
-- `seq` is the sole ordering/dedup authority. `sent_at`, if present, is observational only.
-- Consumers MUST ignore unknown fields (mirrors `docs/specs/adapter-protocol.md` version
-  evolution). Version bumps: additive fields never bump `v`; semantic changes do.
-- Duplicates are expected (at-least-once). Server dedup key: `(session_id, seq)`.
+- `kind`: `open` | `turn` | `lifecycle` | `close`.
+  - `open` — first frame: `session_id` (`ses_` twin), `session_name`, `repo_id`, `team_id`,
+    agent/coworker identity, adapter name (from the raw.jsonl header / `StoreMeta`).
+  - `turn` — one redacted conversation entry (mapping below).
+  - `lifecycle` — `{event: pause|resume|stop|abort, reason, suspended_from_seq?, resumed_at_seq?}`.
+  - `close` — final frame: `{finalize_reason: "explicit-stop"}` (see Finalization).
+- `seq` — client-allocated, 1-based, monotonically increasing, **never renumbered** (stamped
+  into `raw.jsonl` at write time; see below). Sole ordering/dedup authority; server dedup key
+  is `(conversation_id, seq)`, first-writer-wins — duplicates are expected (at-least-once).
+- `client_turn_id` — the entry `eid`; lets the server keep idempotency across seq-collisions
+  during amendment replays.
+- `ts` is advisory (multi-process producers, clock skew); `seq` orders.
+- Consumers strict-decode per the ontology convention (ADR-076 chunks are fail-loud): any
+  added field is a version bump of `v`. This is stricter than the adapter-protocol
+  ignore-unknown rule, and deliberate — it matches the model this stream feeds.
+
+### Mapping `SessionEntry` → `turn`
+
+| `SessionEntry` (raw.jsonl) | stream `turn` |
+|---|---|
+| `type: user` | `role: user`, `author_kind: human`, `participant_kind: human` |
+| `type: assistant` | `role: assistant`, `author_kind: coworker`, `participant_kind: agent` |
+| `type: tool` | `role: tool`, `author_kind: tool`, `participant_kind: agent` |
+| `type: system` | `role: tool`, `author_kind: tool`, `participant_kind: service` |
+| `content` | `content` (already redacted) |
+| `ts` | `ts` |
+| `eid` | `client_turn_id` |
+| `tool_name` / `tool_input` / `tool_output` / `is_error` | one `tool_calls[]` element (`name`, `input`, `output`, `is_error`; `summary` = server-truncatable digest) |
+| `coworker_name` / `coworker_model` | `open` frame identity + per-turn omitted (constant per session today) |
+
+Gap called out for PR 2b: `SessionEntry` has no `tool_use_id` today. Adapters that receive it
+(Claude Code hooks do) should pass it through; the field is optional on the wire. When absent,
+the server keys tool pairing on `(conversation_id, seq)`.
 
 ### seq/eid stamping (new, PR 2b)
 
 Live-recorded entries carry no `seq`/`eid` today (the seq-injecting `SessionWriter` in
 `internal/session/store.go` is not on the live path). PR 2b adds `Seq int64` + `Eid string`
 to `session.SessionEntry`, stamped inside `RawWriter.WriteEntry` — running count since
-header. Every consumer benefits; redaction path unchanged.
+header, 1-based. Every consumer benefits; redaction path unchanged.
 
 ## Pause exclusion (publish-time, CRITICAL)
 
 Pause/resume is upload-time filtering today (ADR-020): raw.jsonl keeps receiving entries
-while paused. The publisher therefore consults `RecordingState.SuspendedAt` + lifecycle
-pause markers per entry and skips (never publishes) any entry whose seq lies in an open or
-closed suspended range. The read cursor still advances. Without this, live streaming would
-ship exactly the content the user paused to exclude — MoQ has no retraction.
+while paused. The session spine's rule is **fail-closed: paused means no content lands**
+(off-the-record = `pause` + `reason:"off_the_record"`). The publisher therefore:
+
+1. Consults `RecordingState.SuspendedAt` + lifecycle pause markers per entry.
+2. **Never publishes** any `turn` whose seq lies in an open or closed suspended range — not
+   even a redacted tombstone (tombstones would still leak that something happened, and
+   fail-closed means nothing lands). The read cursor still advances.
+3. Publishes `lifecycle` frames instead: `pause` with `suspended_from_seq`, `resume` with
+   `resumed_at_seq`. The server marks `[suspended_from_seq, resumed_at_seq)` as
+   **intentionally absent** — not missing — so gap accounting (`missing_ranges`) never
+   requests a resend of withheld content.
+
+Distinct from redaction: a secret-redacted entry (inline redactor) still flows as a normal
+`turn` with scrubbed `content`. A fully-suppressed turn, if ox ever adds one, follows the
+ontology rule `content:"" + redacted:true` so the seq skeleton stays complete. Erasure
+semantics (bodies die, skeleton survives: seq, ids, boundaries) are server-side; the stream's
+structure-relative references (seq, `client_turn_id`, `tool_use_id` — never byte offsets)
+are what make that possible.
 
 ## Ack semantics (honest version)
 
 moq-lite has no object-level acknowledgment; a successful send means bytes left the process
-(ADR-071). Cursor advance therefore encodes local send success, NOT durability. If a receipt
-plane is added later it mirrors what mono shipped for audio: out-of-band SSE watermark
-(ADR-071 Option A) — not an in-band ack track.
+(ADR-071 — and per ADR-087, the receipt plane is still "Proposed, unratified, unbuilt: no
+surface can bind a receipt plane the server doesn't ship"). Cursor advance therefore encodes
+local send success, NOT durability. Durability stands on the local buffer (`raw.jsonl` +
+cursor — which also clears ADR-087 D7's ≥5-minute local-durability floor by construction,
+since the buffer is the session file itself) and on the git upload.
 
-## Retroactive redaction (policy)
+If a receipt plane is added later, it mirrors the shapes mono already ships or specifies:
+out-of-band watermark (ADR-071 Option A) carrying the `CaptureTurns`-style self-healing pair
+`{last_captured_seq, missing_ranges}` — the client resends everything after
+`last_captured_seq`; the server dedups by seq, first-writer-wins.
 
-The deferred redaction tier (pre-push auto-redact/quarantine, `ox session redact`, catalog
-re-scans) fires after write time and can only scrub local copies. Live streaming forfeits
-that net for already-streamed bytes. Policy: dogfood-only until the mono purge/re-redact API
-(keyed `(session_id, seq)`) exists; the retroactive-redact code paths call it when streaming
-was active for the session. Customer enablement blocks on that API.
+## Lifecycle & finalization (session spine + ADR-087 D9)
+
+- The stream binds to the **session spine** FSM (`active / paused / stopped`; verbs
+  `start → pause ⇄ resume → stop | abort`), not the audio capture spine. Turns flow only in
+  `active`. `abort` discards; `stop` finalizes.
+- `close` carries **`finalize_reason: "explicit-stop"`**. If the daemon dies mid-session, the
+  server may finalize as `staleness-presumed` (~1 h without a real liveness signal — the
+  stream's own frames are that signal; an idle-but-alive publisher emits a sparse `lifecycle`
+  liveness ping so silence is never inferred from wire absence alone).
+- **Finalization is provisional and amendable; the FSM never reopens** (ADR-087 D9). A
+  daemon that restarts after a `staleness-presumed` finalize keeps draining from its cursor:
+  the client state is `stopped` (control) × `draining` (durability debt) — two axes, not a
+  reopened session. Late frames are an amendment trigger: the server re-finalizes
+  idempotently (keyed on the delivered seq set), superseding derived artifacts with lineage.
+  Amendment MUST respect deletion tombstones — a purged conversation is never resurrected,
+  and the publisher drops its backlog on a tombstone response.
+- Continuing work later is a **new `ses_`/source-session bound to the same `cnv_`** (one
+  level up), never a reopened stream.
 
 ## Transport
 
@@ -95,9 +189,10 @@ moq-lite-04 over WebSocket TLS (TCP/443), pure Go (`internal/moq`):
   group rotation on a small bound (N entries / M seconds) so reconnect never replays
   unbounded groups (a group is the resume unit; never resume mid-group).
 - Coordinates `{broadcast_name, relay_url, jwt}` come from a new api-go endpoint (request
-  `{session_id, session_name}`) — the coding-session analog of recordings `mode:"moq"`. All
-  three are opaque to ox. JWTs are ~1 h: re-fetch on reconnect/near-expiry via OAuth
-  `EnsureValidToken`; JWT held in memory only.
+  `{session_id, session_name}`) — the coding-session analog of recordings `mode:"moq"`, and
+  the ensure-conversation step: the server derives/creates the `cnv_` twin and binds the
+  destination team on first call. All three coordinates are opaque to ox. JWTs are ~1 h:
+  re-fetch on reconnect/near-expiry via OAuth `EnsureValidToken`; JWT held in memory only.
 - Fail closed: `wss://` required off-loopback; never `InsecureSkipVerify`;
   `OX_ALLOW_PLAINTEXT_ENDPOINT` does not loosen MoQ TLS except loopback (twin tests).
 - Decoder treats relay input as untrusted: strict bounds checks, frame/object size caps,
@@ -106,7 +201,8 @@ moq-lite-04 over WebSocket TLS (TCP/443), pure Go (`internal/moq`):
 ## Daemon integration (`internal/daemon/sessionstream`)
 
 - `Manager` discovers active recordings (`.recording.json` scan), one publisher goroutine per
-  session; re-attaches on daemon start (`DetectAndRestart` pattern).
+  session; re-attaches on daemon start (`DetectAndRestart` pattern) — including post-finalize
+  draining sessions.
 - Hook-mode session activity feeds the daemon inactivity timer so a live Claude Code session
   cannot idle-exit the daemon mid-stream (1 h timeout today).
 - Resilience: `resilience.CircuitBreaker` + exponential backoff; reconnect re-fetches
@@ -118,40 +214,55 @@ moq-lite-04 over WebSocket TLS (TCP/443), pure Go (`internal/moq`):
   not advance (torn-write safety). New raw-jsonl `ParseLineFunc` dispatches header/entry/footer.
 - `rewriteRawJSONL` (regenerate/redact) refuses to rewrite a session with an active recording.
 
-## Future: conversation-native mapping (not built)
+## Projection: the legacy layer is derived, not streamed
 
-| envelope/`SessionEntry` | `KBTurnLine` (`turns.jsonl`) |
-|---|---|
-| `session_id` | `session_id` |
-| `seq` | `seq` |
-| `type` user/assistant | `author_kind` human/coworker |
-| `ts` | `created_at` |
-| `content` | `body` |
-| `tool_name`/`tool_input`/`tool_output` | `metadata.extras.tool_use` |
-| `coworker_model` | `metadata.model` |
-| `eid` | `idempotency_key` |
+The server converts the conversation-native stream into whatever layers consumers need:
 
-`cnv_` twin id derivation and turn coalescing (N entries into one turn) are cloud-side
-decisions; deferred until mono locks the consumer.
+- **Conversation-native storage** (canonical): turns + tool executions + lifecycle under the
+  `cnv_` id, exactly as MCP capture already stores chat (ADR-076 chunks / ADR-081 rows).
+- **Legacy git session folder** (`data/sessions/YYYY/MM/DD/<ses_id>-<slug>/…` with
+  `turns.jsonl` `KBTurnLine`s, `meta.json`, `tool-execs/<tool_use_id>.json`): a projection,
+  derived by prefix-swapping `cnv_`→`ses_` and down-converting turns (`role`→`author_kind`,
+  `tool_calls` full bodies → `tool-execs/` files + `extras.tool_use` digests, caps applied).
+  ADR-081 already defines the git folder as "the conversation's projection" — this stream
+  just extends that principle to live coding sessions.
+- ox itself keeps committing `raw.jsonl` via git/LFS at stop (unchanged); the server may
+  reconcile stream-ingested turns against the settled artifact at amendment time.
 
 ## Cloud contract (mono-side, required before customer enable)
 
-1. Coordinates endpoint + account feature check (`features.session_streaming`).
-2. Purge/re-redact API keyed `(session_id, seq)`.
-3. Session archiver with narrowest `get` (per-team; ideally per-broadcast JIT), separate
+1. Coordinates endpoint = ensure-conversation (`ses_`→`cnv_` twin, team binding, account
+   feature check `features.session_streaming`) + relay JWT minting.
+2. Subscriber ingesting `type='session'` conversations: seq dedup first-writer-wins,
+   intentionally-absent range handling from `lifecycle` frames, amendment-idempotent
+   re-finalization (ADR-087 D9), deletion-tombstone enforcement.
+3. Purge/re-redact API keyed `(conversation_id, seq)` — prerequisite for customer enablement
+  (retroactive redaction below); aligns with the ontology's suppression/erasure fork
+  (skeleton survives, bodies die).
+4. Session archiver with narrowest `get` (per-team; ideally per-broadcast JIT), separate
    service identity + prefix namespace from the audio archiver; asymmetric relay signing
    (EdDSA/RS256) recommended.
-4. Server dedup on `(session_id, seq)`.
+5. Optional later: receipt plane per ADR-071 Option A with `{last_captured_seq, missing_ranges}`.
+
+## Retroactive redaction (policy)
+
+The deferred redaction tier (pre-push auto-redact/quarantine, `ox session redact`, catalog
+re-scans) fires after write time and can only scrub local copies. Live streaming forfeits
+that net for already-streamed bytes. Policy: dogfood-only until the mono purge/re-redact API
+(keyed `(conversation_id, seq)`) exists; the retroactive-redact code paths call it when
+streaming was active for the session. Customer enablement blocks on that API.
 
 ## Implementation phases
 
 | PR | Lands | Proves |
 |---|---|---|
 | 2a | `internal/moq` client + codec + `moqtest` twin + goldens | transport in isolation (riskiest unit) |
-| 2b | seq stamping, `sessionstream` manager, cursor, pause filter, resilience, this spec | end-to-end tail-to-relay with a twin |
+| 2b | seq/eid stamping, `sessionstream` manager, cursor, pause lifecycle frames, envelope mapping, resilience, this spec | end-to-end tail-to-relay with a twin |
 
-Test harness (PR 2b): codec round-trip + conformance; one twin round-trip E2E (twin's received
-JSONL equals redacted `raw.jsonl` minus paused ranges); cursor crash-safety (crash at every
-step around publish/cursor-write, no loss, dedup on `(session_id, seq)`); pause test; flag-off
-test (zero network, zero stream files). Deferred until mono locks the consumer: 5-way relay
-fault matrix, full golden wire suite, staging-relay integration.
+Test harness (PR 2b): codec round-trip + conformance; envelope-mapping goldens
+(`SessionEntry` → `turn` table above); one twin round-trip E2E (twin's received turns equal
+redacted `raw.jsonl` entries minus suspended ranges, with pause/resume lifecycle frames at
+the right seqs); cursor crash-safety (crash at every step around publish/cursor-write, no
+loss, dedup on `(conversation_id, seq)`); pause fail-closed test; flag-off test (zero
+network, zero stream files). Deferred until mono locks the consumer: 5-way relay fault
+matrix, full golden wire suite, staging-relay integration.
