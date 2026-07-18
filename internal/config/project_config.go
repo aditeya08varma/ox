@@ -151,6 +151,11 @@ type ProjectConfig struct {
 	// Pointer so an absent block is distinguishable from explicit zero-values.
 	Plan *PlanConfig `json:"plan,omitempty" yaml:"plan,omitempty"`
 
+	// Decision holds the `decision.*` settings namespace for `ox decision`
+	// (where this repo's Decision Records live). Pointer so an absent block
+	// falls through to the documented default discovery dirs.
+	Decision *DecisionConfig `json:"decision,omitempty" yaml:"decision,omitempty"`
+
 	// KBID is the immutable knowledge-bubble identifier this project is bound
 	// to (ADR-017). Populated when the project has been migrated to the new
 	// .sageox/config.yaml format. Empty for legacy JSON-only projects that
@@ -436,6 +441,11 @@ func ValidateProjectConfig(cfg *ProjectConfig) []string {
 		if _, err := time.Parse(time.RFC3339, *cfg.LastUpdateCheckUTC); err != nil {
 			errors = append(errors, fmt.Sprintf("last_update_check_utc is not a valid ISO 8601 timestamp: %s", *cfg.LastUpdateCheckUTC))
 		}
+	}
+
+	// validate decision.paths if present
+	if err := ValidateDecisionConfig(cfg.Decision); err != nil {
+		errors = append(errors, err.Error())
 	}
 
 	return errors
