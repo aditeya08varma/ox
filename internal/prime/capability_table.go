@@ -106,6 +106,10 @@ func OxCapabilities() []Capability {
 					Cue:     `"Who or what touched this code?"`,
 					Command: "`ox code search \"<pattern>\"` / `ox code insights`.",
 				},
+				{
+					Cue:     `A decision record (ADR/DDR) is being created, edited, or cited by number`,
+					Command: "`ox decision enrich --topic \"<subject>\"` before drafting, `--file <dr.md>` before editing (related DRs, numbering, ref verification). DR text itself is searchable via `ox code search`.",
+				},
 			},
 		},
 		{
@@ -115,6 +119,11 @@ func OxCapabilities() []Capability {
 		},
 		{
 			ID:             "plan-enrichment-guidance",
+			MechanismClass: MechanismFloor,
+			Layer1Source:   "agent prime",
+		},
+		{
+			ID:             "decision-record-guidance",
 			MechanismClass: MechanismFloor,
 			Layer1Source:   "agent prime",
 		},

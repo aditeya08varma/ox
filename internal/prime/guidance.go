@@ -107,6 +107,15 @@ func BuildGuidance(p GuidanceParams) *Guidance {
 		})
 	}
 
+	// decision records — consult team context while creating/updating a DR.
+	// (The matching behavioral block is <decision-record-guidance> in
+	// agent_prime_xml.go, gated on a corpus existing; this row is one line
+	// and ships always so the verb stays discoverable.)
+	cmds = append(cmds, IntentCommand{
+		Intent:  "create or update a decision record (ADR/DDR): related decisions, numbering, conventions, citation refs — consult while drafting",
+		Command: "ox decision enrich",
+	})
+
 	// record observations — only when GUIDE.md exists and memory feature is enabled
 	if p.TeamCtx != nil && p.MemoryEnabled && p.TeamCtx.ObservationGuideHint != "" {
 		cmds = append(cmds, IntentCommand{
