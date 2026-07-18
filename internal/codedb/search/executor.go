@@ -580,6 +580,7 @@ func addDiffFilters(sqlQ *string, args *[]interface{}, f *Filters) {
 		*sqlQ += " AND NOT (" + likeOrGlob("d.path", f.NegFile, f.Case) + ")"
 		*args = append(*args, likeOrGlobParam(f.NegFile))
 	}
+	addFileAnySQLFilter(sqlQ, args, "d.path", f.fileAny, f.Case)
 	if f.Author != "" {
 		*sqlQ += " AND c.author LIKE ?"
 		*args = append(*args, "%"+f.Author+"%")
@@ -616,6 +617,7 @@ func addCodeFilters(sqlQ *string, args *[]interface{}, f *Filters) {
 		*sqlQ += " AND NOT (" + likeOrGlob("fr.path", f.NegFile, f.Case) + ")"
 		*args = append(*args, likeOrGlobParam(f.NegFile))
 	}
+	addFileAnySQLFilter(sqlQ, args, "fr.path", f.fileAny, f.Case)
 	if f.Lang != "" {
 		*sqlQ += " AND b.language = ?"
 		*args = append(*args, f.Lang)
@@ -644,6 +646,7 @@ func addCommentFilters(sqlQ *string, args *[]interface{}, f *Filters) {
 		*sqlQ += " AND NOT (" + likeOrGlob("fr.path", f.NegFile, f.Case) + ")"
 		*args = append(*args, likeOrGlobParam(f.NegFile))
 	}
+	addFileAnySQLFilter(sqlQ, args, "fr.path", f.fileAny, f.Case)
 	if f.Lang != "" {
 		*sqlQ += " AND b.language = ?"
 		*args = append(*args, f.Lang)
@@ -656,6 +659,26 @@ func addCommentFilters(sqlQ *string, args *[]interface{}, f *Filters) {
 		*sqlQ += " AND cm.kind = ?"
 		*args = append(*args, f.CommentKind)
 	}
+}
+
+func addFileAnySQLFilter(sqlQ *string, args *[]interface{}, column string, patterns []string, caseSensitive bool) {
+	var clauses []string
+	for _, pattern := range patterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+		clauses = append(clauses, likeOrGlob(column, pattern, caseSensitive))
+		param := likeOrGlobParam(pattern)
+		if !caseSensitive && strings.ContainsAny(pattern, "*?") {
+			param = strings.ToLower(param)
+		}
+		*args = append(*args, param)
+	}
+	if len(clauses) == 0 {
+		return
+	}
+	*sqlQ += " AND (" + strings.Join(clauses, " OR ") + ")"
 }
 
 // likeOrGlob returns a SQL clause using GLOB for wildcard patterns, LIKE otherwise.

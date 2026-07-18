@@ -5,6 +5,8 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/agentinstance"
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/decision"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/teamdocs"
 	"github.com/spf13/cobra"
@@ -151,6 +153,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 	// hook, so they get a lighter note. Parallels <rule-promotion-guidance>.
 	writePlanEnrichmentGuidance(&sb, output.AgentType)
 
+	// decision-record-guidance: consult-and-credit contract for Decision
+	// Records. Gated on a corpus actually existing (config or conventional
+	// dirs) so repos without DRs pay zero prime tokens for it.
+	writeDecisionRecordGuidance(&sb)
+
 	// code-search: behavioral instruction to prefer ox code search over built-in tools
 	if output.CodeDBAvailable {
 		sb.WriteString("\n<code-search status=\"indexed\">\n")
@@ -159,6 +166,9 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		sb.WriteString("- Git history, diffs, and blame queries\n")
 		sb.WriteString("- Exploratory searches where you don't know the exact file\n")
 		sb.WriteString("Use `ox code insights` before planning multi-file changes (shows hotspots, contention, open PRs).\n")
+		if root := findGitRoot(); decision.CorpusDetected(root) && config.DecisionEnrichEnabled(root) {
+			sb.WriteString("Decision Records are in this index too: hits under docs/adr etc. carry doc_type:\"decision\"; add --decisions to search only them.\n")
+		}
 		sb.WriteString("Reserve Grep/Glob for: exact-string matches in a known file, or when ox code search returns no results.\n")
 		sb.WriteString("</code-search>\n")
 	}
@@ -600,6 +610,26 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 	// Progressive disclosure: authoring aids live on-demand, not inlined here.
 	sb.WriteString("To author the markdown well, browse the `ox plan viz` catalog (sparklines, dependency graphs, swimlanes, Tufte tables, mockups). `ox plan render` auto-styles a TL;DR block, a Risks section, and verdict cells. Never hand-author a SageOx credit or your own footnote/ⓘ markers — the render owns the footer credit and auto-injects an OX marker on references it surfaced context for; for the rest, use the `ox plan viz ox-annotation` pattern.\n")
 	sb.WriteString("</plan-enrichment-guidance>\n")
+}
+
+// writeDecisionRecordGuidance emits the <decision-record-guidance> advisory
+// block — the consult-and-credit contract for creating/updating Decision
+// Records. Emitted ONLY when a decision corpus is detected for this repo
+// (committed decision.paths config or a conventional ADR dir), so repos
+// without DRs spend zero prime tokens here. Static once emitted (no
+// per-session variance) → stays in the cacheable static tier.
+func writeDecisionRecordGuidance(sb *strings.Builder) {
+	gitRoot := findGitRoot()
+	if !decision.CorpusDetected(gitRoot) || !config.DecisionEnrichEnabled(gitRoot) {
+		return
+	}
+	sb.WriteString("\n<decision-record-guidance>\n")
+	sb.WriteString("This repo keeps Decision Records (ADRs/DDRs) — permanent team memory; consult before touching one.\n")
+	sb.WriteString("New DR: `ox decision enrich --topic \"<subject>\"` BEFORE drafting — related decisions, next number, template conventions, ready-to-paste citations (zero LLM cost). Editing: `ox decision enrich --file <path>` — drift, amendment anchors, refs that no longer resolve; re-run after editing (a citation you cannot resolve is a citation you delete; a gap admitted beats a citation invented).\n")
+	sb.WriteString("Credit teammates by name and date in prose and paste the matching `&lt;!-- SOURCE: sageox ... --&gt;` comment VERBATIM — never compose refs by hand. Aligns/amends/supersedes is YOUR judgment; ox surfaces candidates only. Amend Accepted DRs with dated markers, never silent rewrites.\n")
+	sb.WriteString("Mid-implementation, before a nontrivial design choice: check whether a standing decision already constrains it — `ox code search \"<topic>\" --decisions`.\n")
+	sb.WriteString("SageOx credit stays subtle: the scored commit trailer; a visible credit only for genuinely decision-changing context, max 2 per DR.\n")
+	sb.WriteString("</decision-record-guidance>\n")
 }
 
 // emitTeamRules writes <team-rules> and <team-rules-budget> blocks for the

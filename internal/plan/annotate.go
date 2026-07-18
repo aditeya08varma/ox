@@ -19,9 +19,10 @@ import (
 // so each marker stays tiny and the page renders from file:// with no network.
 const oxAnnotMark = `<svg class="ox-annot-mark" aria-hidden="true"><use href="#ox-ico-d" class="ico-d"></use><use href="#ox-ico-l" class="ico-l"></use></svg>`
 
-// adrNumRe pulls the leading ADR number from an ADR doc-path basename
-// (e.g. "051-consent-tooling-and-capture-posture.md" → "051").
-var adrNumRe = regexp.MustCompile(`^(\d{1,4})[-_]`)
+// adrNumRe pulls the leading ADR number from an ADR doc-path basename —
+// both the numeric convention ("051-consent-tooling.md" → "051") and the
+// prefixed one ("ADR-021-ox-plan-context.md" → "021").
+var adrNumRe = regexp.MustCompile(`(?i)^(?:adr[-_])?(\d{1,4})[-_]`)
 
 // contextMarker is a resolved inline reference: a compiled prose-token matcher
 // and the tooltip text surfaced from team context.

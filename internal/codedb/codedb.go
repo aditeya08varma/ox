@@ -149,6 +149,18 @@ func (db *DB) Search(ctx context.Context, input string) ([]search.Result, error)
 	return search.Execute(ctx, db.store, query)
 }
 
+// SearchRestrictedFiles parses and executes a query with an additional
+// internal file-path OR filter. The extra filter is applied inside the search
+// plan, before result limits are enforced.
+func (db *DB) SearchRestrictedFiles(ctx context.Context, input string, patterns []string) ([]search.Result, error) {
+	query, err := search.ParseQuery(input)
+	if err != nil {
+		return nil, fmt.Errorf("parse query: %w", err)
+	}
+	query.RestrictFiles(patterns)
+	return search.Execute(ctx, db.store, query)
+}
+
 // TranslateQuery parses a query and returns the generated SQL without executing.
 func (db *DB) TranslateQuery(input string) (*search.TranslatedQuery, error) {
 	query, err := search.ParseQuery(input)
