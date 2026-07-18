@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/decision"
 	"github.com/sageox/ox/internal/observability"
 	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/repotools"
@@ -138,6 +139,22 @@ var codeSearchCmd = &cobra.Command{
 
 		fullJSON, _ := cmd.Flags().GetBool("full-json")
 		limit, _ := cmd.Flags().GetInt("limit")
+		decisionsOnly, _ := cmd.Flags().GetBool("decisions")
+
+		// Decision Records live in the same index as code; tag hits under the
+		// repo's decision paths (doc_type:"decision") so agents recognize them,
+		// and honor --decisions as a pre-limit filter. Filtering happens on the
+		// RAW result set, so a corpus hit is never crowded out by code hits.
+		isDecision := decision.PathMatcher(root)
+		if decisionsOnly {
+			filtered := results[:0]
+			for _, r := range results {
+				if isDecision(r.FilePath) {
+					filtered = append(filtered, r)
+				}
+			}
+			results = filtered
+		}
 
 		var buf bytes.Buffer
 		enc := json.NewEncoder(&buf)
@@ -149,7 +166,7 @@ var codeSearchCmd = &cobra.Command{
 				return fmt.Errorf("encode: %w", err)
 			}
 		} else {
-			compact := compactSearchResults(results, limit)
+			compact := compactSearchResults(results, limit, isDecision)
 			if err := enc.Encode(compact); err != nil {
 				return fmt.Errorf("encode: %w", err)
 			}
@@ -177,6 +194,10 @@ type compactSearchResult struct {
 	Snippet     string `json:"snippet"`
 	Symbol      string `json:"symbol,omitempty"`
 	CommentKind string `json:"comment_kind,omitempty"`
+	// DocType is "decision" for hits inside the repo's decision-record
+	// corpus (docs/adr etc.) — the special tag that lets agents filter or
+	// recognize DRs in mixed results.
+	DocType string `json:"doc_type,omitempty"`
 
 	// PR/issue fields
 	Number int    `json:"number,omitempty"`
@@ -193,7 +214,7 @@ type compactSearchResponse struct {
 }
 
 // compactSearchResults converts full results into a compact format for agents.
-func compactSearchResults(results []search.Result, limit int) compactSearchResponse {
+func compactSearchResults(results []search.Result, limit int, isDecision func(string) bool) compactSearchResponse {
 	total := len(results)
 	if limit > 0 && len(results) > limit {
 		results = results[:limit]
@@ -214,6 +235,9 @@ func compactSearchResults(results []search.Result, limit int) compactSearchRespo
 			Title:       r.Title,
 			State:       r.State,
 			URL:         r.URL,
+		}
+		if isDecision != nil && isDecision(r.FilePath) {
+			cr.DocType = "decision"
 		}
 		compact = append(compact, cr)
 	}
@@ -845,6 +869,7 @@ func formatIndexTiming(r *daemon.CodeIndexResult) string {
 func init() {
 	codeSearchCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~6x more context tokens)")
 	codeSearchCmd.Flags().Int("limit", 10, "max results to return")
+	codeSearchCmd.Flags().Bool("decisions", false, "only results from this repo's decision records (ADRs/DDRs)")
 
 	codeQueryCmd.Flags().Bool("full-json", false, "full uncompacted JSON output (~6x more context tokens)")
 	codeQueryCmd.Flags().Int("limit", 10, "max results to return")

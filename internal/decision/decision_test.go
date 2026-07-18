@@ -200,6 +200,41 @@ func TestCorpusDetected(t *testing.T) {
 	}
 }
 
+// PathMatcher powers the `ox code search --decisions` filter and the
+// doc_type:"decision" result tag — a wrong match either hides DRs from the
+// filter or mislabels code as a decision.
+func TestPathMatcher(t *testing.T) {
+	root := t.TempDir()
+	writeCorpus(t, root, map[string]string{
+		"docs/adr/ADR-001-x.md": "# ADR-001: X\n**Status**: Accepted\n",
+	})
+	m := PathMatcher(root)
+
+	tests := []struct {
+		rel  string
+		want bool
+	}{
+		{"docs/adr/ADR-001-x.md", true},
+		{"docs/adr/nested/deep.md", true},  // dir match is prefix-recursive
+		{"docs/adr/notes.txt", false},      // not markdown
+		{"docs/other/ADR-002-y.md", false}, // outside the corpus
+		{"internal/decision/parse.go", false},
+	}
+	for _, tt := range tests {
+		if got := m(tt.rel); got != tt.want {
+			t.Errorf("match(%q) = %v want %v", tt.rel, got, tt.want)
+		}
+	}
+
+	// no corpus → always-false predicate, never nil
+	if PathMatcher(t.TempDir())("docs/adr/x.md") {
+		t.Error("empty corpus should match nothing")
+	}
+	if PathMatcher("")("docs/adr/x.md") {
+		t.Error("empty root should match nothing")
+	}
+}
+
 func TestScoreCorpus(t *testing.T) {
 	corpus := []Record{
 		{ID: "ADR-001", Number: 1, Title: "Unix socket IPC transport", Date: "2026-01-01", Excerpt: "sockets everywhere"},

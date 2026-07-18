@@ -17,6 +17,7 @@ import (
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/decision"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/ledgersearch"
 	"github.com/sageox/ox/internal/observability"
@@ -240,7 +241,7 @@ func writeQueryResponse(combined *combinedQueryResponse, qa *queryArgs) (int, er
 		LocalResults: combined.LocalResults,
 	}
 	if len(combined.CodeResults) > 0 {
-		compact := compactSearchResults(combined.CodeResults, qa.limit)
+		compact := compactSearchResults(combined.CodeResults, qa.limit, decision.PathMatcher(findGitRoot()))
 		resp.CodeResults = compact.Results
 		resp.Guidance = compact.Guidance
 	}

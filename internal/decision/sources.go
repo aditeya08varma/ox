@@ -132,6 +132,51 @@ func listFiles(gitRoot string, patterns []string) []string {
 	return out
 }
 
+// PathMatcher returns a predicate reporting whether a repo-relative path lies
+// inside this repo's decision corpus (configured decision.paths or the default
+// dirs). Resolution happens once; matching is pure string work — cheap enough
+// to tag every `ox code search` result at query time. Nil-safe: with no corpus
+// the predicate is always false.
+func PathMatcher(gitRoot string) func(relPath string) bool {
+	var cfg *config.DecisionConfig
+	if pc, _ := config.LoadProjectConfig(gitRoot); pc != nil {
+		cfg = pc.Decision
+	}
+	patterns := resolvePaths(gitRoot, cfg)
+
+	var dirs []string
+	var globs []string
+	for _, p := range patterns {
+		p = filepath.ToSlash(strings.TrimSpace(p))
+		if p == "" {
+			continue
+		}
+		if fi, err := os.Stat(filepath.Join(gitRoot, p)); err == nil && fi.IsDir() {
+			dirs = append(dirs, strings.TrimSuffix(p, "/")+"/")
+			continue
+		}
+		globs = append(globs, p)
+	}
+
+	return func(relPath string) bool {
+		rel := filepath.ToSlash(relPath)
+		if !strings.EqualFold(filepath.Ext(rel), ".md") {
+			return false
+		}
+		for _, d := range dirs {
+			if strings.HasPrefix(rel, d) {
+				return true
+			}
+		}
+		for _, g := range globs {
+			if ok, err := doublestar.Match(g, rel); err == nil && ok {
+				return true
+			}
+		}
+		return false
+	}
+}
+
 // PrimaryDir returns the corpus dir new DRs should land in: the first
 // configured/default path that is a plain directory. Empty when the corpus is
 // glob-only or absent.

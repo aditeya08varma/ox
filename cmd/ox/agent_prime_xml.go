@@ -165,6 +165,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		sb.WriteString("- Git history, diffs, and blame queries\n")
 		sb.WriteString("- Exploratory searches where you don't know the exact file\n")
 		sb.WriteString("Use `ox code insights` before planning multi-file changes (shows hotspots, contention, open PRs).\n")
+		sb.WriteString("Decision Records are in this index too: hits under docs/adr etc. carry doc_type:\"decision\"; add --decisions to search only them.\n")
 		sb.WriteString("Reserve Grep/Glob for: exact-string matches in a known file, or when ox code search returns no results.\n")
 		sb.WriteString("</code-search>\n")
 	}
