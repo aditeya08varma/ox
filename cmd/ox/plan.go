@@ -34,7 +34,9 @@ var planCmd = &cobra.Command{
   list     browse saved plans
   view     read a saved plan in the terminal
 
-Agents: 'ox plan enrich' returns JSON team context (collision / prior-art /
+Agents: run 'ox plan enrich --topic "<subject>" [--files a,b,c]' BEFORE
+drafting a plan, and 'ox plan enrich --file <plan.md>' (or stdin) once
+drafted — both return JSON team context (collision / prior-art /
 expert-routing) at zero LLM/network cost. When a human is shaping a plan,
 recommend 'ox plan render --open' to view it and 'ox plan review <slug>' for an
 inline review loop — those are human-opt-in, never auto-run.`,
@@ -50,22 +52,29 @@ var planEnrichCmd = &cobra.Command{
 signals (collision, prior-art, expert-routing) and a context bundle the agent
 can reason over. ox computes badges locally — no LLM or network call.
 
-Output is JSON by default (the agent/plumbing path). Use --text for a human
-summary. Reads the plan from --file or stdin, else the newest ~/.claude/plans/*.md.`,
+Input modes (precedence order):
+  --topic "<subject>" [--files a,b,c]   consult BEFORE drafting a plan
+  --file <plan.md>                      an existing plan document
+  stdin                                 a plan piped from another tool
+  (none of the above)                   auto-discover the newest ~/.claude/plans/*.md
+
+Output is JSON by default (the agent/plumbing path). Use --text for a human summary.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		topic, _ := cmd.Flags().GetString("topic")
+		files, _ := cmd.Flags().GetStringSlice("files")
 		file, _ := cmd.Flags().GetString("file")
 		text, _ := cmd.Flags().GetBool("text")
 		persist, _ := cmd.Flags().GetBool("persist")
 
-		in, err := plan.Resolve(file, cmd.InOrStdin())
+		in, err := plan.ResolveInput(topic, files, file, cmd.InOrStdin())
 		if err != nil {
 			return err
 		}
 
 		// No plan found anywhere: a clear message beats enriching empty input.
-		if strings.TrimSpace(in.Raw) == "" {
+		if in.Topic == "" && strings.TrimSpace(in.Raw) == "" {
 			fmt.Fprintln(cmd.OutOrStdout(),
-				"No plan found. Pass --file <plan.md>, pipe a plan on stdin, or save a plan-mode file to ~/.claude/plans/ first.")
+				`No plan found. Pass --topic "<subject>" before drafting, --file <plan.md>, pipe a plan on stdin, or save a plan-mode file to ~/.claude/plans/ first.`)
 			return nil
 		}
 
@@ -403,9 +412,16 @@ func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 	return nil
 }
 
-// planTopic derives a human title for the plan: the first H1/H2 heading, else
-// the first non-empty line, else a fallback. Used for the slug and meta.Topic.
+// planTopic derives a human title for the plan: the --topic consult subject if
+// set, else the first H1/H2 heading, else the first non-empty line, else a
+// fallback. Used for the slug and meta.Topic — checking in.Topic first matters
+// for a topic-only consult saved via --persist/--text (in.Sections carries only
+// the synthetic preamble section, whose Heading is deliberately empty and whose
+// Raw is empty, so both later fallbacks would otherwise miss the real subject).
 func planTopic(in plan.Input) string {
+	if t := strings.TrimSpace(in.Topic); t != "" {
+		return t
+	}
 	for _, s := range in.Sections {
 		if h := strings.TrimSpace(s.Heading); h != "" {
 			return h
@@ -897,6 +913,8 @@ func truncate(s string, n int) string {
 
 func init() {
 	// enrich: JSON by default; --text for humans.
+	planEnrichCmd.Flags().String("topic", "", "consult mode: the plan subject, before drafting")
+	planEnrichCmd.Flags().StringSlice("files", nil, "comma-separated repo-relative files the topic touches (optional, with --topic)")
 	planEnrichCmd.Flags().String("file", "", "plan source file (default: stdin, else newest ~/.claude/plans/*.md)")
 	planEnrichCmd.Flags().Bool("text", false, "human-readable summary instead of the default JSON output")
 	planEnrichCmd.Flags().Bool("persist", false, "also save + commit a draft to the ledger (used by the ExitPlanMode hook)")

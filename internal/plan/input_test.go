@@ -277,3 +277,117 @@ func findSection(sections []Section, heading string) *Section {
 	}
 	return nil
 }
+
+// TestResolveInput mirrors decision.TestResolveInput's structure: topic beats
+// file beats stdin/auto-discovery, and the full-document delegation is exact.
+func TestResolveInput(t *testing.T) {
+	t.Run("topic wins over file and stdin", func(t *testing.T) {
+		explicit := writePlanFile(t, t.TempDir(), "explicit.md", "## Explicit\nignored when topic is set", time.Now())
+
+		in, err := ResolveInput("my topic", nil, explicit, strings.NewReader("ignored stdin"))
+		if err != nil {
+			t.Fatalf("ResolveInput: %v", err)
+		}
+		if in.Topic != "my topic" {
+			t.Errorf("Topic = %q, want %q", in.Topic, "my topic")
+		}
+		if in.Raw != "" {
+			t.Errorf("Raw must stay empty in topic mode, got %q", in.Raw)
+		}
+		if in.Path != "" {
+			t.Errorf("Path must stay empty in topic mode, got %q", in.Path)
+		}
+	})
+
+	t.Run("topic with files populates Files and a synthetic preamble section", func(t *testing.T) {
+		in, err := ResolveInput("auth refresh flow", []string{"internal/auth/token.go", " internal/auth/refresh.go ", "internal/auth/token.go"}, "", nil)
+		if err != nil {
+			t.Fatalf("ResolveInput: %v", err)
+		}
+		want := []string{"internal/auth/refresh.go", "internal/auth/token.go"}
+		if !reflect.DeepEqual(in.Files, want) {
+			t.Errorf("Files = %v, want %v (trimmed, deduped, sorted)", in.Files, want)
+		}
+		if len(in.Sections) != 1 {
+			t.Fatalf("expected exactly one synthetic section, got %d: %+v", len(in.Sections), in.Sections)
+		}
+		sec := in.Sections[0]
+		if sec.Heading != "" {
+			t.Errorf("synthetic section Heading must stay empty (preamble semantics), got %q", sec.Heading)
+		}
+		if sec.Body != "auth refresh flow" {
+			t.Errorf("synthetic section Body = %q, want the topic text", sec.Body)
+		}
+		if !reflect.DeepEqual(sec.Files, want) {
+			t.Errorf("synthetic section Files = %v, want %v", sec.Files, want)
+		}
+	})
+
+	t.Run("empty topic delegates to Resolve: file mode", func(t *testing.T) {
+		withPlanModeDir(t, t.TempDir())
+		explicit := writePlanFile(t, t.TempDir(), "explicit.md", "## Explicit\nfull doc path", time.Now())
+
+		in, err := ResolveInput("", nil, explicit, nil)
+		if err != nil {
+			t.Fatalf("ResolveInput: %v", err)
+		}
+		if in.Topic != "" {
+			t.Errorf("Topic must stay empty, got %q", in.Topic)
+		}
+		if in.Path != explicit {
+			t.Errorf("path = %q, want %q (delegated to Resolve)", in.Path, explicit)
+		}
+		if !strings.Contains(in.Raw, "full doc path") {
+			t.Errorf("expected file content via Resolve, got %q", in.Raw)
+		}
+	})
+
+	t.Run("empty topic delegates to Resolve: stdin", func(t *testing.T) {
+		withPlanModeDir(t, t.TempDir())
+		in, err := ResolveInput("", nil, "", strings.NewReader("## Piped\nfrom stdin"))
+		if err != nil {
+			t.Fatalf("ResolveInput: %v", err)
+		}
+		if in.Topic != "" {
+			t.Errorf("Topic must stay empty, got %q", in.Topic)
+		}
+		if !strings.Contains(in.Raw, "from stdin") {
+			t.Errorf("expected stdin content via Resolve, got %q", in.Raw)
+		}
+	})
+
+	t.Run("whitespace-only topic is not a topic", func(t *testing.T) {
+		withPlanModeDir(t, t.TempDir())
+		in, err := ResolveInput("   ", nil, "", strings.NewReader("## Piped\nstdin wins when topic is blank"))
+		if err != nil {
+			t.Fatalf("ResolveInput: %v", err)
+		}
+		if in.Topic != "" {
+			t.Errorf("whitespace-only topic must not count as a topic, got %q", in.Topic)
+		}
+		if !strings.Contains(in.Raw, "stdin wins") {
+			t.Errorf("expected fallthrough to stdin, got %q", in.Raw)
+		}
+	})
+}
+
+func TestNormalizeExplicitFiles(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"nil", nil, nil},
+		{"empty and whitespace-only entries dropped", []string{"", "   ", "a.go"}, []string{"a.go"}},
+		{"duplicates collapsed", []string{"a.go", "a.go"}, []string{"a.go"}},
+		{"sorted", []string{"b.go", "a.go"}, []string{"a.go", "b.go"}},
+		{"trimmed", []string{"  a.go  "}, []string{"a.go"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := normalizeExplicitFiles(tt.in); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("normalizeExplicitFiles(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
+	}
+}

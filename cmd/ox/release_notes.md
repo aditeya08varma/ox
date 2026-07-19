@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`ox plan enrich --topic`** — consult team context before you've written a word of the plan (collision, prior-art, expert-routing), the same pre-draft pattern `ox decision enrich` already has. Add `--files` once you know which files are involved for open-PR/expert-ownership signals too.
+- **`ox session stop --current`** and **`ox session list --repo <path>`** — stop your own recording without knowing its agent ID, and list another repo's sessions without `cd`-ing there first.
+
+### Fixed
+
+- **`ox agent tasks done`/`cancel` now accepts `--result`/`--reason`** — these were documented and fully wired end to end but silently rejected by the CLI; completion and cancellation notes now actually save.
+- **Clearer errors when an agent ID looks like something else** — pasting a session name (from `ox session list`) where an agent ID belongs now says so directly, instead of a generic "unknown command."
+
 ## [0.12.0] - 2026-07-18
 
 Decision Records get first-class team context, and three real reliability gaps in sync and search are closed for good.

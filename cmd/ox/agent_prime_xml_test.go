@@ -578,6 +578,13 @@ func TestOutputAgentPrimeXML_PlanEnrichmentGuidance(t *testing.T) {
 				t.Errorf("plan-enrichment-guidance must mention %s", tt.wantCommand)
 			}
 
+			// always points at `ox plan lint <slug>` as the pre-done verification
+			// gate — full and Bronze tiers alike — so agents can discover the
+			// (Hidden) lint command instead of guessing its flags.
+			if !strings.Contains(xml, "ox plan lint") {
+				t.Error("plan-enrichment-guidance must mention `ox plan lint` in every tier")
+			}
+
 			// the review loop is the differentiator: full tiers recommend the
 			// `ox plan review` loop; Bronze (lighter) does not.
 			hasReviewLoop := strings.Contains(xml, "ox plan review")
@@ -1008,7 +1015,14 @@ func TestOutputAgentPrimeXML_SageoxOverheadBudget_Regression(t *testing.T) {
 	// Records pay none of it — this test measures the ox repo itself, which
 	// keeps docs/adr/, so the measured floor includes the block by design.
 	// Deliberately accepted: consult-and-credit for permanent decision docs.
-	const sageoxOverheadCeiling = 1950
+	//
+	// Raised 1950 -> 2000 (ox-04cn.4): the <plan-enrichment-guidance> block now
+	// teaches `ox plan lint <slug> [--strict]` — one clause in the full-tier
+	// block next to `ox plan review`, a shorter one in the Bronze-tier block.
+	// ~34 tokens, accepted so agents can discover the real `<slug>`-based
+	// usage instead of guessing a `--file` flag by analogy with its siblings
+	// `plan enrich`/`plan render` (both of which do take one).
+	const sageoxOverheadCeiling = 2000
 	sageoxTokens := budget.Get(prime.BudgetSourceSageox)
 	if sageoxTokens > sageoxOverheadCeiling {
 		t.Errorf("SageOx overhead floor for minimal prime = %d tokens, exceeds ceiling %d.\n"+

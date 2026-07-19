@@ -31,6 +31,11 @@ func init() {
 	sessionCmd.AddCommand(sessionExportCmd)
 	sessionExportCmd.Flags().StringP("input", "i", "", "input JSONL file path (bypasses managed store)")
 	sessionExportCmd.Flags().StringP("output", "o", "", "output file path")
+	// markdown is the only export format; this flag exists so a guessed
+	// --markdown (by analogy with --json/--text elsewhere) is accepted
+	// instead of erroring. Value is intentionally never read — if a second
+	// export format is ever added, this needs to become a real switch.
+	sessionExportCmd.Flags().Bool("markdown", true, "markdown is the only export format (accepted for compatibility)")
 }
 
 func runSessionExport(cmd *cobra.Command, args []string) error {

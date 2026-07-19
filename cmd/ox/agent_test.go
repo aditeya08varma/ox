@@ -101,9 +101,9 @@ func TestReinjectSessionFlags(t *testing.T) {
 					t.Fatalf("set %s: %v", k, err)
 				}
 			}
-			got := reinjectSessionFlags(cmd, tt.input)
+			got := reinjectFlags(cmd, tt.input, "title", "file", "session-id", "adapter")
 			if !reflect.DeepEqual(got, tt.want) {
-				t.Errorf("reinjectSessionFlags() = %v, want %v", got, tt.want)
+				t.Errorf("reinjectFlags() = %v, want %v", got, tt.want)
 			}
 		})
 	}
@@ -111,9 +111,9 @@ func TestReinjectSessionFlags(t *testing.T) {
 	t.Run("nil cmd is a no-op", func(t *testing.T) {
 		t.Parallel()
 		input := []string{"a", "b"}
-		got := reinjectSessionFlags(nil, input)
+		got := reinjectFlags(nil, input, "title", "file", "session-id", "adapter")
 		if !reflect.DeepEqual(got, input) {
-			t.Errorf("reinjectSessionFlags(nil) = %v, want %v", got, input)
+			t.Errorf("reinjectFlags(nil) = %v, want %v", got, input)
 		}
 	})
 }

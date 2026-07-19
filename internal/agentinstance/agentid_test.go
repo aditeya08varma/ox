@@ -29,6 +29,34 @@ func TestLooksLikeUUID(t *testing.T) {
 	}
 }
 
+func TestLooksLikeSessionName(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"2026-04-29T20-52-ajit-OxbOue", true},
+		{"2026-04-29T20-52-jane-doe-OxbOue", true},      // dash-containing username
+		{"2026-01-06T14-32-ryan-Ox7f3a", true},          // doc-comment example, internal/session/store.go
+		{"OxA1b2", false},                               // valid agent ID, not a session name
+		{"019568a5-e1e2-7cd1-8da8-b2d7440e3aab", false}, // UUID
+		{"oxsid_01KCJECKEGETGX6HC80NRYVZ3P", false},     // server session ID
+		{"2026-04-29T20-52-ajit-1234", false},           // trailing segment isn't Ox-prefixed
+		{"2026-04-29T20-52-OxbOue", false},              // missing username segment (no "-Ox" separator before it)
+		{"2026-04-29T20-52-ajit-OxbOu", false},          // suffix too short (3 chars after Ox)
+		{"2026-04-29T20-52-ajit-OxbOueX", false},        // suffix too long (5 chars after Ox)
+		{"2026-04-29 20-52-ajit-OxbOue", false},         // missing "T" separator
+		{"foobar", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			if got := looksLikeSessionName(tt.input); got != tt.want {
+				t.Errorf("looksLikeSessionName(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestClassifyBadID(t *testing.T) {
 	tests := []struct {
 		input      string
@@ -43,6 +71,10 @@ func TestClassifyBadID(t *testing.T) {
 
 		// server session ID
 		{"oxsid_01KCJECKEGETGX6HC80NRYVZ3P", "server session ID", false},
+
+		// session name copy-pasted from `ox session list`
+		{"2026-04-29T20-52-ajit-OxbOue", "session name", false},
+		{"2026-04-29T20-52-jane-doe-OxbOue", "session name", false}, // dash-containing username
 
 		// wrong Ox format (wrong case)
 		{"ox1234", "invalid agent ID format", false},

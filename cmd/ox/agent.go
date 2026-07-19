@@ -173,6 +173,20 @@ func init() {
 		"explicit adapter name, overrides auto-detection (session capture-prior)")
 	_ = agentCmd.PersistentFlags().MarkHidden("adapter")
 
+	// Same reinjection mechanism, for parseTaskIDAndNote's manual parser
+	// (tasks done, tasks cancel). Without these registered here, cobra
+	// rejects `ox agent <id> tasks done <task-id> --result "..."` outright
+	// with "unknown flag: --result" before the dispatcher ever runs.
+	agentCmd.PersistentFlags().String("result", "",
+		"completion note (tasks done)")
+	_ = agentCmd.PersistentFlags().MarkHidden("result")
+	agentCmd.PersistentFlags().String("reason", "",
+		"cancellation note (tasks cancel)")
+	_ = agentCmd.PersistentFlags().MarkHidden("reason")
+	agentCmd.PersistentFlags().String("note", "",
+		"generic note, alternate spelling for --result/--reason (tasks done, tasks cancel)")
+	_ = agentCmd.PersistentFlags().MarkHidden("note")
+
 	// Session-stop escape hatch: skip the summary-input optimization pass
 	// entirely and hand raw.jsonl directly to the summarizer. Useful as a
 	// per-session opt-out while the optimized path is still being proven,
@@ -408,12 +422,12 @@ func isAgentSubcommand(name string) bool {
 	return agentSubcommands[name]
 }
 
-// reinjectSessionFlags appends cobra-parsed values for --title, --file,
-// --session-id, and --adapter back into the session subcommand's args slice.
+// reinjectFlags appends cobra-parsed values for the named string flags back
+// onto args as "--name value" pairs, for flags left non-empty.
 //
-// Why: session subcommands (capture-prior, start, import, summarize) consume
-// these flags via manual parseTitle/parseCapturePriorFile/parseSessionID/
-// parseAdapter helpers that scan a []string. But the flags must also be
+// Why: several agent subcommands consume flags via manual parsers that scan
+// a []string — session's parseTitle/parseCapturePriorFile/parseSessionID/
+// parseAdapter, and tasks' parseTaskIDAndNote. But those flags must also be
 // registered on agentCmd itself, otherwise cobra rejects them as unknown
 // during its flag-parse pass before the dispatcher ever runs. Cobra strips
 // registered flags from args when parsing, so by the time the dispatcher
@@ -421,20 +435,19 @@ func isAgentSubcommand(name string) bool {
 //
 // This helper bridges the gap: it reads the cobra-parsed values and appends
 // them back as positional tokens so the existing parsers work unchanged.
-// Flags left empty are not injected.
-func reinjectSessionFlags(cmd *cobra.Command, sessionArgs []string) []string {
+func reinjectFlags(cmd *cobra.Command, args []string, flagNames ...string) []string {
 	if cmd == nil {
-		return sessionArgs
+		return args
 	}
 	flags := cmd.Flags()
-	for _, name := range []string{"title", "file", "session-id", "adapter"} {
+	for _, name := range flagNames {
 		val, err := flags.GetString(name)
 		if err != nil || val == "" {
 			continue
 		}
-		sessionArgs = append(sessionArgs, "--"+name, val)
+		args = append(args, "--"+name, val)
 	}
-	return sessionArgs
+	return args
 }
 
 // runWithAgentID executes a command using the specified agent instance
@@ -495,7 +508,7 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 		// parseSessionID/parseAdapter helpers expect them as positional
 		// tokens. This preserves the manual-parser call pattern without a
 		// wider refactor of every session handler signature.
-		sessionArgs = reinjectSessionFlags(cmd, sessionArgs)
+		sessionArgs = reinjectFlags(cmd, sessionArgs, "title", "file", "session-id", "adapter")
 		// --no-optimize on session stop is plumbed via env var so the deep
 		// writeOptimizedJSONLForSummary call site can read it without a
 		// signature refactor. Same variable serves as a raw env override.
@@ -545,6 +558,11 @@ func runWithAgentID(cmd *cobra.Command, agentID string, args []string) error {
 			return fmt.Errorf("unknown session command: %s\nAvailable: start, stop, abort, pause, resume, delete, log, remind, summarize, record, plan, context-trace, import, capture-prior, subagent-complete, subagent-list, recover", sessionCmd)
 		}
 	case "tasks":
+		// Same reinjection mechanism as session subcommands above:
+		// parseTaskIDAndNote expects --result/--reason/--note as positional
+		// tokens, but cobra already stripped them from subargs while parsing
+		// agentCmd's registered flags.
+		subargs = reinjectFlags(cmd, subargs, "result", "reason", "note")
 		return runAgentTasks(cmd.OutOrStdout(), inst, subargs)
 	case "query":
 		return runAgentQuery(inst, subargs)

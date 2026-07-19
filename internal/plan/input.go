@@ -78,6 +78,65 @@ func Resolve(file string, stdin io.Reader) (Input, error) {
 	return Parse(""), nil
 }
 
+// ResolveInput builds the enrich Input from --topic (+ --files), --file, or
+// stdin/auto-discovery, in that precedence order: topic beats file beats
+// stdin/auto-discovery. Mirrors decision.ResolveInput's precedence and shape
+// for cross-command consistency — an agent that has learned the --topic
+// pre-draft pattern from `ox decision enrich` finds the identical shape here,
+// which is the fix for the friction this exists to close (agents guessing
+// --topic on `plan enrich` by analogy from `decision enrich`). The
+// full-document path is untouched: topic empty delegates straight to Resolve,
+// so --file/stdin/auto-discovery behavior is byte-for-byte unchanged.
+func ResolveInput(topic string, files []string, file string, stdin io.Reader) (Input, error) {
+	if t := strings.TrimSpace(topic); t != "" {
+		return newTopicInput(t, files), nil
+	}
+	return Resolve(file, stdin)
+}
+
+// newTopicInput builds a pre-draft consult Input: no document exists yet, so
+// Raw stays empty (the isTopicOnly gate in enrich.go keys off exactly that).
+// files (optional) becomes both the flat Files list and a single synthetic
+// section's Files, so the existing file-keyed detectors/retrievers (collision,
+// expert-routing, context-bundle) work against it with NO changes to their
+// code — they already read Section.Files. The synthetic section's Heading is
+// deliberately left empty, Parse's own convention for pre-H2 "framing"
+// content, so it is excluded from the Steps count and from the diagram/viz/
+// mockup hints, which score AUTHORED prose structure that doesn't exist yet
+// in topic mode (see computeDiagramHints/computeVizHints/computeMockupExpectation).
+func newTopicInput(topic string, files []string) Input {
+	clean := normalizeExplicitFiles(files)
+	return Input{
+		Topic: topic,
+		Files: clean,
+		Sections: []Section{{
+			Body:  topic,
+			Files: clean,
+		}},
+	}
+}
+
+// normalizeExplicitFiles trims, dedupes, and sorts an explicit --files list —
+// the same determinism contract extractFileRefs guarantees for prose-parsed
+// refs.
+func normalizeExplicitFiles(files []string) []string {
+	seen := make(map[string]struct{}, len(files))
+	var out []string
+	for _, f := range files {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if _, ok := seen[f]; ok {
+			continue
+		}
+		seen[f] = struct{}{}
+		out = append(out, f)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // planModeDirOverride lets tests point auto-discovery at a temp directory
 // without touching the real ~/.claude/plans. Empty means "use the default".
 var planModeDirOverride string

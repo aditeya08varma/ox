@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/sageox/ox/internal/auth"
@@ -52,6 +53,46 @@ func newSessionStore() (*session.Store, string, error) {
 	}
 
 	return store, projectRoot, nil
+}
+
+// newSessionStoreForRepoPath creates a session store for a repo given its
+// filesystem path, rather than the current working directory. Backs
+// 'ox session list --repo <path>' so a caller can inspect another repo's
+// sessions without cd-ing there first.
+//
+// This deliberately does NOT mirror newSessionStore()'s tolerance for an
+// unconfigured repo: newSessionStore() falls back to the shared "default"
+// bucket via getRepoIDOrDefault when the CURRENT directory has no repo ID,
+// which is reasonable for an ambient cwd lookup. Here the caller explicitly
+// named repoPath, so silently substituting the bucket shared by every
+// unconfigured repo would show unrelated sessions as if they belonged to the
+// path the caller asked for — hard-error instead.
+//
+// Also unlike the cwd path, this does not walk up parent directories:
+// config.GetRepoID requires .sageox/config.json literally at repoPath, so a
+// path inside a repo (rather than at its root) will fail to resolve.
+func newSessionStoreForRepoPath(repoPath string) (*session.Store, string, error) {
+	abs, err := filepath.Abs(repoPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("resolve repo path %q: %w", repoPath, err)
+	}
+
+	repoID := config.GetRepoID(abs)
+	if repoID == "" {
+		return nil, "", fmt.Errorf("no SageOx project found at %q (must be the repo root — .sageox/config.json is required literally there; subdirectories are not walked up)", abs)
+	}
+
+	contextPath := session.GetContextPath(repoID)
+	if contextPath == "" {
+		return nil, "", fmt.Errorf("failed to get context path for repo %q", abs)
+	}
+
+	store, err := session.NewStore(contextPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to access session store for repo %q: %w", abs, err)
+	}
+
+	return store, abs, nil
 }
 
 // getAuthenticatedUsername returns the authenticated user's email local part, or "".

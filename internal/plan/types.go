@@ -149,11 +149,22 @@ type Section struct {
 }
 
 // Input is a resolved plan: its source path (if any), raw markdown, and parsed
-// sections.
+// sections. A pre-draft consult (--topic, optionally --files) instead sets
+// Topic/Files and leaves Raw empty — see ResolveInput.
 type Input struct {
 	Path     string
 	Raw      string
 	Sections []Section
+	// Topic is the pre-draft consult subject (--topic). Empty for a full-document
+	// Input (the --file/stdin/auto-discovery path). Mirrors decision.Input.Topic
+	// for cross-command consistency.
+	Topic string
+	// Files is the caller-provided file list for a topic-only consult (--files).
+	// Empty for a full-document Input, where Section.Files (extracted from the
+	// parsed prose) is the file source instead. decision.Input has no equivalent
+	// field: plan's collision/expert-routing signals are file-keyed, which
+	// decision's related-decision signals are not.
+	Files []string
 }
 
 // SignalSummary is the deterministic rollup of which signals fired.

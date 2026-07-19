@@ -57,10 +57,18 @@ Sessions are sorted by date with newest first.
 By default, only shows sessions from the last 7 days for performance.
 Use --all to show all sessions regardless of age.
 
+Use --repo to list another repo's sessions by filesystem path instead of
+the current directory. The path must be the repo root (.sageox/config.json
+must exist directly there — subdirectories are not walked up). Local
+session data reflects the --repo target, but ledger-merged sessions still
+come from the CURRENT directory's configured ledger — this only matters
+if the two repos use different team ledgers.
+
 Examples:
   ox session list              # show last 10 from past 7 days
   ox session list --limit 20   # show last 20 from past 7 days
-  ox session list --all        # show all sessions (may be slow)`,
+  ox session list --all        # show all sessions (may be slow)
+  ox session list --repo /path/to/other/repo  # list a different repo's sessions`,
 	RunE: runSessionList,
 }
 
@@ -68,6 +76,7 @@ func init() {
 	sessionCmd.AddCommand(sessionListCmd)
 	sessionListCmd.Flags().Int("limit", 10, "maximum sessions to show (0 for no limit)")
 	sessionListCmd.Flags().Bool("all", false, "show all sessions regardless of age (may be slow)")
+	sessionListCmd.Flags().String("repo", "", "list sessions for a different repo by filesystem path (must be the repo root; default: current repo)")
 }
 
 // sessionListOutput is the JSON output format for session list.
@@ -106,6 +115,7 @@ const sessionListAgentGuidance = "Pick sessions by title/summary; run 'ox sessio
 func runSessionList(cmd *cobra.Command, args []string) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	showAll, _ := cmd.Flags().GetBool("all")
+	repoPath, _ := cmd.Flags().GetString("repo")
 	jsonOutput, _ := cmd.Root().PersistentFlags().GetBool("json")
 
 	// Agents (AGENT_ENV=claude-code / codex / etc.) consume this output as
@@ -122,27 +132,42 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 		limit = 0
 	}
 
-	store, projectRoot, err := newSessionStore()
-	if err != nil {
-		if jsonOutput {
-			cwd, _ := os.Getwd()
-			out := sessionListOutput{
-				Sessions:        []sessionListEntry{},
-				RepoName:        filepath.Base(cwd),
-				RepoID:          "",
-				LedgerAvailable: false,
-			}
-			if inAgent {
-				out.Guidance = sessionListAgentGuidance
-			}
-			return outputJSON(cmd.OutOrStdout(), out)
+	var store *session.Store
+	var projectRoot string
+	var err error
+	if repoPath != "" {
+		// --repo names a specific repo explicitly, so a resolution failure
+		// hard-errors here instead of falling into the soft "not in a
+		// project" branch below. That branch's output describes the
+		// CURRENT directory as empty of sessions, which would misdescribe
+		// a failure that is actually about the --repo path.
+		store, projectRoot, err = newSessionStoreForRepoPath(repoPath)
+		if err != nil {
+			return err
 		}
-		cwd, _ := os.Getwd()
-		fmt.Println()
-		fmt.Println(sessionEmptyStyle.Render(fmt.Sprintf("  Not in a SageOx project (cwd: %s).", cwd)))
-		fmt.Println()
-		cli.PrintHint("Run from a git directory where SageOx has been initialized, or run 'ox init' to set up.")
-		return nil
+	} else {
+		store, projectRoot, err = newSessionStore()
+		if err != nil {
+			if jsonOutput {
+				cwd, _ := os.Getwd()
+				out := sessionListOutput{
+					Sessions:        []sessionListEntry{},
+					RepoName:        filepath.Base(cwd),
+					RepoID:          "",
+					LedgerAvailable: false,
+				}
+				if inAgent {
+					out.Guidance = sessionListAgentGuidance
+				}
+				return outputJSON(cmd.OutOrStdout(), out)
+			}
+			cwd, _ := os.Getwd()
+			fmt.Println()
+			fmt.Println(sessionEmptyStyle.Render(fmt.Sprintf("  Not in a SageOx project (cwd: %s).", cwd)))
+			fmt.Println()
+			cli.PrintHint("Run from a git directory where SageOx has been initialized, or run 'ox init' to set up.")
+			return nil
+		}
 	}
 
 	repoName := filepath.Base(projectRoot)
@@ -165,6 +190,14 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 	uploadedSessions := make(map[string]bool)
 
 	// also scan ledger sessions from team members
+	//
+	// SCOPE (v1): resolveLedgerPath() resolves via the CALLING process's
+	// cwd/git root, not --repo's path. When --repo is set, the local-cache
+	// sessions above correctly reflect the --repo target, but these
+	// ledger-merged rows still reflect the CURRENT directory's configured
+	// ledger. Invisible when both repos share one team ledger (the common
+	// case); wrong if they use different ledgers. Resolving the ledger
+	// relative to --repo too is a larger change, deferred for now.
 	ledgerPath, ledgerErr := resolveLedgerPath()
 	ledgerAvailable := ledgerErr == nil
 	if ledgerAvailable {
