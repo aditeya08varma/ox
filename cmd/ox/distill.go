@@ -779,27 +779,43 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	// after an earlier one failed would silently and permanently skip the
 	// failed one on every future run.
 	var stageErrs []error
+	dailyOK := true
 
 	if plan.Daily {
 		if err := distillDaily(ctx, cmd, backend, tc, state, idx, projectRoot, now, distillGuidelines); err != nil {
 			slog.Warn("daily distill stopped early", "error", err)
 			stageErrs = append(stageErrs, fmt.Errorf("daily distill: %w", err))
+			dailyOK = false
 		}
 	}
 
-	for _, week := range plan.Weeks {
-		if err := distillWeekly(ctx, cmd, backend, tc, state, week, distillGuidelines); err != nil {
-			slog.Warn("weekly distill failed, stopping remaining weeks this run", "year", week.Year, "week", week.Week, "error", err)
-			stageErrs = append(stageErrs, fmt.Errorf("weekly distill (%d-W%02d): %w", week.Year, week.Week, err))
-			break
+	// Weekly/monthly rollups consume whatever daily files exist on disk —
+	// they don't verify their source date range is complete. If daily
+	// distill stopped partway through backfilling an already-due week (the
+	// plan.Weeks below was computed from state.LastWeekly, independent of
+	// what daily actually manages to finish this run), rolling that week up
+	// anyway would synthesize it from a partial day range and mark it done
+	// forever via LastWeekly, permanently losing the days daily never got
+	// to. Skip both stages entirely rather than risk that — same failure
+	// class the break-not-continue logic above guards against, just
+	// cross-stage instead of within one stage.
+	if !dailyOK {
+		slog.Warn("skipping weekly/monthly rollups this run: daily distill did not complete, its backlog may back an already-due week/month")
+	} else {
+		for _, week := range plan.Weeks {
+			if err := distillWeekly(ctx, cmd, backend, tc, state, week, distillGuidelines); err != nil {
+				slog.Warn("weekly distill failed, stopping remaining weeks this run", "year", week.Year, "week", week.Week, "error", err)
+				stageErrs = append(stageErrs, fmt.Errorf("weekly distill (%d-W%02d): %w", week.Year, week.Week, err))
+				break
+			}
 		}
-	}
 
-	for _, month := range plan.Months {
-		if err := distillMonthly(ctx, cmd, backend, tc, state, month, distillGuidelines); err != nil {
-			slog.Warn("monthly distill failed, stopping remaining months this run", "month", month, "error", err)
-			stageErrs = append(stageErrs, fmt.Errorf("monthly distill (%s): %w", month, err))
-			break
+		for _, month := range plan.Months {
+			if err := distillMonthly(ctx, cmd, backend, tc, state, month, distillGuidelines); err != nil {
+				slog.Warn("monthly distill failed, stopping remaining months this run", "month", month, "error", err)
+				stageErrs = append(stageErrs, fmt.Errorf("monthly distill (%s): %w", month, err))
+				break
+			}
 		}
 	}
 

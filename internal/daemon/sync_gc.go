@@ -145,7 +145,7 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 				// land (diverged from remote) — the interval/full-clone
 				// triggers keep today's conservative gcSkippedDirty
 				// behavior on any local changes that can't be preserved.
-				result := s.runBlueGreenGCOpts(ctx, *l, wedged)
+				result, recovered := s.runBlueGreenGCOpts(ctx, *l, wedged)
 				if s.issues != nil {
 					switch {
 					case result == gcSkippedDirty:
@@ -155,7 +155,13 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 							Repo:     "ledger",
 							Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
 						})
-					case result == gcSuccess && wedged:
+					case result == gcSuccess && recovered:
+						// recovered (not just wedged) means the diverge-capture
+						// path actually ran and actually captured content — a
+						// reclone that succeeded via the ordinary path (e.g.
+						// the wedge resolved itself between detection and this
+						// call) must not raise a "review and commit" alert for
+						// content that was never actually recovered.
 						s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
 						s.issues.ClearIssue(IssueTypeSessionConflictWedge, "ledger")
 						// the daemon never commits (.claude/rules/daemon-git.md)
@@ -171,6 +177,9 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 						})
 					case result == gcSuccess:
 						s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
+						if wedged {
+							s.issues.ClearIssue(IssueTypeSessionConflictWedge, "ledger")
+						}
 					}
 				}
 
@@ -284,16 +293,23 @@ func revListCount(ctx context.Context, path, primaryRange, fallbackRange string)
 
 // isNonFastForwardErr reports whether a git push failure looks like a
 // non-fast-forward rejection (remote has commits we don't have) rather than
-// an auth/network/LFS failure — mirrors the substring-match style already
-// used for LFS errors in gcPushUnpushedCommits.
+// an auth/network/LFS/protected-branch failure — mirrors the substring-match
+// style already used for LFS errors in gcPushUnpushedCommits.
+//
+// Deliberately does NOT match on the bare word "rejected": both a genuine
+// non-fast-forward push and a protected-branch/hook rejection use "rejected"
+// somewhere in their git output ("[rejected]" is the generic push-refusal
+// prefix; the actual reason is a separate suffix like "(non-fast-forward)"
+// or "(protected branch hook declined)"). Matching on "rejected" alone would
+// route protected-branch/hook failures into the diverge-capture path, which
+// is only correct for genuine divergence.
 func isNonFastForwardErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "non-fast-forward") ||
-		strings.Contains(msg, "fetch first") ||
-		strings.Contains(msg, "rejected")
+		strings.Contains(msg, "fetch first")
 }
 
 // TriggerGC forces a GC reclone of all eligible team contexts, bypassing the interval check.
@@ -485,7 +501,8 @@ func releaseGCLock(f *os.File, lockPath string) {
 // Local changes (unpushed commits, uncommitted edits, untracked files) are preserved
 // across the reclone. If preservation fails, GC is skipped rather than risk data loss.
 func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) gcResult {
-	return s.runBlueGreenGCOpts(ctx, ws, false)
+	result, _ := s.runBlueGreenGCOpts(ctx, ws, false)
+	return result
 }
 
 // runBlueGreenGCOpts is runBlueGreenGC with captureUnpushedOnDiverge
@@ -493,7 +510,18 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 // runBlueGreenGC directly) so every existing caller — 50+ call sites across
 // the test suite — keeps its current, unchanged behavior with zero edits;
 // only the new ledger-wedge trigger in checkAndRunGC calls this directly.
-func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) gcResult {
+//
+// The second return value is true only when the diverge-capture path
+// actually ran AND actually captured content (gcCaptureDiff found a
+// non-empty diff). It is NOT a synonym for "captureUnpushedOnDiverge was
+// requested" or "the reclone succeeded" — a reclone can succeed via the
+// ordinary path even when the caller passed captureUnpushedOnDiverge=true
+// (e.g. the wedge condition resolved itself between detection and this
+// call, so the push just succeeded normally). Callers must gate anything
+// implying "there is recovered content for a human to review" on this
+// value specifically, not on gcSuccess or on their own pre-call wedge
+// sample.
+func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) (result gcResult, recovered bool) {
 	newPath := ws.Path + ".new"
 	oldPath := ws.Path + ".old"
 	diffFile := ws.Path + ".gc-diff"
@@ -516,7 +544,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	if lockErr != nil {
 		s.logger.Info("gc: another GC holds the lock for this workspace, skipping",
 			"path", ws.Path, "workspace", wsLabel, "lock", lockPath)
-		return gcSkippedLocked
+		return gcSkippedLocked, false
 	}
 	defer releaseGCLock(gcLock, lockPath)
 
@@ -546,7 +574,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 			s.logger.Info("gc: cleaning up leftover artifact", "path", leftover)
 			if err := os.RemoveAll(leftover); err != nil {
 				s.logger.Error("gc: failed to remove leftover artifact", "path", leftover, "error", err)
-				return gcFailed
+				return gcFailed, false
 			}
 		}
 	}
@@ -567,7 +595,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		if !captureUnpushedOnDiverge || !isNonFastForwardErr(err) {
 			s.logger.Warn("gc: skipping reclone, cannot push unpushed commits",
 				"path", ws.Path, "workspace", wsLabel, "error", err)
-			return gcSkippedDirty
+			return gcSkippedDirty, false
 		}
 
 		mergeBase, mbErr := gitutil.RunGit(ctx, ws.Path, "merge-base", "@{upstream}", "HEAD")
@@ -577,7 +605,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		if mbErr != nil {
 			s.logger.Warn("gc: skipping reclone, cannot determine merge-base for diverge capture",
 				"path", ws.Path, "workspace", wsLabel, "error", mbErr)
-			return gcSkippedDirty
+			return gcSkippedDirty, false
 		}
 
 		s.logger.Warn("gc: push rejected (diverged), capturing unpushed commits as a diff instead of skipping",
@@ -586,7 +614,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		if capErr != nil {
 			s.logger.Warn("gc: skipping reclone, cannot capture diverged commits as diff",
 				"path", ws.Path, "workspace", wsLabel, "error", capErr)
-			return gcSkippedDirty
+			return gcSkippedDirty, false
 		}
 		divergeCaptured = captured
 	}
@@ -602,7 +630,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		if err != nil {
 			s.logger.Warn("gc: skipping reclone, cannot capture uncommitted changes",
 				"path", ws.Path, "workspace", wsLabel, "error", err)
-			return gcSkippedDirty
+			return gcSkippedDirty, false
 		}
 	}
 
@@ -611,7 +639,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	if err != nil {
 		s.logger.Warn("gc: skipping reclone, cannot capture untracked files",
 			"path", ws.Path, "workspace", wsLabel, "error", err)
-		return gcSkippedDirty
+		return gcSkippedDirty, false
 	}
 
 	// step 0d (ledger only): preserve .sageox/cache/ (gitignored, contains codedb indexes)
@@ -621,7 +649,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		if err := gcPreserveCache(ws.Path, cacheBackupDir); err != nil {
 			s.logger.Warn("gc: skipping reclone, cannot preserve cache",
 				"path", ws.Path, "error", err)
-			return gcFailed
+			return gcFailed, false
 		} else if _, err := os.Stat(cacheBackupDir); err == nil {
 			hasCache = true
 		}
@@ -649,7 +677,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		if err := ledger.CloneWithSparseCheckout(newPath, cloneURL); err != nil {
 			s.logger.Error("gc: reclone failed, keeping old", "workspace", wsLabel, "error", err)
 			_ = os.RemoveAll(newPath)
-			return gcFailed
+			return gcFailed, false
 		}
 		// Install the credential helper into the freshly cloned ledger so
 		// subsequent pulls/pushes resolve auth via the helper.
@@ -662,7 +690,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		if err != nil {
 			s.logger.Error("gc: reclone failed, keeping old", "workspace", wsLabel, "error", err)
 			_ = os.RemoveAll(newPath)
-			return gcFailed
+			return gcFailed, false
 		}
 	}
 
@@ -676,7 +704,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	if !valid {
 		s.logger.Error("gc: validation failed, keeping old", "workspace", wsLabel)
 		_ = os.RemoveAll(newPath)
-		return gcFailed
+		return gcFailed, false
 	}
 
 	// configure pull.rebase=true on the new clone (ledger's ConfigureSparseCheckout already sets this)
@@ -721,7 +749,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		}
 		s.logger.Error("gc: failed to move old repo aside", "path", ws.Path, "error", err)
 		_ = os.RemoveAll(newPath)
-		return gcFailed
+		return gcFailed, false
 	}
 
 	if err := os.Rename(newPath, ws.Path); err != nil {
@@ -732,7 +760,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 		if isLedger {
 			s.ledgerMu.Unlock()
 		}
-		return gcFailed
+		return gcFailed, false
 	}
 
 	if isLedger {
@@ -793,7 +821,7 @@ func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceStat
 	}
 
 	s.logger.Info("gc: reclone complete", "workspace", wsLabel, "path", ws.Path)
-	return gcSuccess
+	return gcSuccess, divergeCaptured
 }
 
 // gcPushUnpushedCommits pushes any local commits not yet on the remote.

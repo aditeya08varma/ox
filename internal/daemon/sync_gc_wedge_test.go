@@ -205,8 +205,9 @@ func TestGC_CaptureUnpushedOnDiverge_Succeeds(t *testing.T) {
 	plainResult := s.runBlueGreenGC(context.Background(), ws)
 	require.Equal(t, gcSkippedDirty, plainResult, "sanity check: an ordinary reclone must skip on a diverged push (this is the bug being fixed)")
 
-	result := s.runBlueGreenGCOpts(context.Background(), ws, true)
+	result, recovered := s.runBlueGreenGCOpts(context.Background(), ws, true)
 	require.Equal(t, gcSuccess, result, "diverge-aware reclone must succeed instead of skipping")
+	assert.True(t, recovered, "the diverge-capture path actually ran and captured content — recovered must be true, not just gcSuccess")
 
 	// the remote's content must be present (reclone actually happened)
 	assert.FileExists(t, filepath.Join(ledgerDir, "sessions", "remote.txt"))

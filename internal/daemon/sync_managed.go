@@ -427,11 +427,21 @@ func sessionConflictPaths(ctx context.Context, repoPath string) []string {
 	}
 	var paths []string
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if strings.HasPrefix(line, "sessions/") {
+		if isSessionMetaPath(line) {
 			paths = append(paths, line)
 		}
 	}
 	return paths
+}
+
+// isSessionMetaPath reports whether path has the exact shape
+// sessions/<session-id>/meta.json — one session-directory component, not
+// any file anywhere under sessions/ (session.md, summary.json, and other
+// per-session artifacts are conflicts too, but not the specific
+// content-shape IssueTypeSessionConflictWedge exists to describe).
+func isSessionMetaPath(path string) bool {
+	parts := strings.Split(path, "/")
+	return len(parts) == 3 && parts[0] == "sessions" && parts[1] != "" && parts[2] == "meta.json"
 }
 
 // staleRebaseThreshold separates a fresh, in-flight rebase from an abandoned

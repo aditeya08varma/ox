@@ -173,8 +173,11 @@ func runSync(cmd *cobra.Command, args []string) error {
 
 	// surface daemon health issues (e.g. a wedged session conflict) beyond
 	// just `ox agent <id>` — same warnings, same severity thresholds, now
-	// visible from a plain `ox sync` too.
-	emitDaemonIssueWarnings()
+	// visible from a plain `ox sync` too. Suppressed in --json mode to keep
+	// programmatic output clean (matches ox status).
+	if !jsonOutput {
+		emitDaemonIssueWarnings()
+	}
 
 	// output result
 	if jsonOutput {
