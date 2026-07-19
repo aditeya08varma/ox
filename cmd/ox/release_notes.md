@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-07-18
+
+Decision Records get first-class team context, and three real reliability gaps in sync and search are closed for good.
+
 ### Added
 
 - **Universal session links on every PR and commit** — recordings now mint their stable `ses_` ID the moment they start (not at stop), so every artifact carries the durable `https://sageox.ai/c/<session-id>` conversation link from the first minute: commit trailers (`SageOx-Session:`, written by the existing prepare-commit-msg hook), the PR-body last line (a one-line verbatim directive in prime output — squash merges now land the trailer in main's history), and rendered plan footers. Aborting a recording countermands the directive and stops new links immediately; the existing `attribution.session` setting turns the whole surface off. Crashed sessions keep their links stable — the daemon reuses the start-minted ID from the raw-header carrier instead of inventing a new one. Legacy recordings and historical name-based URLs stay valid.
@@ -14,6 +18,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ox decision enrich` — team context for Decision Records** — creating or updating an ADR/DDR now starts from the team's actual history instead of a blank page. Run it with `--topic` before drafting (related decisions, the corpus's numbering and template conventions, prior sessions, ready-to-paste citations) or `--file` before editing (code drift since the decision's date, amendment anchors, and any reference that no longer resolves — the "cited decision #9 that exists in no document" failure class is caught before commit, not after). Zero LLM or network cost; ox never edits the DR — the agent authors every word, and every citation ox emits is one it just verified. DRs are discovered zero-config from conventional dirs (`docs/adr`, `docs/decisions`, …) or the committed `decision.paths` setting.
 - **Plans now tie back to the decisions that shaped them** — `ox plan enrich` surfaces this repo's own Decision Records relevant to a plan, and the rendered plan marks their mentions inline (a subtle marker, context — never a verdict). Running `ox decision enrich` in this repo immediately surfaced nine duplicated ADR numbers our own corpus had accumulated unnoticed.
 - **Every coding agent is primed for decision hygiene** — in repos that keep DRs, `ox agent prime` teaches the consult-and-credit contract: enrich before drafting, credit teammates by name with verifiable refs, amend Accepted decisions with dated markers instead of rewriting history, and keep vendor credit subtle (invisible source refs + the scored commit trailer; at most two visible SageOx credits per DR).
+- **`ox doctor` catches a broken Decision Records setup** — a typo'd or invalid `decision.paths` entry used to fail silently and quietly turn off enrichment; `ox doctor` now flags it before it costs you a wasted `ox decision enrich` run.
+- **Find your team's decisions fast in code search** — `ox code search --decisions` narrows results to just this repo's ADRs/DDRs, and every decision-record hit is now labeled wherever it shows up in search so you can spot it at a glance.
+- **`ox session prune` clears out local-only sessions you no longer need** — removes finalized recordings that were never pushed to the ledger, keeping your local session store tidy. `--all` also clears paused, canceled, ghost, and orphaned sessions; `--dry-run` previews first; `--force` skips the confirmation prompt. Sessions already on the ledger are never touched — use `ox session remove <name>` for those.
+
+### Changed
+
+- **Fresher skills and rules on every `ox init` / `ox doctor --fix`** — includes a new `ox-session-review` skill for auditing session quality, a reorganized `ox-plan` skill, and a new rule that points every agent to where your team's shared conventions actually live.
+
+### Fixed
+
+- **Sync no longer wedges permanently if you have git commit signing turned on** — ox commits non-interactively (session finalize, murmurs, ledger housekeeping) and can't answer a signing passphrase prompt, so a global `commit.gpgsign` setting used to make every one of those commits fail forever with no visible error outside `ox doctor` — sync would just quietly pile up. ox now disables signing on its own commits only (your own repos keep signing normally) and self-heals any ledger or team context already stuck this way.
+- **`ox code search` recovers on its own from a rare false alarm** — under heavy concurrent use it could occasionally report a scary, permanent-looking index corruption error even though ox already knows how to repair it; it now retries briefly first, so the self-heal kicks in instead of the false alarm.
+- **`ox doctor` no longer skips checks because the daemon wasn't running** — it now starts the daemon first, the same way `ox sync` already does, so checks like stuck-session detection actually run instead of being silently skipped.
+
+### Security
+
+- **Dependency security patch** — updated `golang.org/x/crypto`, `x/net`, `x/sys`, `x/term`, `x/text`, and `goldmark` to close reachable CVEs in code paths ox actually exercises.
 
 ## [0.11.1] - 2026-07-01
 
