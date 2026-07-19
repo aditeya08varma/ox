@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -115,25 +116,60 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 			intervalExceeded := l.LastGCTime.IsZero() || time.Since(l.LastGCTime) >= interval
 			fullClone := !isPartialClone(l.Path)
 
-			if intervalExceeded || fullClone {
+			// trigger 3: a genuinely wedged ledger (ahead AND behind for
+			// longer than ledgerSyncWedgeAge) — checkAndRunGC's normal
+			// triggers never catch this on their own because a wedge can
+			// persist indefinitely without ever exceeding the GC interval.
+			// Only checked when the other two triggers didn't already fire
+			// and the cooldown has elapsed, since it costs a live fetch.
+			wedgeCooldownElapsed := l.LastGCTime.IsZero() || time.Since(l.LastGCTime) >= ledgerGCWedgeCooldown
+			wedged := false
+			var wedgeAge time.Duration
+			if !intervalExceeded && !fullClone && wedgeCooldownElapsed {
+				wedged, wedgeAge, _ = s.ledgerSyncWedged(ctx, l.Path)
+			}
+
+			if intervalExceeded || fullClone || wedged {
 				reason := "interval exceeded"
-				if fullClone {
+				switch {
+				case fullClone:
 					reason = "full clone upgrade"
+				case wedged:
+					reason = "sync wedge detected"
 				}
 				s.logger.Info("gc: ledger due for reclone", "id", l.ID,
-					"reason", reason, "interval_days", intervalDays, "last_gc", l.LastGCTime)
+					"reason", reason, "interval_days", intervalDays, "last_gc", l.LastGCTime, "wedge_age", wedgeAge)
 
-				result := s.runBlueGreenGC(ctx, *l)
+				// only the wedge trigger asks the reclone to capture and
+				// carry forward unpushed commits that a plain push can't
+				// land (diverged from remote) — the interval/full-clone
+				// triggers keep today's conservative gcSkippedDirty
+				// behavior on any local changes that can't be preserved.
+				result := s.runBlueGreenGCOpts(ctx, *l, wedged)
 				if s.issues != nil {
-					switch result {
-					case gcSkippedDirty:
+					switch {
+					case result == gcSkippedDirty:
 						s.issues.SetIssue(DaemonIssue{
 							Type:     IssueTypeDirtyWorkspace,
 							Severity: SeverityWarning,
 							Repo:     "ledger",
 							Summary:  "local changes could not be preserved for GC reclone (push failed or changes could not be captured)",
 						})
-					case gcSuccess:
+					case result == gcSuccess && wedged:
+						s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
+						s.issues.ClearIssue(IssueTypeSessionConflictWedge, "ledger")
+						// the daemon never commits (.claude/rules/daemon-git.md)
+						// — recovered content is uncommitted working-tree
+						// changes after this reclone. Loud on purpose: this
+						// needs a human/agent to review and commit it.
+						s.issues.SetIssue(DaemonIssue{
+							Type:            IssueTypeSessionConflictRecovered,
+							Severity:        SeverityError,
+							Repo:            "ledger",
+							Summary:         "sessions recovered as uncommitted changes after a wedged-ledger reclone — review and commit",
+							RequiresConfirm: true,
+						})
+					case result == gcSuccess:
 						s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
 					}
 				}
@@ -161,6 +197,103 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 	}()
 
 	atomic.StoreInt32(&s.gcInProgress, 0)
+}
+
+// ledgerSyncWedgeAge is how long a ledger must be simultaneously ahead
+// (unpushed local commits) and behind (remote has advanced) before it's
+// considered wedged rather than transient lag an ordinary pull cycle will
+// resolve on its own. Comfortably past the 30-minute backoff cap in
+// workspace_registry.go's exponentialBackoff, so this never fires on a
+// repo that's still within its normal retry window.
+const ledgerSyncWedgeAge = 3 * time.Hour
+
+// ledgerGCWedgeCooldown bounds how often a detected wedge can re-trigger a
+// reclone. If the wedge condition persists after one reclone attempt (e.g.
+// a concurrent writer keeps recreating divergence — see ox-q42i/ox-50d5),
+// that's a signal to stop auto-acting and let severity escalation
+// (escalateSessionConflictSeverity) raise the alarm instead of retrying
+// every cycle.
+const ledgerGCWedgeCooldown = 6 * time.Hour
+
+// ledgerSyncWedged detects a ledger stuck simultaneously ahead and behind
+// its remote for longer than ledgerSyncWedgeAge — the state a sessions/
+// meta.json content conflict produces (see sessionConflictPaths in
+// sync_managed.go), which checkAndRunGC's interval/full-clone triggers
+// never catch on their own since a wedge can persist indefinitely without
+// ever exceeding the GC interval.
+//
+// Deliberately git-plumbing only, not based on any in-memory daemon state
+// (unlike workspace_registry.go's SyncFailures counter, which resets on
+// daemon restart) — so detection survives across restarts during a
+// multi-hour incident. Confirmed via a live fetch so a merely-offline
+// machine, an explicitly supported normal state, is never mistaken for
+// wedged.
+func (s *SyncScheduler) ledgerSyncWedged(ctx context.Context, path string) (wedged bool, oldestUnpushedAge time.Duration, unpushedCount int) {
+	ahead, err := revListCount(ctx, path, "@{upstream}..HEAD", "origin/main..HEAD")
+	if err != nil || ahead <= 0 {
+		return false, 0, 0
+	}
+
+	// bounded fetch to confirm we're actually online before concluding
+	// wedged — a fetch failure means offline, not stuck.
+	if _, err := gitutil.NewNetworkCmd(ctx, "-C", path, "fetch", "--quiet").CombinedOutput(); err != nil {
+		return false, 0, ahead
+	}
+
+	behind, err := revListCount(ctx, path, "HEAD..@{upstream}", "HEAD..origin/main")
+	if err != nil || behind <= 0 {
+		// ahead only, not behind — a plain push (gcPushUnpushedCommits)
+		// resolves this; not wedged.
+		return false, 0, ahead
+	}
+
+	oldestOutput, err := gitutil.RunGit(ctx, path, "log", "@{upstream}..HEAD", "--format=%ct")
+	if err != nil {
+		oldestOutput, err = gitutil.RunGit(ctx, path, "log", "origin/main..HEAD", "--format=%ct")
+	}
+	if err != nil {
+		return false, 0, ahead
+	}
+	timestamps := strings.Fields(strings.TrimSpace(oldestOutput))
+	if len(timestamps) == 0 {
+		return false, 0, ahead
+	}
+	// git log lists newest-first; the last line is the oldest unpushed commit.
+	oldestUnix, err := strconv.ParseInt(timestamps[len(timestamps)-1], 10, 64)
+	if err != nil {
+		return false, 0, ahead
+	}
+
+	age := time.Since(time.Unix(oldestUnix, 0))
+	return age >= ledgerSyncWedgeAge, age, ahead
+}
+
+// revListCount runs `git rev-list --count <range>`, falling back to
+// fallbackRange when the primary range fails (typically because
+// @{upstream} has no tracking branch configured).
+func revListCount(ctx context.Context, path, primaryRange, fallbackRange string) (int, error) {
+	output, err := gitutil.RunGit(ctx, path, "rev-list", "--count", primaryRange)
+	if err != nil {
+		output, err = gitutil.RunGit(ctx, path, "rev-list", "--count", fallbackRange)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return strconv.Atoi(strings.TrimSpace(output))
+}
+
+// isNonFastForwardErr reports whether a git push failure looks like a
+// non-fast-forward rejection (remote has commits we don't have) rather than
+// an auth/network/LFS failure — mirrors the substring-match style already
+// used for LFS errors in gcPushUnpushedCommits.
+func isNonFastForwardErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "non-fast-forward") ||
+		strings.Contains(msg, "fetch first") ||
+		strings.Contains(msg, "rejected")
 }
 
 // TriggerGC forces a GC reclone of all eligible team contexts, bypassing the interval check.
@@ -352,6 +485,15 @@ func releaseGCLock(f *os.File, lockPath string) {
 // Local changes (unpushed commits, uncommitted edits, untracked files) are preserved
 // across the reclone. If preservation fails, GC is skipped rather than risk data loss.
 func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) gcResult {
+	return s.runBlueGreenGCOpts(ctx, ws, false)
+}
+
+// runBlueGreenGCOpts is runBlueGreenGC with captureUnpushedOnDiverge
+// exposed. Kept as a separate entry point (rather than adding the param to
+// runBlueGreenGC directly) so every existing caller — 50+ call sites across
+// the test suite — keeps its current, unchanged behavior with zero edits;
+// only the new ledger-wedge trigger in checkAndRunGC calls this directly.
+func (s *SyncScheduler) runBlueGreenGCOpts(ctx context.Context, ws WorkspaceState, captureUnpushedOnDiverge bool) gcResult {
 	newPath := ws.Path + ".new"
 	oldPath := ws.Path + ".old"
 	diffFile := ws.Path + ".gc-diff"
@@ -411,19 +553,57 @@ func (s *SyncScheduler) runBlueGreenGC(ctx context.Context, ws WorkspaceState) g
 
 	// --- phase 0: preserve local state ---
 
-	// step 0a: push unpushed commits so they survive reclone
+	// step 0a: push unpushed commits so they survive reclone. When the push
+	// is rejected because the remote diverged (not auth/network/LFS) and
+	// the caller opted in, capture everything not on the remote — unpushed
+	// commits AND any uncommitted changes, combined into one diff against
+	// the merge-base — instead of bailing gcSkippedDirty. This is the one
+	// scenario a wedged ledger sync actually needs GC to rescue: a plain
+	// push can never land here (that's the definition of wedged), so
+	// today's push-then-bail sequencing is exactly what makes GC unable to
+	// help the one case that most needs it.
+	divergeCaptured := false
 	if err := s.gcPushUnpushedCommits(ctx, ws); err != nil {
-		s.logger.Warn("gc: skipping reclone, cannot push unpushed commits",
-			"path", ws.Path, "workspace", wsLabel, "error", err)
-		return gcSkippedDirty
+		if !captureUnpushedOnDiverge || !isNonFastForwardErr(err) {
+			s.logger.Warn("gc: skipping reclone, cannot push unpushed commits",
+				"path", ws.Path, "workspace", wsLabel, "error", err)
+			return gcSkippedDirty
+		}
+
+		mergeBase, mbErr := gitutil.RunGit(ctx, ws.Path, "merge-base", "@{upstream}", "HEAD")
+		if mbErr != nil {
+			mergeBase, mbErr = gitutil.RunGit(ctx, ws.Path, "merge-base", "origin/main", "HEAD")
+		}
+		if mbErr != nil {
+			s.logger.Warn("gc: skipping reclone, cannot determine merge-base for diverge capture",
+				"path", ws.Path, "workspace", wsLabel, "error", mbErr)
+			return gcSkippedDirty
+		}
+
+		s.logger.Warn("gc: push rejected (diverged), capturing unpushed commits as a diff instead of skipping",
+			"path", ws.Path, "workspace", wsLabel, "push_error", err)
+		captured, capErr := s.gcCaptureDiff(ctx, ws.Path, diffFile, strings.TrimSpace(mergeBase))
+		if capErr != nil {
+			s.logger.Warn("gc: skipping reclone, cannot capture diverged commits as diff",
+				"path", ws.Path, "workspace", wsLabel, "error", capErr)
+			return gcSkippedDirty
+		}
+		divergeCaptured = captured
 	}
 
-	// step 0b: capture uncommitted tracked changes (staged + unstaged)
-	hasDiff, err := s.gcCaptureDiff(ctx, ws.Path, diffFile)
-	if err != nil {
-		s.logger.Warn("gc: skipping reclone, cannot capture uncommitted changes",
-			"path", ws.Path, "workspace", wsLabel, "error", err)
-		return gcSkippedDirty
+	// step 0b: capture uncommitted tracked changes (staged + unstaged).
+	// Skipped when step 0a's diverge-capture already ran — that diff was
+	// taken against the merge-base, so it already includes any uncommitted
+	// changes; capturing again here against HEAD would double them up.
+	hasDiff := divergeCaptured
+	var err error
+	if !divergeCaptured {
+		hasDiff, err = s.gcCaptureDiff(ctx, ws.Path, diffFile, "HEAD")
+		if err != nil {
+			s.logger.Warn("gc: skipping reclone, cannot capture uncommitted changes",
+				"path", ws.Path, "workspace", wsLabel, "error", err)
+			return gcSkippedDirty
+		}
 	}
 
 	// step 0c: capture untracked files
@@ -705,21 +885,28 @@ func workingTreeEmpty(repoPath string) (bool, error) {
 	return true, nil
 }
 
-// gcCaptureDiff captures all uncommitted tracked changes (staged + unstaged)
-// as a binary-safe patch file. Returns (hasDiff, error).
-// Streams diff directly to disk (not into memory) to avoid OOM on large diffs.
-// Diffs exceeding maxGCDiffSize are skipped with a warning.
+// gcCaptureDiff captures everything not yet reflected at baseRef — working
+// tree plus index, diffed against baseRef — as a binary-safe patch file.
+// Returns (hasDiff, error). Streams diff directly to disk (not into memory)
+// to avoid OOM on large diffs. Diffs exceeding maxGCDiffSize are skipped
+// with a warning.
+//
+// baseRef is "HEAD" for the normal uncommitted-changes-only capture (step
+// 0b); callers that need to also carry forward committed-but-unpushed
+// commits (the ledger-wedge diverge-capture path in
+// runBlueGreenGCOpts) pass the merge-base with the remote instead, which
+// folds both into one diff.
 //
 // If the working tree is empty (only .git remains), treat this as corruption
 // rather than an intentional mass-delete and skip diff capture so the reclone
 // restores the committed content from remote.
-func (s *SyncScheduler) gcCaptureDiff(ctx context.Context, repoPath, diffFile string) (bool, error) {
+func (s *SyncScheduler) gcCaptureDiff(ctx context.Context, repoPath, diffFile, baseRef string) (bool, error) {
 	if empty, err := workingTreeEmpty(repoPath); err == nil && empty {
 		s.logger.Info("gc: working tree empty, skipping diff capture (will restore from remote)", "path", repoPath)
 		return false, nil
 	}
 
-	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "diff", "--binary", "HEAD")
+	cmd := exec.CommandContext(ctx, "git", "-C", repoPath, "diff", "--binary", baseRef)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return false, fmt.Errorf("git diff pipe: %w", err)

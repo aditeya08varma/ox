@@ -1215,6 +1215,31 @@ func isValidGitRepo(path string) bool {
 //     is required for clean linear history on shared ledger repos
 //   - lock file safety: if a git process crashes, its .git/index.lock is released
 //     by the OS; an in-process crash may leave stale locks in the same process
+
+// escalateSessionConflictSeverity sets Severity/RequiresConfirm purely as a
+// function of how long this (Type, Repo) issue has existed. SetIssue already
+// preserves Since across repeated calls with the same key, so no separate
+// persisted timer is needed — a genuine content conflict that survives
+// several sync cycles becomes progressively louder instead of retrying
+// silently forever at the same warning level.
+func escalateSessionConflictSeverity(tracker *IssueTracker, issue *DaemonIssue) {
+	var elapsed time.Duration
+	if existing, ok := tracker.GetIssue(issue.Type, issue.Repo); ok {
+		elapsed = time.Since(existing.Since)
+	}
+	switch {
+	case elapsed >= 24*time.Hour:
+		issue.Severity = SeverityCritical
+		issue.RequiresConfirm = true
+	case elapsed >= 6*time.Hour:
+		issue.Severity = SeverityError
+		issue.RequiresConfirm = true
+	default:
+		issue.Severity = SeverityWarning
+		issue.RequiresConfirm = false
+	}
+}
+
 func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool, refreshSparse bool) error {
 	ctx, span := perf.Start(ctx, "daemon:do_pull")
 	defer span.End()
@@ -1373,7 +1398,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 				s.metrics.RecordConflict()
 			}
 			if s.issues != nil {
-				s.issues.SetIssue(*result.Issue)
+				issue := *result.Issue
+				if issue.Type == IssueTypeSessionConflictWedge {
+					escalateSessionConflictSeverity(s.issues, &issue)
+				}
+				s.issues.SetIssue(issue)
 			}
 		}
 		if s.eventBus != nil {
@@ -1403,6 +1432,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		s.issues.ClearIssue(IssueTypeMergeConflict, "ledger")
 		s.issues.ClearIssue(IssueTypeSyncBackoff, "ledger")
 		s.issues.ClearIssue(IssueTypeDiverged, "ledger")
+		s.issues.ClearIssue(IssueTypeSessionConflictWedge, "ledger")
 	}
 
 	duration := time.Since(startTime)

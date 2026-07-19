@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -331,6 +332,11 @@ var (
 	distillAll         bool
 )
 
+// detectAgentBackend resolves the AI coworker CLI to use for distillation.
+// Var (not a direct agentcli.Detect() call) so tests can exercise runDistill
+// end-to-end without a real Claude/Codex binary on PATH.
+var detectAgentBackend = agentcli.Detect
+
 var distillCmd = &cobra.Command{
 	Use:   "distill",
 	Short: "Distill team observations into memory summaries",
@@ -624,7 +630,7 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	}
 
 	// detect AI coworker CLI
-	backend, err := agentcli.Detect()
+	backend, err := detectAgentBackend()
 	if err != nil && !distillDryRun {
 		return fmt.Errorf("distillation requires an AI coworker CLI: %w", err)
 	}
@@ -639,6 +645,17 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 
 	// load distill state (v2 format, backward compat with v1)
 	state := loadDistillStateV2(projectRoot, tc.Path)
+	// always save state on exit — even a mid-run failure (e.g. a Claude
+	// rate-limit hit on one day) must not discard weekly/monthly bookkeeping
+	// from stages that already completed this run. Mirrors the idx-save
+	// defer below.
+	if !distillDryRun {
+		defer func() {
+			if err := saveDistillStateV2(projectRoot, state); err != nil {
+				slog.Warn("failed to save distill state", "error", err)
+			}
+		}()
+	}
 
 	// load or rebuild the distill index (performance cache for file scanning)
 	idx, rebuilt := loadDistillIndex(projectRoot, tc.Path)
@@ -749,31 +766,46 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Each stage below collects its error instead of returning immediately,
+	// so one day's rate-limit hit (or any other single-stage failure)
+	// doesn't discard weekly/monthly work the rest of this run would
+	// otherwise complete — the reported bug was ~26 minutes of extraction
+	// work lost to exactly this. distillDaily keeps its own internal
+	// first-failure-stops behavior unchanged (correct: its resume position
+	// is a monotonic since-cutoff, so a later day succeeding must never run
+	// after an earlier one failed). The plan.Weeks/plan.Months loops here
+	// use break, not continue, for the same reason: state.LastWeekly/
+	// LastMonthly advance on success, so a later week/month succeeding
+	// after an earlier one failed would silently and permanently skip the
+	// failed one on every future run.
+	var stageErrs []error
+
 	if plan.Daily {
 		if err := distillDaily(ctx, cmd, backend, tc, state, idx, projectRoot, now, distillGuidelines); err != nil {
-			return fmt.Errorf("daily distill: %w", err)
+			slog.Warn("daily distill stopped early", "error", err)
+			stageErrs = append(stageErrs, fmt.Errorf("daily distill: %w", err))
 		}
 	}
 
 	for _, week := range plan.Weeks {
 		if err := distillWeekly(ctx, cmd, backend, tc, state, week, distillGuidelines); err != nil {
-			return fmt.Errorf("weekly distill (%d-W%02d): %w", week.Year, week.Week, err)
+			slog.Warn("weekly distill failed, stopping remaining weeks this run", "year", week.Year, "week", week.Week, "error", err)
+			stageErrs = append(stageErrs, fmt.Errorf("weekly distill (%d-W%02d): %w", week.Year, week.Week, err))
+			break
 		}
 	}
 
 	for _, month := range plan.Months {
 		if err := distillMonthly(ctx, cmd, backend, tc, state, month, distillGuidelines); err != nil {
-			return fmt.Errorf("monthly distill (%s): %w", month, err)
+			slog.Warn("monthly distill failed, stopping remaining months this run", "month", month, "error", err)
+			stageErrs = append(stageErrs, fmt.Errorf("monthly distill (%s): %w", month, err))
+			break
 		}
 	}
 
-	// save updated state (skip in dry-run; index is saved via defer)
-	if !distillDryRun {
-		if err := saveDistillStateV2(projectRoot, state); err != nil {
-			slog.Warn("failed to save distill state", "error", err)
-		}
+	if len(stageErrs) > 0 {
+		return errors.Join(stageErrs...)
 	}
-
 	return nil
 }
 

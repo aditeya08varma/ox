@@ -344,12 +344,24 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 				}
 			}
 
+			// capture conflicted paths before AuditAndAbort discards rebase
+			// state — a sessions/*/meta.json conflict gets its own issue
+			// type (IssueTypeSessionConflictWedge) instead of the generic
+			// IssueTypeDiverged below, since sessions/ is hard-denied from
+			// auto-resolve by design (internal/manifest/auto_resolve.go):
+			// the abort clears the rebase mechanics but never resolves the
+			// underlying content, so the next cycle hits the identical
+			// conflict. Distinguishing it lets sync.go escalate severity by
+			// elapsed time instead of treating it like ordinary lag.
+			conflictedSessionPaths := sessionConflictPaths(ctx, path)
+
 			// AuditAndAbort: structured pre/post logs capture HEAD SHA,
 			// unmerged file list, and stash count BEFORE discarding state,
 			// so silent recovery from a wedged rebase leaves an audit
 			// trail. See ox-ooy3 and .claude/rules/daemon-git.md.
 			abortErr := gitutil.AuditAndAbort(ctx, path, gitutil.AuditOpRebase, "auto-resolve exhausted", logger)
-			if abortErr != nil {
+			switch {
+			case abortErr != nil:
 				logger.Error("rebase abort failed, repo stuck in rebase state", "op", "rebase_abort_failed", "repo", repoName, "error", abortErr)
 				result.Issue = &DaemonIssue{
 					Type:            IssueTypeRebaseStuck,
@@ -357,6 +369,15 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 					Repo:            repoName,
 					Summary:         fmt.Sprintf("%s is stuck in a broken rebase state. Run 'git -C %s rebase --abort' manually or 'ox doctor --fix' to recover.", repoName, path),
 					RequiresConfirm: true,
+				}
+			case len(conflictedSessionPaths) > 0:
+				// Severity/RequiresConfirm are left unset here — sync.go's
+				// doPull escalates them based on how long this specific
+				// (type, repo) issue has existed.
+				result.Issue = &DaemonIssue{
+					Type:    IssueTypeSessionConflictWedge,
+					Repo:    repoName,
+					Summary: fmt.Sprintf("%d session(s) have unresolvable meta.json conflicts; local session data is not syncing to the team ledger", len(conflictedSessionPaths)),
 				}
 			}
 		}
@@ -393,6 +414,24 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 	}
 
 	return result
+}
+
+// sessionConflictPaths returns the subset of unmerged (conflicted) paths
+// under sessions/ in the given repo. Best-effort: returns nil on any git
+// error rather than failing the caller, since this only refines issue
+// classification and never gates control flow.
+func sessionConflictPaths(ctx context.Context, repoPath string) []string {
+	out, err := exec.CommandContext(ctx, "git", "-C", repoPath, "diff", "--name-only", "--diff-filter=U").Output()
+	if err != nil {
+		return nil
+	}
+	var paths []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasPrefix(line, "sessions/") {
+			paths = append(paths, line)
+		}
+	}
+	return paths
 }
 
 // staleRebaseThreshold separates a fresh, in-flight rebase from an abandoned

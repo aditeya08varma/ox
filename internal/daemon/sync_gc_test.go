@@ -76,7 +76,7 @@ func TestGC_CaptureDiff(t *testing.T) {
 
 	// no uncommitted changes => hasDiff=false
 	diffFile := filepath.Join(dir, ".gc-diff")
-	hasDiff, err := s.gcCaptureDiff(ctx, dir, diffFile)
+	hasDiff, err := s.gcCaptureDiff(ctx, dir, diffFile, "HEAD")
 	require.NoError(t, err)
 	assert.False(t, hasDiff, "no changes should produce no diff")
 	_, statErr := os.Stat(diffFile)
@@ -85,7 +85,7 @@ func TestGC_CaptureDiff(t *testing.T) {
 	// make an uncommitted modification
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("modified"), 0644))
 
-	hasDiff, err = s.gcCaptureDiff(ctx, dir, diffFile)
+	hasDiff, err = s.gcCaptureDiff(ctx, dir, diffFile, "HEAD")
 	require.NoError(t, err)
 	assert.True(t, hasDiff, "uncommitted changes should produce a diff")
 
@@ -152,7 +152,7 @@ func TestGC_RestoreDiff(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "README.md"), []byte("changed line"), 0644))
 
 	diffFile := filepath.Join(t.TempDir(), "patch.diff")
-	hasDiff, err := s.gcCaptureDiff(ctx, srcDir, diffFile)
+	hasDiff, err := s.gcCaptureDiff(ctx, srcDir, diffFile, "HEAD")
 	require.NoError(t, err)
 	require.True(t, hasDiff)
 
