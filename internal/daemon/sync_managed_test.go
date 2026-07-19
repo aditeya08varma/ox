@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -149,7 +150,10 @@ func TestEscalateSessionConflictSeverity_EscalatesByElapsedTime(t *testing.T) {
 				Repo:    "ledger",
 				Summary: "1 session(s) have unresolvable meta.json conflicts",
 			}
-			escalateSessionConflictSeverity(tracker, &issue)
+			// no git-plumbing signal here — this test is exercising the
+			// pure tracker-based path in isolation (see the restart test
+			// below for the combined-signal path with a real git fixture).
+			escalateSessionConflictSeverity(tracker, &issue, 0)
 
 			assert.Equal(t, tc.wantSeverity, issue.Severity)
 			assert.Equal(t, tc.wantConfirm, issue.RequiresConfirm)
@@ -165,7 +169,7 @@ func TestEscalateSessionConflictSeverity_PreservesSinceAcrossCycles(t *testing.T
 	tracker := NewIssueTracker()
 
 	firstIssue := DaemonIssue{Type: IssueTypeSessionConflictWedge, Repo: "ledger", Summary: "1 session(s) have unresolvable meta.json conflicts"}
-	escalateSessionConflictSeverity(tracker, &firstIssue)
+	escalateSessionConflictSeverity(tracker, &firstIssue, 0)
 	tracker.SetIssue(firstIssue)
 
 	firstSeen, ok := tracker.GetIssue(IssueTypeSessionConflictWedge, "ledger")
@@ -183,7 +187,7 @@ func TestEscalateSessionConflictSeverity_PreservesSinceAcrossCycles(t *testing.T
 
 	// next sync cycle re-detects the identical, still-unresolved conflict
 	secondIssue := DaemonIssue{Type: IssueTypeSessionConflictWedge, Repo: "ledger", Summary: "1 session(s) have unresolvable meta.json conflicts"}
-	escalateSessionConflictSeverity(tracker, &secondIssue)
+	escalateSessionConflictSeverity(tracker, &secondIssue, 0)
 	tracker.SetIssue(secondIssue)
 
 	assert.Equal(t, SeverityError, secondIssue.Severity, "7h-old conflict must have escalated past the 6h threshold")
@@ -192,4 +196,123 @@ func TestEscalateSessionConflictSeverity_PreservesSinceAcrossCycles(t *testing.T
 	final, ok := tracker.GetIssue(IssueTypeSessionConflictWedge, "ledger")
 	require.True(t, ok)
 	assert.Equal(t, SeverityError, final.Severity, "escalated severity must actually persist in the tracker, not just the local variable")
+}
+
+// --- C. Severity escalation survives a daemon restart ---
+//
+// internal/daemon/issues.go's IssueTracker is pure in-memory — daemon.go
+// constructs `d.issues = NewIssueTracker()` on every daemon startup, with no
+// persistence and no reload. A restart mid-incident (crash, `ox upgrade`,
+// reboot, manual `ox daemon restart` — all realistic over a multi-hour
+// wedge) therefore replaces a long-lived tracker with a brand-new empty
+// one. Before this fix, the next detection of the SAME still-unresolved
+// session conflict called GetIssue on the fresh tracker, got (zero-value,
+// false), computed elapsed=0, and silently reset severity to Warning —
+// indistinguishable from a conflict that just started. Failure prevented: a
+// multi-hour incident going quiet (and un-escalated) purely because the
+// daemon happened to restart.
+
+// TestEscalateSessionConflictSeverity_SurvivesDaemonRestart proves severity
+// is anchored to the restart-durable git-commit-timestamp signal
+// (oldestUnpushedCommitAge / ManagedRepoPullResult.SessionConflictAge), not
+// solely to the in-memory tracker. It runs the real sessions/*/meta.json
+// conflict fixture through pullManagedRepo with a backdated local commit,
+// then evaluates escalation against a completely fresh IssueTracker — the
+// exact shape of a daemon restart — and asserts severity is still Critical.
+func TestEscalateSessionConflictSeverity_SurvivesDaemonRestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	localDir := makeSessionMetaConflictClone(t)
+
+	// Backdate the unpushed local commit well past the 24h Critical
+	// threshold. This is the one fact a restarted daemon can still
+	// observe — the tracker's Since cannot, since it no longer exists.
+	const backdateAge = 30 * time.Hour
+	backdateCommitTimestamp(t, localDir, -backdateAge)
+
+	s := newTestScheduler(t.TempDir())
+	result := s.pullManagedRepo(context.Background(), ManagedRepoPullOpts{
+		RepoPath:     localDir,
+		RepoName:     "ledger",
+		ResolveRules: ledger.DefaultResolveRules, // real production rules: sessions/ stays hard-denied
+		Logger:       discardLogger(),
+	})
+	require.NotNil(t, result.Issue)
+	require.Equal(t, IssueTypeSessionConflictWedge, result.Issue.Type)
+	require.GreaterOrEqual(t, result.SessionConflictAge, 24*time.Hour,
+		"pullManagedRepo must surface the backdated commit's real age on the result")
+
+	// Sanity check: a tracker that has known about this issue the whole
+	// time (no restart) already reports Critical — proves the fixture and
+	// thresholds are set up correctly before testing the restart case.
+	longLivedTracker := NewIssueTracker()
+	longLivedTracker.SetIssue(DaemonIssue{
+		Type:     IssueTypeSessionConflictWedge,
+		Repo:     "ledger",
+		Severity: SeverityWarning,
+		Summary:  "seed",
+		Since:    time.Now().Add(-backdateAge),
+	})
+	beforeRestart := *result.Issue
+	escalateSessionConflictSeverity(longLivedTracker, &beforeRestart, result.SessionConflictAge)
+	require.Equal(t, SeverityCritical, beforeRestart.Severity, "sanity check: an uninterrupted tracker already reports Critical")
+
+	// The actual regression: a brand-new tracker — exactly what
+	// daemon.go's NewIssueTracker() constructs on every restart — sees
+	// this identical, still-unresolved conflict for what looks like the
+	// first time. Without the git-plumbing floor, GetIssue would return
+	// (zero-value, false), elapsed would compute as 0, and severity would
+	// silently reset to Warning.
+	freshTracker := NewIssueTracker()
+	afterRestart := *result.Issue
+	escalateSessionConflictSeverity(freshTracker, &afterRestart, result.SessionConflictAge)
+
+	assert.Equal(t, SeverityCritical, afterRestart.Severity,
+		"severity must not silently drop after a daemon restart while the underlying conflict remains unresolved")
+	assert.True(t, afterRestart.RequiresConfirm)
+}
+
+// --- D. oldestUnpushedCommitAge (git-plumbing age primitive) ---
+//
+// Direct coverage of the primitive escalateSessionConflictSeverity's
+// restart-durable signal is built on, independent of the full
+// pullManagedRepo conflict pipeline exercised above.
+
+func TestOldestUnpushedCommitAge_NoUnpushedCommits_ReturnsNotOK(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	isolateCredentials(t)
+	_, cloneDir := gcInitBareAndClone(t, t.TempDir())
+
+	age, ok := oldestUnpushedCommitAge(context.Background(), cloneDir)
+	assert.False(t, ok, "a clone with nothing unpushed must report no signal")
+	assert.Zero(t, age)
+}
+
+func TestOldestUnpushedCommitAge_PicksOldestAcrossMultipleUnpushedCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	isolateCredentials(t)
+	_, cloneDir := gcInitBareAndClone(t, t.TempDir())
+
+	// two unpushed commits: an older one (backdated), then a newer one on
+	// top. The function must report the OLDER commit's age, not the
+	// newer one's — a naive implementation (e.g. reading only the first
+	// or last `git log` line without regard to order) would get this
+	// backwards.
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "older.txt"), []byte("x"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", cloneDir, "add", "-A").Run())
+	require.NoError(t, exec.Command("git", "-C", cloneDir, "commit", "-m", "older").Run())
+	backdateCommitTimestamp(t, cloneDir, -10*time.Hour)
+
+	require.NoError(t, os.WriteFile(filepath.Join(cloneDir, "newer.txt"), []byte("x"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", cloneDir, "add", "-A").Run())
+	require.NoError(t, exec.Command("git", "-C", cloneDir, "commit", "-m", "newer").Run())
+
+	age, ok := oldestUnpushedCommitAge(context.Background(), cloneDir)
+	require.True(t, ok)
+	assert.GreaterOrEqual(t, age, 10*time.Hour, "must report the OLDEST unpushed commit's age, not the newest")
 }

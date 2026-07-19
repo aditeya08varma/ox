@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -91,12 +94,24 @@ func setupDistillWeeklyFixture(t *testing.T) (teamContextDir string, weeks [3]st
 	dailyDir := filepath.Join(teamContextDir, "memory", "daily")
 	require.NoError(t, os.MkdirAll(dailyDir, 0o755))
 
+	// Anchor on the most recently fully-completed ISO week's LAST day
+	// (Sunday), not "now" directly. runDistill's dailyBacklogComplete guard
+	// requires the daily high-water mark (the latest dated file anywhere
+	// under memory/daily/) to reach a week's END before rolling it up, so
+	// the most-recent seeded file below must land exactly on ITS week's
+	// Sunday — anchoring off "now" directly would only coincidentally
+	// satisfy that on days the suite happens to run on a Sunday itself.
+	// now.AddDate(0,0,-7) always falls in the immediately preceding ISO
+	// week (weeks are fixed 7-day blocks), which has always fully elapsed
+	// relative to now, making its Sunday a safe, deterministic anchor.
 	now := time.Now().UTC()
-	// ~11, ~6, ~1 weeks ago — comfortably inside the 91-day lookback,
-	// spaced 5+ weeks apart so each unambiguously lands in its own ISO week.
-	offsets := [3]int{-77, -42, -7}
-	for i, days := range offsets {
-		d := now.AddDate(0, 0, days).Format("2006-01-02")
+	_, anchorSunday := isoWeekRange(now.AddDate(0, 0, -7).ISOWeek())
+	// ~11, ~6, ~1 weeks before the anchor — comfortably inside the 91-day
+	// lookback, spaced 5+ weeks apart so each unambiguously lands in its
+	// own ISO week (same 70/35-day spacing as before).
+	weeksBack := [3]int{-10, -5, 0}
+	for i, wk := range weeksBack {
+		d := anchorSunday.AddDate(0, 0, wk*7).Format("2006-01-02")
 		weeks[i] = d
 		require.NoError(t, os.WriteFile(filepath.Join(dailyDir, d+".md"),
 			[]byte("## "+d+"\n\nDaily summary for "+d+".\n"), 0o644))
@@ -204,4 +219,129 @@ func TestRunDistill_WeeklySuccess_LaterWeekStillRunsAfterEarlierNoOpWeek(t *test
 	entries, err := os.ReadDir(weeklyDir)
 	require.NoError(t, err)
 	assert.Len(t, entries, 3, "all three weeks' summaries must be written")
+}
+
+// --- runDistill weekly/monthly rollup: incomplete daily backlog behind an
+// explicit --layer=weekly/monthly run ---
+//
+// dailyOK (see runDistill) only catches "daily ran THIS invocation and
+// failed." An explicit `ox distill --layer=weekly` never sets plan.Daily, so
+// dailyOK stays true by construction even when an earlier, separate,
+// interrupted run (e.g. a partial `ox distill --all` backfill) left the
+// daily backlog behind an already-due week incomplete. Before the
+// dailyBacklogComplete guard, distillWeekly only skipped a week if
+// readDailyFilesForDateRange returned literally ZERO files for its date
+// range — it had no way to distinguish "3 of 7 days present" from "7 of 7
+// days present," so a partial week was silently synthesized and marked done
+// forever via LastWeekly, permanently losing the days daily never got to.
+
+// setupDistillWeeklyPartialFixture builds a real project + git-backed team
+// context with exactly ONE already-due ISO week whose daily backing is
+// incomplete: only the week's first 3 (of 7) days have a memory/daily/*.md
+// file — the on-disk shape an interrupted backfill leaves behind mid-week.
+// distill-state-v2.json is pre-seeded so plan.Weeks resolves to exactly this
+// one week, keeping the test's signal isolated from the unrelated (and
+// harmless) "no daily summaries, skipping" path that would otherwise fire
+// for every other empty week in determineLayers' 91-day fallback lookback.
+//
+// Contrast with setupDistillWeeklyFixture above, which seeds three COMPLETE
+// (Sunday-dated, single-file) weeks.
+func setupDistillWeeklyPartialFixture(t *testing.T) (teamContextDir, projectRoot string, weekYear, weekNum int) {
+	t.Helper()
+
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
+
+	projectRoot = createInitializedProjectWithConfig(t, &config.ProjectConfig{
+		ProjectID: "test-project",
+		TeamID:    "test-team",
+		Endpoint:  "https://fake.test.invalid",
+	})
+
+	teamContextDir = t.TempDir()
+	require.NoError(t, exec.Command("git", "-C", teamContextDir, "init", "--initial-branch=main").Run())
+	require.NoError(t, exec.Command("git", "-C", teamContextDir, "config", "user.email", "test@test.com").Run())
+	require.NoError(t, exec.Command("git", "-C", teamContextDir, "config", "user.name", "Test").Run())
+
+	require.NoError(t, config.SaveLocalConfig(projectRoot, &config.LocalConfig{
+		TeamContexts: []config.TeamContext{
+			{TeamID: "test-team", TeamName: "test-team", Path: teamContextDir},
+		},
+	}))
+
+	dailyDir := filepath.Join(teamContextDir, "memory", "daily")
+	require.NoError(t, os.MkdirAll(dailyDir, 0o755))
+
+	// Most recently fully-completed ISO week — deterministic regardless of
+	// what weekday the suite runs on (see setupDistillWeeklyFixture above
+	// for why a raw "now" offset isn't safe to seed a week's boundary from).
+	now := time.Now().UTC()
+	weekYear, weekNum = now.AddDate(0, 0, -7).ISOWeek()
+	weekStart, _ := isoWeekRange(weekYear, weekNum)
+
+	// seed only the first 3 (of 7) days — Mon, Tue, Wed. Thu-Sun are
+	// deliberately absent, so the week's own daily high-water mark
+	// (Wed) falls short of the week's end (Sun).
+	for i := 0; i < 3; i++ {
+		d := weekStart.AddDate(0, 0, i).Format("2006-01-02")
+		require.NoError(t, os.WriteFile(filepath.Join(dailyDir, d+".md"),
+			[]byte("## "+d+"\n\nDaily summary for "+d+".\n"), 0o644))
+	}
+
+	// pre-seed state so plan.Weeks resolves to exactly this one week —
+	// enumerateWeeks starts from the week AFTER LastWeekly.
+	require.NoError(t, saveDistillStateV2(projectRoot, &distillStateV2{
+		SchemaVersion: "2",
+		LastWeekly:    weekStart.Add(-time.Second).Format(time.RFC3339),
+	}))
+
+	origCwd, err := os.Getwd()
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.Chdir(origCwd) })
+	require.NoError(t, os.Chdir(projectRoot))
+
+	return teamContextDir, projectRoot, weekYear, weekNum
+}
+
+func TestRunDistill_ExplicitWeeklyLayer_SkipsWeekWithIncompleteDailyBacklog(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git operations")
+	}
+	teamContextDir, projectRoot, weekYear, weekNum := setupDistillWeeklyPartialFixture(t)
+	weekStart, _ := isoWeekRange(weekYear, weekNum)
+	wantLastWeekly := weekStart.Add(-time.Second).Format(time.RFC3339) // unchanged from the fixture's seed
+
+	// must never be called — the week must be skipped before any AI
+	// coworker call is attempted.
+	backend := &sequencedBackend{failOnCall: -1}
+	withDistillFlags(t, func() {
+		detectAgentBackend = func() (agentcli.Backend, error) { return backend, nil }
+	})
+
+	prevLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(prevLogger) })
+	var logBuf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	err := runDistill(distillCmd, nil)
+	require.NoError(t, err, "an incomplete daily backlog behind a due week is a benign skip, not a run failure")
+
+	assert.Equal(t, 0, backend.calls, "the AI coworker must never be invoked for a week whose daily backlog is incomplete")
+
+	weeklyDir := filepath.Join(teamContextDir, "memory", "weekly")
+	entries, err := os.ReadDir(weeklyDir)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "no weekly summary file must be written for a week with a partial (3 of 7 day) daily backlog")
+
+	statePath := filepath.Join(projectRoot, ".sageox", "cache", "distill-state-v2.json")
+	data, err := os.ReadFile(statePath)
+	require.NoError(t, err)
+	var state distillStateV2
+	require.NoError(t, json.Unmarshal(data, &state))
+	assert.Equal(t, wantLastWeekly, state.LastWeekly, "LastWeekly must not advance past a week whose daily backlog is incomplete — that would permanently lose the days daily never got to")
+
+	logged := logBuf.String()
+	assert.Contains(t, logged, "backlog", "must log a clear warning explaining why the week was skipped")
+	assert.Contains(t, logged, fmt.Sprintf("%d", weekYear), "warning should identify the affected week")
 }

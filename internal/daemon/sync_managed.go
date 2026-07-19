@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -135,6 +136,16 @@ type ManagedRepoPullResult struct {
 
 	// Issue to report (nil if none). The caller decides how to persist it.
 	Issue *DaemonIssue
+
+	// SessionConflictAge is the age of the oldest local commit not yet
+	// pushed to the upstream tracking branch, computed via git-plumbing
+	// when Issue.Type == IssueTypeSessionConflictWedge (zero otherwise).
+	// Grounded in an immutable git commit timestamp, so — unlike
+	// IssueTracker.Since — it survives a daemon restart mid-incident.
+	// sync.go's escalateSessionConflictSeverity uses it as a floor under
+	// the tracker-derived elapsed time so severity never regresses after a
+	// restart while the same conflict remains unresolved.
+	SessionConflictAge time.Duration
 }
 
 // pullManagedRepo executes the shared pull pipeline for any daemon-managed git repo.
@@ -379,6 +390,13 @@ func (s *SyncScheduler) pullManagedRepo(ctx context.Context, opts ManagedRepoPul
 					Repo:    repoName,
 					Summary: fmt.Sprintf("%d session(s) have unresolvable meta.json conflicts; local session data is not syncing to the team ledger", len(conflictedSessionPaths)),
 				}
+				// Restart-durable signal: the age of the oldest unpushed
+				// commit is grounded in an immutable git timestamp, unlike
+				// IssueTracker.Since which resets on every daemon restart.
+				// See sync.go's escalateSessionConflictSeverity.
+				if age, ok := oldestUnpushedCommitAge(ctx, path); ok {
+					result.SessionConflictAge = age
+				}
 			}
 		}
 
@@ -442,6 +460,45 @@ func sessionConflictPaths(ctx context.Context, repoPath string) []string {
 func isSessionMetaPath(path string) bool {
 	parts := strings.Split(path, "/")
 	return len(parts) == 3 && parts[0] == "sessions" && parts[1] != "" && parts[2] == "meta.json"
+}
+
+// oldestUnpushedCommitAge returns the age of the oldest local commit not yet
+// on the upstream tracking branch (falling back to origin/main). Local
+// git-plumbing only — no network fetch, since pullManagedRepo already
+// fetched earlier in this same cycle. Returns ok=false when there are no
+// unpushed commits or the age can't be determined (e.g. no upstream and no
+// origin/main).
+//
+// This mirrors the timestamp half of ledgerSyncWedged's wedge detection
+// (sync_gc.go): git commit timestamps are immutable and survive a daemon
+// restart, unlike IssueTracker's in-memory Since field. Called at
+// session-conflict classification time so sync.go's
+// escalateSessionConflictSeverity has a restart-durable floor under the
+// tracker-derived elapsed time — see ManagedRepoPullResult.SessionConflictAge.
+func oldestUnpushedCommitAge(ctx context.Context, path string) (time.Duration, bool) {
+	ahead, err := revListCount(ctx, path, "@{upstream}..HEAD", "origin/main..HEAD")
+	if err != nil || ahead <= 0 {
+		return 0, false
+	}
+
+	oldestOutput, err := gitutil.RunGit(ctx, path, "log", "@{upstream}..HEAD", "--format=%ct")
+	if err != nil {
+		oldestOutput, err = gitutil.RunGit(ctx, path, "log", "origin/main..HEAD", "--format=%ct")
+	}
+	if err != nil {
+		return 0, false
+	}
+	timestamps := strings.Fields(strings.TrimSpace(oldestOutput))
+	if len(timestamps) == 0 {
+		return 0, false
+	}
+	// git log lists newest-first; the last line is the oldest unpushed commit.
+	oldestUnix, err := strconv.ParseInt(timestamps[len(timestamps)-1], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+
+	return time.Since(time.Unix(oldestUnix, 0)), true
 }
 
 // staleRebaseThreshold separates a fresh, in-flight rebase from an abandoned

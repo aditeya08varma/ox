@@ -39,7 +39,18 @@ func RunGit(ctx context.Context, repoPath string, args ...string) (string, error
 	// "could not read Username ... Input/output error". Disabling the prompt
 	// makes any credential gap fail fast with a clear error. Tests already
 	// set this via internal/testenv, so their behavior is unchanged.
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	//
+	// LC_ALL=C / LANG=C: several call sites (isNonFastForwardErr, LFS-error
+	// detection, "project not initialized", "403"/"forbidden" checks, etc.)
+	// substring-match git's stderr/stdout to classify a failure. Those
+	// messages are translatable in git's own gettext catalogs — on a host
+	// with a non-English locale and the matching catalog installed, the
+	// same failure renders in that language and every one of those checks
+	// silently stops matching. Pinning the C locale here, once, for every
+	// git subprocess this codebase spawns, closes that whole class instead
+	// of patching each match site individually. Does not affect git's
+	// handling of file content or paths, which are UTF-8 regardless.
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 	output, err := cmd.CombinedOutput()
 	sanitized := SanitizeOutput(strings.TrimSpace(string(output)))
 

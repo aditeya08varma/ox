@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
@@ -30,6 +31,62 @@ import (
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/perf"
 )
+
+// gcSwapWaitBound is how long the CLI will wait for a daemon-side blue-green
+// GC rename-swap to clear before proceeding anyway. The swap itself
+// (internal/daemon/sync_gc.go) is a couple of os.Rename calls plus removing
+// the old clone — near-instant even for a large ledger — so this bounds a
+// genuine wait to something that shouldn't be user-visible, without risking
+// an indefinite hang if the marker is ever left behind by a daemon crash
+// mid-swap (acquireGCLock's own 5-minute stale-lock reclaim is the backstop
+// for that; this constant is unrelated and much shorter on purpose).
+const (
+	gcSwapWaitBound    = 10 * time.Second
+	gcSwapPollInterval = 100 * time.Millisecond
+)
+
+// waitForGCSwap gives a daemon-side blue-green GC rename-swap a bounded
+// chance to finish before the CLI writes directly to ledgerPath.
+//
+// ledgerMu (internal/daemon/sync_gc.go) serializes the daemon's own pull
+// cycle against its GC swap, but it's an in-process sync.Mutex — it cannot
+// serialize against the CLI, which runs as a separate OS process
+// (.claude/rules/daemon-git.md's daemon-reads/CLI-writes split). Without
+// this check, a commitAndPushLedger racing the exact rename-swap window can
+// have its writes silently land in what becomes the old clone, which the
+// daemon then deletes — a lost commit with no error surfaced anywhere.
+//
+// ".gc-swap-lock" is written by the daemon immediately before the rename
+// and removed immediately after the old clone is cleaned up — a much
+// narrower, cross-process-safe signal than the coarse ".gc-lock" that spans
+// the daemon's entire (potentially multi-minute) reclone, so this wait
+// should resolve in well under a second in the common case. Best-effort:
+// if the marker is still present after gcSwapWaitBound, log and proceed
+// anyway rather than risk an indefinite hang — this narrows the race window
+// close to zero without giving the CLI a new way to hang forever.
+func waitForGCSwap(ledgerPath string) {
+	waitForGCSwapWithBound(ledgerPath, gcSwapWaitBound, gcSwapPollInterval)
+}
+
+// waitForGCSwapWithBound is waitForGCSwap with an injectable bound/poll
+// interval so tests can exercise the full wait/timeout behavior without
+// blocking for the production 10s bound.
+func waitForGCSwapWithBound(ledgerPath string, bound, pollInterval time.Duration) {
+	lockPath := ledgerPath + ".gc-swap-lock"
+	if _, err := os.Stat(lockPath); err != nil {
+		return // common case: no swap in flight
+	}
+
+	deadline := time.Now().Add(bound)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(lockPath); err != nil {
+			return
+		}
+		time.Sleep(pollInterval)
+	}
+	slog.Warn("proceeding with ledger write despite an in-progress GC swap marker",
+		"ledger", ledgerPath, "waited", bound)
+}
 
 // checkUploadAccess checks if the user has write access to upload sessions.
 // Returns api.ErrReadOnly if the user is a viewer on a public repo.
@@ -146,6 +203,8 @@ func ensureSessionsGitignore(sessionsDir string) error {
 // (see daemon/sync.go doPull): rebase support, process isolation, and lock safety.
 // This is a low-volume path (once per session stop), so subprocess overhead is negligible.
 func commitAndPushLedger(ledgerPath, sessionName string) error {
+	waitForGCSwap(ledgerPath)
+
 	// ensure .gitignore is in place before any commit to prevent cache file leakage
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
 
@@ -197,6 +256,8 @@ func commitPointerRewriteAndPush(ledgerPath, sessionName string, pointerPaths []
 	if len(pointerPaths) == 0 {
 		return nil
 	}
+
+	waitForGCSwap(ledgerPath)
 
 	// --sparse: ledger repos use sparse-checkout (cone mode)
 	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, pointerPaths...)

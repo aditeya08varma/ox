@@ -95,6 +95,29 @@ func inferDailyHighWater(tcPath string) time.Time {
 	return t
 }
 
+// dailyBacklogComplete reports whether daily distillation has caught up
+// through the given end time (a week's or month's own end, from
+// isoWeekRange/endOfMonth) — i.e. whether it's safe to roll that period's
+// dailies up into a weekly/monthly summary. It re-derives the daily
+// high-water mark on every call rather than trusting a value computed
+// earlier, because the period being checked may have been left incomplete
+// by an entirely separate, earlier invocation (e.g. an interrupted
+// `ox distill --all` backfill) — not necessarily anything that happened in
+// the current run.
+//
+// inferDailyHighWater returns the START of its latest date (00:00:00 UTC);
+// endOfDay normalizes that back to the date's last second so this stays a
+// date-level comparison — otherwise a period whose final day IS present on
+// disk would be misreported as incomplete (00:00:00 is before 23:59:59 on
+// the same calendar day).
+func dailyBacklogComplete(tcPath string, through time.Time) bool {
+	highWater := inferDailyHighWater(tcPath)
+	if highWater.IsZero() {
+		return false
+	}
+	return !endOfDay(highWater).Before(through)
+}
+
 // inferWeeklyHighWater scans memory/weekly/ for latest YYYY-WXX file.
 // Returns end-of-that-week (Sunday 23:59:59 UTC).
 func inferWeeklyHighWater(tcPath string) time.Time {
@@ -799,10 +822,27 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	// to. Skip both stages entirely rather than risk that — same failure
 	// class the break-not-continue logic above guards against, just
 	// cross-stage instead of within one stage.
+	//
+	// dailyOK alone only catches "daily ran THIS invocation and failed": an
+	// explicit --layer=weekly/--layer=monthly run never sets plan.Daily, so
+	// dailyOK stays true by construction even when an earlier, separate run
+	// left the backlog behind a due week/month incomplete. The
+	// dailyBacklogComplete check inside each loop below is the complementary
+	// guard for that case. It runs per-iteration (not once, hoisted above
+	// both loops) because different due periods in the same run can have
+	// different completeness — and it breaks (not continues) past the first
+	// incomplete period for the same monotonic-state reason as above: rolling
+	// up a later period would advance LastWeekly/LastMonthly past an earlier
+	// period that's still incomplete, permanently orphaning it.
 	if !dailyOK {
 		slog.Warn("skipping weekly/monthly rollups this run: daily distill did not complete, its backlog may back an already-due week/month")
 	} else {
 		for _, week := range plan.Weeks {
+			_, weekEnd := isoWeekRange(week.Year, week.Week)
+			if !dailyBacklogComplete(tc.Path, weekEnd) {
+				slog.Warn("skipping weekly rollup: daily backlog behind this week is incomplete", "year", week.Year, "week", week.Week, "week_end", weekEnd)
+				break
+			}
 			if err := distillWeekly(ctx, cmd, backend, tc, state, week, distillGuidelines); err != nil {
 				slog.Warn("weekly distill failed, stopping remaining weeks this run", "year", week.Year, "week", week.Week, "error", err)
 				stageErrs = append(stageErrs, fmt.Errorf("weekly distill (%d-W%02d): %w", week.Year, week.Week, err))
@@ -811,6 +851,19 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		}
 
 		for _, month := range plan.Months {
+			monthStart, perr := time.Parse("2006-01", month)
+			if perr != nil {
+				// enumerateMonths always emits "2006-01"-formatted strings —
+				// unreachable in practice, but fail closed rather than roll
+				// up a period we can't verify.
+				slog.Warn("skipping monthly rollup: could not parse month for completeness check", "month", month, "error", perr)
+				break
+			}
+			monthEnd := endOfMonth(monthStart)
+			if !dailyBacklogComplete(tc.Path, monthEnd) {
+				slog.Warn("skipping monthly rollup: daily backlog behind this month is incomplete", "month", month, "month_end", monthEnd)
+				break
+			}
 			if err := distillMonthly(ctx, cmd, backend, tc, state, month, distillGuidelines); err != nil {
 				slog.Warn("monthly distill failed, stopping remaining months this run", "month", month, "error", err)
 				stageErrs = append(stageErrs, fmt.Errorf("monthly distill (%s): %w", month, err))
