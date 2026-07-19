@@ -5,9 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -677,4 +679,122 @@ func TestGC_SwapLock_HeldDuringSwapWindow_RemovedAfter(t *testing.T) {
 		t.Fatal("GC did not complete after the swap window was released")
 	}
 	assert.NoFileExists(t, lockPath, "swap lock must be removed once the risky window ends")
+}
+
+// --- F. dispatch-level wedge-issue clearing ---
+//
+// TestGC_LedgerWedgeRecovery_ClearsSyncBackoff (above) proves
+// runBlueGreenGCOpts itself clears sync-failure backoff on a successful
+// diverge-capture recovery. But the IssueTypeSessionConflictWedge issue
+// itself is cleared one layer up, in checkAndRunGC's dispatch switch — and
+// specifically on the PLAIN gcSuccess case (not just gcSuccess-and-recovered)
+// for when GC succeeds without actually needing to capture anything (e.g.
+// the unpushed commits' net content change against the merge-base is
+// empty). That dispatch-level branch was never exercised by any test:
+// every existing GC test either calls runBlueGreenGC/Opts directly
+// (skipping checkAndRunGC's trigger detection and issue-clearing switch
+// entirely) or doesn't seed a pre-existing wedge issue to observe being
+// cleared.
+
+// TestCheckAndRunGC_WedgeTrigger_ClearsSessionConflictIssueOnPlainSuccess
+// drives the real dispatch path: a genuinely wedged ledger (ahead+behind,
+// old enough) whose two unpushed commits cancel out to an empty net diff
+// against the merge-base — so gcPushUnpushedCommits fails non-fast-forward
+// (entering the diverge-capture branch, since wedged=true is passed through
+// as captureUnpushedOnDiverge), but gcCaptureDiff finds nothing to capture,
+// landing at gcSuccess with recovered=false. Seeds the tracker with the
+// wedge issue a prior pull cycle would have set, calls checkAndRunGC itself
+// (not the lower-level GC function), and asserts the issue is cleared.
+// Failure prevented: a wedge that resolves itself with nothing left to
+// recover (recovered=false) leaves the stale IssueTypeSessionConflictWedge
+// alert permanently showing in `ox status`/`ox doctor` even after the
+// underlying problem is gone — because the only clearing code that fires on
+// a plain (non-recovered) success lives in checkAndRunGC's dispatch switch,
+// never reached by calling runBlueGreenGCOpts directly.
+func TestCheckAndRunGC_WedgeTrigger_ClearsSessionConflictIssueOnPlainSuccess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	isolateCredentials(t)
+
+	bareDir := setupLedgerBareRepo(t)
+	cloneURL := "file://" + bareDir
+	projectDir := setupProjectWithConfig(t, "")
+	s := newTestScheduler(projectDir)
+	tracker := NewIssueTracker()
+	s.SetIssueTracker(tracker)
+
+	ledgerDir := filepath.Join(t.TempDir(), "ledger")
+	require.NoError(t, ledger.CloneWithSparseCheckout(ledgerDir, cloneURL))
+	gitConfig(t, ledgerDir)
+	// checkAndRunGC's wedge-check block only runs when fullClone is false
+	// (!isPartialClone gates it alongside interval/cooldown) — mark this
+	// fixture as a partial clone the same way a real ledger clone is, so
+	// the "full clone upgrade" trigger doesn't fire instead and skip past
+	// the wedge-detection branch entirely.
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "config", "extensions.partialClone", "origin").Run())
+
+	// two local commits whose net content change cancels out: add a file,
+	// then remove it again in a second commit. Ahead count is 2, but the
+	// diff against the merge-base is empty.
+	require.NoError(t, os.WriteFile(filepath.Join(ledgerDir, "sessions", "temp.txt"), []byte("temp"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "add", "-A").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "commit", "-m", "add temp file").Run())
+	backdateCommitTimestamp(t, ledgerDir, -4*time.Hour)
+
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "rm", "sessions/temp.txt").Run())
+	require.NoError(t, exec.Command("git", "-C", ledgerDir, "commit", "-m", "revert temp file").Run())
+
+	// a remote-only commit so the ledger is genuinely behind too, not just ahead.
+	remoteWriterDir := t.TempDir()
+	require.NoError(t, exec.Command("git", "clone", bareDir, remoteWriterDir).Run())
+	gitConfig(t, remoteWriterDir)
+	require.NoError(t, os.WriteFile(filepath.Join(remoteWriterDir, "sessions", "remote.txt"), []byte("remote"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", remoteWriterDir, "add", "-A").Run())
+	require.NoError(t, exec.Command("git", "-C", remoteWriterDir, "commit", "-m", "remote change").Run())
+	require.NoError(t, exec.Command("git", "-C", remoteWriterDir, "push", "origin", "HEAD:main").Run())
+
+	// sanity check: confirm the fixture is genuinely wedged per the same
+	// heuristic checkAndRunGC itself calls, and that the net diff really is
+	// empty (the whole point of this fixture).
+	wedged, age, count := s.ledgerSyncWedged(context.Background(), ledgerDir)
+	require.True(t, wedged, "fixture must be genuinely wedged (ahead+behind, old enough)")
+	require.GreaterOrEqual(t, age, ledgerSyncWedgeAge)
+	require.Equal(t, 2, count)
+	diffOutput, err := gitutil.RunGit(context.Background(), ledgerDir, "diff", "--stat", "@{upstream}...HEAD")
+	require.NoError(t, err)
+	require.Empty(t, strings.TrimSpace(diffOutput), "fixture's two local commits must cancel out to an empty net diff against the merge-base")
+
+	ws := WorkspaceState{
+		ID:         "ledger",
+		Type:       WorkspaceTypeLedger,
+		Path:       ledgerDir,
+		CloneURL:   cloneURL,
+		Exists:     true,
+		LastGCTime: time.Now().Add(-1 * time.Hour), // recent enough that interval-exceeded doesn't also fire
+	}
+	registry := s.WorkspaceRegistry()
+	registry.mu.Lock()
+	primeConfigCacheLocked(registry)
+	registry.ledger = &ws
+	registry.workspaces[ws.ID] = &ws
+	registry.mu.Unlock()
+
+	// seed the issue a prior pull cycle would have set on first detecting
+	// the wedge (sync_managed.go's classification path, exercised
+	// separately in sync_managed_test.go).
+	tracker.SetIssue(DaemonIssue{
+		Type:     IssueTypeSessionConflictWedge,
+		Repo:     "ledger",
+		Severity: SeverityCritical,
+		Summary:  "1 session(s) have unresolvable meta.json conflicts",
+	})
+	_, ok := tracker.GetIssue(IssueTypeSessionConflictWedge, "ledger")
+	require.True(t, ok, "sanity check: issue must actually be seeded before checkAndRunGC runs")
+
+	s.checkAndRunGC(context.Background())
+
+	_, stillPresent := tracker.GetIssue(IssueTypeSessionConflictWedge, "ledger")
+	assert.False(t, stillPresent,
+		"a successful GC that resolves a detected wedge must clear the session-conflict-wedge issue via checkAndRunGC's dispatch-level switch, even when recovered=false (nothing needed capturing)")
 }
