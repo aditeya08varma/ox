@@ -443,6 +443,11 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		} else {
 			sb.WriteString("Recording active. Discussions may be shared with your team.\n")
 		}
+		// PR trailer directive — exact literal line the agent must append
+		if output.Session.PRDirective != "" {
+			sb.WriteString(escapeXML(output.Session.PRDirective))
+			sb.WriteString("\n")
+		}
 	}
 	// observation directive
 	if output.ObservationDirective != "" {

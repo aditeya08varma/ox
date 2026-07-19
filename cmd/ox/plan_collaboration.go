@@ -51,16 +51,58 @@ func resolvePlanProvenance(gitRoot string) (*plan.Provenance, *session.Recording
 	}
 	prov.AuthorName = identity.AttributionDisplayName(ep, "")
 
-	// live recording → session name (available now) + active outcome. The
-	// canonical ses_ SessionID is minted at stop and backfilled there.
+	// live recording → session name + start-minted ses_ SessionID (both
+	// available now) + active outcome. Stop-time reconciliation remains the
+	// backstop for recordings started under an older binary (empty ID here).
 	var st *session.RecordingState
 	if rs, err := session.LoadRecordingStateForAgent(gitRoot, agentID); err == nil && rs != nil {
+		// subagent: prefer the parent session so provenance matches the
+		// footer link (liveSessionConversationURL parent-prefers too) —
+		// otherwise LintSessionLink false-warns on every subagent render
+		if rs.ParentAgentID != "" {
+			if parentState, _ := session.LoadRecordingStateForAgent(gitRoot, rs.ParentAgentID); parentState != nil {
+				rs = parentState
+			}
+		}
 		st = rs
 		prov.SessionName = session.GetSessionName(rs.SessionPath)
+		prov.SessionID = rs.SessionID
 		prov.SessionOutcome = plan.SessionOutcomeActive
 	}
 
 	return prov, st
+}
+
+// liveSessionConversationURL returns the /c/ conversation link of the current
+// live recording, or "" when there is no recording, the recording predates
+// start-minted IDs, or session attribution is disabled. Used to stamp a
+// deterministic session link into rendered plan artifacts — zero agent tokens.
+func liveSessionConversationURL(gitRoot string) string {
+	attr := loadResolvedAttribution()
+	if attr.Session == "" {
+		return ""
+	}
+	cfg, err := config.LoadProjectConfig(gitRoot)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	agentID, _ := detectAgentContext()
+	var state *session.RecordingState
+	if agentID != "" {
+		state, _ = session.LoadRecordingStateForAgent(gitRoot, agentID)
+		// subagent: prefer parent session so the plan links the main session
+		if state != nil && state.ParentAgentID != "" {
+			if parentState, _ := session.LoadRecordingStateForAgent(gitRoot, state.ParentAgentID); parentState != nil {
+				state = parentState
+			}
+		}
+	} else {
+		state, _ = session.LoadRecordingStateForWorkspace(gitRoot, gitRoot)
+	}
+	if state == nil {
+		return ""
+	}
+	return buildConversationURL(cfg, state.SessionID)
 }
 
 // deriveCollabSignals counts deterministic collaboration-effort proxies from the

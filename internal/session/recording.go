@@ -12,6 +12,7 @@ import (
 
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/sessionid"
 )
 
 var (
@@ -60,7 +61,15 @@ type LifecycleEvent struct {
 // RecordingState tracks an active recording session.
 // Stored in sessions/<session-name>/.recording.json
 type RecordingState struct {
-	AgentID          string    `json:"agent_id"`
+	AgentID string `json:"agent_id"`
+	// SessionID is the durable ses_<UUIDv7> recording identity, minted once at
+	// StartRecording and reused verbatim by every finalize path (stop, recover,
+	// daemon). It exists from t=0 so conversation URLs (/c/<ses_id>) circulated
+	// during the live session — commit trailers, PR bodies, plan footers —
+	// keep resolving after upload. omitempty: recordings started under an
+	// older binary round-trip with an empty ID and fall back to name-based
+	// URLs.
+	SessionID        string    `json:"session_id,omitempty"`
 	StartedAt        time.Time `json:"started_at"`
 	AdapterName      string    `json:"adapter_name"`
 	SessionFile      string    `json:"session_file"` // source file from adapter (Claude Code JSONL)
@@ -857,6 +866,7 @@ func StartRecording(projectRoot string, opts StartRecordingOptions) (*RecordingS
 
 	state := &RecordingState{
 		AgentID:           opts.AgentID,
+		SessionID:         sessionid.GenerateSessionID(),
 		AdapterName:       opts.AdapterName,
 		SessionFile:       opts.SessionFile,
 		OutputFile:        sessionFile,

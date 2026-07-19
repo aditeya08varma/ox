@@ -33,9 +33,15 @@ func TestWithAttributionGuidance(t *testing.T) {
 				"Commit Attribution (Automatic)",
 				"PR Attribution (Conditional)",
 				"ox session score",
-				"Session Recording in PRs",
+				// the Co-Authored-By trailer must slot ABOVE the per-session
+				// SageOx-Session last line (emitted in <session-context>)
+				"above the SageOx-Session line when present",
 			},
-			absent: []string{"Not Logged In"},
+			// the old markdown-section instruction is gone: a templated
+			// "<session_url>" placeholder was the confabulation vector, and a
+			// mid-body section dies on squash-merge — replaced by the
+			// exact-literal Session.PRDirective in prime output
+			absent: []string{"Not Logged In", "Session Recording in PRs", "<session_url>"},
 		},
 		{
 			name:     "not logged in shows warning",

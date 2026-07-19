@@ -82,20 +82,17 @@ func WithAttributionGuidance(content string, loggedIn bool, attr config.Resolved
 		sb.WriteString("\n**PR Attribution (Conditional):**\n")
 		sb.WriteString("When creating a PR, check if any commits have SageOx attribution:\n")
 		sb.WriteString("```\ngit log --format='%(trailers:key=Co-Authored-By,valueonly)' base..HEAD | grep -q SageOx\n```\n")
-		sb.WriteString("If any commit has SageOx attribution, include the following as the **last line** of the PR body:\n")
+		sb.WriteString("If any commit has SageOx attribution, include the following in the trailer block at the end of the PR body (above the SageOx-Session line when present):\n")
 		sb.WriteString("```\n")
 		sb.WriteString(attr.PR)
 		sb.WriteString("\n```\n")
 		sb.WriteString("If no commits have SageOx attribution, omit it from the PR body.\n")
 	}
 
-	// session recording link in PRs
-	sb.WriteString("\n**Session Recording in PRs:**\n")
-	sb.WriteString("When creating a PR, if `session_url` was provided in this prime output, include a session recording link in the PR body:\n")
-	sb.WriteString("```\n")
-	sb.WriteString("## Session Recording\n")
-	sb.WriteString("[View session recording](<session_url>)\n")
-	sb.WriteString("```\n")
+	// the per-session PR trailer directive (SageOx-Session: <url>) is emitted
+	// exact-literal in the <session-context> block, not here — a templated
+	// placeholder in static guidance is the confabulation vector this design
+	// removed. See prime output Session.PRDirective.
 
 	return sb.String()
 }
@@ -113,7 +110,7 @@ func BuildAttributionTextSection(attr config.ResolvedAttribution) string {
 		fmt.Fprintf(&sb, "- **Commits**: Add trailer \"%s\"\n", attr.Commit)
 	}
 	if attr.PR != "" {
-		fmt.Fprintf(&sb, "- **PRs**: End body with \"%s\" (survives squash merge)\n", attr.Commit)
+		fmt.Fprintf(&sb, "- **PRs**: End body with \"%s\" (survives squash merge)\n", attr.PR)
 	}
 	return sb.String()
 }

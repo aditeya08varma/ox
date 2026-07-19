@@ -61,6 +61,7 @@ type Result struct {
 	LedgerSessionDir string   // full path to session dir in ledger (empty if upload failed)
 	UploadWarning    string   // non-empty when ledger upload failed (explains recovery)
 	DataWarnings     []string // data quality warnings from validation (reported to agent)
+	PRLinkMisses     []string // server-reported repair tasks: linked PRs missing the SageOx-Session trailer, pre-formatted for the agent
 	UploadMs         int64    // time spent on LFS upload + git push (ms)
 
 	// Adapter-detected terminal-stop metadata, populated by the daemon's
@@ -113,6 +114,7 @@ type StopOutput struct {
 	LedgerSessionDir string           `json:"ledger_session_dir,omitempty"` // path to session dir in ledger
 	UploadWarning    string           `json:"upload_warning,omitempty"`     // set when ledger upload failed
 	DataWarnings     []string         `json:"data_warnings,omitempty"`      // data quality warnings from validation
+	PRLinkMisses     []string         `json:"pr_link_misses,omitempty"`     // repair tasks: linked PRs missing the SageOx-Session trailer
 	Guidance         string           `json:"guidance,omitempty"`           // behavioral guidance for the agent
 	TotalMs          int64            `json:"total_ms,omitempty"`           // wall clock for entire session stop
 	Timing           map[string]int64 `json:"timing,omitempty"`             // per-phase breakdown (ms)

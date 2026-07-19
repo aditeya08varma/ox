@@ -169,9 +169,12 @@ func processSession(projectRoot string, state *session.RecordingState) (*process
 		result.Model = state.Model
 	}
 
-	// write header with metadata
+	// write header with metadata; SessionID keeps the raw header a crash-safe
+	// carrier of the start-minted ID on this reconstruct path too (daemon
+	// orphan-finalize recovers it from here when meta.json was never written)
 	meta := &session.StoreMeta{
 		Version:      "1.0",
+		SessionID:    state.SessionID,
 		CreatedAt:    state.StartedAt,
 		AgentID:      state.AgentID,
 		AgentType:    agentTypeForMeta,

@@ -669,7 +669,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			primeCallCount, agentinstance.ExcessivePrimeThreshold, output.ContentLength)
 	}
 
-	// populate session URL if recording
+	// populate session URL if recording, gated on the session-attribution
+	// toggle so attribution.session: "" disables every session-link surface
+	// (commit trailer, prime URL, PR directive) consistently
 	// for subagents: use parent session URL so PRs/commits link to the main session
 	if output.Session != nil && output.Session.Recording {
 		if projCfg, cfgErr := config.LoadProjectConfig(projectRoot); cfgErr == nil {
@@ -682,10 +684,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				// parent session not found; fall back to own session
 				state, _ = session.LoadRecordingStateForAgent(projectRoot, agentID)
 			}
-			if state != nil {
-				sessionName := session.GetSessionName(state.SessionPath)
-				output.Session.SessionURL = buildSessionURL(projCfg, sessionName)
-			}
+			output.Session.SessionURL, output.Session.PRDirective = sessionLinkOutputs(projCfg, state, attribution.Session)
 		}
 	}
 
@@ -1305,6 +1304,9 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
 		slog.Warn("failed to write raw.jsonl header at auto-start", "error", writeErr)
 	}
+
+	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
+	notifySessionStartedAsync(projectRoot, state)
 
 	// for tail-mode sessions: try to find the agent's session file and tell
 	// the daemon to start tailing it. If TryConnect returns nil (daemon not

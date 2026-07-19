@@ -65,6 +65,12 @@ type RenderOptions struct {
 	// command layer builds the closure from the local project config, and
 	// `ox plan enrich --json` (no config) never embeds an environment URL.
 	PriorArtURL func(refKind, ref string) string
+	// SessionURL is the universal conversation link (/c/<ses_id>) of the
+	// recording that produced this plan, rendered as a deterministic footer
+	// link so committed plan artifacts point back to their session. Empty
+	// (no recording, no start-minted ID, or session attribution disabled)
+	// omits the link.
+	SessionURL string
 	// Artifact renders a strictly self-contained page with NO external resource
 	// requests, suitable for publishing as a Claude Code Artifact (served under a
 	// strict CSP that blocks all cross-origin script/style/font/img and all
@@ -164,6 +170,7 @@ type renderData struct {
 	Plural         string
 	Signals        []renderSignal // unanchored signals (no matching section)
 	FooterCredit   bool
+	SessionURL     string // /c/ conversation link of the producing recording ("" = omit)
 	// Artifact toggles the CSP-safe variant: the template drops the Google-Fonts
 	// link, the Mermaid CDN script, and the SSE review layer when set.
 	Artifact bool
@@ -223,6 +230,7 @@ func RenderHTMLOpts(in Input, res Result, opts RenderOptions) ([]byte, error) {
 		ReviewEndpoint: opts.ReviewEndpoint,
 		ReviewToken:    opts.ReviewToken,
 		FooterCredit:   len(res.Annotations) > 0 || len(res.Context) > 0,
+		SessionURL:     opts.SessionURL,
 		Artifact:       opts.Artifact,
 		WordmarkDark:   template.HTML(wordmarkDark),  //nolint:gosec // first-party embedded asset
 		WordmarkLight:  template.HTML(wordmarkLight), //nolint:gosec // first-party embedded asset

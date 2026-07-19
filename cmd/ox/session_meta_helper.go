@@ -13,9 +13,12 @@ import (
 // fields (UserID, RepoID, SessionID) resolved from the project root.
 // Callers chain additional optional setters before calling Build().
 //
-// SessionID is a fresh ses_<UUIDv7> stamped here at recording-creation
-// time. Never regenerated on later mutates: MutateSessionMeta paths
-// preserve the value via JSON round-trip.
+// The SessionID stamped here is a fresh ses_<UUIDv7> FALLBACK for paths
+// with no recording state (imports, manual uploads, legacy recordings).
+// Recording-backed callers override it with the ID minted at
+// StartRecording, and a preserved meta.json ID overrides both (last
+// write wins on the builder). Never regenerated on later mutates:
+// MutateSessionMeta paths preserve the value via JSON round-trip.
 func sessionMetaBase(sessionName, username, agentID, agentType string, createdAt time.Time, projectRoot string) *lfs.SessionMetaBuilder {
 	ep := endpoint.GetForProject(projectRoot)
 	return lfs.NewSessionMeta(sessionName, username, agentID, agentType, createdAt).

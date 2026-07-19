@@ -82,6 +82,10 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 
 	// intentionally do NOT set doctor.SetNeedsDoctorAgent() — user chose to discard
 
+	// flip the registered /c/ page to "discarded" and drop pending PR-link
+	// repair tasks server-side (fire-and-forget)
+	notifySessionAbortedAsync(projectRoot, state.SessionID)
+
 	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName)
 }
 
@@ -124,8 +128,22 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 		return err
 	}
 
-	// remove .recording.json if present (unconditional — no agent ownership check)
+	// capture the ses_ ID before the folder is destroyed so the server-side
+	// /c/ page can flip from "in progress" to "discarded": recording state
+	// first, raw-header carrier as fallback
+	abortedSessionID := ""
 	recPath := filepath.Join(sessionPath, ".recording.json")
+	if data, err := os.ReadFile(recPath); err == nil {
+		var rs session.RecordingState
+		if json.Unmarshal(data, &rs) == nil {
+			abortedSessionID = rs.SessionID
+		}
+	}
+	if abortedSessionID == "" {
+		abortedSessionID = session.ReadHeaderSessionID(filepath.Join(sessionPath, "raw.jsonl"))
+	}
+
+	// remove .recording.json if present (unconditional — no agent ownership check)
 	if err := os.Remove(recPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to clear recording state: %w", err)
 	}
@@ -134,6 +152,8 @@ func runAgentSessionAbortByName(inst *agentinstance.Instance, cmd *cobra.Command
 	if err := os.RemoveAll(sessionPath); err != nil {
 		return fmt.Errorf("failed to remove session data at %s: %w", sessionPath, err)
 	}
+
+	notifySessionAbortedAsync(projectRoot, abortedSessionID)
 
 	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName)
 }
@@ -246,7 +266,7 @@ func emitAbortOutput(w io.Writer, agentID, sessionName string) error {
 		AgentID:     agentID,
 		SessionName: sessionName,
 		Message:     "session aborted and discarded",
-		Guidance:    "Session aborted and discarded. No further action needed. Continue with your current task.",
+		Guidance:    "Session aborted and discarded. No further action needed. The recording no longer exists: do not add SageOx-Session trailers or session links referencing it to any future commits or PR bodies, and remove the line from any unsubmitted PR drafts. Continue with your current task.",
 	}
 
 	if cfg.Text || cfg.Review {

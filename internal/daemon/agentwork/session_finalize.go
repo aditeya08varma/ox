@@ -1209,9 +1209,11 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 	//
 	// SessionID: if a meta.json already exists on disk (e.g., the CLI
 	// stamped one at session start and the daemon is recovering a partial
-	// finalize), preserve it. Otherwise stamp a fresh ses_<UUIDv7> here so
-	// daemon-recovered sessions still get an identifier. Non-NotExist
-	// read errors are fatal — see PreservedSessionID doc.
+	// finalize), preserve it. Else reuse the start-minted ID from the
+	// raw.jsonl header (the crash-safe carrier — .recording.json is gone
+	// by finalize time). Only stamp a fresh ses_<UUIDv7> for legacy raws
+	// with neither. Non-NotExist read errors are fatal — see
+	// PreservedSessionID doc.
 	preservedSessionID, err := lfs.PreservedSessionID(payload.SessionDir)
 	if err != nil {
 		// fatal: caller must abort the entire finalize flow rather than
@@ -1219,7 +1221,14 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		// read.
 		return nil, fmt.Errorf("preserve existing SessionID for %s: %w", sessionName, err)
 	}
-	sessionIDForMeta := preservedSessionID
+	// start-minted ID carried in the raw.jsonl header so conversation URLs
+	// circulated during the live session (commit trailers, PR bodies) keep
+	// resolving after a daemon-side finalize
+	headerID := ""
+	if stored.Meta != nil {
+		headerID = stored.Meta.SessionID
+	}
+	sessionIDForMeta := session.ResolveSessionID(preservedSessionID, headerID)
 	if sessionIDForMeta == "" {
 		sessionIDForMeta = sessionid.GenerateSessionID()
 	}

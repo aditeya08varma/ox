@@ -112,8 +112,12 @@ func runHooksCommitMsg(cmd *cobra.Command, args []string) error {
 			state, loadErr = session.LoadRecordingStateForWorkspace(projectRoot, projectRoot)
 		}
 		if loadErr == nil && state != nil {
-			sessionName := session.GetSessionName(state.SessionPath)
-			sessionURL := buildSessionURL(cfg, sessionName)
+			// durable /c/ link preferred; recordings started under an older
+			// binary carry no start-minted ID — name-based fallback
+			sessionURL := buildConversationURL(cfg, state.SessionID)
+			if sessionURL == "" {
+				sessionURL = buildSessionURL(cfg, session.GetSessionName(state.SessionPath))
+			}
 			if sessionURL != "" {
 				trailer := fmt.Sprintf("SageOx-Session: %s", sessionURL)
 				if !strings.Contains(msgContent, "SageOx-Session:") {

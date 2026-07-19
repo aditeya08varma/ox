@@ -223,8 +223,16 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 						ProducedCommits(state.ProducedCommits).
 						ProducedPlans(state.ProducedPlans).
 						WithFiles(fileRefs)
-					if preservedID != "" {
-						metaBuilder = metaBuilder.SessionID(preservedID)
+					// durable ID via the shared resolver: preserved meta.json ID
+					// wins; start-minted comes from state, falling back to the
+					// raw-header carrier (state may predate the SessionID field
+					// after a mid-recording binary upgrade)
+					startMinted := state.SessionID
+					if startMinted == "" {
+						startMinted = session.ReadHeaderSessionID(rawPath)
+					}
+					if resolved := session.ResolveSessionID(preservedID, startMinted); resolved != "" {
+						metaBuilder = metaBuilder.SessionID(resolved)
 					}
 					meta := metaBuilder.Build()
 					if err := lfs.WriteSessionMeta(ledgerSessionDir, meta); err != nil {
@@ -238,6 +246,13 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 							_ = doctor.SetNeedsDoctorAgent(projectRoot)
 						} else {
 							uploaded = true
+							// same uploaded-notify as the stop path: without it a
+							// registered session recovers into a /c/ page stuck
+							// "in progress" forever. Misses are logged, not
+							// surfaced — recover has no live agent to task.
+							if misses := finalizeLinkageAfterPush(projectRoot, ledgerSessionDir, meta, sessionName); len(misses) > 0 {
+								slog.Info("recovered session has PR-link misses", "session", sessionName, "count", len(misses))
+							}
 						}
 					}
 				}
