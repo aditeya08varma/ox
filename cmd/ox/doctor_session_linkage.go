@@ -1,17 +1,20 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/lfs"
 )
 
-// doctor_session_linkage.go houses two soft-signal doctor checks for the
-// commit↔session linkage system:
+// doctor_session_linkage.go houses soft-signal doctor checks for the
+// commit↔session↔PR linkage system:
 //
 //  1. checkSessionTrailerRatio surfaces "how many of the last N commits on
 //     this branch carry a SageOx-Session: trailer." A low ratio is the
@@ -26,8 +29,18 @@ import (
 //     intentionally not auto-mutated; staleness is a soft signal so
 //     users notice).
 //
-// Both checks are read-only and intended to run quickly (bounded scan
-// windows). They never block any session work.
+//  3. checkPRAttributionCoverage catches a miss on the one linkage hop that
+//     has no automated enforcement at all: commit-level SageOx attribution
+//     is written by a deterministic git hook (hooks_commit_msg.go), but
+//     PR-body attribution exists only as guidance an AI coworker is
+//     expected to remember and apply on every `gh pr create`/`gh pr edit`
+//     (internal/prime/attribution.go). A long session with context
+//     compaction can lose track of that instruction; this check is the
+//     backstop that catches it before merge, when the PR body becomes the
+//     permanent squash-merge record. See ox-5r5v.
+//
+// All three checks are read-only and intended to run quickly (bounded scan
+// windows / single gh call). None ever block any session work.
 
 // trailerScanCommitCount caps how far back the trailer-ratio scan looks.
 // 50 is enough to catch a recent regression without scanning thousands of
@@ -177,4 +190,113 @@ func runGitLinkage(gitRoot string, args ...string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// checkPRAttributionCoverage reports whether the open PR for the current
+// branch (if any) is missing the SageOx PR-body attribution trailer despite
+// having commits that carry SageOx commit attribution. Soft signal only —
+// see the package doc comment above for why this is the sole backstop for
+// the PR-body attribution hop.
+//
+// Skip cases (each returns SkippedCheck — not a failure): not in a git
+// repo, project not initialized, attribution not configured, gh
+// unavailable, no current branch, or no open PR for it.
+func checkPRAttributionCoverage() checkResult {
+	const name = "PR SageOx attribution coverage"
+
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return SkippedCheck(name, "not in a git repo", "")
+	}
+	if !config.IsInitialized(gitRoot) {
+		return SkippedCheck(name, "project not initialized", "")
+	}
+	cfg, err := config.LoadProjectConfig(gitRoot)
+	if err != nil {
+		return SkippedCheck(name, "could not load project config", "")
+	}
+	attr := resolveProjectAttribution(cfg)
+	if attr.Commit == "" || attr.PR == "" {
+		return SkippedCheck(name, "SageOx attribution not configured for this project", "")
+	}
+	if _, err := exec.LookPath("gh"); err != nil {
+		return SkippedCheck(name, "gh CLI not available", "")
+	}
+
+	branch, err := runGitLinkage(gitRoot, "rev-parse", "--abbrev-ref", "HEAD")
+	if err != nil {
+		return SkippedCheck(name, "could not determine current branch", "")
+	}
+	branch = strings.TrimSpace(branch)
+	if branch == "" || branch == "HEAD" {
+		return SkippedCheck(name, "detached HEAD", "")
+	}
+
+	pr, err := lookupOpenPRForBranch(gitRoot, branch)
+	if err != nil || pr == nil {
+		return SkippedCheck(name, "no open PR for current branch", "")
+	}
+
+	hasSageOxCommit, err := branchHasSageOxCommitTrailer(gitRoot, pr.BaseRefName, attr.Commit)
+	if err != nil {
+		return SkippedCheck(name, fmt.Sprintf("git log failed: %v", err), "")
+	}
+	if !hasSageOxCommit {
+		return PassedCheck(name, "no commits on this branch carry SageOx attribution")
+	}
+
+	if strings.Contains(pr.Body, attr.PR) || strings.Contains(pr.Body, "SageOx-Session:") {
+		return PassedCheck(name, fmt.Sprintf("PR #%d body carries SageOx attribution", pr.Number))
+	}
+
+	msg := fmt.Sprintf("PR #%d has SageOx-attributed commits but its body is missing the trailer", pr.Number)
+	fix := fmt.Sprintf("Add %q to the end of the PR body before merge — it becomes the permanent record on squash-merge: gh pr edit %d --body-file <file>",
+		attr.PR, pr.Number)
+	return WarningCheck(name, msg, fix)
+}
+
+// prAttributionInfo is the subset of `gh pr view`/`gh pr list` fields
+// needed by checkPRAttributionCoverage.
+type prAttributionInfo struct {
+	Number      int    `json:"number"`
+	Body        string `json:"body"`
+	BaseRefName string `json:"baseRefName"`
+}
+
+// lookupOpenPRForBranch shells out to gh to find the open PR (if any) whose
+// head is branch. Mirrors prURLForBranch's (hooks_pre_push.go) invocation
+// style. Bounded by ghTimeout. Returns nil on any failure or no match.
+func lookupOpenPRForBranch(gitRoot, branch string) (*prAttributionInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "pr", "list",
+		"--head", branch, "--state", "open", "--json", "number,body,baseRefName")
+	cmd.Dir = gitRoot
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	var prs []prAttributionInfo
+	if err := json.Unmarshal(out, &prs); err != nil {
+		return nil, err
+	}
+	if len(prs) == 0 {
+		return nil, nil
+	}
+	return &prs[0], nil
+}
+
+// branchHasSageOxCommitTrailer reports whether any commit ahead of the PR's
+// base branch carries commitTrailer (the project's resolved SageOx commit
+// attribution string). Falls back to a local base-ref range when the
+// remote-tracking ref isn't available (e.g. base branch never fetched).
+func branchHasSageOxCommitTrailer(gitRoot, baseRef, commitTrailer string) (bool, error) {
+	out, err := runGitLinkage(gitRoot, "log", "origin/"+baseRef+"..HEAD", "--format=%B")
+	if err != nil {
+		out, err = runGitLinkage(gitRoot, "log", baseRef+"..HEAD", "--format=%B")
+		if err != nil {
+			return false, err
+		}
+	}
+	return strings.Contains(out, commitTrailer), nil
 }
