@@ -87,6 +87,30 @@ func TestPickProbeRepoURL(t *testing.T) {
 			},
 			want: "https://git.sageox.ai/valid/repo.git",
 		},
+		{
+			// Security: never probe (and hand the PAT to) a host other than the
+			// server that issued the PAT. A tampered credentials file or a
+			// compromised repos API response could inject a foreign-host URL.
+			name: "skips foreign host when ServerURL is set",
+			creds: &GitCredentials{
+				ServerURL: "https://git.sageox.ai",
+				Repos: map[string]RepoEntry{
+					"evil": {URL: "https://attacker.example.com/exfil/repo.git"},
+				},
+			},
+			want: "",
+		},
+		{
+			name: "returns same-host repo, skipping a foreign one, when ServerURL is set",
+			creds: &GitCredentials{
+				ServerURL: "https://git.sageox.ai",
+				Repos: map[string]RepoEntry{
+					"evil": {URL: "https://attacker.example.com/exfil/repo.git"},
+					"ours": {URL: "https://git.sageox.ai/team/repo.git"},
+				},
+			},
+			want: "https://git.sageox.ai/team/repo.git",
+		},
 	}
 
 	for _, tt := range tests {
@@ -186,8 +210,12 @@ func TestValidatePATLiveness_CredentialHelperSuppressed(t *testing.T) {
 	require.NoError(t, err)
 	defer os.Remove(fakeGit.Name())
 
+	// Assert the credential helper is ACTUALLY disabled, not merely that some
+	// GIT_CONFIG override exists: the suppression requires KEY_0=credential.helper
+	// with an EMPTY VALUE_0. Checking only GIT_CONFIG_COUNT would stay green even
+	// if a regression pointed KEY_0 elsewhere or set a non-empty helper value.
 	_, err = fakeGit.WriteString(`#!/bin/sh
-if [ -z "$GIT_CONFIG_COUNT" ]; then
+if [ "$GIT_CONFIG_COUNT" != "1" ] || [ "$GIT_CONFIG_KEY_0" != "credential.helper" ] || [ -n "$GIT_CONFIG_VALUE_0" ]; then
   # credential helper was not suppressed — simulate 401 from stale keychain creds
   echo "fatal: unable to access 'https://git.sageox.ai/...': The requested URL returned error: 401" >&2
   exit 128

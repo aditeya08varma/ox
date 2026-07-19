@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/gitutil"
+	"github.com/sageox/ox/internal/paths"
 )
 
 // PATLivenessResult describes the outcome of a PAT liveness check.
@@ -125,11 +126,19 @@ func pickProbeRepoURL(creds *GitCredentials) string {
 	if len(creds.Repos) == 0 {
 		return ""
 	}
-	// pick the first available repo — order doesn't matter for auth validation
+	// Only probe a repo hosted on the same server that issued the PAT. The probe
+	// hands the live PAT to git via GIT_ASKPASS, so a foreign-host repo URL — a
+	// tampered git-credentials file or a compromised repos API response — would
+	// exfiltrate the token. When ServerURL is known we require a host match;
+	// order otherwise doesn't matter for auth validation.
 	for _, repo := range creds.Repos {
-		if repo.URL != "" {
-			return repo.URL
+		if repo.URL == "" {
+			continue
 		}
+		if creds.ServerURL != "" && !endpointHostsEqual(repo.URL, creds.ServerURL) {
+			continue
+		}
+		return repo.URL
 	}
 	return ""
 }
@@ -191,7 +200,15 @@ func ClearCredentialHelperEntry(serverURL string) {
 // Git calls this script with a prompt like "Password for ..." and expects
 // the credential on stdout. Returns the path to the script.
 func writeAskpassScript(token string) (string, error) {
-	f, err := os.CreateTemp("", "ox-askpass-*")
+	// Write under the per-user 0700 temp tree, not world-listable /tmp. The
+	// defer os.Remove in the caller is skipped on SIGKILL/panic, so a crashed
+	// probe can orphan this script — keeping the PAT-bearing filename out of a
+	// world-listable directory contains that residue to the owner.
+	tmpDir := paths.TempDir()
+	if err := os.MkdirAll(tmpDir, 0700); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(tmpDir, "ox-askpass-*")
 	if err != nil {
 		return "", err
 	}

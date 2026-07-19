@@ -682,7 +682,11 @@ func SaveUserConfig(cfg *UserConfig) error {
 		return os.ErrNotExist
 	}
 
-	if err := os.MkdirAll(configDir, 0755); err != nil {
+	// 0700 dir / 0600 file: this is the same directory that holds auth.json and
+	// git-credentials.json (see paths.ConfigDir). A 0755/0644 write here would
+	// silently loosen the 0700 invariant auth.authfile relies on, because
+	// MkdirAll never tightens an existing directory.
+	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return fmt.Errorf("creating config dir: %w", err)
 	}
 
@@ -694,7 +698,7 @@ func SaveUserConfig(cfg *UserConfig) error {
 	configPath := filepath.Join(configDir, "config.yaml")
 	tempPath := configPath + ".tmp"
 
-	if err := os.WriteFile(tempPath, data, 0644); err != nil {
+	if err := os.WriteFile(tempPath, data, 0600); err != nil {
 		return fmt.Errorf("writing temp config: %w", err)
 	}
 

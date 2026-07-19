@@ -1,8 +1,15 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/auth"
+	"github.com/sageox/ox/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -250,4 +257,190 @@ func TestParseQueryArgs_JSONFlag(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, qa.jsonOnly)
 	assert.Equal(t, "local", qa.source)
+}
+
+// --- queryTeamContext auth: mid-session token refresh (ox-x5h5.4) ---
+// Failure prevented: queryTeamContext used to call the raw, non-refreshing
+// auth.GetTokenForEndpoint and gave up immediately on a 401 — so `ox query`
+// failed with "not authenticated" mid-session even though `ox login`
+// succeeded and the access token had simply aged past its ~1h TTL.
+
+// newQueryTestProject sets up an isolated project + auth store pointed at
+// apiServer, with the given token saved for that endpoint. Mirrors the
+// httptest.NewServer + SAGEOX_ENDPOINT/XDG_CONFIG_HOME harness proven in
+// agent_session_manual_publish_test.go.
+func newQueryTestProject(t *testing.T, apiServer *httptest.Server, token *auth.StoredToken) (projectRoot string, qa *queryArgs) {
+	t.Helper()
+
+	t.Setenv("SAGEOX_ENDPOINT", apiServer.URL)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	projectRoot = createInitializedProjectWithConfig(t, &config.ProjectConfig{
+		RepoID:   "test-repo",
+		Endpoint: apiServer.URL,
+		TeamID:   "test-team",
+	})
+
+	require.NoError(t, auth.SaveTokenForEndpoint(apiServer.URL, token))
+
+	qa = &queryArgs{query: "test query", mode: "hybrid", limit: 5, source: "team"}
+	return projectRoot, qa
+}
+
+// TestQueryTeamContext_NearExpiryTokenRefreshedBeforeQuery proves a token
+// expiring within the 300s buffer is proactively refreshed before the query
+// fires, so the API request carries a live token instead of a stale one.
+func TestQueryTeamContext_NearExpiryTokenRefreshedBeforeQuery(t *testing.T) {
+	var tokenEndpointHit, jwtExchangeHit bool
+	var queryAuthHeader string
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case auth.TokenEndpoint:
+			tokenEndpointHit = true
+			require.NoError(t, r.ParseForm())
+			assert.Equal(t, "refresh_token", r.Form.Get("grant_type"))
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "refreshed-opaque",
+				"refresh_token": "refreshed-refresh",
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+			})
+		case "/api/v1/cli/auth/token":
+			jwtExchangeHit = true
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": "refreshed-jwt",
+				"token_type":   "Bearer",
+				"expires_in":   900,
+			})
+		case "/api/v1/query":
+			queryAuthHeader = r.Header.Get("Authorization")
+			json.NewEncoder(w).Encode(api.QueryResponse{Results: []api.QueryResult{{Text: "ok"}}})
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer apiServer.Close()
+
+	// expires in 4 minutes — inside EnsureValidTokenForEndpoint's 300s buffer.
+	projectRoot, qa := newQueryTestProject(t, apiServer, &auth.StoredToken{
+		AccessToken:  "stale-access",
+		RefreshToken: "test-refresh-token",
+		ExpiresAt:    time.Now().Add(4 * time.Minute),
+		TokenType:    "Bearer",
+	})
+
+	resp, err := queryTeamContext(qa, projectRoot, "agent-1", "claude-code")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	assert.True(t, tokenEndpointHit, "expected proactive refresh to hit the token endpoint")
+	assert.True(t, jwtExchangeHit, "expected proactive refresh to complete JWT exchange")
+	assert.Equal(t, "Bearer refreshed-jwt", queryAuthHeader, "query must carry the refreshed token, not the stale one")
+}
+
+// TestQueryTeamContext_RetriesOnceOn401ThenSucceeds proves a token that looks
+// valid locally but is rejected server-side (e.g. revoked) triggers exactly
+// one reactive refresh-and-retry, and the retried query succeeds.
+func TestQueryTeamContext_RetriesOnceOn401ThenSucceeds(t *testing.T) {
+	var queryCallCount int
+	var authHeaders []string
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case auth.TokenEndpoint:
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "refreshed-opaque",
+				"refresh_token": "refreshed-refresh",
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+			})
+		case "/api/v1/cli/auth/token":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": "refreshed-jwt",
+				"token_type":   "Bearer",
+				"expires_in":   900,
+			})
+		case "/api/v1/query":
+			queryCallCount++
+			authHeaders = append(authHeaders, r.Header.Get("Authorization"))
+			if queryCallCount == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			json.NewEncoder(w).Encode(api.QueryResponse{Results: []api.QueryResult{{Text: "ok"}}})
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer apiServer.Close()
+
+	// far from expiry — proactive refresh must NOT fire; only the reactive
+	// 401 retry path should trigger a refresh.
+	projectRoot, qa := newQueryTestProject(t, apiServer, &auth.StoredToken{
+		AccessToken:  "revoked-access",
+		RefreshToken: "test-refresh-token",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+		TokenType:    "Bearer",
+	})
+
+	resp, err := queryTeamContext(qa, projectRoot, "agent-1", "claude-code")
+	require.NoError(t, err)
+	require.NotNil(t, resp)
+
+	require.Equal(t, 2, queryCallCount, "expected exactly one retry after 401")
+	assert.Equal(t, "Bearer revoked-access", authHeaders[0], "first attempt uses the originally stored token")
+	assert.Equal(t, "Bearer refreshed-jwt", authHeaders[1], "retry uses the freshly refreshed token")
+}
+
+// TestQueryTeamContext_GivesUpIfRetryAlso401s proves a genuinely logged-out
+// user (refresh succeeds but the server still rejects the new token, or the
+// account is truly revoked) gets the unchanged "not authenticated" error
+// after exactly one retry — never a loop.
+func TestQueryTeamContext_GivesUpIfRetryAlso401s(t *testing.T) {
+	var queryCallCount int
+
+	apiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case auth.TokenEndpoint:
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "refreshed-opaque",
+				"refresh_token": "refreshed-refresh",
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+			})
+		case "/api/v1/cli/auth/token":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": "refreshed-jwt",
+				"token_type":   "Bearer",
+				"expires_in":   900,
+			})
+		case "/api/v1/query":
+			queryCallCount++
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer apiServer.Close()
+
+	projectRoot, qa := newQueryTestProject(t, apiServer, &auth.StoredToken{
+		AccessToken:  "revoked-access",
+		RefreshToken: "test-refresh-token",
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+		TokenType:    "Bearer",
+	})
+
+	resp, err := queryTeamContext(qa, projectRoot, "agent-1", "claude-code")
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Contains(t, err.Error(), "not authenticated")
+
+	assert.Equal(t, 2, queryCallCount, "expected exactly one retry, not a loop")
 }

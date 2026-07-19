@@ -152,6 +152,14 @@ func Handle401Error(token *StoredToken) (*StoredToken, error) {
 	return refreshToken(token)
 }
 
+// Handle401ErrorForEndpoint is Handle401Error scoped to a specific endpoint.
+// Handle401Error hardcodes endpoint.Get() (the global default), which is wrong
+// for callers bound to a per-project endpoint that can differ from it — e.g.
+// queryTeamContext, which resolves ep via endpoint.GetForProject(projectRoot).
+func Handle401ErrorForEndpoint(token *StoredToken, ep string) (*StoredToken, error) {
+	return refreshTokenForEndpoint(token, ep)
+}
+
 // refreshToken performs token refresh using refresh_token grant.
 //
 // Makes POST to token endpoint with:

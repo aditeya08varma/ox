@@ -59,7 +59,11 @@ func tokenFromEnv(ep string) *StoredToken {
 	if val == "" {
 		return nil
 	}
-	if requested := endpoint.NormalizeEndpoint(ep); requested != "" && requested != envTokenEndpoint() {
+	// Bind the env token to exactly one endpoint. A normalized-empty endpoint
+	// (e.g. malformed input like "api.") has no anchor to match against, so treat
+	// it as a non-match rather than handing out the "*"-scoped token to an
+	// unverifiable target.
+	if requested := endpoint.NormalizeEndpoint(ep); requested == "" || requested != envTokenEndpoint() {
 		return nil
 	}
 	return &StoredToken{

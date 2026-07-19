@@ -46,7 +46,8 @@ const (
 	MsgTypeSessions          = "sessions"            // get active agent sessions (deprecated: use instances)
 	MsgTypeInstances         = "instances"           // get active agent instances
 	MsgTypeDoctor            = "doctor"              // trigger daemon health checks (anti-entropy, etc.)
-	MsgTypeTriggerGC         = "trigger_gc"          // force GC reclone for team contexts
+	MsgTypeTriggerGC         = "trigger_gc"          // force GC reclone for team contexts (synchronous)
+	MsgTypeTriggerGCAsync    = "trigger_gc_async"    // force GC reclone for team contexts (background, returns immediately)
 	MsgTypeCodeIndex         = "code_index"          // index local code with progress
 	MsgTypeCodeStatus        = "code_status"         // get code index status/stats
 	MsgTypeWhispers          = "whispers"            // query whisper entries for an agent
@@ -564,11 +565,18 @@ type DoctorResponse struct {
 	Errors []string `json:"errors,omitempty"`
 }
 
-// TriggerGCResponse is the response for trigger_gc requests.
+// TriggerGCResponse is the response for trigger_gc / trigger_gc_async requests.
 // Errors include both failures (clone/validation errors) and skips due to
 // uncommitted changes — GC is a disk-space optimization and must never
 // destroy user work.
 type TriggerGCResponse struct {
+	// Async lifecycle indicators (populated by trigger_gc_async only).
+	BackgroundStarted bool `json:"background_started,omitempty"` // a fresh GC sweep was kicked off
+	AlreadyRunning    bool `json:"already_running,omitempty"`    // a prior sweep is still in progress; this call was a no-op
+
+	// Legacy synchronous fields. Populated by trigger_gc always, and by
+	// trigger_gc_async's caller never (results land via IssueTracker
+	// instead — see runTriggerGC's gcFailed wiring).
 	Triggered       int      `json:"triggered"`
 	Skipped         int      `json:"skipped,omitempty"`
 	LedgerTriggered bool     `json:"ledger_triggered,omitempty"`
@@ -693,6 +701,7 @@ type DaemonService interface {
 	Checkout(payload CheckoutPayload, progress *ProgressWriter) (*CheckoutResult, error)
 	MarkErrors(ids []string)
 	TriggerGC() *TriggerGCResponse
+	TriggerGCAsync() *TriggerGCResponse
 	CodeIndex(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
 	Doctor() *DoctorResponse
 	SessionFinalize(payload SessionFinalizeIPCPayload)
@@ -739,6 +748,7 @@ type CallbackService struct {
 	onSyncHistory       func() []SyncEvent
 	onDoctor            func() *DoctorResponse
 	onTriggerGC         func() *TriggerGCResponse
+	onTriggerGCAsync    func() *TriggerGCResponse
 	onCodeIndex         func(payload CodeIndexPayload, progress *ProgressWriter) (*CodeIndexResult, error)
 	onCodeStatus        func() *CodeDBStats
 	onWhispers          func(agentID string, attention whisperstore.Attention, topics []string) ([]whisperstore.WhisperEntry, error)
@@ -897,6 +907,16 @@ func (c *CallbackService) MarkErrors(ids []string) {
 func (c *CallbackService) TriggerGC() *TriggerGCResponse {
 	c.mu.Lock()
 	fn := c.onTriggerGC
+	c.mu.Unlock()
+	if fn != nil {
+		return fn()
+	}
+	return nil
+}
+
+func (c *CallbackService) TriggerGCAsync() *TriggerGCResponse {
+	c.mu.Lock()
+	fn := c.onTriggerGCAsync
 	c.mu.Unlock()
 	if fn != nil {
 		return fn()
@@ -1200,6 +1220,7 @@ func (s *Server) buildRouter() *MessageRouter {
 	router.Register(MsgTypeInstances, handleInstances)
 	router.Register(MsgTypeDoctor, handleDoctor)
 	router.Register(MsgTypeTriggerGC, handleTriggerGC)
+	router.Register(MsgTypeTriggerGCAsync, handleTriggerGCAsync)
 	router.Register(MsgTypeCodeIndex, handleCodeIndex)
 	router.Register(MsgTypeCodeStatus, handleCodeStatus)
 	router.Register(MsgTypeWhispers, handleWhispers)
@@ -1389,6 +1410,14 @@ func (s *Server) SetTriggerGCHandler(handler func() *TriggerGCResponse) {
 	svc.mu.Lock()
 	defer svc.mu.Unlock()
 	svc.onTriggerGC = handler
+}
+
+// SetTriggerGCAsyncHandler sets the handler for forced background GC reclone.
+func (s *Server) SetTriggerGCAsyncHandler(handler func() *TriggerGCResponse) {
+	svc := s.mustCallbackService("SetTriggerGCAsyncHandler")
+	svc.mu.Lock()
+	defer svc.mu.Unlock()
+	svc.onTriggerGCAsync = handler
 }
 
 // SetCodeIndexHandler sets the handler for code indexing requests.
@@ -1894,6 +1923,8 @@ func (c *Client) Doctor() (*DoctorResponse, error) {
 }
 
 // TriggerGC requests the daemon to force a GC reclone of team contexts.
+// Blocks until the reclone completes — see TriggerGC's doc comment in
+// sync_gc.go for why this stays synchronous rather than being converted.
 func (c *Client) TriggerGC() (*TriggerGCResponse, error) {
 	resp, err := c.sendMessage(Message{Type: MsgTypeTriggerGC})
 	if err != nil {
@@ -1906,6 +1937,28 @@ func (c *Client) TriggerGC() (*TriggerGCResponse, error) {
 	var gcResp TriggerGCResponse
 	if err := json.Unmarshal(resp.Data, &gcResp); err != nil {
 		return nil, fmt.Errorf("unmarshal trigger_gc response: %w", err)
+	}
+	return &gcResp, nil
+}
+
+// TriggerGCAsync requests the daemon to force a GC reclone of team contexts
+// in the background. Returns immediately (BackgroundStarted or
+// AlreadyRunning) rather than blocking for the full reclone; an old daemon
+// binary that predates this message type returns an "unknown message type"
+// error, which callers should treat as a version-skew signal and fall back
+// to TriggerGC.
+func (c *Client) TriggerGCAsync() (*TriggerGCResponse, error) {
+	resp, err := c.sendMessage(Message{Type: MsgTypeTriggerGCAsync})
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, errors.New(resp.Error)
+	}
+
+	var gcResp TriggerGCResponse
+	if err := json.Unmarshal(resp.Data, &gcResp); err != nil {
+		return nil, fmt.Errorf("unmarshal trigger_gc_async response: %w", err)
 	}
 	return &gcResp, nil
 }

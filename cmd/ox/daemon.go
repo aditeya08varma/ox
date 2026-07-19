@@ -452,3 +452,11 @@ func startDaemonBackground(ledgerPath string) error {
 func isTimeoutErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "i/o timeout")
 }
+
+// isUnknownMessageTypeErr returns true if the daemon rejected an IPC
+// message type it doesn't recognize — the signature of an old daemon
+// binary (predating a newly added message type) still running when a
+// newer CLI talks to it.
+func isUnknownMessageTypeErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "unknown message type")
+}

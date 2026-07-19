@@ -117,6 +117,7 @@ const (
 	IssueTypeCodeDBCacheWiped   = "codedb_cache_wiped"
 	IssueTypeDirtyOverlayFailed = "dirty_overlay_failed"
 	IssueTypeRebaseStuck        = "rebase_stuck"
+	IssueTypeGCFailed           = "gc_failed"
 )
 
 // severityRank returns a numeric rank for sorting (higher = more severe).

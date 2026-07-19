@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -717,10 +718,20 @@ func TestAtomicity_DirectoryPermissions(t *testing.T) {
 func TestAtomicity_OriginalSurvivesWriteError(t *testing.T) {
 	t.Parallel()
 
+	// Permission bits gate this test's injected failure; root and Windows
+	// bypass them, so the write would succeed and the assertion be vacuous.
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits do not gate writes on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses directory permission bits")
+	}
+
 	dir := t.TempDir()
 	authPath := filepath.Join(dir, "auth.json")
 
-	// write initial data
+	// write initial data (also creates auth.json.lock so the failing write below
+	// still acquires the lock even after the dir is made unwritable)
 	original := &AuthStore{Tokens: map[string]*StoredToken{
 		"https://survive.example.com": {AccessToken: "original"},
 	}}
@@ -732,17 +743,30 @@ func TestAtomicity_OriginalSurvivesWriteError(t *testing.T) {
 	originalData, err := os.ReadFile(authPath)
 	require.NoError(t, err)
 
-	// attempt write that errors in the callback (before writeFile)
-	err = withAuthFileLocked(authPath, func(h *authFileHandle) error {
-		return fmt.Errorf("simulated failure before write")
-	})
-	require.Error(t, err)
+	// Force a REAL mid-write failure: make the config dir read-only so the
+	// atomic temp-file create inside writeFile → AtomicWriteJSON fails *after*
+	// the original already exists. This exercises temp+rename durability rather
+	// than trivially erroring before any write is attempted.
+	require.NoError(t, os.Chmod(dir, 0500))
+	t.Cleanup(func() { _ = os.Chmod(dir, 0700) }) // restore so t.TempDir cleanup succeeds
 
-	// original data must be intact
+	mutated := &AuthStore{Tokens: map[string]*StoredToken{
+		"https://survive.example.com": {AccessToken: "mutated"},
+	}}
+	err = withAuthFileLocked(authPath, func(h *authFileHandle) error {
+		return h.writeFile(mutated)
+	})
+	require.Error(t, err, "writing into a read-only dir must fail")
+
+	// original data must be byte-for-byte intact — the failed atomic write must
+	// leave no partial file and must not have clobbered the original
+	require.NoError(t, os.Chmod(dir, 0700)) // regain read access for the assertion
 	afterData, err := os.ReadFile(authPath)
 	require.NoError(t, err)
 	assert.Equal(t, string(originalData), string(afterData),
-		"original file must survive when callback errors before write")
+		"original file must survive a failed atomic write")
+	assert.NotContains(t, string(afterData), "mutated",
+		"failed write must not have partially applied")
 }
 
 // --- F. Legacy migration under lock ---

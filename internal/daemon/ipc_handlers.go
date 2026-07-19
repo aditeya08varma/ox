@@ -299,6 +299,14 @@ func handleTriggerGC(s *Server, _ Message, _ net.Conn) HandlerResult {
 	return HandlerResult{Response: marshalResponse(resp)}
 }
 
+func handleTriggerGCAsync(s *Server, _ Message, _ net.Conn) HandlerResult {
+	resp := s.service.TriggerGCAsync()
+	if resp == nil {
+		resp = &TriggerGCResponse{}
+	}
+	return HandlerResult{Response: marshalResponse(resp)}
+}
+
 func handleCodeIndex(s *Server, msg Message, conn net.Conn) HandlerResult {
 	var payload CodeIndexPayload
 	if len(msg.Payload) > 0 {
