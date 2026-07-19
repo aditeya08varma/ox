@@ -128,6 +128,18 @@ type SyncScheduler struct {
 	lastCredentialRefresh time.Time // dedup concurrent credential refresh calls
 	lastTeamDiscovery     time.Time // dedup concurrent team discovery calls
 
+	// lastWedgeCheck tracks when checkAndRunGC last attempted a ledger
+	// wedge check (the live-fetch-confirming call to ledgerSyncWedged) —
+	// deliberately separate from workspaceRegistry's LastGCTime, which any
+	// successful GC updates regardless of trigger reason. Sharing that
+	// clock would let an unrelated interval/full-clone GC silently push
+	// back the wedge check's cooldown, delaying detection of a genuinely
+	// forming wedge by up to 2x ledgerSyncWedgeAge. In-memory only
+	// (resets on daemon restart) — acceptable here since the cost of a
+	// reset is "check slightly more often," not "escalate incorrectly"
+	// (contrast with issue Since, which must survive restarts).
+	lastWedgeCheck time.Time
+
 	// error tracking
 	recentErrors  []syncError
 	maxRecentErrs int
@@ -176,6 +188,7 @@ type SyncScheduler struct {
 	onBeforeCloneSem        func()        // called just before acquiring cloneSem; tests use this to observe blocking
 	cloneSemTimeoutOverride time.Duration // override cloneSemTimeout for tests (0 = use default)
 	gcAsyncTestHook         func()        // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
+	gcSwapWindowTestHook    func()        // called right after runBlueGreenGCOpts writes .gc-swap-lock, before the rename; tests use this to observe the lock file mid-swap
 
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
@@ -1215,6 +1228,45 @@ func isValidGitRepo(path string) bool {
 //     is required for clean linear history on shared ledger repos
 //   - lock file safety: if a git process crashes, its .git/index.lock is released
 //     by the OS; an in-process crash may leave stale locks in the same process
+
+// escalateSessionConflictSeverity sets Severity/RequiresConfirm as a
+// function of how long this (Type, Repo) issue has existed. SetIssue already
+// preserves Since across repeated calls with the same key, so the tracker
+// alone is normally sufficient — a genuine content conflict that survives
+// several sync cycles becomes progressively louder instead of retrying
+// silently forever at the same warning level.
+//
+// gitPlumbingAge is a second, restart-durable signal (see
+// ManagedRepoPullResult.SessionConflictAge / oldestUnpushedCommitAge in
+// sync_managed.go). The daemon's IssueTracker is pure in-memory —
+// daemon.go's `d.issues = NewIssueTracker()` runs fresh on every daemon
+// startup with no persistence and no reload — so a restart mid-incident
+// (crash, `ox upgrade`, reboot, manual `ox daemon restart`) makes the
+// tracker-derived elapsed reset to zero even though the underlying conflict
+// never resolved. Git commit timestamps survive a restart, so we take
+// whichever signal reports the LONGER elapsed time: severity can only go up
+// when the tracker under-reports (fresh tracker, long-lived conflict),
+// never down while the conflict remains unresolved. Zero means "no
+// git-plumbing signal available for this call" and is ignored.
+func escalateSessionConflictSeverity(tracker *IssueTracker, issue *DaemonIssue, gitPlumbingAge time.Duration) {
+	var elapsed time.Duration
+	if existing, ok := tracker.GetIssue(issue.Type, issue.Repo); ok {
+		elapsed = time.Since(existing.Since)
+	}
+	elapsed = max(elapsed, gitPlumbingAge)
+	switch {
+	case elapsed >= 24*time.Hour:
+		issue.Severity = SeverityCritical
+		issue.RequiresConfirm = true
+	case elapsed >= 6*time.Hour:
+		issue.Severity = SeverityError
+		issue.RequiresConfirm = true
+	default:
+		issue.Severity = SeverityWarning
+		issue.RequiresConfirm = false
+	}
+}
+
 func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, forceSync bool, refreshSparse bool) error {
 	ctx, span := perf.Start(ctx, "daemon:do_pull")
 	defer span.End()
@@ -1373,7 +1425,11 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 				s.metrics.RecordConflict()
 			}
 			if s.issues != nil {
-				s.issues.SetIssue(*result.Issue)
+				issue := *result.Issue
+				if issue.Type == IssueTypeSessionConflictWedge {
+					escalateSessionConflictSeverity(s.issues, &issue, result.SessionConflictAge)
+				}
+				s.issues.SetIssue(issue)
 			}
 		}
 		if s.eventBus != nil {
@@ -1403,6 +1459,7 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		s.issues.ClearIssue(IssueTypeMergeConflict, "ledger")
 		s.issues.ClearIssue(IssueTypeSyncBackoff, "ledger")
 		s.issues.ClearIssue(IssueTypeDiverged, "ledger")
+		s.issues.ClearIssue(IssueTypeSessionConflictWedge, "ledger")
 	}
 
 	duration := time.Since(startTime)

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -76,7 +77,7 @@ func TestGC_CaptureDiff(t *testing.T) {
 
 	// no uncommitted changes => hasDiff=false
 	diffFile := filepath.Join(dir, ".gc-diff")
-	hasDiff, err := s.gcCaptureDiff(ctx, dir, diffFile)
+	hasDiff, err := s.gcCaptureDiff(ctx, dir, diffFile, "HEAD")
 	require.NoError(t, err)
 	assert.False(t, hasDiff, "no changes should produce no diff")
 	_, statErr := os.Stat(diffFile)
@@ -85,7 +86,7 @@ func TestGC_CaptureDiff(t *testing.T) {
 	// make an uncommitted modification
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "README.md"), []byte("modified"), 0644))
 
-	hasDiff, err = s.gcCaptureDiff(ctx, dir, diffFile)
+	hasDiff, err = s.gcCaptureDiff(ctx, dir, diffFile, "HEAD")
 	require.NoError(t, err)
 	assert.True(t, hasDiff, "uncommitted changes should produce a diff")
 
@@ -152,7 +153,7 @@ func TestGC_RestoreDiff(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "README.md"), []byte("changed line"), 0644))
 
 	diffFile := filepath.Join(t.TempDir(), "patch.diff")
-	hasDiff, err := s.gcCaptureDiff(ctx, srcDir, diffFile)
+	hasDiff, err := s.gcCaptureDiff(ctx, srcDir, diffFile, "HEAD")
 	require.NoError(t, err)
 	require.True(t, hasDiff)
 
@@ -590,4 +591,90 @@ func TestRemoveRejFiles_SweepsTreeButSkipsGit(t *testing.T) {
 	assert.NoError(t, err, ".git/*.rej must be preserved")
 	_, err = os.Stat(keep)
 	assert.NoError(t, err, "non-.rej files must survive")
+}
+
+// TestIsNonFastForwardErr_ClassifiesRejectionShapes proves the diverge-
+// capture gate (runBlueGreenGCOpts's captureUnpushedOnDiverge path) only
+// fires for an actual "remote has commits we don't" rejection, never for a
+// superficially similar push failure. Pure string classification, no git
+// subprocess or locale dependency needed — RunGit's LC_ALL=C/LANG=C pinning
+// (internal/gitutil/run.go) is what keeps the *real* git messages this
+// matches against in the English form these cases assume.
+//
+// Fixture text is verbatim real git/GitHub/GitLab CLI output (multi-line,
+// including the "[remote rejected] ... (protected branch hook declined)"
+// / "(pre-receive hook declined)" shape), not a paraphrase — a synthetic
+// stand-in that merely says "protected branch" without the actual
+// "rejected" wording real git emits would pass against a broadened,
+// buggy `strings.Contains(msg, "rejected")` classifier just as easily as
+// the correct one, silently failing to guard the exact bug class this test
+// exists for.
+//
+// Failure prevented: a protected-branch rejection, a pre-receive hook
+// decline (the exact GitLab-LFS "error trap" documented in
+// .claude/rules/lfs-no-git-lfs-binary.md), an auth failure, or a network
+// failure misclassified as "diverged" would make GC capture-and-discard
+// local history against a merge-base that was never actually the problem —
+// the opposite failure from today's overly-conservative gcSkippedDirty
+// bail, but just as much a correctness bug (silently rewriting local state
+// on top of the wrong diagnosis).
+func TestIsNonFastForwardErr_ClassifiesRejectionShapes(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{
+			"non-fast-forward rejection",
+			errors.New(`git push: To github.com:org/repo.git
+ ! [rejected]        main -> main (non-fast-forward)
+error: failed to push some refs to 'github.com:org/repo.git'
+hint: Updates were rejected because the tip of your current branch is behind
+hint: its remote counterpart.: exit status 1`),
+			true,
+		},
+		{
+			"fetch-first rejection",
+			errors.New(`git push: To github.com:org/repo.git
+ ! [rejected]        main -> main (fetch first)
+error: failed to push some refs to 'github.com:org/repo.git'
+hint: Updates were rejected because the remote contains work that you do
+hint: not have locally.: exit status 1`),
+			true,
+		},
+		{
+			"protected branch rejection (GitHub)",
+			errors.New(`git push: remote: error: GH006: Protected branch update failed for refs/heads/main.
+remote: error: Required status check "ci" is expected.
+To github.com:org/repo.git
+ ! [remote rejected] main -> main (protected branch hook declined)
+error: failed to push some refs to 'github.com:org/repo.git': exit status 1`),
+			false,
+		},
+		{
+			"pre-receive hook decline (generic, and the GitLab LFS error trap)",
+			errors.New(`git push: remote: GitLab: LFS objects are missing. Ensure LFS is properly set up or try a manual "git lfs push --all".
+To gitlab.com:org/repo.git
+ ! [remote rejected] main -> main (pre-receive hook declined)
+error: failed to push some refs to 'gitlab.com:org/repo.git': exit status 1`),
+			false,
+		},
+		{
+			"auth failure",
+			errors.New(`git push: remote: HTTP Basic: Access denied
+fatal: Authentication failed for 'https://example.com/repo.git/': exit status 128`),
+			false,
+		},
+		{
+			"network unreachable",
+			errors.New(`git push: fatal: unable to access 'https://example.com/repo.git/': Could not resolve host: example.com: exit status 128`),
+			false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isNonFastForwardErr(tt.err))
+		})
+	}
 }

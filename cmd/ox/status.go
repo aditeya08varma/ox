@@ -1640,6 +1640,11 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// mode, when stderr isn't a TTY, and for never-expires tokens.
 		_ = auth.CheckAndWarnExpiry(cmd.Context(), currentEndpoint, os.Stderr)
 
+		// surface daemon health issues (e.g. a wedged session conflict)
+		// beyond just `ox agent <id>` — same warnings, same severity
+		// thresholds, now visible from a plain `ox status` too.
+		emitDaemonIssueWarnings()
+
 		return nil
 	},
 }

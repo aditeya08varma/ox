@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -92,6 +93,29 @@ func inferDailyHighWater(tcPath string) time.Time {
 		return time.Time{}
 	}
 	return t
+}
+
+// dailyBacklogComplete reports whether daily distillation has caught up
+// through the given end time (a week's or month's own end, from
+// isoWeekRange/endOfMonth) — i.e. whether it's safe to roll that period's
+// dailies up into a weekly/monthly summary. It re-derives the daily
+// high-water mark on every call rather than trusting a value computed
+// earlier, because the period being checked may have been left incomplete
+// by an entirely separate, earlier invocation (e.g. an interrupted
+// `ox distill --all` backfill) — not necessarily anything that happened in
+// the current run.
+//
+// inferDailyHighWater returns the START of its latest date (00:00:00 UTC);
+// endOfDay normalizes that back to the date's last second so this stays a
+// date-level comparison — otherwise a period whose final day IS present on
+// disk would be misreported as incomplete (00:00:00 is before 23:59:59 on
+// the same calendar day).
+func dailyBacklogComplete(tcPath string, through time.Time) bool {
+	highWater := inferDailyHighWater(tcPath)
+	if highWater.IsZero() {
+		return false
+	}
+	return !endOfDay(highWater).Before(through)
 }
 
 // inferWeeklyHighWater scans memory/weekly/ for latest YYYY-WXX file.
@@ -330,6 +354,11 @@ var (
 	distillConcurrency int
 	distillAll         bool
 )
+
+// detectAgentBackend resolves the AI coworker CLI to use for distillation.
+// Var (not a direct agentcli.Detect() call) so tests can exercise runDistill
+// end-to-end without a real Claude/Codex binary on PATH.
+var detectAgentBackend = agentcli.Detect
 
 var distillCmd = &cobra.Command{
 	Use:   "distill",
@@ -624,7 +653,7 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 	}
 
 	// detect AI coworker CLI
-	backend, err := agentcli.Detect()
+	backend, err := detectAgentBackend()
 	if err != nil && !distillDryRun {
 		return fmt.Errorf("distillation requires an AI coworker CLI: %w", err)
 	}
@@ -639,6 +668,17 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 
 	// load distill state (v2 format, backward compat with v1)
 	state := loadDistillStateV2(projectRoot, tc.Path)
+	// always save state on exit — even a mid-run failure (e.g. a Claude
+	// rate-limit hit on one day) must not discard weekly/monthly bookkeeping
+	// from stages that already completed this run. Mirrors the idx-save
+	// defer below.
+	if !distillDryRun {
+		defer func() {
+			if err := saveDistillStateV2(projectRoot, state); err != nil {
+				slog.Warn("failed to save distill state", "error", err)
+			}
+		}()
+	}
 
 	// load or rebuild the distill index (performance cache for file scanning)
 	idx, rebuilt := loadDistillIndex(projectRoot, tc.Path)
@@ -749,31 +789,92 @@ func runDistill(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
+	// Each stage below collects its error instead of returning immediately,
+	// so one day's rate-limit hit (or any other single-stage failure)
+	// doesn't discard weekly/monthly work the rest of this run would
+	// otherwise complete — the reported bug was ~26 minutes of extraction
+	// work lost to exactly this. distillDaily keeps its own internal
+	// first-failure-stops behavior unchanged (correct: its resume position
+	// is a monotonic since-cutoff, so a later day succeeding must never run
+	// after an earlier one failed). The plan.Weeks/plan.Months loops here
+	// use break, not continue, for the same reason: state.LastWeekly/
+	// LastMonthly advance on success, so a later week/month succeeding
+	// after an earlier one failed would silently and permanently skip the
+	// failed one on every future run.
+	var stageErrs []error
+	dailyOK := true
+
 	if plan.Daily {
 		if err := distillDaily(ctx, cmd, backend, tc, state, idx, projectRoot, now, distillGuidelines); err != nil {
-			return fmt.Errorf("daily distill: %w", err)
+			slog.Warn("daily distill stopped early", "error", err)
+			stageErrs = append(stageErrs, fmt.Errorf("daily distill: %w", err))
+			dailyOK = false
 		}
 	}
 
-	for _, week := range plan.Weeks {
-		if err := distillWeekly(ctx, cmd, backend, tc, state, week, distillGuidelines); err != nil {
-			return fmt.Errorf("weekly distill (%d-W%02d): %w", week.Year, week.Week, err)
+	// Weekly/monthly rollups consume whatever daily files exist on disk —
+	// they don't verify their source date range is complete. If daily
+	// distill stopped partway through backfilling an already-due week (the
+	// plan.Weeks below was computed from state.LastWeekly, independent of
+	// what daily actually manages to finish this run), rolling that week up
+	// anyway would synthesize it from a partial day range and mark it done
+	// forever via LastWeekly, permanently losing the days daily never got
+	// to. Skip both stages entirely rather than risk that — same failure
+	// class the break-not-continue logic above guards against, just
+	// cross-stage instead of within one stage.
+	//
+	// dailyOK alone only catches "daily ran THIS invocation and failed": an
+	// explicit --layer=weekly/--layer=monthly run never sets plan.Daily, so
+	// dailyOK stays true by construction even when an earlier, separate run
+	// left the backlog behind a due week/month incomplete. The
+	// dailyBacklogComplete check inside each loop below is the complementary
+	// guard for that case. It runs per-iteration (not once, hoisted above
+	// both loops) because different due periods in the same run can have
+	// different completeness — and it breaks (not continues) past the first
+	// incomplete period for the same monotonic-state reason as above: rolling
+	// up a later period would advance LastWeekly/LastMonthly past an earlier
+	// period that's still incomplete, permanently orphaning it.
+	if !dailyOK {
+		slog.Warn("skipping weekly/monthly rollups this run: daily distill did not complete, its backlog may back an already-due week/month")
+	} else {
+		for _, week := range plan.Weeks {
+			_, weekEnd := isoWeekRange(week.Year, week.Week)
+			if !dailyBacklogComplete(tc.Path, weekEnd) {
+				slog.Warn("skipping weekly rollup: daily backlog behind this week is incomplete", "year", week.Year, "week", week.Week, "week_end", weekEnd)
+				break
+			}
+			if err := distillWeekly(ctx, cmd, backend, tc, state, week, distillGuidelines); err != nil {
+				slog.Warn("weekly distill failed, stopping remaining weeks this run", "year", week.Year, "week", week.Week, "error", err)
+				stageErrs = append(stageErrs, fmt.Errorf("weekly distill (%d-W%02d): %w", week.Year, week.Week, err))
+				break
+			}
+		}
+
+		for _, month := range plan.Months {
+			monthStart, perr := time.Parse("2006-01", month)
+			if perr != nil {
+				// enumerateMonths always emits "2006-01"-formatted strings —
+				// unreachable in practice, but fail closed rather than roll
+				// up a period we can't verify.
+				slog.Warn("skipping monthly rollup: could not parse month for completeness check", "month", month, "error", perr)
+				break
+			}
+			monthEnd := endOfMonth(monthStart)
+			if !dailyBacklogComplete(tc.Path, monthEnd) {
+				slog.Warn("skipping monthly rollup: daily backlog behind this month is incomplete", "month", month, "month_end", monthEnd)
+				break
+			}
+			if err := distillMonthly(ctx, cmd, backend, tc, state, month, distillGuidelines); err != nil {
+				slog.Warn("monthly distill failed, stopping remaining months this run", "month", month, "error", err)
+				stageErrs = append(stageErrs, fmt.Errorf("monthly distill (%s): %w", month, err))
+				break
+			}
 		}
 	}
 
-	for _, month := range plan.Months {
-		if err := distillMonthly(ctx, cmd, backend, tc, state, month, distillGuidelines); err != nil {
-			return fmt.Errorf("monthly distill (%s): %w", month, err)
-		}
+	if len(stageErrs) > 0 {
+		return errors.Join(stageErrs...)
 	}
-
-	// save updated state (skip in dry-run; index is saved via defer)
-	if !distillDryRun {
-		if err := saveDistillStateV2(projectRoot, state); err != nil {
-			slog.Warn("failed to save distill state", "error", err)
-		}
-	}
-
 	return nil
 }
 

@@ -24,8 +24,13 @@ import (
 // (because they need to set Env, capture output differently, etc.).
 //
 // The caller still sets Dir and appends any credential/protocol/timeout flags.
+//
+// LC_ALL=C / LANG=C: matches RunGit's env — several callers substring-match
+// git's output to classify failures (non-fast-forward, LFS, auth), which
+// breaks silently on a host whose locale renders git's messages translated.
+// See RunGit's comment in run.go for the full rationale.
 func NewNetworkCmd(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C", "LANG=C")
 	return cmd
 }

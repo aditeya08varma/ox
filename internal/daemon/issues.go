@@ -105,19 +105,21 @@ const (
 
 // Issue type constants.
 const (
-	IssueTypeMergeConflict      = "merge_conflict"
-	IssueTypeMissingScaffolding = "missing_scaffolding"
-	IssueTypeDiverged           = "diverged"
-	IssueTypeAuthExpiring       = "auth_expiring"
-	IssueTypeGitLock            = "git_lock"
-	IssueTypeCloneFailed        = "clone_failed"
-	IssueTypeSyncBackoff        = "sync_backoff"
-	IssueTypeGitHubAuth         = "github_auth"
-	IssueTypeDirtyWorkspace     = "dirty_workspace"
-	IssueTypeCodeDBCacheWiped   = "codedb_cache_wiped"
-	IssueTypeDirtyOverlayFailed = "dirty_overlay_failed"
-	IssueTypeRebaseStuck        = "rebase_stuck"
-	IssueTypeGCFailed           = "gc_failed"
+	IssueTypeMergeConflict            = "merge_conflict"
+	IssueTypeMissingScaffolding       = "missing_scaffolding"
+	IssueTypeDiverged                 = "diverged"
+	IssueTypeAuthExpiring             = "auth_expiring"
+	IssueTypeGitLock                  = "git_lock"
+	IssueTypeCloneFailed              = "clone_failed"
+	IssueTypeSyncBackoff              = "sync_backoff"
+	IssueTypeGitHubAuth               = "github_auth"
+	IssueTypeDirtyWorkspace           = "dirty_workspace"
+	IssueTypeCodeDBCacheWiped         = "codedb_cache_wiped"
+	IssueTypeDirtyOverlayFailed       = "dirty_overlay_failed"
+	IssueTypeRebaseStuck              = "rebase_stuck"
+	IssueTypeGCFailed                 = "gc_failed"
+	IssueTypeSessionConflictWedge     = "session_conflict_wedge"
+	IssueTypeSessionConflictRecovered = "session_conflict_recovered"
 )
 
 // severityRank returns a numeric rank for sorting (higher = more severe).
@@ -181,6 +183,22 @@ func (t *IssueTracker) GetIssues() []DaemonIssue {
 		return severityRank(b.Severity) - severityRank(a.Severity)
 	})
 	return result
+}
+
+// GetIssue returns the current issue for (Type, Repo), if one exists.
+// Used to read an issue's Since before re-setting it with an updated
+// Severity, so callers can escalate purely based on how long the issue
+// has existed without maintaining a separate timer.
+func (t *IssueTracker) GetIssue(issueType, repo string) (DaemonIssue, bool) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	for _, issue := range t.issues {
+		if issue.Type == issueType && issue.Repo == repo {
+			return issue, true
+		}
+	}
+	return DaemonIssue{}, false
 }
 
 // SetIssue adds or updates an issue.

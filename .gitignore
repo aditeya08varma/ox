@@ -98,9 +98,15 @@ team-contexts/
 demo/credentials.sops.yaml
 demo/playwright/node_modules/
 .
-# Conductor workspace artifacts (blue-green GC reclone)
-.gc-diff
-.gc-untracked/
+# Conductor workspace artifacts (blue-green GC reclone). Artifact paths are
+# <workspace-path> + suffix (no separator, e.g. "ledger.gc-diff"), so these
+# need the leading wildcard — a bare ".gc-diff" only matches a file literally
+# named that, which these never are.
+*.gc-diff
+*.gc-untracked/
+*.gc-lock
+*.gc-cache/
+*.gc-swap-done
 
 # Dolt database files (added by bd init)
 .dolt/
