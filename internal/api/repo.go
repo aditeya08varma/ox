@@ -247,7 +247,8 @@ func (c *RepoClient) RegisterRepo(req *RepoInitRequest) (*RepoInitResponse, erro
 	}
 
 	logger.LogHTTPRequest("POST", reqURL)
-	logger.LogHTTPRequestBody(string(bodyBytes))
+	// intentionally skip LogHTTPRequestBody — RepoInitRequest carries repo_salt
+	// and repo_remote_hashes (auth material); matches the RegisterMarkers sibling.
 	start := time.Now()
 
 	// create HTTP request

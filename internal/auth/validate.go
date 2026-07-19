@@ -65,7 +65,7 @@ func ValidateTokenServerSide(ep, accessToken string) error {
 	slog.Debug("server-side token validation rejected",
 		"endpoint", ep,
 		"status", resp.StatusCode,
-		"response", string(body),
+		"response", redactedBody(body, resp.Header.Get("Content-Type")),
 	)
 
 	var errResp struct {

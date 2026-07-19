@@ -250,6 +250,19 @@ func TestRefreshToken_RefreshTokenNotRotated(t *testing.T) {
 	assert.Equal(t, oldRefreshToken, newToken.RefreshToken, "preserved from original")
 }
 
+// requireTokenSurvived asserts a failed refresh left the stored credential
+// intact on disk — the #449/#299 credential-wipe regression class. Without this
+// reload the refresh-failure tests assert only the (nil, err) return contract
+// and would stay green even if a failure branch wiped the token from disk.
+func requireTokenSurvived(t *testing.T, client *AuthClient, want *StoredToken) {
+	t.Helper()
+	saved, err := client.GetToken()
+	require.NoError(t, err, "reloading token after failed refresh")
+	require.NotNil(t, saved, "failed refresh must not wipe the stored credential")
+	require.Equal(t, want.AccessToken, saved.AccessToken, "stored access token must be unchanged")
+	require.Equal(t, want.RefreshToken, saved.RefreshToken, "stored refresh token must be unchanged")
+}
+
 func TestRefreshToken_InvalidRefreshToken(t *testing.T) {
 	t.Parallel()
 
@@ -279,6 +292,8 @@ func TestRefreshToken_InvalidRefreshToken(t *testing.T) {
 
 	// verify error message contains server error description
 	assert.Contains(t, err.Error(), "refresh token expired or revoked")
+
+	requireTokenSurvived(t, client, token)
 }
 
 func TestRefreshToken_BadRequest(t *testing.T) {
@@ -305,6 +320,8 @@ func TestRefreshToken_BadRequest(t *testing.T) {
 	require.Error(t, err, "want TokenRefreshError")
 	assert.Nil(t, newToken, "want nil on error")
 	assert.Contains(t, err.Error(), "re-authentication required")
+
+	requireTokenSurvived(t, client, token)
 }
 
 func TestRefreshToken_ServerError(t *testing.T) {
@@ -330,6 +347,8 @@ func TestRefreshToken_ServerError(t *testing.T) {
 	require.Error(t, err, "want TokenRefreshError")
 	assert.Nil(t, newToken, "want nil on error")
 	assert.Contains(t, err.Error(), "HTTP 500")
+
+	requireTokenSurvived(t, client, token)
 }
 
 func TestRefreshToken_NetworkError(t *testing.T) {
@@ -347,6 +366,8 @@ func TestRefreshToken_NetworkError(t *testing.T) {
 
 	// verify error contains network error message
 	assert.Contains(t, err.Error(), "network error")
+
+	requireTokenSurvived(t, client, token)
 }
 
 func TestRefreshToken_MissingAccessToken(t *testing.T) {

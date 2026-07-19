@@ -131,9 +131,15 @@ var logoutCmd = &cobra.Command{
 			fmt.Println(cli.StyleDim.Render("Note: server-side sessions may still be active — try again when online."))
 		}
 
-		// strip PATs from git remote URLs for logged-out endpoints
+		// strip PATs from git remote URLs and clear the stored git credential
+		// (keychain + file) for each logged-out endpoint. Revoking the OAuth
+		// token alone leaves the separately-minted git PAT live on disk and
+		// server-side — a decommissioned/shared machine would keep push access.
 		for _, ep := range endpointsToLogout {
 			stripExistingRemotes(ep)
+			if err := gitserver.RemoveCredentialsForEndpoint(ep); err != nil {
+				slog.Debug("logout: failed to remove git credentials", "endpoint", ep, "error", err)
+			}
 		}
 
 		// show contextual tip
