@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/sageox/ox/internal/cli"
@@ -18,6 +19,7 @@ Use 'ox session status' to see active recordings and their agent IDs.
 
 Examples:
   ox session stop --agent-id OxzAbc    # stop a specific session
+  ox session stop --current             # stop the calling agent's own recording
   ox session stop                       # lists active recordings if no agent ID given`,
 	RunE: runSessionForceStop,
 }
@@ -25,10 +27,22 @@ Examples:
 func init() {
 	sessionCmd.AddCommand(sessionForceStopCmd)
 	sessionForceStopCmd.Flags().String("agent-id", "", "agent ID of the session to stop")
+	sessionForceStopCmd.Flags().Bool("current", false, "stop the calling agent's own recording (uses SAGEOX_AGENT_ID)")
 }
 
 func runSessionForceStop(cmd *cobra.Command, args []string) error {
 	agentID, _ := cmd.Flags().GetString("agent-id")
+	currentOnly, _ := cmd.Flags().GetBool("current")
+
+	if currentOnly {
+		if agentID != "" {
+			return fmt.Errorf("--current and --agent-id are mutually exclusive")
+		}
+		agentID = os.Getenv("SAGEOX_AGENT_ID")
+		if agentID == "" {
+			return fmt.Errorf("--current requires SAGEOX_AGENT_ID environment variable (set by 'ox agent prime')")
+		}
+	}
 
 	projectRoot, err := findProjectRoot()
 	if err != nil {

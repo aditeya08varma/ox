@@ -320,6 +320,22 @@
       "auto_execute": true,
       "confidence": 0.95,
       "description": "Missing subcommand: team-ctx -> agent team-ctx"
+    },
+    {
+      "pattern": "agent murmur",
+      "target": "murmur",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.90,
+      "description": "Wrong namespace: agent murmur -> murmur (murmur is top-level, not under agent, unlike most other agent-facing verbs)"
+    },
+    {
+      "pattern": "git-credentials-helper",
+      "target": "git-credential-helper",
+      "has_regex": false,
+      "auto_execute": true,
+      "confidence": 0.95,
+      "description": "Typo: git-credentials-helper -> git-credential-helper (singular; the real command is only ever invoked programmatically by git via .git/config, never typed, so this is safe to auto-execute)"
     }
   ],
   "tokens": [
@@ -340,6 +356,13 @@
       "target": "--json=false",
       "kind": "unknown-flag",
       "confidence": 0.95
+    },
+    {
+      "pattern": "--scope",
+      "target": "--team",
+      "kind": "unknown-flag",
+      "confidence": 0.75,
+      "_comment": "Suggestion-only (bare flag name, no fixed value to rewrite to): hints '--team' on `ox query`, where --scope is unrecognized. Distinct from ox murmur's own --scope flag (ledger vs. team scope) -- no collision since this entry only ever engages where --scope is unrecognized, and murmur registers its own --scope so it never hits this path."
     }
   ]
 }

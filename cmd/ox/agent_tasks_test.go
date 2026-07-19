@@ -313,3 +313,85 @@ func TestEmitAgentTasks_RespectsTargetAgent(t *testing.T) {
 		t.Fatalf("claude should not be nudged about codex-targeted task, got: %s", buf.String())
 	}
 }
+
+// TestParseTaskIDAndNote covers the manual arg parser directly. Before this,
+// its only coverage was indirect via runAgentTasks calls that pass an
+// already-split []string — never exercising parsing edge cases (flag
+// ordering, missing values, repeated flags) in isolation.
+func TestParseTaskIDAndNote(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		args     []string
+		wantID   string
+		wantNote string
+	}{
+		{
+			name: "empty args",
+			args: nil,
+		},
+		{
+			name:   "id only, no note flag",
+			args:   []string{"task-123"},
+			wantID: "task-123",
+		},
+		{
+			name:     "id with --result",
+			args:     []string{"task-123", "--result", "all done"},
+			wantID:   "task-123",
+			wantNote: "all done",
+		},
+		{
+			name:     "id with --reason",
+			args:     []string{"task-123", "--reason", "duplicate"},
+			wantID:   "task-123",
+			wantNote: "duplicate",
+		},
+		{
+			name:     "id with --note",
+			args:     []string{"task-123", "--note", "generic note"},
+			wantID:   "task-123",
+			wantNote: "generic note",
+		},
+		{
+			name:     "flag before positional id",
+			args:     []string{"--result", "all done", "task-123"},
+			wantID:   "task-123",
+			wantNote: "all done",
+		},
+		{
+			name:   "trailing flag with no value is dropped, not treated as id",
+			args:   []string{"task-123", "--result"},
+			wantID: "task-123",
+		},
+		{
+			name:   "second positional token is ignored (first wins as id)",
+			args:   []string{"task-123", "extra-token"},
+			wantID: "task-123",
+		},
+		{
+			name:     "last note flag wins when multiple are given",
+			args:     []string{"task-123", "--result", "first", "--reason", "second"},
+			wantID:   "task-123",
+			wantNote: "second",
+		},
+		{
+			name:     "flag value that itself looks like a flag is consumed literally",
+			args:     []string{"task-123", "--result", "--reason"},
+			wantID:   "task-123",
+			wantNote: "--reason",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			gotID, gotNote := parseTaskIDAndNote(tt.args)
+			if gotID != tt.wantID || gotNote != tt.wantNote {
+				t.Errorf("parseTaskIDAndNote(%q) = (%q, %q), want (%q, %q)",
+					tt.args, gotID, gotNote, tt.wantID, tt.wantNote)
+			}
+		})
+	}
+}

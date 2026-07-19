@@ -2,6 +2,7 @@ package plan
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"strings"
@@ -86,6 +87,24 @@ func Enrich(ctx context.Context, in Input, gitRoot string) Result {
 	}
 
 	annotations = sortDedupeAnnotations(annotations)
+	sum := summarize(annotations, in)
+
+	// Pre-draft consult (--topic, no document yet): the collision/prior-art/
+	// expert-routing detectors and the context-bundle retrievers above already
+	// ran against it — they key off Section.Files/headings/query text, which
+	// the synthetic topic section (newTopicInput) supplies, so those signals
+	// fire exactly as they would for a real section. What's skipped here is
+	// doc-STRUCTURAL analysis: the diagram/viz/mockup hints score AUTHORED
+	// prose structure that doesn't exist yet, and the full-doc buildGuidance is
+	// an "author this HTML plan" contract that doesn't apply pre-draft.
+	if isTopicOnly(in) {
+		return Result{
+			Annotations: annotations,
+			Context:     items,
+			Signals:     sum,
+			Guidance:    buildTopicGuidance(in, sum),
+		}
+	}
 
 	// Diagram hints + authoring guidance are deterministic, plan-local content
 	// help (zero LLM/network): they steer the agent toward the right diagram per
@@ -93,7 +112,6 @@ func Enrich(ctx context.Context, in Input, gitRoot string) Result {
 	hints := computeDiagramHints(in)
 	vizHints := computeVizHints(in)
 	mockup := computeMockupExpectation(in)
-	sum := summarize(annotations, in)
 
 	return Result{
 		Annotations:   annotations,
@@ -106,6 +124,45 @@ func Enrich(ctx context.Context, in Input, gitRoot string) Result {
 		// what a self-authored render would drop — see buildGuidance.
 		Guidance: buildGuidance(in, sum, hints, vizHints, mockup),
 	}
+}
+
+// isTopicOnly reports whether in is a pre-draft consult (--topic, optionally
+// --files) rather than a full plan document — the same Raw-empty-but-Topic-set
+// gate decision's own detectors use (e.g. refsDetector, driftDetector) to skip
+// doc-structural analysis.
+func isTopicOnly(in Input) bool {
+	return in.Raw == "" && in.Topic != ""
+}
+
+// buildTopicGuidance is the pre-draft-consult counterpart of buildGuidance: the
+// same evidence-led, honesty-first contract as decision.buildGuidance ("no
+// signal found" is a verifiable finding, never papered over) adapted to plan's
+// signal vocabulary (collision/prior-art/expert-routing instead of
+// related-decision/prior-sessions). Unlike buildGuidance it never returns "" —
+// a bare topic still gets guidance, it just has less evidence to lead with.
+func buildTopicGuidance(in Input, sum SignalSummary) string {
+	var b strings.Builder
+	switch {
+	case sum.Material:
+		var parts []string
+		if sum.Collisions > 0 {
+			parts = append(parts, fmt.Sprintf("%d collision%s", sum.Collisions, plural(sum.Collisions)))
+		}
+		if sum.ExpertRoutes > 0 {
+			parts = append(parts, fmt.Sprintf("%d expert route%s", sum.ExpertRoutes, plural(sum.ExpertRoutes)))
+		}
+		if sum.PriorArt > 0 {
+			parts = append(parts, fmt.Sprintf("%d prior-art hit%s", sum.PriorArt, plural(sum.PriorArt)))
+		}
+		fmt.Fprintf(&b, "This topic has team history: %s. Read the annotations/context before drafting and reconcile explicitly — align with it, or say why you're diverging. ", joinAnd(parts))
+	default:
+		b.WriteString("No collisions, prior art, or expert routes matched this topic yet. Draft from first principles and say so — 'nothing found' is itself a verifiable finding, not a gap. ")
+	}
+	if len(in.Files) == 0 {
+		b.WriteString("Pass --files a,b,c alongside --topic once you know which files are involved, to also check open-PR/contention collisions and expert ownership. ")
+	}
+	b.WriteString("Once drafted, run `ox plan enrich --file <plan.md>` (or pipe it on stdin) for the full structural signals — diagram/viz hints and render-ready guidance.")
+	return b.String()
 }
 
 // runDetector invokes a single detector with panic recovery so a misbehaving

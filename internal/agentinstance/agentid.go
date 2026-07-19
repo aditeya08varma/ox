@@ -3,6 +3,7 @@ package agentinstance
 import (
 	"crypto/rand"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -131,6 +132,9 @@ func ClassifyBadID(id string) string {
 	if strings.HasPrefix(id, "oxsid_") {
 		return fmt.Sprintf("%q is a server session ID, not an agent ID\nRun 'ox agent prime' to get your Ox<4-char> agent ID", id)
 	}
+	if looksLikeSessionName(id) {
+		return fmt.Sprintf("%q looks like a session name (from 'ox session list'), not an agent ID\nFor agent commands, run 'ox agent prime' for your current agent ID; for general diagnostics, run 'ox doctor' without an ID", id)
+	}
 	if len(id) >= 2 && strings.EqualFold(id[:2], "ox") {
 		return fmt.Sprintf("invalid agent ID format %q — expected Ox<4-char> (e.g., OxA1b2)\nRun 'ox agent prime' to get your agent ID", id)
 	}
@@ -143,6 +147,23 @@ func looksLikeUUID(id string) bool {
 		return false
 	}
 	return id[8] == '-' && id[13] == '-' && id[18] == '-' && id[23] == '-'
+}
+
+// sessionNamePattern matches session-folder names from
+// session.GenerateSessionName: <timestamp>-<username>-<agentID>, e.g.
+// "2026-04-29T20-52-ajit-OxbOue". The middle .+ must tolerate dashes:
+// sanitizeFilename (internal/session/store.go) passes dashes through
+// unchanged, so a username like "jane-doe" is legal input. That's still
+// unambiguous because the trailing Ox<4-char> is fixed-width and anchored
+// to $ — there is exactly one position it can occupy (the last 7
+// characters), so .+ can only ever absorb the timestamp separator plus
+// username, dashes and all, and never mistake part of the suffix for it.
+var sessionNamePattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-.+-Ox[A-Za-z0-9]{4}$`)
+
+// looksLikeSessionName reports whether id has the shape of a session-folder
+// name (e.g. copy-pasted from `ox session list`) rather than a bare agent ID.
+func looksLikeSessionName(id string) bool {
+	return sessionNamePattern.MatchString(id)
 }
 
 // ParseAgentID extracts the 4-char suffix from an agent ID.
