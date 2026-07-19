@@ -56,6 +56,14 @@ func resolvePlanProvenance(gitRoot string) (*plan.Provenance, *session.Recording
 	// backstop for recordings started under an older binary (empty ID here).
 	var st *session.RecordingState
 	if rs, err := session.LoadRecordingStateForAgent(gitRoot, agentID); err == nil && rs != nil {
+		// subagent: prefer the parent session so provenance matches the
+		// footer link (liveSessionConversationURL parent-prefers too) —
+		// otherwise LintSessionLink false-warns on every subagent render
+		if rs.ParentAgentID != "" {
+			if parentState, _ := session.LoadRecordingStateForAgent(gitRoot, rs.ParentAgentID); parentState != nil {
+				rs = parentState
+			}
+		}
 		st = rs
 		prov.SessionName = session.GetSessionName(rs.SessionPath)
 		prov.SessionID = rs.SessionID

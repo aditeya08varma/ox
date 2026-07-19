@@ -3,9 +3,11 @@ package main
 import (
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/sessionid"
 )
 
@@ -43,5 +45,37 @@ func buildConversationURL(cfg *config.ProjectConfig, sessionID string) string {
 	if ep == "" {
 		return ""
 	}
+	// the endpoint comes from committed, team-editable config and this URL
+	// is handed to `git interpret-trailers` as a --trailer value: any
+	// whitespace or control character would smuggle extra trailer lines
+	// into commit messages, so reject the endpoint outright
+	if strings.ContainsFunc(ep, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+		return ""
+	}
 	return fmt.Sprintf("%s/c/%s", ep, url.PathEscape(sessionID))
+}
+
+// sessionLinkOutputs derives the prime session URL and the exact-literal PR
+// directive for a live recording. The attribution.session toggle gates both:
+// an empty toggle (attribution.session: "") or a missing/unlinkable state
+// yields ("", "") so every session-link surface disables together. The /c/
+// form is preferred; recordings started under an older binary carry no
+// start-minted ID and fall back to the name-based view URL.
+func sessionLinkOutputs(projCfg *config.ProjectConfig, state *session.RecordingState, attrSession string) (sessionURL, prDirective string) {
+	if attrSession == "" || state == nil {
+		return "", ""
+	}
+	sessionURL = buildConversationURL(projCfg, state.SessionID)
+	if sessionURL == "" {
+		sessionURL = buildSessionURL(projCfg, session.GetSessionName(state.SessionPath))
+	}
+	if sessionURL == "" {
+		return "", ""
+	}
+	// exact-literal so the agent copies, never reconstructs — templated
+	// placeholders are the confabulation vector
+	prDirective = fmt.Sprintf(
+		"When you create a PR for this session's work, the LAST line of the PR body must be exactly:\nSageOx-Session: %s\nIf this session is stopped or aborted, stop adding this line.",
+		sessionURL)
+	return sessionURL, prDirective
 }

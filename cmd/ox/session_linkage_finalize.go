@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"log/slog"
+	"net/url"
+	"strings"
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
@@ -98,5 +100,32 @@ func notifySessionUploaded(projectRoot string, meta *lfs.SessionMeta, sessionNam
 		slog.Debug("linkage finalize: notify failed", "error", err, "session", sessionName)
 		return nil, false
 	}
-	return misses, true
+	return filterPRLinkMisses(misses, "SageOx-Session: "+notification.SessionURL), true
+}
+
+// filterPRLinkMisses guards the trust boundary between the server and agent
+// guidance: misses are server-controlled input that gets formatted into a
+// "REPAIR REQUIRED" instruction the agent will act on. Accept only misses
+// whose ExpectedLine exactly equals the locally-derived trailer for THIS
+// session and whose PR URL is a clean https link — the server confirms a
+// miss, it never gets to author the instruction.
+func filterPRLinkMisses(misses []api.PRLinkMiss, expectedLine string) []api.PRLinkMiss {
+	if strings.TrimPrefix(expectedLine, "SageOx-Session: ") == "" {
+		return nil
+	}
+	var out []api.PRLinkMiss
+	for _, m := range misses {
+		if m.ExpectedLine != expectedLine {
+			continue
+		}
+		if strings.ContainsAny(m.PRURL, " \t\r\n") {
+			continue
+		}
+		u, err := url.Parse(m.PRURL)
+		if err != nil || u.Scheme != "https" || u.Host == "" {
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
 }

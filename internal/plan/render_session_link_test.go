@@ -23,8 +23,18 @@ func TestRenderHTML_SessionURLFooterLink(t *testing.T) {
 	})
 	require.NoError(t, err)
 	html := string(withURL)
-	assert.Contains(t, html, `href="https://sageox.ai/c/ses_01890a5d-ac96-774b-bcce-b302099a8057"`)
-	assert.Contains(t, html, "Session recording")
+	// scope to the foot element: the whole anchor must land in the footer,
+	// not merely appear somewhere (a comment or prior-art card would pass a
+	// page-wide substring check)
+	footStart := strings.Index(html, `<div class="foot"`)
+	require.GreaterOrEqual(t, footStart, 0, "footer element missing")
+	foot := html[footStart:]
+	if end := strings.Index(foot, "</div>"); end > 0 {
+		foot = foot[:end]
+	}
+	assert.Contains(t, foot,
+		`<a href="https://sageox.ai/c/ses_01890a5d-ac96-774b-bcce-b302099a8057" target="_blank" rel="noopener noreferrer">Session recording</a>`,
+		"complete anchor must render inside the foot element")
 
 	withoutURL, err := RenderHTMLOpts(in, Result{}, RenderOptions{})
 	require.NoError(t, err)

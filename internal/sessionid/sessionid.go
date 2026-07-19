@@ -54,10 +54,17 @@ func ParseSessionID(id string) (uuid.UUID, error) {
 }
 
 // IsValidSessionID validates the format of a session ID.
-// Returns true if the ID has the correct prefix and can be parsed as a valid UUID.
+// Returns true only for the canonical encoding: "ses_" + lowercase
+// hyphenated UUID. uuid.Parse also accepts braces, urn:uuid: prefixes,
+// undashed hex, and uppercase — all of which would produce a /c/ URL that
+// doesn't byte-match the ID stored in meta.json or keyed server-side, so
+// non-canonical encodings are rejected via a round-trip check.
 func IsValidSessionID(id string) bool {
-	_, err := ParseSessionID(id)
-	return err == nil
+	parsed, err := ParseSessionID(id)
+	if err != nil {
+		return false
+	}
+	return sessionIDPrefix+parsed.String() == id
 }
 
 // Prefix returns the canonical "ses_" prefix used for session IDs.

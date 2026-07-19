@@ -1221,13 +1221,14 @@ func (h *SessionFinalizeHandler) writeMetaAndUploadLFS(payload *SessionFinalizeP
 		// read.
 		return nil, fmt.Errorf("preserve existing SessionID for %s: %w", sessionName, err)
 	}
-	sessionIDForMeta := preservedSessionID
-	if sessionIDForMeta == "" && stored.Meta != nil {
-		// reuse the start-minted ID carried in the raw.jsonl header so
-		// conversation URLs circulated during the live session (commit
-		// trailers, PR bodies) keep resolving after a daemon-side finalize
-		sessionIDForMeta = stored.Meta.SessionID
+	// start-minted ID carried in the raw.jsonl header so conversation URLs
+	// circulated during the live session (commit trailers, PR bodies) keep
+	// resolving after a daemon-side finalize
+	headerID := ""
+	if stored.Meta != nil {
+		headerID = stored.Meta.SessionID
 	}
+	sessionIDForMeta := session.ResolveSessionID(preservedSessionID, headerID)
 	if sessionIDForMeta == "" {
 		sessionIDForMeta = sessionid.GenerateSessionID()
 	}

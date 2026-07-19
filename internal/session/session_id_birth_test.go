@@ -76,6 +76,70 @@ func TestRecordingState_LegacyJSONWithoutSessionID(t *testing.T) {
 // Failure prevented: a daemon orphan-finalize misreading an agent id as the
 // recording identity (dangling /c/ links), or an alternative-format agent id
 // vanishing because it was mistaken for a recording ID.
+// TestResolveSessionID_Precedence pins the single source of truth for the
+// finalize-time ID choice shared by stop, recover, and daemon finalize.
+// Failure prevented: any of the three paths drifting to a different
+// precedence (e.g. start-minted overriding a preserved republish ID),
+// rotating the identity out from under /c/ links already in git history.
+func TestResolveSessionID_Precedence(t *testing.T) {
+	tests := []struct {
+		name        string
+		preserved   string
+		startMinted string
+		want        string
+	}{
+		{"preserved wins over start-minted", "ses_prior", "ses_birth", "ses_prior"},
+		{"start-minted stands when nothing preserved", "", "ses_birth", "ses_birth"},
+		{"preserved alone", "ses_prior", "", "ses_prior"},
+		{"neither: caller mints fresh", "", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ResolveSessionID(tt.preserved, tt.startMinted))
+		})
+	}
+}
+
+// TestReadHeaderSessionID covers the crash-safe-carrier read used by recover
+// and abort-by-name when .recording.json is already gone.
+// Failure prevented: a recover/abort of a crashed session failing to find the
+// start-minted ID (fresh re-mint → dangling /c/ links) or misreading a
+// foreign-format agent id as a recording identity.
+func TestReadHeaderSessionID(t *testing.T) {
+	sesID := "ses_01890a5d-ac96-774b-bcce-b302099a8057"
+
+	writeRaw := func(t *testing.T, firstLine string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "raw.jsonl")
+		require.NoError(t, os.WriteFile(path, []byte(firstLine+"\n{\"type\":\"entry\"}\n"), 0o644))
+		return path
+	}
+
+	t.Run("ox header format carries the id", func(t *testing.T) {
+		path := writeRaw(t, `{"type":"header","metadata":{"version":"1.0","agent_id":"OxA1b2","session_id":"`+sesID+`"}}`)
+		assert.Equal(t, sesID, ReadHeaderSessionID(path))
+	})
+	t.Run("_meta header format carries the id", func(t *testing.T) {
+		path := writeRaw(t, `{"_meta":{"schema_version":"1","agent_id":"OxA1b2","session_id":"`+sesID+`"}}`)
+		assert.Equal(t, sesID, ReadHeaderSessionID(path))
+	})
+	t.Run("foreign _meta agent-id style yields empty, never an agent id", func(t *testing.T) {
+		path := writeRaw(t, `{"_meta":{"schema_version":"1","session_id":"manual"}}`)
+		assert.Empty(t, ReadHeaderSessionID(path))
+	})
+	t.Run("legacy header without session_id yields empty", func(t *testing.T) {
+		path := writeRaw(t, `{"type":"header","metadata":{"version":"1.0","agent_id":"OxA1b2"}}`)
+		assert.Empty(t, ReadHeaderSessionID(path))
+	})
+	t.Run("first line not a header yields empty", func(t *testing.T) {
+		path := writeRaw(t, `{"type":"entry","content":"hi"}`)
+		assert.Empty(t, ReadHeaderSessionID(path))
+	})
+	t.Run("missing file yields empty", func(t *testing.T) {
+		assert.Empty(t, ReadHeaderSessionID(filepath.Join(t.TempDir(), "nope.jsonl")))
+	})
+}
+
 func TestParseStoreMeta_SessionIDKeyDisambiguation(t *testing.T) {
 	sesID := "ses_01890a5d-ac96-774b-bcce-b302099a8057"
 

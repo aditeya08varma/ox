@@ -941,6 +941,50 @@ func ReadSessionFromPath(filePath string) (*StoredSession, error) {
 	return session, nil
 }
 
+// ResolveSessionID picks the durable ses_ recording ID for a finalizing
+// session. Precedence: preserved (an ID a prior finalize attempt already
+// wrote to meta.json) beats startMinted (the ID minted at recording start,
+// carried by .recording.json or the raw-header carrier); "" means the caller
+// mints fresh (legacy recordings only). Single source of truth for stop,
+// recover, and daemon finalize so the three paths can never drift.
+func ResolveSessionID(preserved, startMinted string) string {
+	if preserved != "" {
+		return preserved
+	}
+	return startMinted
+}
+
+// ReadHeaderSessionID returns the ses_ ID carried in the first-line header
+// of the raw.jsonl at path, or "" for legacy/foreign/absent headers. This is
+// the crash-safe-carrier read for paths where .recording.json is already
+// gone (recover, daemon orphan finalize).
+func ReadHeaderSessionID(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
+	if !scanner.Scan() {
+		return ""
+	}
+	var entry map[string]any
+	if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+		return ""
+	}
+	var meta *StoreMeta
+	if metadata, ok := entry["metadata"].(map[string]any); ok && entry["type"] == "header" {
+		meta = ParseStoreMeta(metadata)
+	} else if m, ok := entry["_meta"].(map[string]any); ok {
+		meta = ParseStoreMeta(m)
+	}
+	if meta == nil {
+		return ""
+	}
+	return meta.SessionID
+}
+
 // ParseStoreMeta converts a map to StoreMeta struct.
 // Supports both standard format (version, agent_id, created_at) and
 // alternative format (schema_version, session_id, started_at).

@@ -673,7 +673,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// toggle so attribution.session: "" disables every session-link surface
 	// (commit trailer, prime URL, PR directive) consistently
 	// for subagents: use parent session URL so PRs/commits link to the main session
-	if output.Session != nil && output.Session.Recording && attribution.Session != "" {
+	if output.Session != nil && output.Session.Recording {
 		if projCfg, cfgErr := config.LoadProjectConfig(projectRoot); cfgErr == nil {
 			lookupAgentID := agentID
 			if parentAgentID != "" {
@@ -684,22 +684,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				// parent session not found; fall back to own session
 				state, _ = session.LoadRecordingStateForAgent(projectRoot, agentID)
 			}
-			if state != nil {
-				// durable /c/ link preferred; recordings started under an
-				// older binary carry no start-minted ID — name-based fallback
-				sessionURL := buildConversationURL(projCfg, state.SessionID)
-				if sessionURL == "" {
-					sessionURL = buildSessionURL(projCfg, session.GetSessionName(state.SessionPath))
-				}
-				output.Session.SessionURL = sessionURL
-				if sessionURL != "" {
-					// exact-literal so the agent copies, never reconstructs —
-					// templated placeholders are the confabulation vector
-					output.Session.PRDirective = fmt.Sprintf(
-						"When you create a PR for this session's work, the LAST line of the PR body must be exactly:\nSageOx-Session: %s\nIf this session is stopped or aborted, stop adding this line.",
-						sessionURL)
-				}
-			}
+			output.Session.SessionURL, output.Session.PRDirective = sessionLinkOutputs(projCfg, state, attribution.Session)
 		}
 	}
 

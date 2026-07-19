@@ -1024,9 +1024,12 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 		result.Model = state.Model
 	}
 
-	// write header with metadata
+	// write header with metadata; SessionID keeps the raw header a crash-safe
+	// carrier of the start-minted ID on the reconstruct path too (daemon
+	// orphan-finalize recovers it from here when meta.json was never written)
 	meta := &session.StoreMeta{
 		Version:      "1.0",
+		SessionID:    state.SessionID,
 		CreatedAt:    state.StartedAt,
 		AgentID:      state.AgentID,
 		AgentType:    agentTypeForMeta,
@@ -1342,24 +1345,17 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 	_ = session.CleanupSageoxScore(state.AgentID)
 
-	// reuse the start-minted ses_ ID so conversation URLs circulated during
-	// the live session (commit trailers, PR bodies, plan footers) match the
-	// final meta.json. empty for recordings started under an older binary —
-	// the builder's fresh mint then stands.
-	if state.SessionID != "" {
-		metaBuilder = metaBuilder.SessionID(state.SessionID)
-	}
-
-	// preserve any pre-existing ses_<UUIDv7> on republish: if a prior stop
-	// attempt already wrote meta.json (e.g., LFS upload failed and we're
-	// retrying), reuse that SessionID rather than minting a fresh one.
-	// Non-NotExist read errors are fatal — see PreservedSessionID doc.
+	// durable ID precedence via the shared resolver: a preserved meta.json
+	// ID (prior stop attempt, e.g. LFS upload failed and we're retrying)
+	// beats the start-minted state ID; empty → the builder's fresh mint
+	// stands (recordings started under an older binary). Non-NotExist read
+	// errors are fatal — see PreservedSessionID doc.
 	preservedID, err := lfs.PreservedSessionID(sessionDir)
 	if err != nil {
 		return err
 	}
-	if preservedID != "" {
-		metaBuilder = metaBuilder.SessionID(preservedID)
+	if resolved := session.ResolveSessionID(preservedID, state.SessionID); resolved != "" {
+		metaBuilder = metaBuilder.SessionID(resolved)
 	}
 
 	meta := metaBuilder.Build()

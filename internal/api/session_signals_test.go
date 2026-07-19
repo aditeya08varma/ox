@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -99,4 +100,133 @@ func TestNotifySessionStartedAndAborted(t *testing.T) {
 	old := NewRepoClientWithEndpoint(notFound.URL)
 	assert.NoError(t, old.NotifySessionStarted(SessionStartedNotification{SessionID: "ses_x"}), "old server 404 = accepted")
 	assert.NoError(t, old.NotifySessionAborted(SessionAbortedNotification{SessionID: "ses_x"}), "old server 404 = accepted")
+}
+
+// --- Wire-contract golden pinning ---
+
+// TestSessionNotificationWireKeys golden-pins the exact JSON key set each
+// session lifecycle sender puts on the wire, for the SessionUploaded/
+// Started/Aborted notification structs. The server team is building the
+// receiving endpoints against these exact keys in parallel. Decoding the
+// captured request body back into the same Go struct (as tests above do
+// for other concerns) is tautological for a json-tag rename: the struct
+// always knows how to read its own tags back out. Decoding into
+// map[string]any instead means a renamed or dropped tag actually changes
+// the observed key set, and asserting each value (not just key presence)
+// catches a tag *swap* between two fields that a key-set check alone
+// would miss.
+//
+// Every field beyond the first on each struct is `,omitempty`, so every
+// fixture below fills in ALL fields with non-zero values — an empty
+// field would vanish from the wire either way, masking a rename.
+//
+// Failure prevented: a silent json-tag rename or field drop on any of
+// the three session notification structs ships a payload the server
+// can't read, while the rest of this suite stays green because it only
+// round-trips through the same struct.
+func TestSessionNotificationWireKeys(t *testing.T) {
+	tests := []struct {
+		name       string
+		wantKeys   []string
+		wantValues map[string]any
+		call       func(c *RepoClient) error
+	}{
+		{
+			name: "uploaded",
+			wantKeys: []string{
+				"session_id", "repo_id", "session_name", "session_url",
+				"linked_prs", "linked_issues", "produced_commits",
+			},
+			wantValues: map[string]any{
+				"session_id":       "ses_u1",
+				"repo_id":          "repo_u1",
+				"session_name":     "2026-01-01T00-00-user-OxU1",
+				"session_url":      "https://sageox.ai/c/ses_u1",
+				"linked_prs":       []any{"https://github.com/o/r/pull/1"},
+				"linked_issues":    []any{"https://github.com/o/r/issues/2"},
+				"produced_commits": []any{"deadbeef"},
+			},
+			call: func(c *RepoClient) error {
+				_, err := c.NotifySessionUploaded(SessionUploadedNotification{
+					SessionID:       "ses_u1",
+					RepoID:          "repo_u1",
+					SessionName:     "2026-01-01T00-00-user-OxU1",
+					SessionURL:      "https://sageox.ai/c/ses_u1",
+					LinkedPRs:       []string{"https://github.com/o/r/pull/1"},
+					LinkedIssues:    []string{"https://github.com/o/r/issues/2"},
+					ProducedCommits: []string{"deadbeef"},
+				})
+				return err
+			},
+		},
+		{
+			name: "started",
+			wantKeys: []string{
+				"session_id", "repo_id", "session_name", "agent_id", "branch", "started_at",
+			},
+			wantValues: map[string]any{
+				"session_id":   "ses_s1",
+				"repo_id":      "repo_s1",
+				"session_name": "2026-01-01T00-00-user-OxS1",
+				"agent_id":     "agent_42",
+				"branch":       "dev/feature-x",
+				"started_at":   "2026-01-01T00:00:00Z",
+			},
+			call: func(c *RepoClient) error {
+				return c.NotifySessionStarted(SessionStartedNotification{
+					SessionID:   "ses_s1",
+					RepoID:      "repo_s1",
+					SessionName: "2026-01-01T00-00-user-OxS1",
+					AgentID:     "agent_42",
+					Branch:      "dev/feature-x",
+					StartedAt:   "2026-01-01T00:00:00Z",
+				})
+			},
+		},
+		{
+			name:     "aborted",
+			wantKeys: []string{"session_id", "repo_id"},
+			wantValues: map[string]any{
+				"session_id": "ses_a1",
+				"repo_id":    "repo_a1",
+			},
+			call: func(c *RepoClient) error {
+				return c.NotifySessionAborted(SessionAbortedNotification{
+					SessionID: "ses_a1",
+					RepoID:    "repo_a1",
+				})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var rawBody []byte
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, err := io.ReadAll(r.Body)
+				require.NoError(t, err)
+				rawBody = b
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer srv.Close()
+
+			require.NoError(t, tt.call(NewRepoClientWithEndpoint(srv.URL)))
+
+			var got map[string]any
+			require.NoError(t, json.Unmarshal(rawBody, &got))
+
+			gotKeys := make([]string, 0, len(got))
+			for k := range got {
+				gotKeys = append(gotKeys, k)
+			}
+			assert.ElementsMatch(t, tt.wantKeys, gotKeys,
+				"wire key set drifted from the struct's declared json tags — the server is coding against these exact keys; a tag rename or dropped field must fail here")
+
+			for key, want := range tt.wantValues {
+				assert.Equal(t, want, got[key], "value for key %q did not round-trip onto the wire", key)
+			}
+		})
+	}
 }
