@@ -930,3 +930,93 @@ func TestAuthClient_EnsureValidToken_EnvTokenSkipsRefresh(t *testing.T) {
 	assert.Equal(t, "oxp_env_client_bypass", token.AccessToken)
 	assert.Empty(t, token.RefreshToken)
 }
+
+// --- C. Endpoint-scoped reactive refresh (ox-x5h5.4) ---
+// Failure prevented: Handle401Error hardcodes endpoint.Get() (the global
+// default), which is wrong for a caller bound to a per-project endpoint that
+// differs from it — exactly queryTeamContext's situation
+// (ep := endpoint.GetForProject(projectRoot)). Refreshing against the wrong
+// endpoint produces a token valid nowhere useful, so the retry 401s again
+// and `ox query` fails mid-session even though `ox login` succeeded.
+
+// TestHandle401ErrorForEndpoint_UsesPassedEndpoint proves the refresh POST
+// hits the endpoint passed as an argument, not endpoint.Get()'s global
+// default — the one assertion that proves the bug this function fixes.
+func TestHandle401ErrorForEndpoint_UsesPassedEndpoint(t *testing.T) {
+	// wrongServer stands in for endpoint.Get()'s global default. If
+	// Handle401ErrorForEndpoint ever falls back to it instead of the passed
+	// ep, this handler fires and fails the test — deterministically, instead
+	// of a regression silently reaching the real production endpoint.
+	wrongServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("refresh must use the passed endpoint, not the global default; got %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer wrongServer.Close()
+
+	rightServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case TokenEndpoint:
+			require.NoError(t, r.ParseForm())
+			assert.Equal(t, "refresh_token", r.Form.Get("grant_type"))
+			assert.Equal(t, "project-refresh-token", r.Form.Get("refresh_token"))
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token":  "project-scoped-access",
+				"refresh_token": "project-scoped-refresh",
+				"token_type":    "Bearer",
+				"expires_in":    3600,
+			})
+		case "/api/v1/cli/auth/token":
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"access_token": "project-scoped-jwt",
+				"token_type":   "Bearer",
+				"expires_in":   900,
+			})
+		default:
+			t.Errorf("unexpected path on right server: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer rightServer.Close()
+
+	// t.Setenv forbids t.Parallel() in this test.
+	t.Setenv("SAGEOX_ENDPOINT", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+
+	// Exactly one endpoint has a valid (non-expired) token, so endpoint.Get()
+	// deterministically resolves to it via the "logged into exactly one
+	// endpoint" branch — this is what makes wrongServer the concrete target
+	// a regression would hit, instead of an untestable real prod default.
+	require.NoError(t, SaveTokenForEndpoint(wrongServer.URL, createTestToken(1*time.Hour)))
+
+	oldToken := createTestToken(-1 * time.Hour)
+	oldToken.RefreshToken = "project-refresh-token"
+
+	newToken, err := Handle401ErrorForEndpoint(oldToken, rightServer.URL)
+	require.NoError(t, err)
+	require.NotNil(t, newToken, "want refreshed token")
+	assert.Equal(t, "project-scoped-jwt", newToken.AccessToken)
+
+	// saved under the endpoint refreshed against, not the global default
+	saved, err := GetTokenForEndpoint(rightServer.URL)
+	require.NoError(t, err)
+	require.NotNil(t, saved)
+	assert.Equal(t, "project-scoped-jwt", saved.AccessToken)
+}
+
+// TestHandle401ErrorForEndpoint_NoRefreshToken mirrors Handle401Error's
+// existing no-refresh-credential coverage (TestRefreshToken_NoRefreshOrSessionToken)
+// for the endpoint-scoped variant: a token with neither RefreshToken nor
+// SessionToken must fail loudly, not attempt a network call.
+func TestHandle401ErrorForEndpoint_NoRefreshToken(t *testing.T) {
+	t.Parallel()
+
+	token := createTestToken(-1 * time.Hour)
+	token.RefreshToken = ""
+	token.SessionToken = ""
+
+	newToken, err := Handle401ErrorForEndpoint(token, "https://unused.example.com")
+	require.Error(t, err, "want TokenRefreshError")
+	assert.Nil(t, newToken, "want nil on error")
+	assert.Contains(t, err.Error(), "no refresh token available")
+}

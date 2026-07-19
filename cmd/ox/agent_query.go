@@ -298,7 +298,7 @@ func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*a
 	}
 
 	ep := endpoint.GetForProject(projectRoot)
-	token, err := auth.GetTokenForEndpoint(ep)
+	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
 	if err != nil || token == nil || token.AccessToken == "" {
 		return nil, fmt.Errorf("not authenticated. Run 'ox login' first")
 	}
@@ -306,6 +306,16 @@ func queryTeamContext(qa *queryArgs, projectRoot, agentID, agentType string) (*a
 	client := api.NewRepoClientWithEndpoint(ep).WithAuthToken(token.AccessToken)
 
 	resp, err := client.Query(req)
+	if err != nil && errors.Is(err, api.ErrUnauthorized) {
+		// proactive refresh above can still miss a token invalidated
+		// server-side (e.g. revoked) after the check; one bounded reactive
+		// retry before giving up, mirroring auth.AuthenticatedRequest.
+		refreshed, refreshErr := auth.Handle401ErrorForEndpoint(token, ep)
+		if refreshErr == nil && refreshed != nil && refreshed.AccessToken != "" {
+			client = client.WithAuthToken(refreshed.AccessToken)
+			resp, err = client.Query(req)
+		}
+	}
 	if err != nil {
 		if errors.Is(err, api.ErrUnauthorized) {
 			return nil, fmt.Errorf("not authenticated. Run 'ox login' first")

@@ -165,12 +165,53 @@ func (s *SyncScheduler) checkAndRunGC(ctx context.Context) {
 
 // TriggerGC forces a GC reclone of all eligible team contexts, bypassing the interval check.
 // Returns immediately if GC is already in progress. Runs synchronously.
+//
+// Do not convert this to run in the background: defaultKBDoctorGC
+// (cmd/ox/doctor_kb.go) calls TriggerGC and immediately rechecks disk
+// state for orphaned kb dirs, which depends on GC having actually
+// finished by the time this call returns. Use TriggerGCAsync for callers
+// (like `ox doctor --gc`) that must not block on a multi-minute reclone.
 func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
 		return &TriggerGCResponse{Skipped: 1}
 	}
 	defer atomic.StoreInt32(&s.gcInProgress, 0)
+	return s.runTriggerGC(ctx)
+}
 
+// TriggerGCAsync forces a GC reclone of all eligible team contexts in a
+// background goroutine, mirroring daemonServiceImpl.Doctor()'s async
+// pattern: the caller's IPC read deadline is milliseconds, but a
+// blue-green reclone can take minutes, so the work must not run on the
+// request path. Single-flight via the same gcInProgress guard TriggerGC
+// uses — a concurrent call while GC is running returns AlreadyRunning
+// instead of queuing a second sweep. The goroutine is tracked via the
+// same cloneWg used for background clones so daemon shutdown can bound
+// how long it waits for in-flight GC work (see waitClones).
+func (s *SyncScheduler) TriggerGCAsync(ctx context.Context) *TriggerGCResponse {
+	if !atomic.CompareAndSwapInt32(&s.gcInProgress, 0, 1) {
+		return &TriggerGCResponse{AlreadyRunning: true}
+	}
+	if !s.addClone() {
+		// scheduler is shutting down — don't spawn new background work
+		atomic.StoreInt32(&s.gcInProgress, 0)
+		return &TriggerGCResponse{Skipped: 1}
+	}
+	go func() {
+		defer s.cloneWg.Done()
+		defer atomic.StoreInt32(&s.gcInProgress, 0)
+		if s.gcAsyncTestHook != nil {
+			s.gcAsyncTestHook()
+		}
+		s.runTriggerGC(ctx)
+	}()
+	return &TriggerGCResponse{BackgroundStarted: true}
+}
+
+// runTriggerGC performs the forced-reclone sweep across team contexts and
+// the ledger. Callers must already hold the gcInProgress single-flight
+// guard (both TriggerGC and TriggerGCAsync do).
+func (s *SyncScheduler) runTriggerGC(ctx context.Context) *TriggerGCResponse {
 	if err := s.workspaceRegistry.LoadFromConfig(); err != nil {
 		return &TriggerGCResponse{Errors: []string{fmt.Sprintf("load registry: %v", err)}}
 	}
@@ -198,6 +239,7 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 			resp.Triggered++
 			if s.issues != nil {
 				s.issues.ClearIssue(IssueTypeDirtyWorkspace, name)
+				s.issues.ClearIssue(IssueTypeGCFailed, name)
 			}
 		case gcSkippedDirty:
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: local changes could not be preserved for GC", name))
@@ -215,6 +257,17 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 			resp.Skipped++
 		case gcFailed:
 			resp.Errors = append(resp.Errors, fmt.Sprintf("%s: reclone failed (check daemon logs)", name))
+			// TriggerGCAsync discards this response's return value, so the
+			// IssueTracker is the only way a background GC failure becomes
+			// visible (via `ox daemon status`).
+			if s.issues != nil {
+				s.issues.SetIssue(DaemonIssue{
+					Type:     IssueTypeGCFailed,
+					Severity: SeverityError,
+					Repo:     name,
+					Summary:  "GC reclone failed (check daemon logs)",
+				})
+			}
 		}
 	}
 
@@ -228,6 +281,7 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 				resp.LedgerTriggered = true
 				if s.issues != nil {
 					s.issues.ClearIssue(IssueTypeDirtyWorkspace, "ledger")
+					s.issues.ClearIssue(IssueTypeGCFailed, "ledger")
 				}
 				// runBlueGreenGC closes the whisper store before the rename to release
 				// SQLite's mmap; reopen it now so writes don't silently fail until the
@@ -248,6 +302,14 @@ func (s *SyncScheduler) TriggerGC(ctx context.Context) *TriggerGCResponse {
 				resp.Skipped++
 			case gcFailed:
 				resp.Errors = append(resp.Errors, "ledger: reclone failed (check daemon logs)")
+				if s.issues != nil {
+					s.issues.SetIssue(DaemonIssue{
+						Type:     IssueTypeGCFailed,
+						Severity: SeverityError,
+						Repo:     "ledger",
+						Summary:  "GC reclone failed (check daemon logs)",
+					})
+				}
 			}
 		}
 	}

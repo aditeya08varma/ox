@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"sort"
@@ -471,6 +472,14 @@ func runForceSessionUploads(cmd *cobra.Command) error {
 }
 
 // runGC triggers blue/green GC in the daemon, starting it if needed.
+//
+// TriggerGCAsync is asynchronous: the daemon kicks off the (potentially
+// multi-minute) blue-green reclone in a background goroutine and returns
+// within milliseconds. This mirrors runForceSessionUploads's 5s/30s
+// retry shape rather than blocking on the full reclone. A daemon binary
+// older than this change won't recognize the async message type; that
+// case falls back to the untouched synchronous TriggerGC with a much
+// longer timeout (it's genuinely going to block for the whole reclone).
 func runGC(cmd *cobra.Command) error {
 	w := cmd.OutOrStdout()
 
@@ -478,37 +487,83 @@ func runGC(cmd *cobra.Command) error {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	client := daemon.NewClientForCurrentRepo()
-
+	var usedSyncFallback bool
 	resp, err := cli.WithSpinner("Running garbage collection...", func() (*daemon.TriggerGCResponse, error) {
-		return client.TriggerGC()
+		client := daemon.NewClientForCurrentRepoWithTimeout(5 * time.Second)
+		r, err := client.TriggerGCAsync()
+		if err != nil && isTimeoutErr(err) {
+			client = daemon.NewClientForCurrentRepoWithTimeout(30 * time.Second)
+			r, err = client.TriggerGCAsync()
+		}
+		if err != nil && isUnknownMessageTypeErr(err) {
+			usedSyncFallback = true
+			fallbackClient := daemon.NewClientForCurrentRepoWithTimeout(3 * time.Minute)
+			return fallbackClient.TriggerGC()
+		}
+		return r, err
 	})
 	if err != nil {
-		return fmt.Errorf("gc failed: %w", err)
+		return gcErrorMessage(err)
 	}
 
-	if resp.Triggered == 0 && !resp.LedgerTriggered && resp.Skipped == 0 && len(resp.Errors) == 0 {
-		fmt.Fprintln(w, "No workspaces eligible for GC")
-		return nil
-	}
-
-	if resp.Triggered > 0 {
-		fmt.Fprintf(w, "%s  Recloned %d team context(s)\n",
-			ui.PassStyle.Render(ui.RenderPassIcon()), resp.Triggered)
-	}
-	if resp.LedgerTriggered {
-		fmt.Fprintf(w, "%s  Recloned ledger\n",
-			ui.PassStyle.Render(ui.RenderPassIcon()))
-	}
-	if resp.Skipped > 0 {
-		fmt.Fprintf(w, "%s  Skipped %d (GC already in progress)\n",
-			ui.MutedStyle.Render("○"), resp.Skipped)
-	}
-	for _, e := range resp.Errors {
-		fmt.Fprintf(w, "%s  %s\n", ui.FailStyle.Render("✗"), e)
-	}
-
+	renderGCResponse(w, resp, usedSyncFallback)
 	return nil
+}
+
+// gcErrorMessage maps a runGC failure to a user-facing error, giving a
+// friendly message for the "daemon didn't respond in time" case instead of
+// a raw i/o timeout.
+func gcErrorMessage(err error) error {
+	if isTimeoutErr(err) {
+		return fmt.Errorf("daemon is busy, try again in a moment")
+	}
+	return fmt.Errorf("gc failed: %w", err)
+}
+
+// renderGCResponse writes runGC's user-facing summary for a TriggerGCResponse.
+// Extracted from runGC so the response-branch rendering can be table-tested
+// without a live daemon connection.
+func renderGCResponse(w io.Writer, resp *daemon.TriggerGCResponse, usedSyncFallback bool) {
+	switch {
+	case resp.AlreadyRunning:
+		fmt.Fprintf(w, "%s  GC already in progress; this call was a no-op\n",
+			ui.PassStyle.Render(ui.TimelineDot))
+	case resp.BackgroundStarted:
+		fmt.Fprintf(w, "%s  GC started in background\n",
+			ui.PassStyle.Render(ui.TimelineDot))
+		fmt.Fprintf(w, "%s  Run %s to see results\n",
+			ui.MutedStyle.Render(ui.TimelineBar),
+			ui.MutedStyle.Render("`ox daemon status`"))
+	default:
+		// Legacy synchronous fields: either the version-skew fallback ran
+		// (old daemon, synchronous TriggerGC), or an old daemon answered
+		// trigger_gc_async inline.
+		if resp.Triggered == 0 && !resp.LedgerTriggered && resp.Skipped == 0 && len(resp.Errors) == 0 {
+			fmt.Fprintln(w, "No workspaces eligible for GC")
+			break
+		}
+		if resp.Triggered > 0 {
+			fmt.Fprintf(w, "%s  Recloned %d team context(s)\n",
+				ui.PassStyle.Render(ui.RenderPassIcon()), resp.Triggered)
+		}
+		if resp.LedgerTriggered {
+			fmt.Fprintf(w, "%s  Recloned ledger\n",
+				ui.PassStyle.Render(ui.RenderPassIcon()))
+		}
+		if resp.Skipped > 0 {
+			fmt.Fprintf(w, "%s  Skipped %d (GC already in progress)\n",
+				ui.MutedStyle.Render("○"), resp.Skipped)
+		}
+		for _, e := range resp.Errors {
+			fmt.Fprintf(w, "%s  %s\n", ui.FailStyle.Render("✗"), e)
+		}
+	}
+
+	if usedSyncFallback {
+		fmt.Fprintf(w, "%s  Daemon predates async GC; restart it (%s) for faster background runs\n",
+			ui.MutedStyle.Render(ui.TimelineBar),
+			ui.MutedStyle.Render("`ox daemon restart`"))
+	}
 }
 
 // detectDoctorState detects environment state for conditional check suppression

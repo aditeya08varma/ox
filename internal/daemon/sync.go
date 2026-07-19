@@ -175,6 +175,7 @@ type SyncScheduler struct {
 	// test hooks (nil in production)
 	onBeforeCloneSem        func()        // called just before acquiring cloneSem; tests use this to observe blocking
 	cloneSemTimeoutOverride time.Duration // override cloneSemTimeout for tests (0 = use default)
+	gcAsyncTestHook         func()        // called at the start of TriggerGCAsync's goroutine, before runTriggerGC; tests use this to hold the goroutine open deterministically
 
 	// callbacks
 	onActivity   func()                                                           // called on any sync activity
