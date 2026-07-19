@@ -8,9 +8,9 @@ description: >-
   a metric/cost change. A confident answer that prior work contradicts is worse
   than a slow one — check first, then answer. Routes the cue to the right corpus:
   recency to `ox session list`, conceptual to `ox query`, code-provenance to
-  `ox code search`.
+  `ox code search`, decision-record work to `ox decision enrich`.
 ---
-<!-- ox-hash: 1db18042d6cb ver: 0.11.1 -->
+<!-- ox-hash: 1db18042d6cb ver: 0.12.0 -->
 
 <!-- Thin by design. The authoritative consult-first reflex — the cues, the
      "confident-wrong is worse than slow" reasoning, and the routing rationale —
