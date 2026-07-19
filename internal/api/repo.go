@@ -37,6 +37,8 @@ const (
 	repoMergePath       = "/api/v1/repo/%s/merge"           // %s = repo_id
 	gitImportPath       = "/api/v1/teams/%s/context/import" // %s = team_id
 	sessionUploadedPath = "/api/v1/sessions/%s/uploaded"    // %s = session_id
+	sessionStartedPath  = "/api/v1/sessions/%s/started"     // %s = session_id
+	sessionAbortedPath  = "/api/v1/sessions/%s/aborted"     // %s = session_id
 )
 
 // RepoInitRequest represents the POST /api/v1/repo/init request
@@ -114,10 +116,44 @@ type ImportNotification struct {
 type SessionUploadedNotification struct {
 	SessionID       string   `json:"session_id"`
 	RepoID          string   `json:"repo_id"`
+	SessionName     string   `json:"session_name,omitempty"` // ledger dir name — lets the server bind name↔id without waiting for ledger ingest
 	SessionURL      string   `json:"session_url,omitempty"`
 	LinkedPRs       []string `json:"linked_prs,omitempty"`
 	LinkedIssues    []string `json:"linked_issues,omitempty"`
 	ProducedCommits []string `json:"produced_commits,omitempty"`
+}
+
+// SessionStartedNotification is the POST /api/v1/sessions/{session_id}/started
+// request body. Register-at-start: lets the universal conversation link
+// (/c/<session_id>) resolve to a live "in progress" page from the moment a
+// recording begins instead of only after stop+upload. Strictly fire-and-forget
+// — the uploaded notification remains the authoritative signal.
+type SessionStartedNotification struct {
+	SessionID   string `json:"session_id"`
+	RepoID      string `json:"repo_id"`
+	SessionName string `json:"session_name,omitempty"`
+	AgentID     string `json:"agent_id,omitempty"`
+	Branch      string `json:"branch,omitempty"`
+	StartedAt   string `json:"started_at,omitempty"` // RFC3339
+}
+
+// SessionAbortedNotification is the POST /api/v1/sessions/{session_id}/aborted
+// request body. Flips a registered "in progress" page to "discarded" and lets
+// the server drop any pending PR-link repair tasks for the session. Best-effort:
+// the server also ages out stale registered-never-uploaded sessions on its own.
+type SessionAbortedNotification struct {
+	SessionID string `json:"session_id"`
+	RepoID    string `json:"repo_id,omitempty"`
+}
+
+// PRLinkMiss is one linked PR whose body is missing the SageOx-Session
+// trailer, as detected server-side (GitHub App) in response to the uploaded
+// notification. The CLI surfaces each as a repair task in session-stop
+// guidance — the agent fixes the PR with its own tooling; ox never mutates
+// PR bodies and never requires gh on the machine.
+type PRLinkMiss struct {
+	PRURL        string `json:"pr_url"`
+	ExpectedLine string `json:"expected_line"`
 }
 
 // DoctorIssue represents a single diagnostic issue from the cloud
@@ -556,26 +592,25 @@ func (c *RepoClient) NotifyImport(teamID string, metadata any) (recordingID stri
 	return out.RecordingID, nil
 }
 
-// NotifySessionUploaded tells the SageOx server that a session's content
-// has been uploaded and is viewable. Graceful degradation mirrors
-// NotifyImport: network errors and 404 (endpoint not yet deployed) return
-// nil so the caller can record "notified" optimistically without blocking;
-// 429 and 5xx return an error so the caller records "notify_failed" and
-// retries via ox doctor.
-func (c *RepoClient) NotifySessionUploaded(n SessionUploadedNotification) error {
-	bodyBytes, err := json.Marshal(n)
+// postSessionSignal POSTs a session lifecycle notification and returns the
+// (size-limited) response body on 2xx. Graceful degradation mirrors
+// NotifyImport: 404 (endpoint not yet deployed) and 409 (already recorded —
+// idempotent) return (nil, nil) so callers proceed without retry thrash;
+// network errors, 429, and 5xx return an error for the caller's retry policy.
+func (c *RepoClient) postSessionSignal(pathTmpl, sessionID, label string, body any) ([]byte, error) {
+	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("marshal request: %w", err)
+		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(sessionUploadedPath, n.SessionID)
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(pathTmpl, sessionID)
 
 	logger.LogHTTPRequest("POST", reqURL)
 	start := time.Now()
 
 	httpReq, err := useragent.NewRequest(context.Background(), "POST", reqURL, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.authToken != "" {
@@ -586,26 +621,55 @@ func (c *RepoClient) NotifySessionUploaded(n SessionUploadedNotification) error 
 	duration := time.Since(start)
 	if err != nil {
 		logger.LogHTTPError("POST", reqURL, err, duration)
-		return fmt.Errorf("session uploaded notification: %w", err)
+		return nil, fmt.Errorf("%s notification: %w", label, err)
 	}
 	defer resp.Body.Close()
 
 	logger.LogHTTPResponse("POST", reqURL, resp.StatusCode, duration)
-	io.Copy(io.Discard, resp.Body)
 
 	switch {
-	case resp.StatusCode == http.StatusNotFound:
-		// endpoint not yet deployed — treat as accepted so the CLI doesn't
-		// thrash retrying against a server that can't answer yet.
-		return nil
-	case resp.StatusCode == http.StatusConflict:
-		// already notified for this session — idempotent success.
-		return nil
+	case resp.StatusCode == http.StatusNotFound, resp.StatusCode == http.StatusConflict:
+		io.Copy(io.Discard, resp.Body)
+		return nil, nil
 	case resp.StatusCode >= 400:
-		return fmt.Errorf("session uploaded notification failed (%d)", resp.StatusCode)
+		io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("%s notification failed (%d)", label, resp.StatusCode)
 	default:
-		return nil
+		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return respBody, nil
 	}
+}
+
+// NotifySessionUploaded tells the SageOx server that a session's content
+// has been uploaded and is viewable, so the (v2) GitHub App reconciler can
+// refresh any PR sticky comment. The response may carry pr_link_misses —
+// linked PRs whose bodies lack the SageOx-Session trailer — which the
+// caller surfaces as agent repair tasks. An empty or non-JSON body is
+// normal (older servers) and yields no misses.
+func (c *RepoClient) NotifySessionUploaded(n SessionUploadedNotification) ([]PRLinkMiss, error) {
+	respBody, err := c.postSessionSignal(sessionUploadedPath, n.SessionID, "session uploaded", n)
+	if err != nil || len(respBody) == 0 {
+		return nil, err
+	}
+	var out struct {
+		PRLinkMisses []PRLinkMiss `json:"pr_link_misses"`
+	}
+	_ = json.Unmarshal(respBody, &out)
+	return out.PRLinkMisses, nil
+}
+
+// NotifySessionStarted registers a just-started recording so /c/<session_id>
+// resolves immediately. Callers treat this as strictly fire-and-forget.
+func (c *RepoClient) NotifySessionStarted(n SessionStartedNotification) error {
+	_, err := c.postSessionSignal(sessionStartedPath, n.SessionID, "session started", n)
+	return err
+}
+
+// NotifySessionAborted marks a registered recording as discarded. Callers
+// treat this as strictly fire-and-forget.
+func (c *RepoClient) NotifySessionAborted(n SessionAbortedNotification) error {
+	_, err := c.postSessionSignal(sessionAbortedPath, n.SessionID, "session aborted", n)
+	return err
 }
 
 // RepoMarkerData holds parsed data from a .repo_* marker file

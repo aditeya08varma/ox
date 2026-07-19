@@ -256,6 +256,9 @@ When SageOx guidance shapes your approach:
 - In responses: "SageOx found [name]'s session on [topic]..."
 - Commit footer: ` + "`Co-Authored-By: SageOx <ox@sageox.ai>`" + `
 - PR body: ` + "`Co-Authored-By: [SageOx](https://github.com/SageOx)`" + `
+- PR body last line (while a session is recording): the ` + "`SageOx-Session:`" + ` link
+  from prime output — copy it exactly, never construct or guess it; stop adding
+  it after the session is stopped or aborted.
 
 ### Record Your Session
 Sessions auto-record after priming. Use ` + "`/ox-session-stop`" + ` to end.

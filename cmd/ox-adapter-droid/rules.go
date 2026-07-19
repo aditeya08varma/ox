@@ -207,7 +207,10 @@ Murmur at the start of significant work and after architectural decisions.
 
 When SageOx guidance influences your approach:
 - Commit footer: ` + "`Co-Authored-By: SageOx <ox@sageox.ai>`" + `
-- PR body (last line): ` + "`Co-Authored-By: [SageOx](https://github.com/SageOx)`" + `
+- PR body (end of body): ` + "`Co-Authored-By: [SageOx](https://github.com/SageOx)`" + `
+- PR body last line (while a session is recording): the ` + "`SageOx-Session:`" + ` link
+  from prime output — copy it exactly, never construct or guess it; stop adding
+  it after the session is stopped or aborted.
 - In responses: "Based on SageOx domain guidance, I'll..."
 `)
 

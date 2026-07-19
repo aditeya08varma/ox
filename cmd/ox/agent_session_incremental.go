@@ -39,6 +39,7 @@ func writeRawHeader(projectRoot string, state *session.RecordingState) error {
 		Version:   "1.0",
 		CreatedAt: state.StartedAt,
 		AgentID:   state.AgentID,
+		SessionID: state.SessionID,
 		AgentType: agentTypeForMeta,
 		Model:     state.Model,
 		Username:  identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),

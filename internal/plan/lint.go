@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"bytes"
 	"fmt"
 	"regexp"
 )
@@ -164,6 +165,27 @@ func LintBranding(html []byte, res Result) []BrandingFinding {
 	}
 
 	return findings
+}
+
+// LintSessionLink warns when a plan whose provenance carries a session
+// identity renders with no /c/ conversation link back to that exact session.
+// The Go renderer injects the footer link deterministically
+// (RenderOptions.SessionURL); this advisory exists for agent-authored renders
+// (the ox-plan skill) where the link is part of the spec but the author is
+// fallible. Exact-ID match only — a link to a different session is as wrong
+// as none. Fail-open and advisory: callers warn, never block. Empty page or
+// empty sessionID returns nil.
+func LintSessionLink(htmlBytes []byte, sessionID string) []Finding {
+	if len(htmlBytes) == 0 || sessionID == "" {
+		return nil
+	}
+	if bytes.Contains(htmlBytes, []byte("/c/"+sessionID)) {
+		return nil
+	}
+	return []Finding{{
+		Rule:    "session.link-missing",
+		Message: fmt.Sprintf("plan provenance records session %s but the render carries no /c/ conversation link back to it — pass RenderOptions.SessionURL (Go render) or add the footer session link (agent render)", sessionID),
+	}}
 }
 
 // craftDeviceRe detects whether the rendered page carries a device mockup. The

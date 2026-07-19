@@ -82,6 +82,10 @@ func runAgentSessionAbortActive(inst *agentinstance.Instance, cmd *cobra.Command
 
 	// intentionally do NOT set doctor.SetNeedsDoctorAgent() — user chose to discard
 
+	// flip the registered /c/ page to "discarded" and drop pending PR-link
+	// repair tasks server-side (fire-and-forget)
+	notifySessionAbortedAsync(projectRoot, state.SessionID)
+
 	return emitAbortOutput(cmd.OutOrStdout(), inst.AgentID, sessionName)
 }
 
@@ -246,7 +250,7 @@ func emitAbortOutput(w io.Writer, agentID, sessionName string) error {
 		AgentID:     agentID,
 		SessionName: sessionName,
 		Message:     "session aborted and discarded",
-		Guidance:    "Session aborted and discarded. No further action needed. Continue with your current task.",
+		Guidance:    "Session aborted and discarded. No further action needed. The recording no longer exists: do not add SageOx-Session trailers or session links referencing it to any future commits or PR bodies, and remove the line from any unsubmitted PR drafts. Continue with your current task.",
 	}
 
 	if cfg.Text || cfg.Review {

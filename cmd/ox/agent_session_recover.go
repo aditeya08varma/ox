@@ -223,6 +223,11 @@ func recoverFromCache(inst *agentinstance.Instance, projectRoot string, state *s
 						ProducedCommits(state.ProducedCommits).
 						ProducedPlans(state.ProducedPlans).
 						WithFiles(fileRefs)
+					// start-minted ID first (links circulated during the live
+					// session must keep resolving), preserved meta.json ID wins
+					if state.SessionID != "" {
+						metaBuilder = metaBuilder.SessionID(state.SessionID)
+					}
 					if preservedID != "" {
 						metaBuilder = metaBuilder.SessionID(preservedID)
 					}

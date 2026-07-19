@@ -254,6 +254,9 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		// non-fatal: processAgentSession will write header at stop time as fallback
 	}
 
+	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
+	notifySessionStartedAsync(projectRoot, state)
+
 	// build output once, render based on mode
 	output := buildSessionStartOutput(inst.AgentID, adapterName, sessionFile, title, notice, state.StartedAt)
 
@@ -809,6 +812,11 @@ func outputSessionStopJSON(inst *agentinstance.Instance, state *session.Recordin
 		output.LedgerSessionDir = processResult.LedgerSessionDir
 		output.UploadWarning = processResult.UploadWarning
 		output.DataWarnings = processResult.DataWarnings
+		output.PRLinkMisses = processResult.PRLinkMisses
+		if len(processResult.PRLinkMisses) > 0 {
+			// repair task while the agent is still alive — it just ran stop
+			output.Guidance += " REPAIR REQUIRED: " + strings.Join(processResult.PRLinkMisses, " ")
+		}
 		output.StopReason = processResult.StopReason
 		output.StopDetail = processResult.StopDetail
 		output.StopSource = processResult.StopSource
@@ -1334,6 +1342,14 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 	_ = session.CleanupSageoxScore(state.AgentID)
 
+	// reuse the start-minted ses_ ID so conversation URLs circulated during
+	// the live session (commit trailers, PR bodies, plan footers) match the
+	// final meta.json. empty for recordings started under an older binary —
+	// the builder's fresh mint then stands.
+	if state.SessionID != "" {
+		metaBuilder = metaBuilder.SessionID(state.SessionID)
+	}
+
 	// preserve any pre-existing ses_<UUIDv7> on republish: if a prior stop
 	// attempt already wrote meta.json (e.g., LFS upload failed and we're
 	// retrying), reuse that SessionID rather than minting a fresh one.
@@ -1416,8 +1432,14 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// the (v2) GitHub App reconciler can refresh any PR sticky comment. The
 	// notify is fire-and-forget: a failure leaves the session in
 	// notify_failed for `ox doctor` to retry, and never affects the
-	// already-successful upload.
-	finalizeLinkageAfterPush(projectRoot, sessionDir, meta, sessionName)
+	// already-successful upload. Server-reported PR-link misses become
+	// repair tasks in the stop output — the agent still holds the session
+	// context and can fix the PR bodies with its own tooling.
+	for _, miss := range finalizeLinkageAfterPush(projectRoot, sessionDir, meta, sessionName) {
+		result.PRLinkMisses = append(result.PRLinkMisses, fmt.Sprintf(
+			"PR %s is missing its session link — append this exact final line to its body: %s",
+			miss.PRURL, miss.ExpectedLine))
+	}
 
 	return nil
 }

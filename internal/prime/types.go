@@ -16,6 +16,7 @@ type SessionStatus struct {
 	AutoStarted      bool   `json:"auto_started,omitempty"`      // true if started by ox agent prime
 	UserNotification string `json:"user_notification,omitempty"` // message for agent to relay to user
 	SessionURL       string `json:"session_url,omitempty"`       // web URL to view this session recording
+	PRDirective      string `json:"pr_directive,omitempty"`      // exact-literal instruction: end PR bodies with the SageOx-Session trailer
 }
 
 // LedgerInfo represents discovered ledger state for prime output.

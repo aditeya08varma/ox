@@ -349,6 +349,13 @@ func runPlanSave(cmd *cobra.Command) error {
 	for _, f := range plan.LintRender(html, result) {
 		cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
 	}
+	// Session-link guarantee: an agent-authored render saved from a live
+	// recording should link back to its /c/ conversation page.
+	if prov, _ := resolvePlanProvenance(gitRoot); prov != nil && prov.SessionID != "" {
+		for _, f := range plan.LintSessionLink(html, prov.SessionID) {
+			cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
+		}
+	}
 	return nil
 }
 
@@ -380,6 +387,9 @@ func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 	}
 
 	findings := plan.LintRender(html, res)
+	if meta, metaErr := plan.LoadMeta(info.Dir); metaErr == nil && meta.Provenance != nil && meta.Provenance.SessionID != "" {
+		findings = append(findings, plan.LintSessionLink(html, meta.Provenance.SessionID)...)
+	}
 	if len(findings) == 0 {
 		fmt.Fprintln(out, cli.StyleSuccess.Render("✓")+" SageOx attribution OK")
 		return nil
@@ -540,7 +550,7 @@ func runPlanRenderFresh(cmd *cobra.Command, file, outPath string, open, artifact
 	gitRoot := findGitRoot()
 	result := plan.Enrich(context.Background(), in, gitRoot)
 
-	htmlBytes, err := plan.RenderHTMLOpts(in, result, plan.RenderOptions{Slug: plan.Slugify(planTopic(in)), PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact})
+	htmlBytes, err := plan.RenderHTMLOpts(in, result, plan.RenderOptions{Slug: plan.Slugify(planTopic(in)), PriorArtURL: priorArtURLResolver(gitRoot), Artifact: artifact, SessionURL: liveSessionConversationURL(gitRoot)})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}

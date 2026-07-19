@@ -669,9 +669,11 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 			primeCallCount, agentinstance.ExcessivePrimeThreshold, output.ContentLength)
 	}
 
-	// populate session URL if recording
+	// populate session URL if recording, gated on the session-attribution
+	// toggle so attribution.session: "" disables every session-link surface
+	// (commit trailer, prime URL, PR directive) consistently
 	// for subagents: use parent session URL so PRs/commits link to the main session
-	if output.Session != nil && output.Session.Recording {
+	if output.Session != nil && output.Session.Recording && attribution.Session != "" {
 		if projCfg, cfgErr := config.LoadProjectConfig(projectRoot); cfgErr == nil {
 			lookupAgentID := agentID
 			if parentAgentID != "" {
@@ -683,8 +685,20 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				state, _ = session.LoadRecordingStateForAgent(projectRoot, agentID)
 			}
 			if state != nil {
-				sessionName := session.GetSessionName(state.SessionPath)
-				output.Session.SessionURL = buildSessionURL(projCfg, sessionName)
+				// durable /c/ link preferred; recordings started under an
+				// older binary carry no start-minted ID — name-based fallback
+				sessionURL := buildConversationURL(projCfg, state.SessionID)
+				if sessionURL == "" {
+					sessionURL = buildSessionURL(projCfg, session.GetSessionName(state.SessionPath))
+				}
+				output.Session.SessionURL = sessionURL
+				if sessionURL != "" {
+					// exact-literal so the agent copies, never reconstructs —
+					// templated placeholders are the confabulation vector
+					output.Session.PRDirective = fmt.Sprintf(
+						"When you create a PR for this session's work, the LAST line of the PR body must be exactly:\nSageOx-Session: %s\nIf this session is stopped or aborted, stop adding this line.",
+						sessionURL)
+				}
 			}
 		}
 	}
@@ -1305,6 +1319,9 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 	if writeErr := writeRawHeader(projectRoot, state); writeErr != nil {
 		slog.Warn("failed to write raw.jsonl header at auto-start", "error", writeErr)
 	}
+
+	// register-at-start so /c/<session_id> resolves from t=0 (fire-and-forget)
+	notifySessionStartedAsync(projectRoot, state)
 
 	// for tail-mode sessions: try to find the agent's session file and tell
 	// the daemon to start tailing it. If TryConnect returns nil (daemon not

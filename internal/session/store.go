@@ -29,6 +29,7 @@ import (
 
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/sageox/ox/internal/paths"
+	"github.com/sageox/ox/internal/sessionid"
 )
 
 const (
@@ -177,15 +178,23 @@ type SessionWriter struct {
 
 // StoreMeta contains session storage metadata written to the header.
 type StoreMeta struct {
-	Version      string    `json:"version"`
-	CreatedAt    time.Time `json:"created_at"`
-	AgentID      string    `json:"agent_id,omitempty"`
-	AgentType    string    `json:"agent_type,omitempty"`
-	AgentVersion string    `json:"agent_version,omitempty"` // version of the coding agent (e.g., "1.0.3")
-	Model        string    `json:"model,omitempty"`         // LLM model used (e.g., "claude-sonnet-4-20250514")
-	Username     string    `json:"username,omitempty"`      // privacy-safe display name — via identity.AttributionDisplayName(). NOT an email.
-	RepoID       string    `json:"repo_id,omitempty"`
-	OxVersion    string    `json:"ox_version,omitempty"` // version of ox that created this session
+	Version   string    `json:"version"`
+	CreatedAt time.Time `json:"created_at"`
+	AgentID   string    `json:"agent_id,omitempty"`
+	// SessionID is the ses_<UUIDv7> recording identity minted at
+	// StartRecording. The raw.jsonl header is its crash-safe carrier:
+	// .recording.json is deleted at stop/abort/anti-entropy, so a daemon
+	// orphan-finalize can only recover the start-minted ID from here.
+	// NOTE: the alternative header format overloads the "session_id" key as
+	// an agent identifier — ParseStoreMeta only accepts ses_-prefixed values
+	// into this field to keep the two meanings apart.
+	SessionID    string `json:"session_id,omitempty"`
+	AgentType    string `json:"agent_type,omitempty"`
+	AgentVersion string `json:"agent_version,omitempty"` // version of the coding agent (e.g., "1.0.3")
+	Model        string `json:"model,omitempty"`         // LLM model used (e.g., "claude-sonnet-4-20250514")
+	Username     string `json:"username,omitempty"`      // privacy-safe display name — via identity.AttributionDisplayName(). NOT an email.
+	RepoID       string `json:"repo_id,omitempty"`
+	OxVersion    string `json:"ox_version,omitempty"` // version of ox that created this session
 }
 
 // Writable is an interface for entries that can be written to a session.
@@ -945,11 +954,19 @@ func ParseStoreMeta(m map[string]any) *StoreMeta {
 		meta.Version = v
 	}
 
-	// agent_id (or session_id)
+	// agent_id (or session_id — the alternative format overloads that key
+	// as an agent identifier; ses_-prefixed values are the ox recording ID
+	// and must not be mistaken for an agent)
 	if v, ok := m["agent_id"].(string); ok {
 		meta.AgentID = v
-	} else if v, ok := m["session_id"].(string); ok {
+	} else if v, ok := m["session_id"].(string); ok && !sessionid.IsValidSessionID(v) {
 		meta.AgentID = v
+	}
+
+	// ses_ recording identity (ox headers only; guarded so alternative-format
+	// agent identifiers never land here)
+	if v, ok := m["session_id"].(string); ok && sessionid.IsValidSessionID(v) {
+		meta.SessionID = v
 	}
 
 	if v, ok := m["agent_type"].(string); ok {
