@@ -94,6 +94,13 @@ func reviewSaveDraft(cmd *cobra.Command, file string) (string, error) {
 	if dir == "" {
 		return "", fmt.Errorf("could not save draft to the ledger")
 	}
+	if companions := gatherCompanions(cmd, in); len(companions) > 0 {
+		if names, cerr := plan.CopyCompanions(companions, dir); cerr != nil {
+			cli.PrintHint("could not bundle companion(s): " + cerr.Error())
+		} else if rerr := plan.RecordCompanions(dir, names); rerr != nil {
+			cli.PrintHint("could not record companion(s) in plan meta: " + rerr.Error())
+		}
+	}
 	return plan.Slugify(planTopic(in)), nil
 }
 
@@ -107,7 +114,7 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 	if noServe || cli.IsHeadless() {
 		in := plan.Parse(planMD)
 		review, _ := plan.AssembleReview(info.Dir)
-		return reviewStaticFallback(cmd, gitRoot, slug, in, res, review)
+		return reviewStaticFallback(cmd, gitRoot, slug, info.Dir, in, res, review)
 	}
 
 	// Bind a STABLE address for this plan (persisted last port, then the
@@ -141,7 +148,7 @@ func runPlanReview(cmd *cobra.Command, slug string, noServe bool, idleTimeout ti
 			cli.PrintHint("could not start review server, falling back to file export: " + lerr.Error())
 			in := plan.Parse(planMD)
 			review, _ := plan.AssembleReview(info.Dir)
-			return reviewStaticFallback(cmd, gitRoot, slug, in, res, review)
+			return reviewStaticFallback(cmd, gitRoot, slug, info.Dir, in, res, review)
 		}
 		ln = l
 		cli.PrintHint("Stable review ports are busy — serving on an ephemeral port; a previously open tab won't auto-reconnect to this one.")
@@ -237,6 +244,42 @@ func liveReviewHandler(gitRoot, slug, planDir, base, token string, bc *broadcast
 		// must never mask a dead server with a stale page that still looks live.
 		w.Header().Set("Cache-Control", "no-store")
 		_, _ = w.Write(html)
+	})
+
+	// /companions/<name>: bundled companion HTML artifacts, served from the plan
+	// dir's companions/ subdir so the page's relative links work in the live
+	// loop. Allowlisted against meta.json's Companions (never a raw directory
+	// listing) and basename-only (no traversal).
+	mux.HandleFunc("/companions/", func(w http.ResponseWriter, r *http.Request) {
+		name := strings.TrimPrefix(r.URL.Path, "/companions/")
+		if name == "" || name != filepath.Base(name) {
+			http.NotFound(w, r)
+			return
+		}
+		meta, err := plan.LoadMeta(planDir)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		for _, n := range meta.Companions {
+			if n == name {
+				w.Header().Set("Cache-Control", "no-store")
+				f, err := os.Open(filepath.Join(planDir, plan.CompanionsDir, n))
+				if err != nil {
+					http.NotFound(w, r)
+					return
+				}
+				defer f.Close()
+				info, err := f.Stat()
+				if err != nil || info.IsDir() {
+					http.NotFound(w, r)
+					return
+				}
+				http.ServeContent(w, r, n, info.ModTime(), f)
+				return
+			}
+		}
+		http.NotFound(w, r)
 	})
 
 	// /healthz: unauthenticated identity probe (loopback only). A second
@@ -418,11 +461,34 @@ func renderLive(gitRoot, slug, base, token string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	in := plan.Parse(planMD)
 	review, _ := plan.AssembleReview(info.Dir)
+	meta, merr := plan.LoadMeta(info.Dir)
+
+	// HTML-primary plan: serve the AUTHORED page with the ox chrome injected
+	// live (enrichment overlay + review layer wired to this server). Falls
+	// through to the generated render only if the authored page is unreadable
+	// (LFS pointer, missing file) — the review loop must still function.
+	if merr == nil && meta.Primary == plan.PrimaryHTML {
+		if path, _, isPointer, exists := plan.PlanHTMLPath(info.Dir); exists && !isPointer {
+			if authored, rerr := os.ReadFile(path); rerr == nil {
+				return plan.InjectChrome(authored, plan.BuildChromeData(res, plan.RenderOptions{
+					Slug: slug, Review: review, ReviewEndpoint: base, ReviewToken: token,
+					PriorArtURL: priorArtURLResolver(gitRoot),
+				})), nil
+			}
+		}
+		cli.PrintHint("authored plan.html unavailable (LFS pointer or unreadable) — serving the generated render of the derived markdown")
+	}
+
+	in := plan.Parse(planMD)
+	var companionNames []string
+	if merr == nil {
+		companionNames = meta.Companions
+	}
 	return plan.RenderHTMLOpts(in, res, plan.RenderOptions{
 		Slug: slug, Review: review, ReviewEndpoint: base, ReviewToken: token,
 		PriorArtURL: priorArtURLResolver(gitRoot),
+		Companions:  plan.CompanionRefs(companionNames),
 	})
 }
 
@@ -512,8 +578,13 @@ func (b *broadcaster) broadcast() {
 
 // reviewStaticFallback renders to a file and prints the clipboard-export path for
 // environments with no browser/server.
-func reviewStaticFallback(cmd *cobra.Command, gitRoot, slug string, in plan.Input, res plan.Result, review []plan.MergedItem) error {
-	html, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot)})
+func reviewStaticFallback(cmd *cobra.Command, gitRoot, slug, planDir string, in plan.Input, res plan.Result, review []plan.MergedItem) error {
+	companions := savedCompanionFiles(planDir)
+	var companionNames []string
+	for _, c := range companions {
+		companionNames = append(companionNames, c.Name)
+	}
+	html, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot), Companions: plan.CompanionRefs(companionNames)})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}
@@ -522,6 +593,11 @@ func reviewStaticFallback(cmd *cobra.Command, gitRoot, slug string, in plan.Inpu
 	path := filepath.Join(os.TempDir(), safeSlug+"-review.html")
 	if err := os.WriteFile(path, html, 0o644); err != nil {
 		return fmt.Errorf("write render: %w", err)
+	}
+	if len(companions) > 0 {
+		if _, cerr := plan.CopyCompanions(companions, os.TempDir()); cerr != nil {
+			cli.PrintHint("could not place companion(s) next to the render: " + cerr.Error())
+		}
 	}
 	out := cmd.OutOrStdout()
 	fmt.Fprintf(out, "Rendered review page: %s\n", cli.StyleFile.Render(path))
