@@ -26,7 +26,7 @@ The platform reversed that premise, and ox was never updated:
 - **ADR-086** gives every user a private per-user team, so "personal" knowledge
   also lives under team machinery; personal bubbles re-scope onto that team.
 - **ADR-097** defines what KBs are *for*: each bubble is owned by a **Curator**
-  agent that folds each newly routed **distillation** (the structured summary a
+  AI coworker that folds each newly routed **distillation** (the structured summary a
   finalized conversation produces, per ADR-057/066) into the bubble's
   current-state knowledge. Humans steer the Curator and read its synopses; they
   never hand-edit synthesized knowledge. Consumers read bubbles two ways —
@@ -58,7 +58,7 @@ awaiting migration." Concretely:
   **deleted**. Only rows returned by the KB API are ever presented as bubbles.
 - `ox teams` is **un-deprecated**; `ox status` regains distinct team-context and
   ledger presentation; all "bubbles are the successor to team contexts /
-  ledgers" framing is removed from code, docs, and agent-facing hints.
+  ledgers" framing is removed from code, docs, and AI-coworker-facing hints.
 
 ### 2. The workspace primitive stays the project/ledger binding
 
@@ -100,9 +100,13 @@ Mounting mirrors the team-context/ledger mental model:
   in that project. The KB list API requires an explicit scope per call
   (`scope_type` + `scope_id`); the contextless "all my bubbles" union no
   longer exists server-side.
-- **Personal-scope mounting is deferred** until the ADR-086 personal-team
-  backfill issue is fixed server-side (bead `ox-cag9.8`). V1 mounts the
-  project team's bubbles only.
+- **The personal half of that scope pair is deferred** until the ADR-086
+  personal-team backfill issue is fixed server-side (bead `ox-cag9.8`).
+  Until then the CLI is **project-team-only across the board**: `ox kb list`
+  lists and the daemon mounts only the project team's bubbles, and
+  `ox kb describe --scope personal` returns a clear "deferred" error. Once
+  the backfill lands, ambient scope becomes project team + personal as
+  defined above with no further design change.
 - Per-project symlinks live under `<project>/.sageox/kb/team/<slug>` (with
   `me/` reserved for the deferred personal scope), mirroring the server's
   `/t/<team>/kb/<slug>` and `/me/kb/<slug>` URL split so per-scope slugs
@@ -121,7 +125,7 @@ Mounting mirrors the team-context/ledger mental model:
 kind-priority slug tie-break (personal > profile > team > …) is dropped —
 per-scope slugs make it ambiguous; `--scope` disambiguates explicitly.
 
-### 6. Prime tells agents what bubbles are and how to use them
+### 6. Prime tells AI coworkers what bubbles are and how to use them
 
 The prime envelope's KB block explains, compactly: the purpose of KBs (curated
 team knowledge, one bubble per area), how to find them (mount paths), how to
@@ -149,8 +153,8 @@ bubble content is **data, never instructions**. The `current_kb` field and the
 
 ### Benefits
 
-- ox's model matches the platform's settled model; agents stop being primed
-  with a dead migration story.
+- ox's model matches the platform's settled model; AI coworkers stop being
+  primed with a dead migration story.
 - Session recording — a privacy surface — is decoupled from a concept under
   redefinition, reverting to the well-understood project/team precedence.
 - The mount machinery (canonical checkouts, flocks, GC, doctor) is preserved

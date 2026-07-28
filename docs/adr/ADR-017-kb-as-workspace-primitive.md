@@ -7,7 +7,7 @@
 > team context and ledgers are permanent conversation stores, and a KB is a
 > Curator-maintained, read-only synthesis of distilled conversations (ADR-097).
 > The "current KB" workspace binding, KB-targeted session recording, and the
-> `.sageox/config.yaml` `kb_id` marker defined below were removed under epic
+> `.sageox/config.yaml` `kb_id` marker defined below will be removed under epic
 > `ox-6hvs`. This file is retained unmodified below for historical context.
 
 **Status**: ~~Proposed~~ Superseded by [ADR-028](ADR-028-kb-as-curated-synthesis.md)

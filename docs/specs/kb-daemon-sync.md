@@ -9,9 +9,9 @@ distilled conversations for one area of work (ox ADR-028; sageox-mono
 ADR-073/097). Bubbles do **not** replace ledgers or team contexts — those are
 permanent conversation stores and sync via their own pipelines. What bubbles
 *share* with them is the transport shape: a single git repo cloned into a
-canonical XDG path and kept fresh by the daemon, mounted so agents can navigate
-the published knowledge locally. This doc records how the CLI side handles that
-sync so the model isn't re-derived every time someone touches it.
+canonical XDG path and kept fresh by the daemon, mounted so AI coworkers can
+navigate the published knowledge locally. This doc records how the CLI side
+handles that sync so the model isn't re-derived every time someone touches it.
 
 > **Note (2026-07-28):** the mechanics below predate ox ADR-028 / epic
 > `ox-cag9` (scoped list API, project-team ambient scope, `team/`-prefixed
@@ -116,7 +116,7 @@ failure modes. The kb checks (`cmd/ox/doctor_kb.go`,
 | `kb-stale-sync` | (kb-specific) | `meta.json` `last_sync` > 1h | kick daemon sync |
 | `kb-failed-provision` | (kb-specific) | server `lifecycle_state=provision-failed` | requires-agent (server side) |
 | `kb-global-sync-no-owner` | (kb-specific, ox-6zme) | an endpoint with daemons but no lease holder | check-only |
-| `kb-project-config-migrate` | (kb-specific, ADR-017) | legacy `config.json` → `config.yaml` | auto — **removed under ox ADR-028 / epic `ox-6hvs`** (waited on repo→KB provisioning that never happens) |
+| `kb-project-config-migrate` | (kb-specific, ADR-017) | legacy `config.json` → `config.yaml` | auto — **slated for removal under ox ADR-028 / epic `ox-6hvs`** (waits on repo→KB provisioning that never happens) |
 
 **Design rule — repairs go through the daemon, not the CLI.** The daemon owns kb
 git writes and serializes them with the per-kb flock. A kb doctor repair therefore
@@ -128,9 +128,11 @@ in `doctor_kb_repo_health.go`.
 **Intentionally deferred (not yet ported from ledger/team):**
 
 - **Secret scanning** (`ledger-secrets`). Ledger scans its `sessions/` tree for
-  credential patterns. Bubbles have no `sessions/` — they hold imported data,
-  murmurs, and recordings. A kb scan would need a different target set and a
-  policy decision; deferred until kb import flows settle.
+  credential patterns. Bubbles have no `sessions/` — under ox ADR-028 they hold
+  Curator-published synthesis, not raw conversation content (sessions, murmurs,
+  recordings all live in conversation stores). Whether Curator output warrants
+  a scan of its own is a server-side question (the Curator publishes, not the
+  CLI); no kb-side check is planned.
 - **Dirty-workdir / cache-tracked auto-commit** (`ledger-clean-workdir`,
   `ledger-cache-tracked`). These auto-commit from the CLI. For a daemon-managed
   tree that's the wrong owner; if needed, the repair belongs in the daemon's
@@ -145,19 +147,26 @@ in `doctor_kb_repo_health.go`.
 
 Today the CLI is **repo-bound**: endpoint resolution and credentials flow from a
 project root, and the daemon's `syncBubbles` returns early when `ProjectRoot == ""`.
-Bubbles bind to the current repo via the cwd `.kb-marker` (`internal/kb/resolve.go`).
 
-Cloud Co-Work may run an AI coworker with **no git repo at all**. In the cloud
-model, bubbles are explicitly *not* tied to repos (ADR-028), so the repo-bound
-assumption doesn't carry over cleanly.
+> **Superseded contract (2026-07-28):** an earlier revision of this section
+> described bubbles binding to the current repo via a cwd marker
+> (`internal/kb/resolve.go`) and sketched resolving a "current bubble" from an
+> `OX_KB` env var or XDG-global marker. That current-KB binding model is
+> removed by [ox ADR-028](../adr/ADR-028-kb-as-curated-synthesis.md) — there
+> is no "current bubble"; the project's **ambient scope** (its team, plus the
+> caller's personal scope once `ox-cag9.8` lands) determines which bubbles are
+> listed and mounted. Do not implement the marker/env-var contract.
+
+Cloud Co-Work may run an AI coworker with **no git repo at all**. Bubbles are
+not tied to repos, so the repo-bound assumption doesn't carry over cleanly.
 
 **Decision (now): keep the CLI repo-bound.** Breaking the repo binding touches
 endpoint resolution, daemon lifecycle, and selection — too much blast radius for
-a case that doesn't exist in the product yet. When it does, the likely surface is
-a **global/no-repo binding**: resolve a "current bubble" from an env var (`OX_KB`)
-or an XDG-global marker when no git root is found, leaving the repo path unchanged.
-Captured here so the tradeoff isn't re-litigated; no implementation until
-Cloud Co-Work needs it.
+a case that doesn't exist in the product yet. When it does, the likely surface
+is **no-repo scope resolution**: derive the ambient scopes (a chosen team, the
+caller's personal scope) from an explicit flag or environment instead of a
+project root, leaving the repo path unchanged. Captured here so the tradeoff
+isn't re-litigated; no implementation until Cloud Co-Work needs it.
 
 ---
 
