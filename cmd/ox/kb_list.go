@@ -32,6 +32,29 @@ import (
 //     method, the same shape Merger.Merge has — so tests can inject a fake
 //     without standing up httptest servers.
 
+// kbCmd is the parent command for knowledge bubble (`ox kb …`) operations.
+// Moved here from kb_path.go when `ox kb path` was removed (ox ADR-028 /
+// epic ox-nsf7) — this file owns the parent now; sibling subcommand files
+// attach to kbCmd in their own init() blocks.
+//
+// `bubble` and `bubbles` are aliases: `kb` is the canonical noun in docs,
+// the longer form is for discoverability. User-facing copy says "knowledge
+// bubble" — never just "bubble" — but the CLI noun stays terse.
+var kbCmd = &cobra.Command{
+	Use:     "kb",
+	Aliases: []string{"bubble", "bubbles"},
+	Short:   "Work with knowledge bubbles",
+	Long: `Work with knowledge bubbles — curated syntheses of your team's knowledge.
+
+A knowledge bubble is a Curator-maintained, read-only synthesis of your
+team's distilled conversations for one area of work (see ox ADR-028). Team
+contexts and ledgers are separate, permanent conversation stores — they are
+not bubbles.
+
+Use ` + "`ox kb list`" + ` to see the bubbles you can access and
+` + "`ox kb show <slug>`" + ` for details on one.`,
+}
+
 // kbListMerger is the seam between runKBList and the F3 three-source merger.
 // Production wires *kb.Merger; tests provide a fake. Mirrors the surface of
 // kb.Merger.Merge so swapping in the real one is a one-line construction.
@@ -62,6 +85,7 @@ Examples:
 }
 
 func init() {
+	rootCmd.AddCommand(kbCmd)
 	kbCmd.AddCommand(kbListCmd)
 	kbListCmd.Flags().String("type", "", "filter by kb type: personal|profile|team|repo|custom")
 }
