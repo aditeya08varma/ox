@@ -61,42 +61,43 @@ func kbXDGEnv(t *testing.T) string {
 }
 
 // TestReconcileProjectSymlinks_InitialCreate verifies a fresh project
-// with no .sageox/kb/ ends up with one symlink per eligible bubble.
+// with no .sageox/kb/ ends up with one symlink per bubble under the
+// team/ scope subdirectory — every bubble returned by the ambient
+// scoped fetch links (ADR-028 §4: the scoped list already guarantees
+// relevance, so there is no per-type policy).
 //
 // Failure prevented: a fresh `ox init` followed by daemon sync silently
 // no-ops the ergonomic surface, and AI coworkers never find their
-// personal/team bubbles inside the project tree.
+// team's bubbles inside the project tree.
 func TestReconcileProjectSymlinks_InitialCreate(t *testing.T) {
 	kbXDGEnv(t)
 	projectRoot := symlinkTestProject(t, "repo_my_app")
 	s := newSymlinkTestScheduler(t, projectRoot)
 
 	bubbles := []api.KB{
-		{KBID: "kb_p", KBType: api.KBTypePersonal, Slug: "personal-abc"},
-		{KBID: "kb_pf", KBType: api.KBTypeProfile, Slug: "ryan-profile"},
 		{KBID: "kb_team", KBType: api.KBTypeTeam, Slug: "platform"},
-		{KBID: "kb_repo", KBType: api.KBTypeRepo, Slug: "my-app", RepoID: "repo_my_app"},
-		{KBID: "kb_other_repo", KBType: api.KBTypeRepo, Slug: "other-app", RepoID: "repo_other"},
 		{KBID: "kb_custom", KBType: api.KBTypeCustom, Slug: "custom-thing"},
+		{KBID: "kb_channel", KBType: api.KBTypeChannel, Slug: "wip-broadcast"},
 	}
 
 	s.reconcileProjectSymlinks(context.Background(), projectRoot, bubbles)
 
 	kbDir := filepath.Join(projectRoot, ".sageox", "kb")
-	for _, slug := range []string{"personal-abc", "ryan-profile", "platform", "my-app"} {
-		linkPath := filepath.Join(kbDir, slug)
+	for _, slug := range []string{"platform", "custom-thing", "wip-broadcast"} {
+		linkPath := filepath.Join(kbDir, "team", slug)
 		info, err := os.Lstat(linkPath)
-		require.NoError(t, err, "symlink %s must exist", slug)
-		assert.NotZero(t, info.Mode()&os.ModeSymlink, "%s must be a symlink", slug)
+		require.NoError(t, err, "symlink team/%s must exist", slug)
+		assert.NotZero(t, info.Mode()&os.ModeSymlink, "team/%s must be a symlink", slug)
 	}
-	for _, slug := range []string{"other-app", "custom-thing"} {
-		linkPath := filepath.Join(kbDir, slug)
-		_, err := os.Lstat(linkPath)
-		assert.True(t, os.IsNotExist(err), "%s must NOT have been linked (policy)", slug)
+
+	// nothing lands flat under .sageox/kb/ and me/ stays reserved (absent).
+	for _, name := range []string{"platform", "custom-thing", "wip-broadcast", "me"} {
+		_, err := os.Lstat(filepath.Join(kbDir, name))
+		assert.True(t, os.IsNotExist(err), "%s must not exist at the kb root", name)
 	}
 
 	// targets resolve to canonical KBDir paths
-	target, err := os.Readlink(filepath.Join(kbDir, "platform"))
+	target, err := os.Readlink(filepath.Join(kbDir, "team", "platform"))
 	require.NoError(t, err)
 	assert.Equal(t, paths.KBDir("kb_team"), target)
 }
@@ -151,7 +152,7 @@ func TestReconcileProjectSymlinks_SlugRename(t *testing.T) {
 	second := []api.KB{{KBID: "kb_p", KBType: api.KBTypePersonal, Slug: "new-name"}}
 
 	s.reconcileProjectSymlinks(context.Background(), projectRoot, first)
-	kbDir := filepath.Join(projectRoot, ".sageox", "kb")
+	kbDir := filepath.Join(projectRoot, ".sageox", "kb", "team")
 	require.FileExists(t, filepath.Join(kbDir, "old-name"))
 
 	s.reconcileProjectSymlinks(context.Background(), projectRoot, second)
@@ -180,7 +181,7 @@ func TestReconcileProjectSymlinks_KBRevoked_PrunesLinkButNotTarget(t *testing.T)
 	first := []api.KB{{KBID: "kb_p", KBType: api.KBTypePersonal, Slug: "personal-abc"}}
 	s.reconcileProjectSymlinks(context.Background(), projectRoot, first)
 
-	linkPath := filepath.Join(projectRoot, ".sageox", "kb", "personal-abc")
+	linkPath := filepath.Join(projectRoot, ".sageox", "kb", "team", "personal-abc")
 	require.FileExists(t, linkPath)
 
 	// kb is no longer in the desired set (revoked / removed from API).
@@ -193,34 +194,64 @@ func TestReconcileProjectSymlinks_KBRevoked_PrunesLinkButNotTarget(t *testing.T)
 	assert.FileExists(t, filepath.Join(target, "marker.txt"), "canonical KBDir must NOT be touched by reconciler")
 }
 
-// TestReconcileProjectSymlinks_RepoBubbleScopedToOwnProject verifies
-// repo bubbles only land in the project whose RepoID matches kb.RepoID,
-// even when both projects are reconciled in the same pass.
-//
-// Failure prevented: a repo bubble fans out to every project on the
-// machine, causing cross-project ledger shadows and visual clutter.
-func TestReconcileProjectSymlinks_RepoBubbleScopedToOwnProject(t *testing.T) {
+// TestReconcileProjectSymlinks_FlatLayoutMigration verifies that a
+// stale symlink from the pre-scope flat layout (.sageox/kb/<slug>) is
+// removed on reconcile and the scoped link (.sageox/kb/team/<slug>) is
+// created for the same bubble. Regression class: a layout migration
+// that only writes the new location leaves dangling links at the old
+// one forever — editors and AI coworkers keep following the stale path.
+func TestReconcileProjectSymlinks_FlatLayoutMigration(t *testing.T) {
 	kbXDGEnv(t)
-	myProject := symlinkTestProject(t, "repo_my_app")
-	otherProject := symlinkTestProject(t, "repo_other")
-	s := newSymlinkTestScheduler(t, myProject)
+	projectRoot := symlinkTestProject(t, "")
+	s := newSymlinkTestScheduler(t, projectRoot)
 
-	bubbles := []api.KB{
-		{KBID: "kb_my_repo", KBType: api.KBTypeRepo, Slug: "my-app", RepoID: "repo_my_app"},
-		{KBID: "kb_personal", KBType: api.KBTypePersonal, Slug: "personal-abc"},
-	}
+	kbDir := filepath.Join(projectRoot, ".sageox", "kb")
+	require.NoError(t, os.MkdirAll(kbDir, 0o755))
 
-	s.reconcileProjectSymlinks(context.Background(), myProject, bubbles)
-	s.reconcileProjectSymlinks(context.Background(), otherProject, bubbles)
+	// simulate the old flat layout: a symlink directly under .sageox/kb/
+	// pointing at the bubble's canonical dir.
+	target := paths.KBDir("kb_team")
+	require.NoError(t, os.MkdirAll(target, 0o755))
+	flatLink := filepath.Join(kbDir, "platform")
+	require.NoError(t, os.Symlink(target, flatLink))
 
-	// my project: repo + personal links
-	assert.FileExists(t, filepath.Join(myProject, ".sageox", "kb", "my-app"))
-	assert.FileExists(t, filepath.Join(myProject, ".sageox", "kb", "personal-abc"))
+	bubbles := []api.KB{{KBID: "kb_team", KBType: api.KBTypeTeam, Slug: "platform"}}
+	s.reconcileProjectSymlinks(context.Background(), projectRoot, bubbles)
 
-	// other project: personal only — repo bubble must be skipped
-	_, err := os.Lstat(filepath.Join(otherProject, ".sageox", "kb", "my-app"))
-	assert.True(t, os.IsNotExist(err), "repo bubble must NOT link in unrelated project")
-	assert.FileExists(t, filepath.Join(otherProject, ".sageox", "kb", "personal-abc"))
+	// flat-layout link swept...
+	_, err := os.Lstat(flatLink)
+	assert.True(t, os.IsNotExist(err), "stale flat-layout symlink must be removed")
+
+	// ...and the scoped link created, pointing at the canonical dir.
+	scopedLink := filepath.Join(kbDir, "team", "platform")
+	got, err := os.Readlink(scopedLink)
+	require.NoError(t, err, "team/platform must exist after migration")
+	assert.Equal(t, target, got)
+
+	// the canonical target itself is untouched.
+	assert.DirExists(t, target)
+}
+
+// TestReconcileProjectSymlinks_FlatLayoutStrayFileSurvives verifies the
+// flat-layout sweep only removes SYMLINKS: a regular file a user left
+// directly under .sageox/kb/ is never deleted.
+// Failure prevented: the migration cleanup rm'ing a human's notes file
+// that happened to live in the gitignored kb dir.
+func TestReconcileProjectSymlinks_FlatLayoutStrayFileSurvives(t *testing.T) {
+	kbXDGEnv(t)
+	projectRoot := symlinkTestProject(t, "")
+	s := newSymlinkTestScheduler(t, projectRoot)
+
+	kbDir := filepath.Join(projectRoot, ".sageox", "kb")
+	require.NoError(t, os.MkdirAll(kbDir, 0o755))
+	stray := filepath.Join(kbDir, "NOTES.md")
+	require.NoError(t, os.WriteFile(stray, []byte("mine\n"), 0o644))
+
+	s.reconcileProjectSymlinks(context.Background(), projectRoot,
+		[]api.KB{{KBID: "kb_team", KBType: api.KBTypeTeam, Slug: "platform"}})
+
+	assert.FileExists(t, stray, "stray regular file must survive the flat-layout sweep")
+	assert.FileExists(t, filepath.Join(kbDir, "team", "platform"))
 }
 
 // TestEnsureProjectGitignoreEntry_Idempotent verifies that appending
@@ -330,8 +361,8 @@ func TestReconcileProjectSymlinks_ConcurrentCalls_NoCorruption(t *testing.T) {
 	}
 	wg.Wait()
 
-	kbDir := filepath.Join(projectRoot, ".sageox", "kb")
-	entries, err := os.ReadDir(kbDir)
+	teamDir := filepath.Join(projectRoot, ".sageox", "kb", "team")
+	entries, err := os.ReadDir(teamDir)
 	require.NoError(t, err)
 
 	// expect exactly 2 entries (the 2 bubbles' symlinks) — no temp
@@ -340,7 +371,7 @@ func TestReconcileProjectSymlinks_ConcurrentCalls_NoCorruption(t *testing.T) {
 	for _, e := range entries {
 		slugs = append(slugs, e.Name())
 		// every entry must be a symlink and point at the right kb_id.
-		full := filepath.Join(kbDir, e.Name())
+		full := filepath.Join(teamDir, e.Name())
 		info, err := os.Lstat(full)
 		require.NoError(t, err)
 		assert.NotZero(t, info.Mode()&os.ModeSymlink, "%s should be a symlink, not a temp file", e.Name())
@@ -377,10 +408,10 @@ func TestReconcileProjectSymlinks_PerSymlinkFailureIsolation(t *testing.T) {
 
 	s.reconcileProjectSymlinksWithOps(context.Background(), projectRoot, bubbles, ops)
 
-	kbDir := filepath.Join(projectRoot, ".sageox", "kb")
-	_, err := os.Lstat(filepath.Join(kbDir, "bad-slug"))
+	teamDir := filepath.Join(projectRoot, ".sageox", "kb", "team")
+	_, err := os.Lstat(filepath.Join(teamDir, "bad-slug"))
 	assert.True(t, os.IsNotExist(err), "bad slug must remain unlinked")
-	assert.FileExists(t, filepath.Join(kbDir, "good-slug"), "good slug must succeed despite earlier failure")
+	assert.FileExists(t, filepath.Join(teamDir, "good-slug"), "good slug must succeed despite earlier failure")
 }
 
 // stripTmpSuffix turns "<linkPath>.tmp-<n>" back into "<linkPath>".
@@ -394,67 +425,40 @@ func stripTmpSuffix(link string) string {
 	return link[:idx]
 }
 
-// TestDesiredSymlinks_PolicyMatrix verifies the type-by-type policy
-// table independent of any filesystem state. Pure unit test — no I/O.
+// TestDesiredSymlinks_EveryBubbleLinksUnderTeamScope verifies the
+// desired-map computation independent of any filesystem state. Pure
+// unit test — no I/O. Under ADR-028 §4 every bubble from the ambient
+// scoped fetch links under team/<slug>; the only drops are rows with
+// an empty kb_id or slug (unaddressable).
 //
-// Failure prevented: a future refactor that moves the policy table
-// silently flips one of the cases (e.g. starts symlinking custom
-// bubbles by default), and no on-disk test catches it because the
-// test scenario doesn't include a custom bubble.
-func TestDesiredSymlinks_PolicyMatrix(t *testing.T) {
+// Failure prevented: a future refactor reintroducing a per-type policy
+// switch (or the old repo_id matching) that silently hides some kinds
+// from the project view.
+func TestDesiredSymlinks_EveryBubbleLinksUnderTeamScope(t *testing.T) {
 	bubbles := []api.KB{
 		{KBID: "kb_personal", KBType: api.KBTypePersonal, Slug: "personal-abc"},
 		{KBID: "kb_profile", KBType: api.KBTypeProfile, Slug: "ryan-profile"},
 		{KBID: "kb_team", KBType: api.KBTypeTeam, Slug: "platform"},
-		{KBID: "kb_my_repo", KBType: api.KBTypeRepo, Slug: "my-app", RepoID: "repo_my_app"},
-		{KBID: "kb_their_repo", KBType: api.KBTypeRepo, Slug: "their-app", RepoID: "repo_other"},
-		{KBID: "kb_legacy_repo", KBType: api.KBTypeRepo, Slug: "legacy"}, // missing repo_id
+		{KBID: "kb_repo", KBType: api.KBTypeRepo, Slug: "my-app", RepoID: "repo_my_app"},
 		{KBID: "kb_custom", KBType: api.KBTypeCustom, Slug: "custom-thing"},
-		{KBID: "kb_channel", KBType: api.KBType("channel"), Slug: "wip-broadcast"},
+		{KBID: "kb_channel", KBType: api.KBTypeChannel, Slug: "wip-broadcast"},
 		{KBID: "kb_unknown", KBType: api.KBTypeUnknown, Slug: "future-kind"},
-		{KBID: "", KBType: api.KBTypePersonal, Slug: "no-id"}, // dropped: empty kb_id
+		{KBID: "", KBType: api.KBTypePersonal, Slug: "no-id"},  // dropped: empty kb_id
+		{KBID: "kb_no_slug", KBType: api.KBTypeTeam, Slug: ""}, // dropped: empty slug
 	}
 
-	got := desiredSymlinks(bubbles, "repo_my_app")
+	got := desiredSymlinks(bubbles)
 
-	assert.Equal(t, "kb_personal", got["personal-abc"])
-	assert.Equal(t, "kb_profile", got["ryan-profile"])
-	assert.Equal(t, "kb_team", got["platform"])
-	assert.Equal(t, "kb_my_repo", got["my-app"])
-
-	_, hasTheir := got["their-app"]
-	assert.False(t, hasTheir, "repo bubble for a different project must not link")
-
-	_, hasLegacy := got["legacy"]
-	assert.False(t, hasLegacy, "repo bubble missing repo_id must be skipped")
-
-	_, hasCustom := got["custom-thing"]
-	assert.False(t, hasCustom, "custom bubbles are deferred")
-
-	_, hasChannel := got["wip-broadcast"]
-	assert.False(t, hasChannel, "channel bubbles are deferred until explicit subscribe")
-
-	_, hasUnknown := got["future-kind"]
-	assert.False(t, hasUnknown, "unknown bubbles are skipped")
-
-	_, hasNoID := got["no-id"]
-	assert.False(t, hasNoID, "bubble with empty kb_id must be dropped")
-}
-
-// TestDiscoverInitializedProjectRoots_FiltersUninitialized verifies
-// that a registry entry pointing at a directory without .sageox/config.json
-// is silently skipped instead of being treated as a project to manage.
-//
-// Failure prevented: a stale registry entry from a deleted workspace
-// causes the reconciler to MkdirAll a `.sageox/kb/` inside an empty
-// directory, polluting unrelated paths.
-func TestDiscoverInitializedProjectRoots_FiltersUninitialized(t *testing.T) {
-	initialized := setupProjectWithConfig(t, "")
-	uninitialized := t.TempDir() // no .sageox/config.json here
-
-	roots := discoverInitializedProjectRoots(initialized)
-	assert.Contains(t, roots, initialized, "current root must always appear when initialized")
-	assert.NotContains(t, roots, uninitialized, "uninitialized dir must be filtered out")
+	want := map[string]string{
+		"team/personal-abc":  "kb_personal",
+		"team/ryan-profile":  "kb_profile",
+		"team/platform":      "kb_team",
+		"team/my-app":        "kb_repo",
+		"team/custom-thing":  "kb_custom",
+		"team/wip-broadcast": "kb_channel",
+		"team/future-kind":   "kb_unknown",
+	}
+	assert.Equal(t, want, got)
 }
 
 // --- ox-gzp.28 symlink lifecycle gaps ---
@@ -488,17 +492,21 @@ func TestReconcileProjectSymlinks_ProjectVanished(t *testing.T) {
 		s.reconcileProjectSymlinks(context.Background(), projectRoot, bubbles)
 	})
 
-	// reconciler may MkdirAll(.sageox/kb) which would recreate the tree.
-	// The contract we care about is: no panic, no error spam at fatal
-	// level, and the .sageox/kb dir, if it exists, is empty.
+	// reconciler may MkdirAll(.sageox/kb[/team]) which would recreate the
+	// tree. The contract we care about is: no panic, no error spam at
+	// fatal level, and the recreated dirs, if any, hold only the scope
+	// subdir and the symlink we asked for — never junk from a panicked
+	// half-run.
 	kbDir := filepath.Join(projectRoot, ".sageox", "kb")
 	if entries, err := os.ReadDir(kbDir); err == nil {
-		// if the dir was recreated, at most it contains the symlink we
-		// asked for — never any junk from a panicked half-run.
 		for _, e := range entries {
 			full := filepath.Join(kbDir, e.Name())
 			info, err := os.Lstat(full)
 			require.NoError(t, err)
+			if info.IsDir() {
+				assert.Equal(t, "team", e.Name(), "only the team/ scope dir may exist at the kb root")
+				continue
+			}
 			assert.NotZero(t, info.Mode()&os.ModeSymlink, "dir contains a non-symlink entry: %s", e.Name())
 		}
 	}
@@ -523,7 +531,7 @@ func TestReconcileProjectSymlinks_TargetRelocated(t *testing.T) {
 
 	// first pass — link points at the canonical target
 	s.reconcileProjectSymlinks(context.Background(), projectRoot, bubbles)
-	linkPath := filepath.Join(projectRoot, ".sageox", "kb", "personal-abc")
+	linkPath := filepath.Join(projectRoot, ".sageox", "kb", "team", "personal-abc")
 	got, err := os.Readlink(linkPath)
 	require.NoError(t, err)
 	require.Equal(t, target, got)
@@ -547,15 +555,15 @@ func TestReconcileProjectSymlinks_TargetRelocated(t *testing.T) {
 	assert.Equal(t, target, got2, "reconciler must correct a divergent symlink target")
 }
 
-// TestReconcileAllProjectSymlinks_PerProjectFailureIsolation verifies that
-// when reconciliation fails for one project in a multi-project pass, the
-// remaining projects are still serviced. Today the reconciler walks
-// projects in a `for` loop with no shared state — the test pins this by
-// making one project unwritable and asserting the next still gets its links.
+// TestReconcileProjectSymlinks_PerProjectFailureIsolation verifies that
+// a failed reconciliation for one project root does not poison a later
+// pass against another root — the reconciler keeps no cross-call state.
+// (Production now reconciles only the daemon's own project root, but
+// per-call containment is still the contract this pins.)
 //
 // Failure prevented: a permissions error on one workspace cascades into
-// the next project's pass, leaving an entire machine unsymlinked.
-func TestReconcileAllProjectSymlinks_PerProjectFailureIsolation(t *testing.T) {
+// the next reconcile pass, leaving the project unsymlinked.
+func TestReconcileProjectSymlinks_PerProjectFailureIsolation(t *testing.T) {
 	if testing.Short() {
 		t.Skip("short: registry-driven multi-project test is moderately slow")
 	}
@@ -575,15 +583,14 @@ func TestReconcileAllProjectSymlinks_PerProjectFailureIsolation(t *testing.T) {
 
 	bubbles := []api.KB{{KBID: "kb_p", KBType: api.KBTypePersonal, Slug: "personal-abc"}}
 
-	// reconcile both projects in sequence — the daemon's inner loop does
-	// the same in reconcileAllProjectSymlinks. Calling per-project here
-	// exercises the same containment surface without depending on the
-	// registry being populated.
+	// reconcile two roots in sequence — each reconcileProjectSymlinks
+	// call must be self-contained, with no state carried from a failed
+	// pass into the next one.
 	s.reconcileProjectSymlinks(context.Background(), bad, bubbles)
 	s.reconcileProjectSymlinks(context.Background(), good, bubbles)
 
 	// good project must have the link despite the earlier project failing.
-	goodLink := filepath.Join(good, ".sageox", "kb", "personal-abc")
+	goodLink := filepath.Join(good, ".sageox", "kb", "team", "personal-abc")
 	_, err := os.Lstat(goodLink)
 	assert.NoError(t, err, "good project must be linked after a sibling project failed")
 }
@@ -666,8 +673,8 @@ func TestReconcileProjectSymlinks_ManyBubblesScale(t *testing.T) {
 	// A real regression typically blows past this by 10x.
 	assert.Less(t, elapsed, 5*time.Second, "reconciliation of 50 bubbles must complete promptly")
 
-	kbDir := filepath.Join(projectRoot, ".sageox", "kb")
-	entries, err := os.ReadDir(kbDir)
+	teamDir := filepath.Join(projectRoot, ".sageox", "kb", "team")
+	entries, err := os.ReadDir(teamDir)
 	require.NoError(t, err)
 	assert.Equal(t, 50, len(entries), "all 50 bubbles must be linked")
 }

@@ -1,11 +1,12 @@
 package daemon
 
-// Knowledge-bubble sync loop. Daemon-side reader: fetches the list of
-// bubbles the caller can access from /api/v1/kb and pulls each one into
-// its canonical XDG path (paths.KBDir(kb_id)). Per the daemon-CLI split
-// (.claude/rules/daemon-git.md) this only ever pulls — never adds,
-// commits, or pushes. Symlink management (D2) and GC (D3) live in
-// separate beads and intentionally NOT here.
+// Knowledge-bubble sync loop. Daemon-side reader: fetches the bubbles
+// for the project's ambient scopes from /api/v1/kb (the list endpoint is
+// scoped per sageox-mono ADR-073 — one scope per call, members-only) and
+// pulls each one into its canonical XDG path (paths.KBDir(kb_id)). Per
+// the daemon-CLI split (.claude/rules/daemon-git.md) this only ever
+// pulls — never adds, commits, or pushes. Symlink management (D2) and
+// GC (D3) live in separate beads and intentionally NOT here.
 
 import (
 	"context"
@@ -50,7 +51,7 @@ func kbCloneActive(kbID string) bool {
 	return ok
 }
 
-// envDisableKBDaemon mirrors the merger's OX_KB_DISABLE escape hatch on
+// envDisableKBDaemon mirrors internal/kb's OX_KB_DISABLE escape hatch on
 // the daemon side. When set to a truthy value (anything but empty / "0" /
 // "false" / "no" / "off") the kb sync loop is a no-op. Intentionally
 // duplicated rather than exported from internal/kb to keep that package's
@@ -70,12 +71,13 @@ func kbDaemonDisabledByEnv() bool {
 }
 
 // KBBubbleLister is the minimal surface syncBubbles needs from the kb API
-// client. Defining it locally (rather than importing *api.KBClient
-// directly) keeps the daemon test-injectable without dragging in real
-// HTTP plumbing — sync_bubbles_test.go swaps in a fake that returns
-// canned rows or errors.
+// client. The list endpoint requires an explicit scope per call (ADR-073),
+// so the method signature carries one — it matches *api.KBClient exactly.
+// Defining it locally (rather than importing *api.KBClient directly) keeps
+// the daemon test-injectable without dragging in real HTTP plumbing —
+// sync_bubbles_test.go swaps in a fake that returns canned rows or errors.
 type KBBubbleLister interface {
-	ListBubbles(ctx context.Context) ([]api.KB, error)
+	ListBubbles(ctx context.Context, scope api.KBScope) ([]api.KB, error)
 }
 
 // kbBubbleListerFactory returns a lister bound to the given endpoint and
@@ -103,22 +105,34 @@ func (s *SyncScheduler) SetKBBubbleListerFactory(f kbBubbleListerFactory) {
 type kbMeta struct {
 	Type        api.KBType `json:"type"`
 	Slug        string     `json:"slug"`
+	Name        string     `json:"name,omitempty"`
+	ScopeType   string     `json:"scope_type,omitempty"`
+	ScopeID     string     `json:"scope_id,omitempty"`
+	Description string     `json:"description,omitempty"`
+	Topics      []string   `json:"topics,omitempty"`
 	OwnerUserID string     `json:"owner_user_id,omitempty"`
 	ViewerRole  string     `json:"viewer_role,omitempty"`
 	LastSync    time.Time  `json:"last_sync"`
 }
 
 // syncBubbles is the periodic reconciliation pass for knowledge bubbles.
-// It is the daemon-side counterpart to `ox kb list`: fetch the caller's
-// accessible bubbles and ensure each one is cloned + up-to-date in its
+// It is the daemon-side counterpart to `ox kb list`: fetch the project's
+// ambient-scope bubbles and ensure each one is cloned + up-to-date in its
 // canonical XDG location (paths.KBDir(kb_id)).
+//
+// Scope derivation: the list endpoint requires one scope per call
+// (ADR-073), and the scopes a project implies come from
+// kb.AmbientScopes(teamID) — v1 is the project's team only. The team id
+// comes from the workspace registry (populated from the project's
+// config.json); no team binding means there is nothing to list.
 //
 // Failure isolation: every per-bubble step is wrapped so one bad bubble
 // (bad URL, fetch failure, permissions) does not abort the rest of the
-// pass. A 403/404 from the kb API as a whole is treated as "feature
-// flag is off for this caller" and exits silently — the kb API is one
-// of three sources merged in internal/kb/merge.go and must not fail the
-// whole daemon.
+// pass. Per-scope, a 403/404 (api.ErrKBAPIUnavailable) means "feature
+// flag off / non-member" and is skipped silently; other errors are
+// warned and the remaining scopes still run. The scoped fetch here
+// mirrors kb.FetchBubbles (internal/kb/bubbles.go) so the daemon and
+// the CLI surfaces can't disagree about union/dedup semantics.
 //
 // What this loop deliberately does NOT do:
 //   - Symlink management (D2 / ox-gzp.5) — canonical XDG path only.
@@ -132,11 +146,17 @@ func (s *SyncScheduler) syncBubbles(ctx context.Context) {
 	}
 
 	// Escape hatch from the kb plan: OX_KB_DISABLE=1 takes the daemon's
-	// kb sync loop offline entirely. Mirrors the merger's client-side
-	// short-circuit in internal/kb/merge.go so operators have one consistent
-	// switch to flip during a rollout incident.
+	// kb sync loop offline entirely. Mirrors the client-side short-circuit
+	// in internal/kb/bubbles.go so operators have one consistent switch to
+	// flip during a rollout incident.
 	if kbDaemonDisabledByEnv() {
 		s.logger.Debug("kb_sync skipped: OX_KB_DISABLE set")
+		return
+	}
+
+	scopes := kb.AmbientScopes(s.projectTeamIDForKB())
+	if len(scopes) == 0 {
+		s.logger.Debug("kb_sync skipped: no team scope")
 		return
 	}
 
@@ -146,21 +166,38 @@ func (s *SyncScheduler) syncBubbles(ctx context.Context) {
 		return
 	}
 
-	// bound the entire pass; per-bubble git ops can each take seconds and
-	// we don't want a slow remote to wedge the scheduler tick.
+	// bound the entire list fan-out; per-bubble git ops below get their
+	// own bounds and we don't want a slow API to wedge the scheduler tick.
 	listCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	bubbles, err := lister.ListBubbles(listCtx)
-	if err != nil {
-		if errors.Is(err, api.ErrKBAPIUnavailable) {
-			// 403/404 — flag-gated or endpoint missing. Silent skip per
-			// the sentinel doc on api.ErrKBAPIUnavailable.
-			s.logger.Debug("kb_sync skipped: kb API unavailable", "error", err)
-			return
+	// fan out over the ambient scopes and union the rows, deduped by
+	// kb_id (a bubble visible via two scopes must reconcile once).
+	var bubbles []api.KB
+	seen := make(map[string]bool)
+	for _, scope := range scopes {
+		rows, err := lister.ListBubbles(listCtx, scope)
+		if err != nil {
+			if errors.Is(err, api.ErrKBAPIUnavailable) {
+				// 403/404 — flag-gated, non-member, or endpoint missing.
+				// Silent skip per the sentinel doc on api.ErrKBAPIUnavailable.
+				s.logger.Debug("kb_sync scope unavailable, skipping",
+					"scope_type", scope.Type, "scope_id", scope.ID, "error", err)
+				continue
+			}
+			s.logger.Warn("kb_sync list failed for scope",
+				"scope_type", scope.Type, "scope_id", scope.ID, "error", err)
+			continue
 		}
-		s.logger.Warn("kb_sync list failed", "error", err)
-		return
+		for _, r := range rows {
+			if r.KBID != "" && seen[r.KBID] {
+				continue
+			}
+			if r.KBID != "" {
+				seen[r.KBID] = true
+			}
+			bubbles = append(bubbles, r)
+		}
 	}
 
 	if len(bubbles) == 0 {
@@ -175,11 +212,25 @@ func (s *SyncScheduler) syncBubbles(ctx context.Context) {
 		s.reconcileBubble(ctx, b)
 	}
 
-	// after every bubble has been cloned/pulled into its canonical
-	// XDG path, refresh per-project ergonomic symlinks so editors and
-	// AI coworkers can see them at <project>/.sageox/kb/<slug>. The
+	// after every bubble has been cloned/pulled into its canonical XDG
+	// path, refresh this project's ergonomic symlinks so editors and AI
+	// coworkers can see them at <project>/.sageox/kb/team/<slug>. The
 	// reconciler is idempotent and safe to call when nothing changed.
-	s.reconcileAllProjectSymlinks(ctx, bubbles)
+	s.reconcileOwnProjectSymlinks(ctx, bubbles)
+}
+
+// projectTeamIDForKB resolves the project's primary team id from the
+// workspace registry, refreshing the registry's config cache first so a
+// team binding written after daemon startup is picked up. Returns ""
+// when the daemon has no registry or the project has no team binding.
+func (s *SyncScheduler) projectTeamIDForKB() string {
+	if s.workspaceRegistry == nil {
+		return ""
+	}
+	// best-effort refresh (30s-cached internally); a load failure just
+	// means we fall back to whatever the registry already knows.
+	_ = s.workspaceRegistry.LoadFromConfig()
+	return s.workspaceRegistry.ProjectTeamID()
 }
 
 // buildKBLister resolves a KBBubbleLister using the test factory if set,
@@ -244,11 +295,6 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 		return
 	}
 	defer unlock()
-
-	// per-bubble cadence routing: high-mutation bubbles (personal/profile/team)
-	// should be reconciled at the team-context cadence; repo/custom at the
-	// slower read cadence. We don't enforce that here (Start() decides which
-	// loop calls us); we just log it so the choice is visible in traces.
 
 	// existence is determined by .git/ — a bare directory without it is
 	// either a partial clone we should redo, or noise. We keep it simple
@@ -338,8 +384,15 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 // gitutil.StripLFSConfig to disable any smudge filter git-lfs may have
 // injected during the clone.
 func (s *SyncScheduler) cloneBubble(ctx context.Context, b api.KB, target string) error {
-	if b.RepoURL == "" {
-		return fmt.Errorf("bubble %s (%s) has no repo_url; server may not have provisioned it yet", b.KBID, b.Slug)
+	// prefer the server-supplied full URL (older response shapes); the
+	// current server sends git_path instead, from which we derive
+	// https://git.<endpoint-host>/<path>.git.
+	cloneURL := b.RepoURL
+	if cloneURL == "" && b.GitPath != "" {
+		cloneURL = kb.GitCloneURL(endpoint.GetForProject(s.config.ProjectRoot), b.GitPath)
+	}
+	if cloneURL == "" {
+		return fmt.Errorf("bubble %s (%s) has no repo url/git path; server may not have provisioned it yet", b.KBID, b.Slug)
 	}
 
 	parent := filepath.Dir(target)
@@ -356,7 +409,7 @@ func (s *SyncScheduler) cloneBubble(ctx context.Context, b api.KB, target string
 	cloneCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	if _, err := gitserver.TwoPhaseClone(cloneCtx, b.RepoURL, target); err != nil {
+	if _, err := gitserver.TwoPhaseClone(cloneCtx, cloneURL, target); err != nil {
 		return fmt.Errorf("kb two-phase clone failed: %w", err)
 	}
 
@@ -389,6 +442,11 @@ func writeKBMeta(target string, b api.KB) error {
 	meta := kbMeta{
 		Type:        b.KBType,
 		Slug:        b.Slug,
+		Name:        b.Name,
+		ScopeType:   b.ScopeType,
+		ScopeID:     b.ScopeID,
+		Description: b.Description,
+		Topics:      b.Topics,
 		OwnerUserID: b.OwnerUserID,
 		ViewerRole:  b.ViewerRole,
 		LastSync:    time.Now().UTC(),

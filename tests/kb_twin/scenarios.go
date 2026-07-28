@@ -77,12 +77,14 @@ type ExpectedKB struct {
 }
 
 // ExpectedSymlink is the post-sync state we assert for one per-project
-// symlink under <project>/.sageox/kb/<slug>.
+// symlink under <project>/.sageox/kb/team/<slug> (the team scope
+// subdirectory — ADR-028 §4; every bubble from the ambient scoped
+// fetch links there).
 type ExpectedSymlink struct {
 	// ProjectKey identifies which scenario project to check (matches
 	// keys in ScenarioSpec.Projects).
 	ProjectKey string
-	// Slug is the symlink name under <project>/.sageox/kb/.
+	// Slug is the symlink name under <project>/.sageox/kb/team/.
 	Slug string
 	// Exists: true means the symlink must be present and point at the
 	// expected canonical KBDir; false means the symlink must NOT exist.
@@ -391,7 +393,10 @@ func BuildManifest() *Manifest {
 				},
 				Symlinks: []ExpectedSymlink{
 					{ProjectKey: "primary", Slug: "healthy-bubble", Exists: true, TargetKBID: "kb_healthy"},
-					{ProjectKey: "primary", Slug: "broken-bubble", Exists: false},
+					// ADR-028 §4: EVERY bubble in the ambient fetch links,
+					// even before its clone succeeds — the link dangles at
+					// the canonical path and self-heals when the clone lands.
+					{ProjectKey: "primary", Slug: "broken-bubble", Exists: true, TargetKBID: "kb_broken"},
 				},
 			},
 		}},

@@ -30,6 +30,7 @@ import (
 
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/daemon"
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -57,7 +58,7 @@ type fakeKBLister struct {
 	calls   atomic.Int32
 }
 
-func (f *fakeKBLister) ListBubbles(_ context.Context) ([]api.KB, error) {
+func (f *fakeKBLister) ListBubbles(_ context.Context, _ api.KBScope) ([]api.KB, error) {
 	f.calls.Add(1)
 	if f.err != nil {
 		return nil, f.err
@@ -82,11 +83,22 @@ func scenarioEnv(t *testing.T, scenarioName, endpoint string) string {
 	}
 	t.Setenv("SAGEOX_ENDPOINT", endpoint)
 
+	// scenarios clone from local bare repos via file:// to simulate
+	// remotes. Production hardens against this transport
+	// (`-c protocol.file.allow=never` in gitserver.TwoPhaseClone) as
+	// CVE-2017-1000117 defense-in-depth, so the harness must opt back in.
+	prevAllowFile := gitserver.TestAllowFileTransport
+	gitserver.TestAllowFileTransport = true
+	t.Cleanup(func() { gitserver.TestAllowFileTransport = prevAllowFile })
+
 	projectDir := filepath.Join(tmp, "project-primary")
 	mustMkdir(t, filepath.Join(projectDir, ".sageox"))
-	// minimal config.json — the daemon needs it to recognize the dir
-	// as initialized. Endpoint inside is overridden by env var above.
-	configJSON := fmt.Sprintf(`{"endpoint":%q,"repo_id":%q}`, endpoint, "repo_primary")
+	// minimal config.json — the daemon needs it to recognize the dir as
+	// initialized, plus a team binding so the scoped kb sync derives a
+	// non-empty ambient scope set. Endpoint inside is overridden by the
+	// env var above.
+	configJSON := fmt.Sprintf(`{"endpoint":%q,"repo_id":%q,"team_id":%q}`,
+		endpoint, "repo_primary", "team_twin")
 	mustWrite(t, filepath.Join(projectDir, ".sageox", "config.json"), configJSON)
 	mustWrite(t, filepath.Join(projectDir, ".sageox", "config.local.toml"), "")
 	return projectDir

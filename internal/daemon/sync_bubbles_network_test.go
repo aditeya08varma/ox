@@ -137,7 +137,7 @@ type fakeKBListerWithCtx struct {
 	fn func(ctx context.Context) ([]api.KB, error)
 }
 
-func (f *fakeKBListerWithCtx) ListBubbles(ctx context.Context) ([]api.KB, error) {
+func (f *fakeKBListerWithCtx) ListBubbles(ctx context.Context, _ api.KBScope) ([]api.KB, error) {
 	return f.fn(ctx)
 }
 
@@ -245,7 +245,7 @@ func TestSyncBubbles_Network_HTTPMockServer_KnownStatuses(t *testing.T) {
 			defer srv.Close()
 
 			client := api.NewKBClientWithEndpoint(srv.URL)
-			_, err := client.ListBubbles(context.Background())
+			_, err := client.ListBubbles(context.Background(), api.KBScope{Type: api.KBScopeTypeTeam, ID: kbTestTeamID})
 			if tc.wantErr {
 				require.Error(t, err)
 				if tc.wantSentinel {
@@ -351,7 +351,7 @@ func TestSyncBubbles_Network_ConnectionImmediatelyClosed(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	_, err = client.ListBubbles(ctx)
+	_, err = client.ListBubbles(ctx, api.KBScope{Type: api.KBScopeTypeTeam, ID: kbTestTeamID})
 	require.Error(t, err, "must surface an error on connection-closed")
 	assert.False(t, errors.Is(err, api.ErrKBAPIUnavailable),
 		"connection-closed (transport failure) must NOT collapse to the flag-off sentinel")

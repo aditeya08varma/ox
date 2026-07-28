@@ -19,15 +19,18 @@ import (
 )
 
 // fakeKBLister is a test double for KBBubbleLister. Each test wires it up
-// once and reads the recorded ListBubbles call count to assert behavior.
+// once and reads the recorded ListBubbles call count (and the scopes it
+// was asked for) to assert behavior.
 type fakeKBLister struct {
 	bubbles []api.KB
 	err     error
 	callCnt int
+	scopes  []api.KBScope
 }
 
-func (f *fakeKBLister) ListBubbles(_ context.Context) ([]api.KB, error) {
+func (f *fakeKBLister) ListBubbles(_ context.Context, scope api.KBScope) ([]api.KB, error) {
 	f.callCnt++
+	f.scopes = append(f.scopes, scope)
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -35,6 +38,11 @@ func (f *fakeKBLister) ListBubbles(_ context.Context) ([]api.KB, error) {
 	copy(out, f.bubbles)
 	return out, nil
 }
+
+// kbTestTeamID is the team binding kbProjectWithTeam writes. Ambient
+// scope derivation (kb.AmbientScopes) turns it into the single team
+// scope the daemon's sync loop lists.
+const kbTestTeamID = "team_kbtest"
 
 // kbTestEnv isolates the path resolution + endpoint state so each test
 // gets its own XDG data home and a deterministic endpoint slug. Without
@@ -56,12 +64,24 @@ func kbTestEnv(t *testing.T) {
 	t.Cleanup(func() { gitserver.TestAllowFileTransport = prevAllowFile })
 }
 
+// kbProjectWithTeam overlays the project's config.json with a team_id
+// binding so the scoped kb sync derives a non-empty ambient scope set.
+// Without this, syncBubbles skips before ever consulting the lister.
+func kbProjectWithTeam(t *testing.T, projectDir string) {
+	t.Helper()
+	body := `{"endpoint":"https://fake.test.invalid","team_id":"` + kbTestTeamID + `"}`
+	require.NoError(t, os.WriteFile(
+		filepath.Join(projectDir, ".sageox", "config.json"), []byte(body), 0o644))
+}
+
 // kbTestScheduler builds a SyncScheduler with verbose-quiet logging and a
-// project root configured. The project root is required for
-// syncBubbles to know which endpoint to use.
+// project root configured (with a team binding, so ambient kb scopes
+// resolve). The project root is required for syncBubbles to know which
+// endpoint to use.
 func kbTestScheduler(t *testing.T) (*SyncScheduler, string) {
 	t.Helper()
 	projectDir := setupProjectWithConfig(t, "")
+	kbProjectWithTeam(t, projectDir)
 	cfg := DefaultConfig()
 	cfg.ProjectRoot = projectDir
 	cfg.TeamContextSyncInterval = time.Second
@@ -291,6 +311,11 @@ func TestSyncBubbles_MetaJSONFields(t *testing.T) {
 		KBID:        "kb_profile_meta",
 		KBType:      api.KBTypeProfile,
 		Slug:        "ryan-profile",
+		Name:        "Ryan Profile",
+		ScopeType:   api.KBScopeTypeTeam,
+		ScopeID:     kbTestTeamID,
+		Description: "curated profile synthesis",
+		Topics:      []string{"profile", "people"},
 		OwnerUserID: "user_42",
 		ViewerRole:  "owner",
 		RepoURL:     "file://" + bareDir,
@@ -311,6 +336,11 @@ func TestSyncBubbles_MetaJSONFields(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &generic))
 	assert.Equal(t, "profile", generic["type"])
 	assert.Equal(t, "ryan-profile", generic["slug"])
+	assert.Equal(t, "Ryan Profile", generic["name"])
+	assert.Equal(t, "team", generic["scope_type"])
+	assert.Equal(t, kbTestTeamID, generic["scope_id"])
+	assert.Equal(t, "curated profile synthesis", generic["description"])
+	assert.Equal(t, []any{"profile", "people"}, generic["topics"])
 	assert.Equal(t, "user_42", generic["owner_user_id"])
 	assert.Equal(t, "owner", generic["viewer_role"])
 
@@ -319,36 +349,42 @@ func TestSyncBubbles_MetaJSONFields(t *testing.T) {
 	assert.True(t, meta.LastSync.After(before), "last_sync should be set to ~now")
 }
 
-// TestSyncBubbles_CadenceRouting verifies the per-bubble cadence
-// classifier returns the team-context interval for high-churn kinds and
-// the read interval for the slower ones.
-// Failure prevented: every bubble silently sharing the slow cadence
-// (or, worse, the fast cadence) — making personal/team feel stale or
-// repo bubbles thrash the network.
-func TestSyncBubbles_CadenceRouting(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.TeamContextSyncInterval = 15 * time.Second
-	cfg.SyncIntervalRead = 60 * time.Second
-	s := &SyncScheduler{config: cfg}
+// TestSyncBubbles_ScopedList verifies syncBubbles asks the lister for
+// exactly the project's ambient team scope — not a contextless list.
+// Failure prevented: the daemon regressing to a bare (scope-less) list
+// request, which the server 400s under ADR-073, silently killing kb
+// sync for every user.
+func TestSyncBubbles_ScopedList(t *testing.T) {
+	kbTestEnv(t)
+	s, _ := kbTestScheduler(t)
 
-	cases := []struct {
-		name string
-		t    api.KBType
-		want time.Duration
-	}{
-		{"personal uses team cadence", api.KBTypePersonal, 15 * time.Second},
-		{"profile uses team cadence", api.KBTypeProfile, 15 * time.Second},
-		{"team uses team cadence", api.KBTypeTeam, 15 * time.Second},
-		{"repo uses read cadence", api.KBTypeRepo, 60 * time.Second},
-		{"custom uses read cadence", api.KBTypeCustom, 60 * time.Second},
-		{"unknown uses read cadence", api.KBTypeUnknown, 60 * time.Second},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := intervalForType(s.config, string(tc.t))
-			assert.Equal(t, tc.want, got)
-		})
-	}
+	lister := &fakeKBLister{}
+	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister { return lister })
+
+	s.syncBubbles(context.Background())
+
+	require.Len(t, lister.scopes, 1, "one list call per ambient scope (v1: team only)")
+	assert.Equal(t, api.KBScope{Type: api.KBScopeTypeTeam, ID: kbTestTeamID}, lister.scopes[0])
+}
+
+// TestSyncBubbles_NoTeamScope_NoOp verifies the loop is a silent no-op
+// when the project has no team binding — there is no ambient scope to
+// list, and the scoped endpoint cannot be called without one.
+// Failure prevented: an un-bound project issuing scope-less requests
+// (server 400) every cadence tick.
+func TestSyncBubbles_NoTeamScope_NoOp(t *testing.T) {
+	kbTestEnv(t)
+	projectDir := setupProjectWithConfig(t, "") // config.json WITHOUT team_id
+	cfg := DefaultConfig()
+	cfg.ProjectRoot = projectDir
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
+	s := NewSyncScheduler(cfg, logger)
+
+	lister := &fakeKBLister{}
+	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister { return lister })
+
+	s.syncBubbles(context.Background())
+	assert.Zero(t, lister.callCnt, "must not call the lister without an ambient scope")
 }
 
 // TestSyncBubbles_NoProjectRoot_NoOp verifies the loop is a silent no-op

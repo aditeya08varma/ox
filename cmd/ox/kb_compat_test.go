@@ -7,9 +7,16 @@ package main
 // Also covers the OX_KB_DISABLE escape hatch, the no-persistent-disk
 // skip, lazy personal-bubble provisioning, and forward-compat unknown
 // kb_type handling. These cases straddle the CLI commands (`ox kb list`,
-// `ox kb show`) and the kb.FetchBubbles contract; they live here rather
-// than in any single command's test file so the matrix is easy to read
-// end-to-end.
+// `ox kb describe`) and the kb.FetchBubbles contract; they live here
+// rather than in any single command's test file so the matrix is easy to
+// read end-to-end.
+//
+// Historical note: TestCompat_ForwardCompatSlugCollision_PersonalBeatsUnknown
+// was deleted along with pickKBByPriority/filterKBsBySlug — slugs are now
+// unique PER SCOPE (ADR-073) and resolution happens server-side within one
+// scope via GET /api/v1/kb/resolve, so a cross-scope slug collision is a
+// non-question: `--scope` disambiguates explicitly and no client-side
+// kind-priority tie-break exists anymore (ox ADR-028 §5).
 
 import (
 	"bytes"
@@ -58,7 +65,7 @@ func TestCompat_KBAPIUnavailable_ListShowsEmpty(t *testing.T) {
 		return nil, fmt.Errorf("kb list: %w", api.ErrKBAPIUnavailable)
 	}}
 
-	res := kb.FetchBubbles(context.Background(), source, "https://sageox.ai")
+	res := kb.FetchBubbles(context.Background(), source, "https://sageox.ai", compatScopes())
 	if len(res.Bubbles) != 0 {
 		t.Fatalf("expected zero bubbles when KB API is unavailable, got %+v", res.Bubbles)
 	}
@@ -80,19 +87,19 @@ func TestCompat_KBAPIUnavailable_ListShowsEmpty(t *testing.T) {
 	}
 }
 
-// TestCompat_KBFlagOff_ShowFallsBackGracefully verifies handleKBShowError
-// translates ErrKBAPIUnavailable into the documented user-facing message
-// + ErrSilent (so main.go doesn't double-print "Error:"). The behavior
-// is what gives flag-off users a clear next step rather than a stack
-// trace.
+// TestCompat_KBFlagOff_ShowFallsBackGracefully verifies
+// handleKBDescribeError translates ErrKBAPIUnavailable into the documented
+// user-facing message + ErrSilent (so main.go doesn't double-print
+// "Error:"). The behavior is what gives flag-off users a clear next step
+// rather than a stack trace.
 //
 // Failure prevented: a regression that returns the raw HTTP 403 to the
-// user instead of the friendly "Knowledge bubbles not enabled..." copy.
+// user instead of the friendly "no knowledge bubble matching ..." copy.
 func TestCompat_KBFlagOff_ShowFallsBackGracefully(t *testing.T) {
 	t.Parallel()
 
 	wrapped := fmt.Errorf("listing failed: %w", api.ErrKBAPIUnavailable)
-	err := handleKBShowError(io.Discard, wrapped, "personal", false)
+	err := handleKBDescribeError(io.Discard, wrapped, "personal", false)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -124,7 +131,7 @@ func TestCompat_OXKBDisable_SourceNotCalled(t *testing.T) {
 		return []api.KB{{KBID: "kb_should_not_appear", KBType: api.KBTypePersonal, Slug: "ghost"}}, nil
 	}}
 
-	res := kb.FetchBubbles(context.Background(), source, "https://sageox.ai")
+	res := kb.FetchBubbles(context.Background(), source, "https://sageox.ai", compatScopes())
 	if calls.Load() != 0 {
 		t.Errorf("kb source called %d times, want 0", calls.Load())
 	}
@@ -151,7 +158,7 @@ func TestCompat_NoPersistDisk_SkipsFetch(t *testing.T) {
 		return []api.KB{{KBID: "kb_x", KBType: api.KBTypePersonal, Slug: "ghost"}}, nil
 	}}
 
-	res := kb.FetchBubbles(context.Background(), source, "https://sageox.ai")
+	res := kb.FetchBubbles(context.Background(), source, "https://sageox.ai", compatScopes())
 	if calls.Load() != 0 {
 		t.Errorf("kb source called %d times without persistent disk, want 0", calls.Load())
 	}
@@ -194,7 +201,7 @@ func TestCompat_OXKBDisable_VariantsAreRecognized(t *testing.T) {
 				calls.Add(1)
 				return nil, nil
 			}}
-			_ = kb.FetchBubbles(context.Background(), source, "https://sageox.ai")
+			_ = kb.FetchBubbles(context.Background(), source, "https://sageox.ai", compatScopes())
 
 			gotDisabled := calls.Load() == 0
 			if gotDisabled != tc.disabled {
@@ -264,50 +271,46 @@ func TestCompat_ForwardCompatUnknownType_ListRendersUnknown(t *testing.T) {
 	}
 }
 
-// TestCompat_ForwardCompatUnknownType_ShowResolvesByKBID verifies that a
-// kb_id pointing at a future-typed bubble still resolves via
-// `ox kb show kb_<id>` — the kb_id direct path bypasses the slug priority
-// table entirely, so an unrecognized type doesn't matter for resolution.
+// TestCompat_ForwardCompatUnknownType_DescribeResolvesByKBID verifies that
+// a kb_id pointing at a future-typed bubble still resolves via
+// `ox kb describe kb_<id>` — the kb_id direct path passes the id straight
+// through without consulting slug resolution, scope, or any type table,
+// so an unrecognized type doesn't matter for resolution.
 //
 // Failure prevented: a regression that gates the kb_id direct path on
-// "type is one of the five known values" would block the only escape
-// hatch flag-off users have for inspecting a future-typed bubble.
-func TestCompat_ForwardCompatUnknownType_ShowResolvesByKBID(t *testing.T) {
+// scope resolution or "type is one of the known values" would block the
+// only escape hatch flag-off users have for inspecting a future-typed
+// bubble.
+func TestCompat_ForwardCompatUnknownType_DescribeResolvesByKBID(t *testing.T) {
 	t.Parallel()
 
-	bubbles := []api.KB{{KBID: "kb_future", KBType: api.KBTypeUnknown, Slug: "future-x"}}
-	got := pickKBByPriority(bubbles)
-	if got == nil {
-		t.Fatal("expected fallback selection for unknown-type bubble, got nil")
+	// projectRoot deliberately empty: the kb_id path must not require an
+	// ambient team scope at all.
+	got, err := resolveKBIdentifier(context.Background(), nil, "kb_future", "team", "")
+	if err != nil {
+		t.Fatalf("kb_id passthrough must not error: %v", err)
 	}
-	if got.KBID != "kb_future" {
-		t.Errorf("expected fallback to first match, got %q", got.KBID)
-	}
-}
-
-func TestCompat_ForwardCompatSlugCollision_PersonalBeatsUnknown(t *testing.T) {
-	t.Parallel()
-
-	bubbles := []api.KB{
-		{KBID: "kb_unknown", KBType: api.KBTypeUnknown, Slug: "shared"},
-		{KBID: "kb_personal", KBType: api.KBTypePersonal, Slug: "shared"},
-	}
-	got := pickKBByPriority(bubbles)
-	if got == nil || got.KBID != "kb_personal" {
-		t.Errorf("expected personal to win over unknown, got %+v", got)
+	if got != "kb_future" {
+		t.Errorf("expected kb_id passthrough, got %q", got)
 	}
 }
 
 // --- helpers ---
 
+// compatScopes is the fixture scope list for kb.FetchBubbles — one team
+// scope, matching the project-team-only ambient contract (ox ADR-028 §4).
+func compatScopes() []api.KBScope {
+	return []api.KBScope{{Type: api.KBScopeTypeTeam, ID: "team_compat"}}
+}
+
 // compatFakeKBSource is a tiny fake for kb.FetchBubbles calls so we don't
 // depend on internal/kb's unexported test fakes. The shape matches
-// kb.KBSource — single ListBubbles method.
+// kb.KBSource — single scoped ListBubbles method.
 type compatFakeKBSource struct {
 	listFn func() ([]api.KB, error)
 }
 
-func (f *compatFakeKBSource) ListBubbles(_ context.Context) ([]api.KB, error) {
+func (f *compatFakeKBSource) ListBubbles(_ context.Context, _ api.KBScope) ([]api.KB, error) {
 	if f.listFn != nil {
 		return f.listFn()
 	}

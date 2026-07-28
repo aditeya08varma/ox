@@ -13,15 +13,16 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/spf13/cobra"
 )
 
 // kb_list.go — `ox kb list` subcommand. Fetches the caller's bubbles from
-// the KB API (the only source of bubble rows under ox ADR-028 — team
-// contexts and ledgers are conversation stores, never presented as bubbles)
-// and renders them.
+// the KB API for the project's ambient scopes (the only source of bubble
+// rows under ox ADR-028 — team contexts and ledgers are conversation
+// stores, never presented as bubbles) and renders them.
 //
 // Design notes:
 //   - The command wires up the production client only inside runKBList; the
@@ -54,15 +55,18 @@ Use ` + "`ox kb list`" + ` to see the bubbles you can access and
 var kbListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List knowledge bubbles you can access",
-	Long: `List the knowledge bubbles available to you.
+	Long: `List the knowledge bubbles available in this project's context.
 
-Bubbles come from the KB API (/api/v1/kb). Team contexts and ledgers are
-separate, permanent conversation stores — list them with ` + "`ox teams`" + ` and
-` + "`ox status`" + `, not here.
+Bubbles are Curator-maintained syntheses of your team's knowledge (ox
+ADR-028), listed per scope from the KB API. Inside an ox-initialized repo
+the ambient scope is the repo's team; your personal scope joins it once
+personal-team provisioning is fully rolled out. Team contexts and ledgers
+are separate, permanent conversation stores — list them with ` + "`ox teams`" + `
+and ` + "`ox status`" + `, not here.
 
 Examples:
-  ox kb list                  # all bubbles
-  ox kb list --type=team      # only team bubbles
+  ox kb list                  # bubbles in this project's scopes
+  ox kb list --type=team      # only team-type bubbles
   ox kb list --json           # scriptable JSON output`,
 	Args: cobra.NoArgs,
 	RunE: runKBList,
@@ -84,14 +88,18 @@ type kbListJSONOutput struct {
 // kbListJSONBubble mirrors kb.Bubble for JSON. Defined separately so the
 // JSON tags are stable even if the internal struct gains internal-only fields.
 type kbListJSONBubble struct {
-	KBID       string `json:"kb_id,omitempty"`
-	Type       string `json:"type"`
-	Slug       string `json:"slug,omitempty"`
-	Name       string `json:"name,omitempty"`
-	ViewerRole string `json:"viewer_role,omitempty"`
-	LocalPath  string `json:"local_path,omitempty"`
-	RepoURL    string `json:"repo_url,omitempty"`
-	Endpoint   string `json:"endpoint,omitempty"`
+	KBID        string   `json:"kb_id,omitempty"`
+	Type        string   `json:"type"`
+	Slug        string   `json:"slug,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	ScopeType   string   `json:"scope_type,omitempty"`
+	ScopeID     string   `json:"scope_id,omitempty"`
+	Description string   `json:"description,omitempty"`
+	Topics      []string `json:"topics,omitempty"`
+	ViewerRole  string   `json:"viewer_role,omitempty"`
+	LocalPath   string   `json:"local_path,omitempty"`
+	RepoURL     string   `json:"repo_url,omitempty"`
+	Endpoint    string   `json:"endpoint,omitempty"`
 }
 
 type kbListJSONWarning struct {
@@ -108,8 +116,22 @@ func runKBList(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
 	defer cancel()
 
-	res := kb.FetchBubbles(ctx, source, ep)
+	res := kb.FetchBubbles(ctx, source, ep, ambientKBScopes(projectRoot))
 	return renderKBListResult(cmd.OutOrStdout(), res, typeFilter, jsonOutput, projectRoot)
+}
+
+// ambientKBScopes resolves the scopes this project context implies (ox
+// ADR-028 §4): the repo's team. Outside a project, or in a project with no
+// team binding, there is no scope to list and the result is empty.
+func ambientKBScopes(projectRoot string) []api.KBScope {
+	if projectRoot == "" {
+		return nil
+	}
+	tc := config.FindRepoTeamContext(projectRoot)
+	if tc == nil {
+		return nil
+	}
+	return kb.AmbientScopes(tc.TeamID)
 }
 
 // newDefaultKBListSource builds the authenticated production KB client (and
@@ -314,14 +336,18 @@ func emitKBListJSON(w io.Writer, bubbles []kb.Bubble, warnings []kb.Warning) err
 	}
 	for _, b := range bubbles {
 		out.Bubbles = append(out.Bubbles, kbListJSONBubble{
-			KBID:       b.KBID,
-			Type:       jsonTypeForBubble(b.Type),
-			Slug:       b.Slug,
-			Name:       b.Name,
-			ViewerRole: b.ViewerRole,
-			LocalPath:  b.LocalPath,
-			RepoURL:    b.RepoURL,
-			Endpoint:   b.Endpoint,
+			KBID:        b.KBID,
+			Type:        jsonTypeForBubble(b.Type),
+			Slug:        b.Slug,
+			Name:        b.Name,
+			ScopeType:   b.ScopeType,
+			ScopeID:     b.ScopeID,
+			Description: b.Description,
+			Topics:      b.Topics,
+			ViewerRole:  b.ViewerRole,
+			LocalPath:   b.LocalPath,
+			RepoURL:     b.RepoURL,
+			Endpoint:    b.Endpoint,
 		})
 	}
 	for _, sw := range warnings {

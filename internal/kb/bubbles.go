@@ -1,17 +1,23 @@
 package kb
 
-// bubbles.go — the KB-API-only bubble catalog fetch.
+// bubbles.go — the scoped KB-API bubble catalog fetch.
 //
-// Replaces the deleted three-source merger (merge.go) under ox ADR-028 /
-// epic ox-gmkd: team contexts and ledgers are permanent conversation stores,
-// never presented as bubbles, so the only source of bubble rows is the KB
-// API. This is a thin fetch-and-convert helper shared by `ox kb list`,
-// `ox status`, and prime so the three surfaces can't disagree.
+// Under ox ADR-028 the only source of bubble rows is the KB API, and the
+// list endpoint requires an explicit scope per call (sageox-mono ADR-073:
+// listing is per-context, members-only). This file owns:
+//
+//   - AmbientScopes: which scopes a project context implies (v1: the
+//     project's team only; the caller's personal scope is deferred until
+//     the ADR-086 personal-team backfill fix lands — bead ox-cag9.8),
+//   - FetchBubbles: fan-out over those scopes, union + dedup, warning
+//     collection. Shared by `ox kb list`, `ox status`, prime, and the
+//     daemon so the surfaces can't disagree.
 //
 // Escape hatch: OX_KB_DISABLE=1 skips the fetch entirely. Mirrors the
 // OX_XDG_DISABLE pattern; used for debugging rollout issues, not daily
 // operation. The fetch is also skipped when the runtime has no persistent
-// disk (nothing to reconcile against — see runtime.Caps).
+// disk (nothing to reconcile against — see runtime.Caps; ephemeral
+// runtimes are steered to the cloud MCP for knowledge-bubble queries).
 
 import (
 	"context"
@@ -21,6 +27,7 @@ import (
 	"strings"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/runtime"
 )
 
@@ -30,8 +37,8 @@ import (
 const envDisableKBSource = "OX_KB_DISABLE"
 
 // Bubble is one knowledge-bubble row as the CLI presents it. Converted
-// from api.KB; LocalPath and Endpoint are populated by the caller from
-// project context where known (the KB API does not return them today).
+// from api.KB; LocalPath is populated by the caller where known (the KB
+// API does not return it).
 type Bubble struct {
 	// KBID is the immutable kb identifier (kb_xxx).
 	KBID string
@@ -41,21 +48,40 @@ type Bubble struct {
 	Type api.KBType
 
 	// Slug is the human-readable slug (kebab-case, bare — the leading `#`
-	// is display-only).
+	// is display-only). Unique within a scope, NOT globally (ADR-073).
 	Slug string
 
 	// Name is the display name.
 	Name string
 
-	// ViewerRole is the caller's role on this bubble ("admin", "member",
-	// "viewer").
+	// ScopeType/ScopeID locate the bubble: "user"|"team" + the owning id.
+	ScopeType string
+	ScopeID   string
+
+	// Description is the bubble's free-text description.
+	Description string
+
+	// Topics is the declared topic list.
+	Topics []string
+
+	// ViewerRole is the caller's role ("admin", "member", "viewer").
+	// The server omits it from list responses; populated on single reads.
 	ViewerRole string
+
+	// LifecycleState is "provisioning", "active", or "provision-failed".
+	LifecycleState string
 
 	// LocalPath is the on-disk checkout path when the bubble is mounted.
 	LocalPath string
 
-	// RepoURL is the git clone URL when known.
+	// RepoURL is the git clone URL: the server-supplied URL when present,
+	// otherwise derived from GitPath + the endpoint's git host. Empty when
+	// the bubble's repo has not been provisioned yet.
 	RepoURL string
+
+	// LastActivityAt is the bubble repo's last activity (RFC3339, from
+	// GitLab) when known.
+	LastActivityAt string
 
 	// Endpoint is the SageOx API endpoint this row belongs to.
 	Endpoint string
@@ -73,50 +99,109 @@ type ListResult struct {
 	Warnings []Warning
 }
 
-// KBSource is the contract for fetching kb rows. Defined as an interface so
-// tests can supply fakes without an httptest server; production passes
-// *api.KBClient.
+// KBSource is the contract for fetching kb rows for one scope. Defined as an
+// interface so tests can supply fakes without an httptest server; production
+// passes *api.KBClient.
 type KBSource interface {
-	ListBubbles(ctx context.Context) ([]api.KB, error)
+	ListBubbles(ctx context.Context, scope api.KBScope) ([]api.KB, error)
 }
 
-// FetchBubbles lists the caller's bubbles from the KB API and converts them
-// to presentation rows.
+// AmbientScopes returns the scopes an `ox init`-ed project implies: the
+// project's team. Returns nil when the project has no team binding — there
+// is then no scope to list, and FetchBubbles returns empty.
 //
-// Failure semantics:
-//   - nil source, OX_KB_DISABLE, or no persistent disk → empty result.
-//   - api.ErrKBAPIUnavailable (403/404 — feature flag off for this caller)
-//     → empty result, NO warning: absence of the feature is not an error.
-//   - any other error → empty rows plus one Warning so the caller can
-//     surface degraded state without failing the whole command.
-func FetchBubbles(ctx context.Context, source KBSource, endpoint string) ListResult {
-	if source == nil || kbDisabledByEnv() {
+// Deliberately NOT included yet: the caller's personal scope. Personal
+// bubbles are scoped to per-user private teams (ADR-086), whose backfill
+// has a known server-side issue; until that is fixed the CLI is
+// project-team-only across the board (ox ADR-028 §4, bead ox-cag9.8).
+// This helper is the single place the scope-pair list lives so enabling
+// personal later is a one-function change.
+func AmbientScopes(teamID string) []api.KBScope {
+	teamID = strings.TrimSpace(teamID)
+	if teamID == "" {
+		return nil
+	}
+	return []api.KBScope{{Type: api.KBScopeTypeTeam, ID: teamID}}
+}
+
+// FetchBubbles lists the caller's bubbles for the given scopes and converts
+// them to presentation rows (union across scopes, deduped by kb_id).
+//
+// Failure semantics, per scope:
+//   - api.ErrKBAPIUnavailable (403/404 — feature flag off or non-member)
+//     → zero rows for that scope, NO warning: absence is not an error.
+//   - any other error → one Warning so the caller can surface degraded
+//     state without failing the whole command.
+//
+// A nil source, no scopes, OX_KB_DISABLE, or no persistent disk → empty.
+func FetchBubbles(ctx context.Context, source KBSource, endpointURL string, scopes []api.KBScope) ListResult {
+	if source == nil || len(scopes) == 0 || kbDisabledByEnv() {
 		return ListResult{}
 	}
 
-	rows, err := source.ListBubbles(ctx)
-	if err != nil {
-		if errors.Is(err, api.ErrKBAPIUnavailable) {
-			slog.Debug("kb fetch: kb API unavailable, treating as 0 rows", "err", err)
-			return ListResult{}
+	var out ListResult
+	seen := make(map[string]bool)
+	for _, scope := range scopes {
+		rows, err := source.ListBubbles(ctx, scope)
+		if err != nil {
+			if errors.Is(err, api.ErrKBAPIUnavailable) {
+				slog.Debug("kb fetch: scope unavailable, treating as 0 rows",
+					"scope_type", scope.Type, "scope_id", scope.ID, "err", err)
+				continue
+			}
+			slog.Warn("kb fetch: list failed",
+				"scope_type", scope.Type, "scope_id", scope.ID, "err", err)
+			out.Warnings = append(out.Warnings, Warning{Err: err.Error()})
+			continue
 		}
-		slog.Warn("kb fetch: list failed", "err", err)
-		return ListResult{Warnings: []Warning{{Err: err.Error()}}}
+		for _, r := range rows {
+			if r.KBID != "" && seen[r.KBID] {
+				continue
+			}
+			if r.KBID != "" {
+				seen[r.KBID] = true
+			}
+			out.Bubbles = append(out.Bubbles, bubbleFromRow(r, endpointURL))
+		}
 	}
+	return out
+}
 
-	bubbles := make([]Bubble, 0, len(rows))
-	for _, r := range rows {
-		bubbles = append(bubbles, Bubble{
-			KBID:       r.KBID,
-			Type:       r.KBType,
-			Slug:       r.Slug,
-			Name:       r.Name,
-			ViewerRole: r.ViewerRole,
-			RepoURL:    r.RepoURL,
-			Endpoint:   endpoint,
-		})
+// bubbleFromRow converts one API row, deriving the clone URL when the
+// server supplied a git path but no full URL.
+func bubbleFromRow(r api.KB, endpointURL string) Bubble {
+	repoURL := r.RepoURL
+	if repoURL == "" && r.GitPath != "" {
+		repoURL = GitCloneURL(endpointURL, r.GitPath)
 	}
-	return ListResult{Bubbles: bubbles}
+	return Bubble{
+		KBID:           r.KBID,
+		Type:           r.KBType,
+		Slug:           r.Slug,
+		Name:           r.Name,
+		ScopeType:      r.ScopeType,
+		ScopeID:        r.ScopeID,
+		Description:    r.Description,
+		Topics:         r.Topics,
+		ViewerRole:     r.ViewerRole,
+		LifecycleState: r.LifecycleState,
+		RepoURL:        repoURL,
+		LastActivityAt: r.LastActivityAt,
+		Endpoint:       endpointURL,
+	}
+}
+
+// GitCloneURL derives a bubble's HTTPS clone URL from the SageOx endpoint
+// and the server-reported git project path, following the platform's
+// git-subdomain convention (https://git.<endpoint-host>/<path>.git).
+// Returns "" when either input is empty.
+func GitCloneURL(endpointURL, gitPath string) string {
+	host := endpoint.NormalizeSlug(endpointURL)
+	gitPath = strings.Trim(strings.TrimSpace(gitPath), "/")
+	if host == "" || gitPath == "" {
+		return ""
+	}
+	return "https://git." + host + "/" + gitPath + ".git"
 }
 
 // kbDisabledByEnv returns true when OX_KB_DISABLE is set to a value commonly

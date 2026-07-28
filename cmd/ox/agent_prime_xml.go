@@ -402,6 +402,30 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			sb.WriteString("</ledger>\n")
 		}
 
+		// knowledge bubbles — the mounted catalog + consumption guidance
+		// (ox ADR-028; sageox-mono ADR-097 C10/C18/C19). Emitted only when
+		// bubbles exist so a flag-off account pays zero tokens for it.
+		if len(output.KB) > 0 {
+			sb.WriteString("\n<knowledge-bubbles>\n")
+			if output.KBGuidance != "" {
+				sb.WriteString(output.KBGuidance)
+				sb.WriteString("\n")
+			}
+			sb.WriteString("| Slug | Name | Topics | Mounted at |\n")
+			sb.WriteString("|------|------|--------|------------|\n")
+			for _, b := range output.KB {
+				topics := strings.Join(b.Topics, ", ")
+				path := b.Path
+				if path == "" {
+					path = "(not mounted yet)"
+				}
+				fmt.Fprintf(&sb, "| #%s | %s | %s | %s |\n",
+					escapeXML(b.Slug), escapeXML(b.Name), escapeXML(topics), escapeXML(path))
+			}
+			sb.WriteString("</knowledge-bubbles>\n")
+			bk.charge(prime.BudgetSourceSageox)
+		}
+
 		// other teams
 		if output.OtherTeams != nil && len(output.OtherTeams.Teams) > 0 {
 			sb.WriteString("\n<other-teams hint=\"Only read when user asks about a specific team by name\">\n")

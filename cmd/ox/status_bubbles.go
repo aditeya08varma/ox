@@ -225,8 +225,9 @@ type statusBubblesFetch func(ctx context.Context) kb.ListResult
 // Tests assign a fake.
 var statusBubblesFetchForRoot = func(projectRoot string) statusBubblesFetch {
 	source, ep := newDefaultKBListSource(projectRoot)
+	scopes := ambientKBScopes(projectRoot)
 	return func(ctx context.Context) kb.ListResult {
-		return kb.FetchBubbles(ctx, source, ep)
+		return kb.FetchBubbles(ctx, source, ep, scopes)
 	}
 }
 

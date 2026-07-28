@@ -144,7 +144,9 @@ func assertExpectedSymlink(t *testing.T, dctx kbDiagContext, sl ExpectedSymlink,
 			dctx.prefix(), sl.ProjectKey, sortedKeys(projects))
 		return
 	}
-	link := filepath.Join(projectRoot, ".sageox", "kb", sl.Slug)
+	// symlinks live under the team/ scope subdirectory (ADR-028 §4 —
+	// mirrors the server's /t/<team>/kb/<slug> URL split).
+	link := filepath.Join(projectRoot, ".sageox", "kb", "team", sl.Slug)
 
 	info, err := os.Lstat(link)
 	switch {

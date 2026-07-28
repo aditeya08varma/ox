@@ -38,14 +38,16 @@ type LedgerInfo struct {
 // KBInfo is intentionally minimal — it identifies the bubble, where it
 // lives on disk, the caller's role, and a short hint.
 type KBInfo struct {
-	KBID       string `json:"kb_id,omitempty"`
-	Type       string `json:"type"` // kb_type slug ("personal", "team", "repo", ...)
-	Slug       string `json:"slug,omitempty"`
-	Name       string `json:"name,omitempty"`
-	Path       string `json:"path,omitempty"`        // canonical XDG path (paths.KBDir) or legacy local dir
-	ViewerRole string `json:"viewer_role,omitempty"` // "owner", "member", "viewer"
-	Tokens     int    `json:"tokens,omitempty"`      // estimated/observed tokens contributed by this bubble
-	Hint       string `json:"hint,omitempty"`        // short, type-specific guidance for the AI coworker
+	KBID        string   `json:"kb_id,omitempty"`
+	Type        string   `json:"type"` // kb_type slug ("personal", "team", "repo", ...)
+	Slug        string   `json:"slug,omitempty"`
+	Name        string   `json:"name,omitempty"`
+	Description string   `json:"description,omitempty"` // bubble's own description
+	Topics      []string `json:"topics,omitempty"`      // declared topic list
+	Path        string   `json:"path,omitempty"`        // local mount path (canonical XDG dir) when cloned
+	ViewerRole  string   `json:"viewer_role,omitempty"` // "admin", "member", "viewer"
+	Tokens      int      `json:"tokens,omitempty"`      // estimated/observed tokens contributed by this bubble
+	Hint        string   `json:"hint,omitempty"`        // short, type-specific guidance for the AI coworker
 }
 
 // CapturePriorGuidance provides instructions for capturing prior history
@@ -341,6 +343,7 @@ type Output struct {
 	ContentLength     int                        `json:"content_length,omitempty"`      // raw byte length
 	Session           *SessionStatus             `json:"session,omitempty"`             // session recording status
 	KB                []KBInfo                   `json:"kb,omitempty"`                  // knowledge-bubble envelope (KB-API rows only, ox ADR-028)
+	KBGuidance        string                     `json:"kb_guidance,omitempty"`         // how to consume the mounted bubbles (set when KB is non-empty)
 	Ledger            *LedgerInfo                `json:"ledger,omitempty"`              // the project ledger (conversation store; see LedgerInfo godoc)
 	Important         string                     `json:"important"`                     // always-present disambiguation of knowledge sources
 	TeamContext       *TeamContextInfo           `json:"team_context,omitempty"`        // team context (conversation store; see TeamContextInfo godoc)

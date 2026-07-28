@@ -486,6 +486,10 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// at worst the KB array is empty and the deprecated mirrors carry the
 	// session through.
 	kbInfos, _ := buildPrimeKBEnvelope(cmd.Context(), projectRoot)
+	kbGuidance := ""
+	if len(kbInfos) > 0 {
+		kbGuidance = prime.KBGuidanceText
+	}
 
 	// load project guidance from AGENTS.md
 	projectGuidance := loadProjectGuidance(projectRoot, agentType)
@@ -624,6 +628,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		CapturePrior:       capturePrior,
 		Session:            sessionStat,
 		KB:                 kbInfos,
+		KBGuidance:         kbGuidance,
 		Ledger:             ledgerStatus,
 		TeamContext:        teamCtx,
 		PrimeCallCount:     primeCallCount,
@@ -2335,7 +2340,7 @@ func buildPrimeKBEnvelope(ctx context.Context, projectRoot string) ([]prime.KBIn
 	defer cancel()
 
 	source, ep := newDefaultKBListSource(projectRoot)
-	res := kb.FetchBubbles(fetchCtx, source, ep)
+	res := kb.FetchBubbles(fetchCtx, source, ep, ambientKBScopes(projectRoot))
 
 	// per-bubble token attribution is filled in by the caller AFTER agentID
 	// is resolved — see enrichKBTokensFromInstance below. Building the
@@ -2343,9 +2348,36 @@ func buildPrimeKBEnvelope(ctx context.Context, projectRoot string) ([]prime.KBIn
 	// and avoids the previous bug where machine-wide aggregation inflated
 	// the current agent's KB[].Tokens with other agents' usage.
 	infos := prime.BuildKBInfos(res, nil)
+
+	// Path = the local mount when the daemon has cloned the bubble. Only
+	// set when the checkout actually exists — an AI coworker following the
+	// path must land on files, not an empty dir.
+	for i := range infos {
+		if infos[i].KBID == "" {
+			continue
+		}
+		dir := kbDirSafe(infos[i].KBID)
+		if dir == "" {
+			continue
+		}
+		if _, statErr := os.Stat(filepath.Join(dir, ".git")); statErr == nil {
+			infos[i].Path = dir
+		}
+	}
 	reachable := prime.KBSourceReachable(res)
 	infos = prime.EnsurePersonalKBPresent(infos, reachable)
 	return infos, reachable
+}
+
+// kbDirSafe wraps paths.KBDir, which panics when no endpoint is
+// configured — prime must degrade, not crash, in that state.
+func kbDirSafe(kbID string) (dir string) {
+	defer func() {
+		if r := recover(); r != nil {
+			dir = ""
+		}
+	}()
+	return paths.KBDir(kbID)
 }
 
 // enrichKBTokensFromInstance fills KBInfo.Tokens for kbInfos using the

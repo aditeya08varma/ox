@@ -1,0 +1,52 @@
+---
+title: "ox kb describe"
+description: "CLI reference for ox kb describe"
+sidebar_position: 55
+---
+
+## ox kb describe
+
+Describe a knowledge bubble
+
+### Synopsis
+
+Describe a single knowledge bubble.
+
+The argument may be a kb_id (starts with 'kb_', passed directly to the
+detail endpoint) or a slug (with or without the display '#' prefix).
+Slugs are unique within a scope, not globally, so slug resolution happens
+inside one scope: the project's team by default, or the scope named by
+--scope. Rename aliases are followed server-side.
+
+Examples:
+  ox kb describe kb_01HXYZ...
+  ox kb describe '#engineering'
+  ox kb describe engineering --scope team
+  ox kb describe platform --json
+
+```
+ox kb describe <#slug|kb_id> [flags]
+```
+
+### Options
+
+```
+  -h, --help           help for describe
+      --scope string   scope to resolve a slug in: team|personal (personal is not yet available) (default "team")
+```
+
+### Options inherited from parent commands
+
+```
+  -c, --config string    config file path (default: .sageox/config.yaml)
+      --json             output in JSON format (default: false)
+      --no-interactive   disable spinners and TUI elements (auto-enabled when CI=true)
+      --profile          generate CPU profile and execution trace for performance analysis (default: false)
+  -q, --quiet            suppress non-error output (default: false)
+  -v, --verbose          enable verbose output (default: false)
+```
+
+### SEE ALSO
+
+* [ox kb](/kb)	 - Work with knowledge bubbles
+

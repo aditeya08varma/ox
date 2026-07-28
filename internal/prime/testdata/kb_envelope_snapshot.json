@@ -14,6 +14,11 @@
     "type": "team",
     "slug": "platform",
     "name": "Platform",
+    "description": "Curated platform-team knowledge",
+    "topics": [
+      "infra",
+      "deploys"
+    ],
     "path": "/data/sageox/sageox.ai/kb/kb_team",
     "viewer_role": "member",
     "tokens": 400,

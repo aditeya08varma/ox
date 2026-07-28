@@ -68,7 +68,7 @@ type countingLister struct {
 	err   error
 }
 
-func (c *countingLister) ListBubbles(_ context.Context) ([]api.KB, error) {
+func (c *countingLister) ListBubbles(_ context.Context, _ api.KBScope) ([]api.KB, error) {
 	c.calls.Add(1)
 	return nil, c.err
 }
