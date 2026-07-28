@@ -1,6 +1,16 @@
 # ADR-017: Knowledge Bubble (KB) as the Unifying Workspace Primitive
 
-**Status**: Proposed
+> ⚠️ **SUPERSEDED in full by [ADR-028: Knowledge Bubbles Are Curated Syntheses,
+> Not Workspaces](ADR-028-kb-as-curated-synthesis.md)** (2026-07-28). The
+> premise this ADR builds on — sageox-mono ADR-030/035's "team contexts and
+> ledgers migrate into KBs" — was reversed by sageox-mono ADR-073 (2026-06-26):
+> team context and ledgers are permanent conversation stores, and a KB is a
+> Curator-maintained, read-only synthesis of distilled conversations (ADR-097).
+> The "current KB" workspace binding, KB-targeted session recording, and the
+> `.sageox/config.yaml` `kb_id` marker defined below will be removed under epic
+> `ox-6hvs`. This file is retained unmodified below for historical context.
+
+**Status**: ~~Proposed~~ Superseded by [ADR-028](ADR-028-kb-as-curated-synthesis.md)
 **Date**: 2026-05-18
 
 ## Context
