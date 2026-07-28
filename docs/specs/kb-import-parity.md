@@ -1,6 +1,15 @@
 # KB import parity — `ox import --kb`
 
-**Status:** implemented (CLI side; backend bulk-import endpoint lands in parallel in sageox-mono)
+> ⚠️ **SUPERSEDED by [ox ADR-028](../adr/ADR-028-kb-as-curated-synthesis.md)**
+> (2026-07-28). Knowledge bubbles are read-only syntheses of distilled
+> conversations — raw recordings are conversation content and belong in team
+> context (a conversation store), never in a bubble. `ox import --kb` and the
+> `/kb/{id}/recordings` client paths are removed under epic `ox-nsf7`. Retained
+> below for historical context on the import mechanisms and their storage
+> asymmetry; the `--team` document-LFS path described here is unaffected and
+> remains current.
+
+**Status:** ~~implemented~~ superseded — CLI surface removed (epic `ox-nsf7`)
 **Audience:** SageOx engineers working on `ox import`, the recordings API client, or Knowledge Bubble ingestion
 
 `ox import` historically targeted team contexts only. This design brings Knowledge Bubbles to

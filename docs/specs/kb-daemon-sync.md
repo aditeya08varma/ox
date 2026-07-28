@@ -4,11 +4,20 @@
 > step on each other, what `ox daemon status` / `ox doctor` report, and the one
 > deliberately-deferred question (agents without a git repo).
 
-Knowledge bubbles are the kb-era successor to **ledgers** and **team contexts**
-(ADR-028/030 in `sageox-mono`). A bubble is a single git repo cloned into a
-canonical XDG path and kept fresh by the daemon — the same shape ledgers and
-team contexts already had. This doc records how the CLI side handles them so the
-model isn't re-derived every time someone touches kb sync.
+A knowledge bubble is a Curator-maintained, read-only synthesis of a team's
+distilled conversations for one area of work (ox ADR-028; sageox-mono
+ADR-073/097). Bubbles do **not** replace ledgers or team contexts — those are
+permanent conversation stores and sync via their own pipelines. What bubbles
+*share* with them is the transport shape: a single git repo cloned into a
+canonical XDG path and kept fresh by the daemon, mounted so agents can navigate
+the published knowledge locally. This doc records how the CLI side handles that
+sync so the model isn't re-derived every time someone touches it.
+
+> **Note (2026-07-28):** the mechanics below predate ox ADR-028 / epic
+> `ox-cag9` (scoped list API, project-team ambient scope, `team/`-prefixed
+> project symlinks, uniform 60s cadence). Locking, GC, sparse-checkout, and
+> doctor-parity sections remain accurate; per-type sync policy and symlink
+> layout are being revised under that epic.
 
 ---
 
@@ -107,7 +116,7 @@ failure modes. The kb checks (`cmd/ox/doctor_kb.go`,
 | `kb-stale-sync` | (kb-specific) | `meta.json` `last_sync` > 1h | kick daemon sync |
 | `kb-failed-provision` | (kb-specific) | server `lifecycle_state=provision-failed` | requires-agent (server side) |
 | `kb-global-sync-no-owner` | (kb-specific, ox-6zme) | an endpoint with daemons but no lease holder | check-only |
-| `kb-project-config-migrate` | (kb-specific, ADR-017) | legacy `config.json` → `config.yaml` | auto |
+| `kb-project-config-migrate` | (kb-specific, ADR-017) | legacy `config.json` → `config.yaml` | auto — **removed under ox ADR-028 / epic `ox-6hvs`** (waited on repo→KB provisioning that never happens) |
 
 **Design rule — repairs go through the daemon, not the CLI.** The daemon owns kb
 git writes and serializes them with the per-kb flock. A kb doctor repair therefore
