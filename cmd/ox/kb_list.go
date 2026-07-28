@@ -58,9 +58,10 @@ var kbListCmd = &cobra.Command{
 	Long: `List the knowledge bubbles available in this project's context.
 
 Bubbles are Curator-maintained syntheses of your team's knowledge (ox
-ADR-028), listed per scope from the KB API. Inside an ox-initialized repo
-the ambient scope is the repo's team; your personal scope joins it once
-personal-team provisioning is fully rolled out. Team Contexts and Ledgers
+ADR-028), listed per scope from the KB API. Inside an ox-initialized repo,
+the ambient scope is the repo's team. Personal-scope listing is not yet
+available — it remains deferred until personal-team provisioning is fully
+rolled out. Team Contexts and Ledgers
 are separate, permanent conversation stores — list them with ` + "`ox teams`" + `
 and ` + "`ox status`" + `, not here.
 
