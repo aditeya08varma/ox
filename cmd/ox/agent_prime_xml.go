@@ -408,7 +408,7 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		if len(output.KB) > 0 {
 			sb.WriteString("\n<knowledge-bubbles>\n")
 			if output.KBGuidance != "" {
-				sb.WriteString(output.KBGuidance)
+				sb.WriteString(escapeXML(output.KBGuidance))
 				sb.WriteString("\n")
 			}
 			sb.WriteString("| Slug | Name | Topics | Mounted at |\n")

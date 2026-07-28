@@ -44,6 +44,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -191,7 +192,7 @@ func (s *SyncScheduler) reconcileProjectSymlinksWithOps(ctx context.Context, pro
 				continue
 			}
 			linkPath := filepath.Join(kbDir, filepath.FromSlash(rel))
-			if err := ops.remove(linkPath); err != nil && !os.IsNotExist(err) {
+			if err := ops.remove(linkPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 				s.logger.Warn("kb_symlink prune failed", "project", projectRoot, "link", rel, "error", err)
 				continue
 			}

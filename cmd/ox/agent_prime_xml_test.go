@@ -1266,8 +1266,13 @@ func TestOutputAgentPrimeXML_KnowledgeBubbles(t *testing.T) {
 	}
 	block := xml[start:end]
 
-	if !strings.Contains(block, prime.KBGuidanceText) {
-		t.Errorf("block must inline the KB consumption guidance, got:\n%s", block)
+	// guidance is XML-escaped at emit (it contains `<#slug>`); assert the
+	// escaped form so raw-emission regressions fail this test.
+	if !strings.Contains(block, escapeXML(prime.KBGuidanceText)) {
+		t.Errorf("block must inline the XML-escaped KB consumption guidance, got:\n%s", block)
+	}
+	if strings.Contains(block, "describe <#slug>") {
+		t.Errorf("guidance must not be emitted raw (unescaped '<'), got:\n%s", block)
 	}
 	for _, want := range []string{
 		"#platform",
