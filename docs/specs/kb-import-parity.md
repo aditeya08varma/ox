@@ -12,6 +12,19 @@
 **Status:** ~~implemented~~ superseded — CLI surface removed (epic `ox-nsf7`)
 **Audience:** SageOx engineers working on `ox import`, the recordings API client, or Knowledge Bubble ingestion
 
+---
+
+## ⚠️ Historical design record — nothing below is supported guidance
+
+Everything from here down is the original (pre-ADR-028) design, preserved
+verbatim as a record of the import mechanisms and their storage asymmetry.
+The `--kb` flag, the recording-file import flow, and the `/kb/{id}/recordings`
+client paths described below **no longer exist**. The only part that remains
+current is the `--team` document-LFS path, whose live documentation is
+`docs/reference/import.mdx`.
+
+---
+
 `ox import` historically targeted team contexts only. This design brings Knowledge Bubbles to
 parity for the import paths that go through the cloud recording pipeline, and documents which
 path is deliberately deferred.
