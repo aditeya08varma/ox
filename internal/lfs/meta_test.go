@@ -420,7 +420,7 @@ func TestWriteSessionMeta_PreservesGitContent_ReplacesLFSContent(t *testing.T) {
 		AgentType:   "claude-code",
 		CreatedAt:   time.Now(),
 		Files: map[string]FileRef{
-			"raw.jsonl":    {Storage: StorageLFS, OID: "sha256:abc", Size: int64(len(rawContent))},
+			"raw.jsonl":    {Storage: StorageLFS, OID: "sha256:" + ComputeOID(rawContent), Size: int64(len(rawContent))},
 			"summary.json": NewGitFileRef(int64(len(summaryContent))),
 		},
 	}
@@ -444,8 +444,10 @@ func TestWriteSessionMeta_ReplacesContentWithPointers(t *testing.T) {
 	require.NoError(t, os.MkdirAll(sessionDir, 0755))
 
 	// write real content files that simulate post-upload state
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), []byte(`{"event":"test"}`), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte("# Summary"), 0644))
+	rawContent := []byte(`{"event":"test"}`)
+	summaryContent := []byte("# Summary")
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "raw.jsonl"), rawContent, 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(sessionDir, "summary.md"), summaryContent, 0644))
 
 	meta := &SessionMeta{
 		Version:     "1.0",
@@ -455,8 +457,8 @@ func TestWriteSessionMeta_ReplacesContentWithPointers(t *testing.T) {
 		AgentType:   "claude-code",
 		CreatedAt:   time.Now(),
 		Files: map[string]FileRef{
-			"raw.jsonl":  {OID: "sha256:abc123", Size: 16},
-			"summary.md": {OID: "sha256:def456", Size: 9},
+			"raw.jsonl":  {OID: "sha256:" + ComputeOID(rawContent), Size: 16},
+			"summary.md": {OID: "sha256:" + ComputeOID(summaryContent), Size: 9},
 		},
 	}
 
@@ -472,7 +474,7 @@ func TestWriteSessionMeta_ReplacesContentWithPointers(t *testing.T) {
 	// pointer files should round-trip correctly
 	ref, err := ReadPointerFile(filepath.Join(sessionDir, "raw.jsonl"))
 	require.NoError(t, err)
-	assert.Equal(t, "sha256:abc123", ref.OID)
+	assert.Equal(t, "sha256:"+ComputeOID(rawContent), ref.OID)
 	assert.Equal(t, int64(16), ref.Size)
 }
 
@@ -745,9 +747,12 @@ func TestWriteSessionMeta_WritesPointers_WriteSessionMetaOnlyDoesNot(t *testing.
 	rawContent := []byte(`{"type":"header"}`)
 	summaryContent := []byte("# Summary")
 
+	// OIDs are the real content hashes — that is what the upload path stores
+	// (meta.go builds each FileRef as "sha256:"+ComputeOID(content)), and
+	// WritePointerFile now refuses to pointerize content an OID doesn't describe.
 	files := map[string]FileRef{
-		"raw.jsonl":  {OID: "sha256:abc123", Size: int64(len(rawContent))},
-		"summary.md": {OID: "sha256:def456", Size: int64(len(summaryContent))},
+		"raw.jsonl":  {OID: "sha256:" + ComputeOID(rawContent), Size: int64(len(rawContent))},
+		"summary.md": {OID: "sha256:" + ComputeOID(summaryContent), Size: int64(len(summaryContent))},
 	}
 	meta := &SessionMeta{
 		Version:   "1.0",

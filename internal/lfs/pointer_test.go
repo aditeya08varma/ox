@@ -288,8 +288,11 @@ func TestWritePointerFile_OverwritesLargeContent(t *testing.T) {
 	}
 	require.NoError(t, os.WriteFile(path, largeContent, 0644))
 
-	// overwrite with pointer
-	ref := FileRef{OID: "sha256:abc123", Size: int64(len(largeContent))}
+	// Overwrite with a pointer for THIS content. The OID must be the content's
+	// real hash — that is exactly what the upload path produces (meta.go builds
+	// every FileRef as "sha256:"+ComputeOID(content)), and it is what proves the
+	// bytes reached the LFS store before we drop the local copy.
+	ref := FileRef{OID: "sha256:" + ComputeOID(largeContent), Size: int64(len(largeContent))}
 	require.NoError(t, WritePointerFile(path, ref))
 
 	// verify file is now a pointer (small)
@@ -297,6 +300,56 @@ func TestWritePointerFile_OverwritesLargeContent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Less(t, info.Size(), int64(maxPointerSize), "pointer file should be small")
 	assert.True(t, IsPointerFile(path))
+}
+
+// TestWritePointerFile_RefusesToClobberMismatchedContent pins the invariant that
+// prevents silent, unrecoverable recording loss.
+//
+// Failure prevented: a meta.json whose Files map disagrees with the blob on disk
+// — the state independently-resolved merge conflicts produce — gets pointerized
+// by UpdateMetaSummary, which rewrites pointers for the WHOLE Files map. One
+// stale OID destroys the only local copy; if that OID was never uploaded, the
+// next push is rejected with "LFS objects are missing" and the reconcile path
+// then blanks the file to zero bytes. No doctor check detects the result.
+func TestWritePointerFile_RefusesToClobberMismatchedContent(t *testing.T) {
+	dir := t.TempDir()
+
+	readBack := func(t *testing.T, path string) string {
+		t.Helper()
+		data, err := os.ReadFile(path)
+		require.NoError(t, err)
+		return string(data)
+	}
+
+	t.Run("real content with a mismatched OID is refused", func(t *testing.T) {
+		path := filepath.Join(dir, "raw.jsonl")
+		content := []byte(`{"type":"header"}` + "\n")
+		require.NoError(t, os.WriteFile(path, content, 0644))
+
+		err := WritePointerFile(path, FileRef{OID: "sha256:deadbeef", Size: int64(len(content))})
+		require.Error(t, err, "must refuse rather than destroy the only local copy")
+		assert.Equal(t, string(content), readBack(t, path), "content must survive untouched")
+	})
+
+	t.Run("an existing pointer may be replaced by a different pointer", func(t *testing.T) {
+		// A redaction pass legitimately installs a new OID over the old pointer.
+		// Nothing is lost — the old bytes were never on disk to begin with.
+		path := filepath.Join(dir, "redacted.jsonl")
+		require.NoError(t, WritePointerFile(path, FileRef{OID: "sha256:" + ComputeOID([]byte("v1")), Size: 2}))
+
+		newRef := FileRef{OID: "sha256:" + ComputeOID([]byte("v2")), Size: 2}
+		require.NoError(t, WritePointerFile(path, newRef))
+
+		oid, _, err := ParsePointer(readBack(t, path))
+		require.NoError(t, err)
+		assert.Equal(t, newRef.OID, oid, "ParsePointer returns the prefixed OID as written")
+	})
+
+	t.Run("writing into a fresh path always succeeds", func(t *testing.T) {
+		path := filepath.Join(dir, "brand-new.jsonl")
+		require.NoError(t, WritePointerFile(path, FileRef{OID: "sha256:abc123", Size: 7}))
+		assert.True(t, IsPointerFile(path))
+	})
 }
 
 func TestNewFileRef_EndToEnd_RoundTrip(t *testing.T) {

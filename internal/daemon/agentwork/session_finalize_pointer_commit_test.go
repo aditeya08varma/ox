@@ -51,8 +51,11 @@ func TestPointerRewrite_CommittedAfterPush(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// simulate LFS upload having succeeded — create file refs
-	oid := "sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+	// Simulate LFS upload having succeeded — create file refs. The OID must be
+	// the content's real hash, which is what a real upload produces. Pointerizing
+	// content that an OID does not describe is refused, because that is the shape
+	// of a meta/blob disagreement and it would destroy the only local copy.
+	oid := "sha256:" + lfs.ComputeOID(rawContent)
 	fileRefs := map[string]lfs.FileRef{
 		"raw.jsonl": {OID: oid, Size: int64(len(rawContent)), Storage: "lfs"},
 	}
