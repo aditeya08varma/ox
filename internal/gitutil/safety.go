@@ -8,7 +8,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -66,6 +69,53 @@ func HasLockFiles(gitDir string) []string {
 	return lockFilesIn(gitDir)
 }
 
+// lockOwnerPID extracts the owning process ID from a lock filename that encodes
+// one. Today that is only git's next-index-<pid>.lock.
+//
+// Returns ok=false for locks that carry no owner information. git's index.lock
+// is the canonical example: it IS the lock (its content is the partially-written
+// index, not metadata), so there is no owner to interrogate and age is the only
+// signal available. That is a property of git's on-disk format, not a shortcut.
+func lockOwnerPID(lockName string) (int, bool) {
+	const prefix, suffix = "next-index-", ".lock"
+	if !strings.HasPrefix(lockName, prefix) || !strings.HasSuffix(lockName, suffix) {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(lockName, prefix), suffix))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
+}
+
+// processAlive reports whether pid names a running process.
+//
+// Biased toward reporting "alive": a false positive merely leaves a lock in
+// place (recoverable — the next sweep retries), while a false negative deletes a
+// lock a live git still holds, which can corrupt the index and lose uncommitted
+// work. Ambiguity therefore resolves to alive.
+func processAlive(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false // Windows: the process does not exist
+	}
+	if runtime.GOOS == "windows" {
+		// FindProcess succeeding is as much as we can cheaply establish here,
+		// and the conservative reading is "still running".
+		return true
+	}
+	// Unix: FindProcess always succeeds, so probe with signal 0.
+	err = proc.Signal(syscall.Signal(0))
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, os.ErrPermission):
+		return true // alive, just owned by another user
+	default:
+		return false // ESRCH — no such process
+	}
+}
+
 // StaleLockAge is how old a git lock file must be before we consider it abandoned.
 // Git operations normally hold locks for milliseconds to a few seconds, but a slow
 // git pull --rebase on a large repo over a poor network can hold index.lock for
@@ -85,6 +135,14 @@ func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 			if !errors.Is(err, os.ErrNotExist) {
 				errs = append(errs, fmt.Errorf("stat %s: %w", lock, err))
 			}
+			continue
+		}
+		// Owner liveness beats age whenever the owner is knowable. A
+		// next-index-<pid>.lock names the process that created it, so a live
+		// owner means the lock is legitimately held no matter how old it is —
+		// removing it there could let a second writer scribble over the index
+		// mid-write. Age is only a fallback for locks that carry no owner.
+		if pid, ok := lockOwnerPID(lock); ok && processAlive(pid) {
 			continue
 		}
 		if time.Since(info.ModTime()) < StaleLockAge {

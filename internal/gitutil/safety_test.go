@@ -1,6 +1,7 @@
 package gitutil
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -428,4 +429,104 @@ func TestLockSweep_PidSuffixedAndSelfHealing(t *testing.T) {
 		assert.Error(t, IsSafeForGitOps(repo),
 			"a lock a running git may still hold must block")
 	})
+}
+
+// TestLockSweep_OwnerLivenessBeatsAge covers the case age alone gets wrong:
+// a lock whose owning process is STILL RUNNING must survive the sweep no matter
+// how old it is. Deleting it would let a second writer into the index mid-write
+// and lose uncommitted work — the one outcome worse than a blocked push.
+//
+// Only next-index-<pid>.lock encodes an owner. git's index.lock IS the lock (its
+// content is the partially-written index), so no owner exists to interrogate and
+// age remains the only available signal there.
+func TestLockSweep_OwnerLivenessBeatsAge(t *testing.T) {
+	ancient := time.Now().Add(-100 * StaleLockAge)
+
+	writeAged := func(t *testing.T, gitDir, name string) string {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+		p := filepath.Join(gitDir, name)
+		require.NoError(t, os.WriteFile(p, []byte("lock"), 0644))
+		require.NoError(t, os.Chtimes(p, ancient, ancient))
+		return p
+	}
+
+	t.Run("live owner retains the lock despite extreme age", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		// Our own PID is guaranteed alive for the duration of this test.
+		p := writeAged(t, gitDir, fmt.Sprintf("next-index-%d.lock", os.Getpid()))
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Empty(t, removed, "a lock held by a LIVE process must never be removed")
+		assert.FileExists(t, p, "removing it could corrupt the index mid-write")
+
+		// And the repo must stay blocked rather than silently proceeding.
+		assert.Error(t, IsSafeForGitOps(filepath.Dir(gitDir)),
+			"an actively-held lock must keep blocking git operations")
+	})
+
+	t.Run("dead owner allows removal", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		// PID 0x7FFFFFFF is not a live process on any realistic system.
+		p := writeAged(t, gitDir, "next-index-2147483647.lock")
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Contains(t, removed, "next-index-2147483647.lock",
+			"a lock whose owner is verifiably gone is abandoned")
+		assert.NoFileExists(t, p)
+	})
+
+	t.Run("ownerless lock still falls back to age", func(t *testing.T) {
+		// index.lock carries no PID, so age is the only signal git's format offers.
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		p := writeAged(t, gitDir, "index.lock")
+
+		removed, _ := RemoveStaleLockFiles(gitDir)
+		assert.Contains(t, removed, "index.lock")
+		assert.NoFileExists(t, p)
+	})
+
+	t.Run("ownerless lock younger than StaleLockAge is retained", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+		p := filepath.Join(gitDir, "index.lock")
+		require.NoError(t, os.WriteFile(p, []byte("lock"), 0644))
+
+		removed, _ := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, removed, "a lock a running git may still hold must survive")
+		assert.FileExists(t, p)
+	})
+}
+
+func TestLockOwnerPID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		lock    string
+		wantPID int
+		wantOK  bool
+	}{
+		{"next-index with pid", "next-index-13088.lock", 13088, true},
+		{"index.lock has no owner", "index.lock", 0, false},
+		{"shallow.lock has no owner", "shallow.lock", 0, false},
+		{"non-numeric pid", "next-index-abc.lock", 0, false},
+		{"empty pid", "next-index-.lock", 0, false},
+		{"zero pid rejected", "next-index-0.lock", 0, false},
+		{"negative pid rejected", "next-index--5.lock", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pid, ok := lockOwnerPID(tt.lock)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantPID, pid)
+		})
+	}
+}
+
+func TestProcessAlive(t *testing.T) {
+	assert.True(t, processAlive(os.Getpid()), "our own process is alive")
+	assert.False(t, processAlive(2147483647), "an implausible PID is not alive")
 }
