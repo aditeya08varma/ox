@@ -888,19 +888,37 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 			_, err := os.Stat(filepath.Join(paths.TeamContextDir(teamID, projectEndpoint), ".git"))
 			return err != nil
 		}
-		sort.SliceStable(otherCloudTCs, func(i, j int) bool {
-			ni, nj := notCloned(otherCloudTCs[i].info.StableID()), notCloned(otherCloudTCs[j].info.StableID())
-			if ni != nj {
-				return ni
+		// merge cloud + detail-only entries into ONE ordered list so the
+		// needs-attention-first ordering holds across sources — sorting the
+		// two collections independently would rank a healthy cloud team
+		// above a not-cloned detail-only team.
+		type otherTCEntry struct {
+			render    func()
+			notCloned bool
+			name      string
+		}
+		merged := make([]otherTCEntry, 0, len(otherCloudTCs)+len(otherDetailTCs))
+		for _, entry := range otherCloudTCs {
+			info := entry.info
+			merged = append(merged, otherTCEntry{
+				render:    func() { renderCloudTC(info, verbose) },
+				notCloned: notCloned(info.StableID()),
+				name:      info.Name,
+			})
+		}
+		for _, entry := range otherDetailTCs {
+			info := entry.info
+			merged = append(merged, otherTCEntry{
+				render:    func() { renderDetailTC(info, verbose) },
+				notCloned: notCloned(info.StableID()),
+				name:      info.Name,
+			})
+		}
+		sort.SliceStable(merged, func(i, j int) bool {
+			if merged[i].notCloned != merged[j].notCloned {
+				return merged[i].notCloned
 			}
-			return otherCloudTCs[i].info.Name < otherCloudTCs[j].info.Name
-		})
-		sort.SliceStable(otherDetailTCs, func(i, j int) bool {
-			ni, nj := notCloned(otherDetailTCs[i].info.StableID()), notCloned(otherDetailTCs[j].info.StableID())
-			if ni != nj {
-				return ni
-			}
-			return otherDetailTCs[i].info.Name < otherDetailTCs[j].info.Name
+			return merged[i].name < merged[j].name
 		})
 
 		b.WriteString("\n")
@@ -909,13 +927,9 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusMutedStyle.Render("───────────────────"))
 		b.WriteString("\n")
 
-		for _, entry := range otherCloudTCs {
+		for _, entry := range merged {
 			hasAnyTeams = true
-			renderCloudTC(entry.info, verbose)
-		}
-		for _, entry := range otherDetailTCs {
-			hasAnyTeams = true
-			renderDetailTC(entry.info, verbose)
+			entry.render()
 		}
 	}
 
