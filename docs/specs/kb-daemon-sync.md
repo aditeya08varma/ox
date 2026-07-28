@@ -116,7 +116,7 @@ failure modes. The kb checks (`cmd/ox/doctor_kb.go`,
 | `kb-stale-sync` | (kb-specific) | `meta.json` `last_sync` > 1h | kick daemon sync |
 | `kb-failed-provision` | (kb-specific) | server `lifecycle_state=provision-failed` | requires-agent (server side) |
 | `kb-global-sync-no-owner` | (kb-specific, ox-6zme) | an endpoint with daemons but no lease holder | check-only |
-| `kb-project-config-migrate` | (kb-specific, ADR-017) | legacy `config.json` → `config.yaml` | auto — **slated for removal under ox ADR-028 / epic `ox-6hvs`** (waits on repo→KB provisioning that never happens) |
+| `kb-project-config-migrate` | (kb-specific, ADR-017) | legacy `config.json` → `config.yaml` | **DEPRECATED, non-operative** (ox ADR-028): its repo→KB provisioning premise no longer holds, so it cannot complete and misreports repos as "orphans." Do not rely on it; still present in the binary until epic `ox-6hvs` deletes it |
 
 **Design rule — repairs go through the daemon, not the CLI.** The daemon owns kb
 git writes and serializes them with the per-kb flock. A kb doctor repair therefore
