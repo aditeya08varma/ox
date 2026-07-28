@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -183,9 +184,42 @@ const lfsPointerPrefix = "version https://git-lfs.github.com/spec/v1"
 // pointers are ~130 bytes; anything larger is content by definition.
 const maxLFSPointerSize = 200
 
-// isLFSPointerBlob reports whether the given blob content is an LFS pointer.
+// isLFSPointerBlob reports whether the given blob content is a COMPLETE, valid
+// LFS pointer.
+//
+// The full shape is required, not just the version prefix. A truncated pointer
+// — or a short artifact that merely starts with the spec line — must not win a
+// conflict against valid content: downstream LFS parsing would reject it, so
+// "winning" would mean committing an unusable blob over a good one. Mirrors the
+// validation in lfs.ParsePointer, which gitutil cannot import (lfs depends on
+// gitutil, so the import would cycle).
 func isLFSPointerBlob(content string) bool {
-	return len(content) <= maxLFSPointerSize && strings.HasPrefix(content, lfsPointerPrefix)
+	if len(content) > maxLFSPointerSize || !strings.HasPrefix(content, lfsPointerPrefix) {
+		return false
+	}
+	var haveOID, haveSize bool
+	for _, line := range strings.Split(strings.TrimSpace(content), "\n") {
+		switch {
+		case strings.HasPrefix(line, "oid "):
+			// require a non-empty, hex-shaped digest with its algorithm prefix
+			oid := strings.TrimPrefix(line, "oid ")
+			if !strings.HasPrefix(oid, "sha256:") {
+				return false
+			}
+			digest := strings.TrimPrefix(oid, "sha256:")
+			if digest == "" || strings.ContainsAny(digest, " \t") {
+				return false
+			}
+			haveOID = true
+		case strings.HasPrefix(line, "size "):
+			size, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "size ")), 10, 64)
+			if err != nil || size <= 0 {
+				return false
+			}
+			haveSize = true
+		}
+	}
+	return haveOID && haveSize
 }
 
 // pointerWinsStage decides a content conflict where the two sides disagree

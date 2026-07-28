@@ -123,6 +123,20 @@ func processAlive(pid int) bool {
 // while still recovering from crashed processes.
 const StaleLockAge = 5 * time.Minute
 
+// AbandonedLockAge is how old an OWNERLESS lock (index.lock, shallow.lock,
+// config.lock, HEAD.lock) must be before it is treated as abandoned.
+//
+// Much longer than StaleLockAge on purpose. Those files carry no PID, so there
+// is no owner to probe and age is the only signal — and five minutes is not a
+// safe bound: a slow `git pull --rebase` on a large repo over a bad network can
+// legitimately hold the index longer than that, and deleting the lock would
+// admit a second writer and risk index corruption or lost uncommitted work.
+//
+// No index operation stays live for an hour. A lock that old is a crash, which
+// is the case worth recovering from — the real incident was a
+// next-index-<pid>.lock plus an index.lock sitting untouched for three months.
+const AbandonedLockAge = 1 * time.Hour
+
 // RemoveStaleLockFiles removes git lock files older than StaleLockAge.
 // Safe to call at daemon startup or before pull operations — only removes
 // files that no running git process could still be holding.
@@ -137,16 +151,25 @@ func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
 			}
 			continue
 		}
-		// Owner liveness beats age whenever the owner is knowable. A
-		// next-index-<pid>.lock names the process that created it, so a live
-		// owner means the lock is legitimately held no matter how old it is —
-		// removing it there could let a second writer scribble over the index
-		// mid-write. Age is only a fallback for locks that carry no owner.
-		if pid, ok := lockOwnerPID(lock); ok && processAlive(pid) {
+		age := time.Since(info.ModTime())
+		if pid, ok := lockOwnerPID(lock); ok {
+			// Owner is knowable: liveness decides, and it overrides age
+			// entirely. A live owner means the lock is legitimately held no
+			// matter how old it is — removing it could let a second writer
+			// scribble over the index mid-write.
+			if processAlive(pid) {
+				continue
+			}
+			if age < StaleLockAge {
+				continue // owner is gone, but give a just-exited process room
+			}
+		} else if age < AbandonedLockAge {
+			// Ownerless lock. git's index.lock IS the lock — no PID to probe —
+			// so age is the only available signal, and it is a weak one: a slow
+			// legitimate operation CAN hold the index past StaleLockAge. Require
+			// a threshold no plausible index operation reaches before assuming
+			// abandonment, so a live writer is never displaced.
 			continue
-		}
-		if time.Since(info.ModTime()) < StaleLockAge {
-			continue // recent enough to be from an active process
 		}
 		if err := os.Remove(path); err != nil {
 			errs = append(errs, fmt.Errorf("remove %s: %w", lock, err))

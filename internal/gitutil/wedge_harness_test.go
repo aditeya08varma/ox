@@ -263,7 +263,9 @@ func TestWedge_StaleLockBlocksPushForever(t *testing.T) {
 			f := newLedgerFixture(t)
 			p := filepath.Join(f.local, ".git", lock)
 			require.NoError(t, os.WriteFile(p, []byte("stale"), 0o644))
-			old := time.Now().Add(-2 * StaleLockAge)
+			// ownerless locks (index.lock, shallow.lock) require AbandonedLockAge;
+			// pid-encoded ones are decided by owner liveness, so this covers both
+			old := time.Now().Add(-2 * AbandonedLockAge)
 			require.NoError(t, os.Chtimes(p, old, old))
 
 			// 1. detected

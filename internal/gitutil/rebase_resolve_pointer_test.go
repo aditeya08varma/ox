@@ -145,6 +145,17 @@ func TestIsLFSPointerBlob(t *testing.T) {
 		// stops a hydrated file that happens to begin with the marker from being
 		// misclassified as safe to keep.
 		{"prefix but oversized", valid + string(make([]byte, maxLFSPointerSize)), false},
+		// A malformed pointer must NOT win a conflict. Downstream LFS parsing
+		// rejects it, so treating it as a pointer would commit an unusable blob
+		// over valid content — a data-loss dressed up as a safety guard.
+		{"truncated: version line only", lfsPointerPrefix + "\n", false},
+		{"missing size", lfsPointerPrefix + "\noid sha256:abc123\n", false},
+		{"missing oid", lfsPointerPrefix + "\nsize 100\n", false},
+		{"empty oid digest", lfsPointerPrefix + "\noid sha256:\nsize 100\n", false},
+		{"oid without algorithm prefix", lfsPointerPrefix + "\noid abc123\nsize 100\n", false},
+		{"non-numeric size", lfsPointerPrefix + "\noid sha256:abc123\nsize huge\n", false},
+		{"zero size", lfsPointerPrefix + "\noid sha256:abc123\nsize 0\n", false},
+		{"negative size", lfsPointerPrefix + "\noid sha256:abc123\nsize -5\n", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
