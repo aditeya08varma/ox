@@ -345,3 +345,87 @@ func TestFetchHeadAge(t *testing.T) {
 		assert.Greater(t, age, 4*time.Minute)
 	})
 }
+
+// TestLockSweep_PidSuffixedAndSelfHealing covers the wedge that kept a real
+// ledger blocked for three months: a next-index-<pid>.lock left by a crashed
+// git. Its pid varies, so it can never be listed in knownLockFiles, and the
+// push pre-flight only ever *reported* locks — it never cleared them, unlike
+// the pull path. Detection and removal must agree, and IsSafeForGitOps must
+// self-heal an abandoned lock rather than blocking forever.
+func TestLockSweep_PidSuffixedAndSelfHealing(t *testing.T) {
+	stale := time.Now().Add(-2 * StaleLockAge)
+
+	newGitDir := func(t *testing.T) (repo, gitDir string) {
+		t.Helper()
+		repo = t.TempDir()
+		gitDir = filepath.Join(repo, ".git")
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+		return repo, gitDir
+	}
+
+	writeLock := func(t *testing.T, gitDir, name string, mtime time.Time) string {
+		t.Helper()
+		p := filepath.Join(gitDir, name)
+		require.NoError(t, os.WriteFile(p, []byte("lock"), 0644))
+		require.NoError(t, os.Chtimes(p, mtime, mtime))
+		return p
+	}
+
+	t.Run("pid-suffixed next-index lock is detected", func(t *testing.T) {
+		_, gitDir := newGitDir(t)
+		writeLock(t, gitDir, "next-index-13088.lock", stale)
+
+		assert.Contains(t, HasLockFiles(gitDir), "next-index-13088.lock",
+			"a lock we cannot detect is a lock we can never clear")
+	})
+
+	t.Run("pid-suffixed next-index lock is removable when stale", func(t *testing.T) {
+		_, gitDir := newGitDir(t)
+		p := writeLock(t, gitDir, "next-index-13088.lock", stale)
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Contains(t, removed, "next-index-13088.lock")
+		assert.NoFileExists(t, p)
+	})
+
+	t.Run("fresh locks are never swept", func(t *testing.T) {
+		_, gitDir := newGitDir(t)
+		fresh := writeLock(t, gitDir, "next-index-999.lock", time.Now())
+		freshIndex := writeLock(t, gitDir, "index.lock", time.Now())
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Empty(t, removed, "a live git process must not have its lock yanked")
+		assert.FileExists(t, fresh)
+		assert.FileExists(t, freshIndex)
+	})
+
+	t.Run("ref locks are left alone", func(t *testing.T) {
+		_, gitDir := newGitDir(t)
+		// packed-refs.lock belongs to a ref transaction, not the index. A broad
+		// "*.lock" sweep would eat it; we must not.
+		packed := writeLock(t, gitDir, "packed-refs.lock", stale)
+
+		removed, _ := RemoveStaleLockFiles(gitDir)
+		assert.NotContains(t, removed, "packed-refs.lock")
+		assert.FileExists(t, packed)
+	})
+
+	t.Run("IsSafeForGitOps self-heals an abandoned lock", func(t *testing.T) {
+		repo, gitDir := newGitDir(t)
+		p := writeLock(t, gitDir, "index.lock", stale)
+
+		assert.NoError(t, IsSafeForGitOps(repo),
+			"an abandoned lock must not block pushes forever")
+		assert.NoFileExists(t, p)
+	})
+
+	t.Run("IsSafeForGitOps still blocks on a live lock", func(t *testing.T) {
+		repo, gitDir := newGitDir(t)
+		writeLock(t, gitDir, "index.lock", time.Now())
+
+		assert.Error(t, IsSafeForGitOps(repo),
+			"a lock a running git may still hold must block")
+	})
+}

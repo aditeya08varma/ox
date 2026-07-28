@@ -37,6 +37,14 @@ import (
 // Delegates to manifest defaults so the set is configurable via
 // .sageox/sync.manifest without a code change. CLI callers (session upload,
 // doctor) use this; the daemon reads from the manifest directly when available.
+//
+// NOTE: sessions/ is deliberately NOT auto-resolved yet. Doing so is the
+// obvious fix for the sessions/*/meta.json wedge, but it is not safe until the
+// LFS pointer-vs-hydrated conflict class is handled — see bd ox-zmjc. On a real
+// wedged ledger every mixed content conflict is local=hydrated / remote=pointer,
+// and accept-theirs resolves to the LOCAL side during a rebase, which would
+// commit hydrated bytes over the remote pointer and permanently break pushes
+// (.claude/rules/cache-only-design.md).
 var DefaultResolveRules = manifest.DefaultResolveRules
 
 // AutoResolvePrefixes extracts auto-resolve paths from the default rules.

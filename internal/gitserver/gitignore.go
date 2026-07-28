@@ -240,6 +240,21 @@ func EnsureGitignoreBeforeCommitCtx(ctx context.Context, repoPath string) {
 		slog.Debug("pre-commit .rej untrack failed", "path", repoPath, "error", err, "output", strings.TrimSpace(string(out)))
 	}
 
+	// untrack .needs-summary markers committed before sessions/.gitignore
+	// excluded them. The marker is machine-local scheduling state holding
+	// ABSOLUTE local paths, so it both leaks the writer's home directory into a
+	// shared repo and can never merge cleanly between two machines. The cloud
+	// summarizer deletes it on completion while a local writer modifies it —
+	// a modify/delete conflict that resolves toward the local modification and
+	// resurrects a retired marker forever. --cached preserves the local files,
+	// so in-flight summarization is unaffected; --sparse reaches tracked paths
+	// outside the sparse cone.
+	rmNeedsSummaryCmd := exec.CommandContext(ctx, "git", "-C", repoPath,
+		"rm", "--cached", "--sparse", "--ignore-unmatch", "*.needs-summary")
+	if out, err := rmNeedsSummaryCmd.CombinedOutput(); err != nil {
+		slog.Debug("pre-commit .needs-summary untrack failed", "path", repoPath, "error", err, "output", strings.TrimSpace(string(out)))
+	}
+
 	// untrack root-level codedb/ that was committed before the path was fixed
 	// (codedb now lives at .sageox/cache/codedb/ inside the ledger).
 	rmCodedbCmd := exec.CommandContext(ctx, "git", "-C", repoPath,

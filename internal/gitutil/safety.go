@@ -5,6 +5,7 @@ package gitutil
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,17 +24,46 @@ var knownLockFiles = []string{
 	"HEAD.lock",
 }
 
-// HasLockFiles checks .git/ for stale lock files that block git operations.
-// Returns the names of lock files found (empty slice = safe to proceed).
-func HasLockFiles(gitDir string) []string {
+// knownLockGlobs are lock-file patterns whose exact name isn't predictable.
+// git writes .git/next-index-<pid>.lock while rebuilding the index; a process
+// killed mid-write leaves one behind, and because the pid varies it can never
+// be enumerated in knownLockFiles.
+//
+// Deliberately NOT a broad "*.lock": that would sweep packed-refs.lock and
+// ref-transaction locks, which belong to operations we must not interfere with.
+var knownLockGlobs = []string{
+	"next-index-*.lock",
+}
+
+// lockFilesIn returns the .git-relative names of every lock file present,
+// covering both the fixed names and the pid-suffixed globs. Shared by
+// HasLockFiles and RemoveStaleLockFiles so the two can never drift — a lock
+// that one detects but the other cannot clear is a permanent wedge, which is
+// exactly how a ledger sat blocked for three months on a stray
+// next-index-13088.lock.
+func lockFilesIn(gitDir string) []string {
 	var found []string
 	for _, lock := range knownLockFiles {
-		path := filepath.Join(gitDir, lock)
-		if _, err := os.Stat(path); err == nil {
+		if _, err := os.Stat(filepath.Join(gitDir, lock)); err == nil {
 			found = append(found, lock)
 		}
 	}
+	for _, pattern := range knownLockGlobs {
+		matches, err := filepath.Glob(filepath.Join(gitDir, pattern))
+		if err != nil {
+			continue // malformed pattern — treat as no match
+		}
+		for _, m := range matches {
+			found = append(found, filepath.Base(m))
+		}
+	}
 	return found
+}
+
+// HasLockFiles checks .git/ for stale lock files that block git operations.
+// Returns the names of lock files found (empty slice = safe to proceed).
+func HasLockFiles(gitDir string) []string {
+	return lockFilesIn(gitDir)
 }
 
 // StaleLockAge is how old a git lock file must be before we consider it abandoned.
@@ -48,7 +78,7 @@ const StaleLockAge = 5 * time.Minute
 // files that no running git process could still be holding.
 // Returns the names of files removed and any removal errors encountered.
 func RemoveStaleLockFiles(gitDir string) (removed []string, errs []error) {
-	for _, lock := range knownLockFiles {
+	for _, lock := range lockFilesIn(gitDir) {
 		path := filepath.Join(gitDir, lock)
 		info, err := os.Stat(path)
 		if err != nil {
@@ -129,6 +159,15 @@ func RebaseAge(repoPath string) (time.Duration, bool) {
 // why the repo is blocked.
 func IsSafeForGitOps(repoPath string) error {
 	gitDir := filepath.Join(repoPath, ".git")
+
+	// Sweep abandoned locks before reporting them as blocking. Without this the
+	// push path is asymmetric with the pull path (which already sweeps before
+	// every pull), so a lock left by a crashed git blocks every future push
+	// forever with no self-heal. Gated on StaleLockAge, so a lock held by a
+	// live git process is never touched.
+	if removed, errs := RemoveStaleLockFiles(gitDir); len(removed) > 0 || len(errs) > 0 {
+		slog.Info("git lock sweep", "repo", repoPath, "removed", strings.Join(removed, ","), "errors", len(errs))
+	}
 
 	if locks := HasLockFiles(gitDir); len(locks) > 0 {
 		return fmt.Errorf("git lock files detected: %s (remove stale locks or wait for in-progress operation)", strings.Join(locks, ", "))
