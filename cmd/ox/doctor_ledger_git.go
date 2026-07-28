@@ -331,9 +331,13 @@ func fixLedgerBranchBehind(ledgerPath string, behindCount int) checkResult {
 	output, err := pullCmd.CombinedOutput()
 	if err != nil {
 		errStr := strings.TrimSpace(string(output))
-		// try accept-theirs for data/github/ conflicts
+		// Route through automerge, not the bare accept-theirs call. This was the
+		// one reconcile path that skipped the tiered resolver, so it got no union
+		// tier and no LLM tier while every other path (CLI push, daemon pull,
+		// diverged fix) went through ledgerLLMResolveHook. Behind-only pulls hit
+		// exactly the same sessions/ conflicts as the others.
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		resolveErr := gitutil.ResolveRebaseAcceptTheirs(ctx, ledgerPath, ledgerAutoResolvePrefixes)
+		_, resolveErr := ledgerLLMResolveHook()(ctx, ledgerPath, nil)
 		cancel()
 		if resolveErr != nil {
 			slog.Debug("rebase auto-resolve failed", "error", resolveErr)
