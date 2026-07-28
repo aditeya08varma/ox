@@ -104,8 +104,7 @@ daemon pulls the bubbles or a sibling does. The human view renders a
 
 A bubble is a daemon-managed git checkout like a ledger, so it shares the same
 failure modes. The kb checks (`cmd/ox/doctor_kb.go`,
-`doctor_kb_repo_health.go`, `doctor_kb_global_sync.go`,
-`doctor_kb_migrate.go`):
+`doctor_kb_repo_health.go`, `doctor_kb_global_sync.go`):
 
 | kb check | Mirrors | What it catches | Fix |
 |---|---|---|---|
@@ -116,7 +115,7 @@ failure modes. The kb checks (`cmd/ox/doctor_kb.go`,
 | `kb-stale-sync` | (kb-specific) | `meta.json` `last_sync` > 1h | kick daemon sync |
 | `kb-failed-provision` | (kb-specific) | server `lifecycle_state=provision-failed` | requires-agent (server side) |
 | `kb-global-sync-no-owner` | (kb-specific, ox-6zme) | an endpoint with daemons but no lease holder | check-only |
-| `kb-project-config-migrate` | (kb-specific, ADR-017) | legacy `config.json` → `config.yaml` | **DEPRECATED, non-operative** (ox ADR-028): its repo→KB provisioning premise no longer holds, so it cannot complete and misreports repos as "orphans." Do not rely on it; still present in the binary until epic `ox-6hvs` deletes it |
+| `kb-project-config-migrate` | (kb-specific, ADR-017) | legacy `config.json` → `config.yaml` | **REMOVED** (ox ADR-028 / epic `ox-6hvs`): its repo→KB provisioning premise never holds under ADR-073, so it could not complete and misreported repos as "orphans" |
 
 **Design rule — repairs go through the daemon, not the CLI.** The daemon owns kb
 git writes and serializes them with the per-kb flock. A kb doctor repair therefore

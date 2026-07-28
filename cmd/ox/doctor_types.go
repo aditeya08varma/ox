@@ -212,8 +212,6 @@ const (
 	CheckSlugKBOrphans         = "kb-orphans"
 	CheckSlugKBFailedProvision = "kb-failed-provision"
 	CheckSlugKBStaleSync       = "kb-stale-sync"
-	// CheckSlugKBProjectConfigMigrate is co-located with its impl in
-	// doctor_kb_migrate.go to keep the v1 migration check self-contained.
 
 	// Knowledge-bubble repo-health checks — parity with ledger/team-context
 	// git-repo doctoring. A bubble is a daemon-managed git checkout like a

@@ -645,17 +645,6 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// daemon). See cmd/ox/agent_prime_ephemeral_hint.go.
 	output.EphemeralHint = buildEphemeralHint(teamCtx, projectRoot)
 
-	// ADR-017: surface the binding the agent's CWD currently resolves to.
-	// Look it up in the KB list so the emitted entry carries the same
-	// type/slug/path enrichment as the matching row. Resolve from the
-	// actual working directory so nested/subtree KB bindings win over the
-	// repo root binding when applicable.
-	kbResolveFrom := projectRoot
-	if wd, wdErr := os.Getwd(); wdErr == nil && wd != "" {
-		kbResolveFrom = wd
-	}
-	output.CurrentKB = resolveCurrentKBEntry(kbResolveFrom, output.KB)
-
 	// populate cumulative context stats from daemon (best-effort).
 	// read BEFORE sending this command's heartbeat — intentional: these report
 	// "consumed so far", not including the prime output about to be emitted.
@@ -1140,16 +1129,9 @@ func repoSlugFromRemoteOrDir(projectRoot string) string {
 // Returns the session status for inclusion in prime output.
 // Errors are logged but not fatal - session recording is optional.
 func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string) *sessionStatus {
-	// resolve session mode from config hierarchy; KB binding (when present)
-	// participates in precedence + safety-inversion via ResolveSessionRecording.
-	// Resolve the KB binding from the agent's actual working directory so
-	// nested/subtree bindings win over the repo root binding.
-	kbResolveFrom := projectRoot
-	if wd, wdErr := os.Getwd(); wdErr == nil && wd != "" {
-		kbResolveFrom = wd
-	}
-	kbID, kbType := kb.ResolveCurrentKBIDAndType(kbResolveFrom)
-	resolved := config.ResolveSessionRecording(projectRoot, kbID, kbType)
+	// resolve session mode from the config hierarchy. Sessions record into
+	// the project ledger; Knowledge Bubbles play no part (ox ADR-028).
+	resolved := config.ResolveSessionRecording(projectRoot)
 
 	// only auto-start recording when config is explicitly set to "auto"
 	// "manual" mode requires the user to run `ox session start` themselves
@@ -2412,30 +2394,4 @@ func ensureClaudeHooks(projectRoot string) bool {
 		return false
 	}
 	return true
-}
-
-// resolveCurrentKBEntry returns the KB row matching the binding resolved from
-// cwd, or nil when:
-//   - cwd is empty,
-//   - ResolveCurrentKB returns (nil, nil) — outside any KB-bound tree,
-//   - ResolveCurrentKB returns an error — malformed marker, etc.,
-//   - the binding's kb_id is not present in kbList (revoked or unsynced).
-//
-// Extracted from runAgentPrime so the current_kb envelope field can be
-// unit-tested without standing up the full prime pipeline. Pure function:
-// no I/O beyond the resolver's filesystem walk.
-func resolveCurrentKBEntry(cwd string, kbList []prime.KBInfo) *prime.KBInfo {
-	binding, err := kb.ResolveCurrentKB(cwd)
-	if err != nil || binding == nil {
-		return nil
-	}
-	for i := range kbList {
-		if kbList[i].KBID == binding.KBID {
-			cur := kbList[i]
-			return &cur
-		}
-	}
-	// binding's kb_id doesn't match any row — kb was revoked or hasn't synced.
-	slog.Warn("current_kb_not_in_list", "kb_id", binding.KBID)
-	return nil
 }

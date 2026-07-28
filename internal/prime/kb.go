@@ -121,7 +121,7 @@ func hintForType(t api.KBType) string {
 	case api.KBTypeCustom:
 		return hintCustom
 	case "channel":
-		// channel is defined in internal/api/kbconfig but not yet in
+		// channel is a server-side kb_type not yet promoted into
 		// internal/api as a typed KBType — match on the string slug so
 		// rows that arrive as kb_type="channel" still get the right hint.
 		return hintChannel

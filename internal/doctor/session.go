@@ -12,7 +12,6 @@ import (
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitutil"
-	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/ledger"
 	session "github.com/sageox/ox/internal/session"
 )
@@ -470,8 +469,7 @@ func (c *SessionModeCheck) Category() string {
 
 // Run executes the session recording check.
 func (c *SessionModeCheck) Run(_ context.Context, _ bool) CheckResult {
-	kbID, kbType := kb.ResolveCurrentKBIDAndType(c.gitRoot)
-	resolved := config.ResolveSessionRecording(c.gitRoot, kbID, kbType)
+	resolved := config.ResolveSessionRecording(c.gitRoot)
 
 	// format source for display
 	sourceStr := formatModeSource(resolved.Source)
@@ -524,8 +522,7 @@ func (c *SessionLedgerCheck) Category() string {
 
 // Run executes the ledger check.
 func (c *SessionLedgerCheck) Run(_ context.Context, _ bool) CheckResult {
-	kbID, kbType := kb.ResolveCurrentKBIDAndType(c.gitRoot)
-	resolved := config.ResolveSessionRecording(c.gitRoot, kbID, kbType)
+	resolved := config.ResolveSessionRecording(c.gitRoot)
 
 	// skip if session recording is disabled
 	if !resolved.ShouldRecord() {

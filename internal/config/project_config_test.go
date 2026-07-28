@@ -233,7 +233,8 @@ update_frequency_hours: 12
 
 	assert.Equal(t, "yaml", cfg.Format)
 	assert.Equal(t, "repo_abc", cfg.RepoID)
-	assert.Equal(t, "kb_repo_abc", cfg.KBID)
+	// kb_id keys are ignored since the ADR-017 binding was removed (ox
+	// ADR-028 / epic ox-6hvs); presence in the YAML must not error.
 	assert.Equal(t, "https://test.sageox.ai", cfg.Endpoint)
 	assert.Equal(t, "auto", cfg.SessionRecording)
 	assert.Equal(t, "disabled", cfg.GitHubSync)
