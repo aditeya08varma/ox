@@ -104,8 +104,7 @@ daemon pulls the bubbles or a sibling does. The human view renders a
 
 A bubble is a daemon-managed git checkout like a ledger, so it shares the same
 failure modes. The kb checks (`cmd/ox/doctor_kb.go`,
-`doctor_kb_repo_health.go`, `doctor_kb_global_sync.go`,
-`doctor_kb_migrate.go`):
+`doctor_kb_repo_health.go`, `doctor_kb_global_sync.go`):
 
 | kb check | Mirrors | What it catches | Fix |
 |---|---|---|---|
