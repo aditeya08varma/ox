@@ -172,6 +172,7 @@ func (f *ledgerFixture) fileContent(rel string) string {
 // escalation — and the repair loop "succeeding" every cycle while making no
 // progress at all.
 func TestWedge_SessionsMetaConflict_SelfHeals(t *testing.T) {
+	t.Parallel()
 	f := newLedgerFixture(t)
 	const meta = "sessions/s1/meta.json"
 
@@ -201,6 +202,7 @@ func TestWedge_SessionsMetaConflict_SelfHeals(t *testing.T) {
 // commits and green exit codes on every cycle while never converging — it reads
 // as recovery and is not.
 func TestWedge_RepairIsIdempotent_NoInfinitePingPong(t *testing.T) {
+	t.Parallel()
 	f := newLedgerFixture(t)
 	const meta = "sessions/s1/meta.json"
 
@@ -229,6 +231,7 @@ func TestWedge_RepairIsIdempotent_NoInfinitePingPong(t *testing.T) {
 // — a permanent repo-wide wedge strictly worse than the one being fixed
 // (.claude/rules/cache-only-design.md, 2026-04-25 incident).
 func TestWedge_PointerNeverLosesToHydratedContent(t *testing.T) {
+	t.Parallel()
 	pointer := lfsPointer("aa11bb22cc33dd44ee55ff6677889900aabbccddeeff00112233445566778899", 8192)
 	hydrated := "# Agent Session\n\nhydrated bytes that must never be committed\n"
 
@@ -258,6 +261,7 @@ func TestWedge_PointerNeverLosesToHydratedContent(t *testing.T) {
 // enumerated, and the push pre-flight only ever REPORTED locks while the pull
 // path swept them.
 func TestWedge_StaleLockBlocksPushForever(t *testing.T) {
+	t.Parallel()
 	for _, lock := range []string{"index.lock", "next-index-13088.lock", "shallow.lock"} {
 		t.Run(lock, func(t *testing.T) {
 			f := newLedgerFixture(t)
@@ -283,6 +287,7 @@ func TestWedge_StaleLockBlocksPushForever(t *testing.T) {
 // TestWedge_StaleRebaseDirBlocksEveryPull covers the abandoned rebase — every
 // subsequent pull fails with "already a rebase-merge directory" until cleared.
 func TestWedge_StaleRebaseDirBlocksEveryPull(t *testing.T) {
+	t.Parallel()
 	f := newLedgerFixture(t)
 	f.diverge("sessions/s1/meta.json", `{"s":"local"}`, `{"s":"cloud"}`)
 
@@ -321,6 +326,7 @@ func TestWedge_StaleRebaseDirBlocksEveryPull(t *testing.T) {
 // that yanks a rebase out from under the daemon's own in-flight pull corrupts
 // live work — a self-inflicted wedge.
 func TestWedge_FreshRebaseIsNeverAborted(t *testing.T) {
+	t.Parallel()
 	f := newLedgerFixture(t)
 	f.diverge("sessions/s1/meta.json", `{"s":"local"}`, `{"s":"cloud"}`)
 	f.gitAllowFail(f.local, "pull", "--rebase", "--autostash")
@@ -338,6 +344,7 @@ func TestWedge_FreshRebaseIsNeverAborted(t *testing.T) {
 // end: detection must fire, and the repair must actually reach 0/0 rather than
 // merely returning success.
 func TestWedge_DivergenceDetectedAndConverges(t *testing.T) {
+	t.Parallel()
 	f := newLedgerFixture(t)
 	f.diverge("sessions/s1/meta.json", `{"s":"local"}`, `{"s":"cloud"}`)
 
@@ -358,6 +365,7 @@ func TestWedge_DivergenceDetectedAndConverges(t *testing.T) {
 // resolves one conflict per pass and effectively never finishes on a ledger
 // carrying hundreds of them — the real one had 281.
 func TestWedge_ManyConflictsConvergeInBoundedRounds(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("short: drives many real git commits")
 	}
@@ -389,6 +397,7 @@ func TestWedge_ManyConflictsConvergeInBoundedRounds(t *testing.T) {
 // auto-resolve set to sessions/ did not quietly make human-authored content
 // last-writer-wins too.
 func TestWedge_NonSessionConflictsStillRefuseAutoResolve(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{"AGENTS.md", "docs/architecture.md", "MEMORY.md"} {
 		t.Run(path, func(t *testing.T) {
 			f := newLedgerFixture(t)
@@ -400,4 +409,137 @@ func TestWedge_NonSessionConflictsStillRefuseAutoResolve(t *testing.T) {
 			assert.Contains(t, err.Error(), "not under safe auto-resolve prefixes")
 		})
 	}
+}
+
+// TestWedge_SequentiallyConflictingCommits is the case every earlier fixture
+// missed, and the one the real ledger actually hit.
+//
+// Failure prevented: a rebase replays commits ONE AT A TIME, so
+// `git rebase --continue` exits non-zero every time it commits the current step
+// and halts on the next conflicting commit. Treating that exit code as failure
+// made the caller abort the rebase, restore the pre-rebase state, and re-wedge
+// the ledger on every attempt — forever. It cannot reproduce with a single
+// conflicting commit, which is exactly why single-commit fixtures passed while
+// a 344-commit ledger stayed stuck for 13 days.
+func TestWedge_SequentiallyConflictingCommits(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: drives many real git commits")
+	}
+	f := newLedgerFixture(t)
+
+	// Each local commit must conflict on its OWN file, so the replay halts at
+	// EVERY step rather than collapsing into one. This is the real ledger's
+	// shape: both sides edited many different sessions over the same period.
+	const chain = 10
+	for i := 0; i < chain; i++ {
+		f.write(f.cloud, fmt.Sprintf("sessions/c%d/meta.json", i), fmt.Sprintf(`{"s":"cloud","n":%d}`, i))
+	}
+	f.commitAll(f.cloud, "cloud touches all sessions")
+	f.git(f.cloud, "push", "origin", "main")
+
+	for i := 0; i < chain; i++ {
+		f.write(f.local, fmt.Sprintf("sessions/c%d/meta.json", i), fmt.Sprintf(`{"s":"local","n":%d}`, i))
+		f.commitAll(f.local, fmt.Sprintf("local step %d", i))
+	}
+	f.git(f.local, "fetch", "origin")
+
+	f.gitAllowFail(f.local, "pull", "--rebase", "--autostash")
+	require.True(t, IsRebaseInProgress(f.local), "fixture must genuinely conflict")
+
+	// ONE call must carry the rebase all the way through every halting step.
+	err := ResolveRebaseAcceptTheirs(context.Background(), f.local, []string{"sessions/"})
+	require.NoError(t, err,
+		"halting on the next conflicting commit is PROGRESS; treating it as failure re-wedges the ledger")
+	assert.False(t, IsRebaseInProgress(f.local),
+		"the rebase must be fully finished, not parked on a later step")
+
+	f.assertMakesProgress()
+}
+
+// TestWedge_ReplayedCommitBecomesEmpty covers the adjacent shape: a replayed
+// commit whose changes are already upstream. git halts with a non-zero exit and
+// NO unmerged files, wanting `--skip`. A resolver that only understands
+// conflicts must not mistake that for a failure worth aborting over.
+func TestWedge_ReplayedCommitBecomesEmpty(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: drives real git commits")
+	}
+	f := newLedgerFixture(t)
+	const meta = "sessions/s1/meta.json"
+	const dup = "sessions/s2/meta.json"
+
+	f.write(f.local, dup, `{"s":"identical"}`)
+	f.commitAll(f.local, "local adds s2")
+	f.cloudWrites(dup, `{"s":"identical"}`, "cloud adds the same s2")
+	f.cloudWrites(meta, `{"s":"cloud"}`, "cloud update")
+	f.write(f.local, meta, `{"s":"local"}`)
+	f.commitAll(f.local, "local update")
+	f.git(f.local, "fetch", "origin")
+
+	f.gitAllowFail(f.local, "pull", "--rebase", "--autostash")
+	require.True(t, IsRebaseInProgress(f.local), "fixture must genuinely start a rebase")
+
+	err := ResolveRebaseAcceptTheirs(context.Background(), f.local, []string{"sessions/"})
+	require.NoError(t, err,
+		"an emptied replayed commit must not abort the rebase and re-wedge the ledger")
+	assert.False(t, IsRebaseInProgress(f.local), "the rebase must run to completion")
+
+	f.assertMakesProgress()
+}
+
+// TestWedge_RebaseHaltsWithNothingToResolve covers the path a code review
+// caught that no fixture reached: a rebase that halts with ZERO unmerged
+// entries.
+//
+// Failure prevented: the resolver used to return "no conflicted files found"
+// whenever the index had no conflicts. During an ACTIVE rebase that is not an
+// error at all — git halts this way when a replayed commit's changes are
+// already upstream (rebase.empty=stop, and the default on older git). Returning
+// an error made the caller abort, restoring the pre-rebase state and re-wedging
+// the ledger. Modern git auto-drops empty commits, which is exactly why the
+// end-to-end fixtures passed while the code path stayed broken — so this test
+// forces the state directly instead of hoping git produces it.
+func TestWedge_RebaseHaltsWithNothingToResolve(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: drives real git commits")
+	}
+	f := newLedgerFixture(t)
+	const meta = "sessions/s1/meta.json"
+
+	f.diverge(meta, `{"s":"local"}`, `{"s":"cloud"}`)
+	f.gitAllowFail(f.local, "pull", "--rebase", "--autostash")
+	require.True(t, IsRebaseInProgress(f.local), "fixture must halt on a conflict")
+
+	// Resolve and stage by hand so the index is CLEAN while the rebase is still
+	// running — the exact shape an empty replayed commit produces.
+	f.git(f.local, "checkout", "--theirs", "--", meta)
+	f.git(f.local, "add", "--", meta)
+	require.Empty(t, f.git(f.local, "ls-files", "--unmerged"),
+		"precondition: mid-rebase with nothing left to resolve")
+	require.True(t, IsRebaseInProgress(f.local))
+
+	// The resolver must ADVANCE this, not report "no conflicted files found".
+	err := ResolveRebaseAcceptTheirs(context.Background(), f.local, []string{"sessions/"})
+	require.NoError(t, err,
+		"a rebase halted with nothing to resolve must be advanced, not treated as an error")
+	assert.False(t, IsRebaseInProgress(f.local), "the rebase must run to completion")
+
+	f.assertMakesProgress()
+}
+
+// TestResolveRebase_NoConflictsOutsideRebaseStillErrors keeps the original
+// contract intact: called on a repo that is NOT mid-rebase, "no conflicted
+// files found" is still the right answer. Without this, the fix above could
+// silently turn a caller's programming error into a no-op.
+func TestResolveRebase_NoConflictsOutsideRebaseStillErrors(t *testing.T) {
+	t.Parallel()
+	f := newLedgerFixture(t)
+	require.False(t, IsRebaseInProgress(f.local))
+
+	err := ResolveRebaseAcceptTheirs(context.Background(), f.local, []string{"sessions/"})
+	require.Error(t, err, "no rebase in progress and no conflicts is a caller error")
+	assert.Contains(t, err.Error(), "no conflicted files found")
 }

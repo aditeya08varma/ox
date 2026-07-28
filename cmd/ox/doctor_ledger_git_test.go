@@ -299,3 +299,179 @@ func TestStripURLCredentials(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckLedgerBranchStatus_UnbornHead pins the detection that was silently
+// broken: `git rev-parse --abbrev-ref HEAD` on an unborn repo prints "HEAD" to
+// stdout AND exits 128, so trusting stdout reads as detached-HEAD while trusting
+// the error reads as "can't tell". The old code took the second path and
+// returned Skipped, so a ledger whose every session existed only on one machine
+// was completely invisible to doctor.
+//
+// Failure prevented: a real ledger sat with zero commits and 184 uncommitted
+// files — nothing had EVER synced — and doctor reported it skipped.
+func TestCheckLedgerBranchStatus_UnbornHead(t *testing.T) {
+	gitRun := func(t *testing.T, dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), // safe: git subprocess in a temp fixture repo, not the ox CLI
+			"GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+			"GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=commit.gpgsign", "GIT_CONFIG_VALUE_0=false")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	t.Run("unborn with content and an empty remote is critical, not skipped", func(t *testing.T) {
+		root := t.TempDir()
+		bare := filepath.Join(root, "bare.git")
+		repo := filepath.Join(root, "ledger")
+		gitRun(t, root, "init", "--bare", "--initial-branch=main", bare)
+		gitRun(t, root, "clone", bare, repo)
+		// content on disk, zero commits — exactly the production shape
+		require.NoError(t, os.MkdirAll(filepath.Join(repo, "sessions", "s1"), 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "sessions", "s1", "meta.json"), []byte(`{}`), 0o644))
+
+		res := unbornLedgerFailure(repo, "main", false)
+
+		assert.False(t, res.skipped,
+			"a ledger that has never synced must never be reported as skipped")
+		assert.Equal(t, "critical", res.priority,
+			"every session existing on one machine only is a critical condition")
+		assert.Contains(t, res.message, "nothing has ever synced")
+		assert.Contains(t, res.detail, "never provisioned",
+			"an empty remote must be named as the cause, not guessed past")
+	})
+
+	t.Run("unborn locally but remote has commits is auto-recoverable", func(t *testing.T) {
+		root := t.TempDir()
+		bare := filepath.Join(root, "bare.git")
+		seed := filepath.Join(root, "seed")
+		repo := filepath.Join(root, "ledger")
+		gitRun(t, root, "init", "--bare", "--initial-branch=main", bare)
+		gitRun(t, root, "clone", bare, seed)
+		require.NoError(t, os.WriteFile(filepath.Join(seed, "AGENTS.md"), []byte("# Ledger\n"), 0o644))
+		gitRun(t, seed, "add", "-A")
+		gitRun(t, seed, "commit", "-m", "seed")
+		gitRun(t, seed, "push", "origin", "main")
+
+		// clone, then simulate an interrupted clone that lost the branch
+		gitRun(t, root, "clone", bare, repo)
+		gitRun(t, repo, "update-ref", "-d", "refs/heads/main")
+		gitRun(t, repo, "symbolic-ref", "HEAD", "refs/heads/main")
+
+		res := unbornLedgerFailure(repo, "main", true)
+
+		assert.True(t, res.passed, "a recoverable clone must be repaired, not just reported")
+		out, err := exec.Command("git", "-C", repo, "rev-parse", "--verify", "HEAD").Output()
+		require.NoError(t, err, "HEAD must resolve after the repair")
+		assert.NotEmpty(t, strings.TrimSpace(string(out)))
+	})
+}
+
+// TestUnbornLedger_UnreachableRemoteNeverSuggestsSeeding is the data-integrity
+// guard on the unborn-HEAD repair.
+//
+// Failure prevented: `ls-remote` returning nothing looks identical whether the
+// remote is genuinely empty or the command FAILED (network blip, expired token,
+// DNS). Treating a failure as "empty" tells the user to author a brand-new
+// initial commit — and doing that on a ledger that actually has remote history
+// fabricates a divergent root. This is not hypothetical: an expired PAT embedded
+// in a real ledger's origin URL produced exactly this ls-remote failure.
+func TestUnbornLedger_UnreachableRemoteNeverSuggestsSeeding(t *testing.T) {
+	gitInit := func(t *testing.T, dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), // safe: git subprocess in a temp fixture repo, not the ox CLI
+			"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	t.Run("unreachable remote is critical but must NOT recommend seeding", func(t *testing.T) {
+		root := t.TempDir()
+		repo := filepath.Join(root, "ledger")
+		gitInit(t, root, "init", "--initial-branch=main", repo)
+		// origin points at a path that does not exist -> ls-remote FAILS
+		gitInit(t, repo, "remote", "add", "origin", filepath.Join(root, "does-not-exist.git"))
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "note.txt"), []byte("x"), 0o644))
+
+		res := unbornLedgerFailure(repo, "main", false)
+
+		assert.False(t, res.passed)
+		assert.Equal(t, "critical", res.priority,
+			"a never-synced ledger stays critical even when the remote can't be checked")
+		assert.Equal(t, CheckSlugLedgerBranchStatus, res.slug, "slug must survive for correlation")
+		assert.NotContains(t, res.detail, "seed ledger",
+			"must never recommend authoring an initial commit when the remote is unverified")
+		assert.Contains(t, res.detail, "could NOT verify")
+	})
+
+	t.Run("verifiably empty remote may recommend seeding", func(t *testing.T) {
+		root := t.TempDir()
+		bare := filepath.Join(root, "bare.git")
+		repo := filepath.Join(root, "ledger")
+		gitInit(t, root, "init", "--bare", "--initial-branch=main", bare)
+		gitInit(t, root, "clone", bare, repo)
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "note.txt"), []byte("x"), 0o644))
+
+		res := unbornLedgerFailure(repo, "main", false)
+
+		assert.Equal(t, "critical", res.priority)
+		assert.Contains(t, res.detail, "seed ledger",
+			"a reachable, verifiably-empty remote is the one case where seeding is correct")
+	})
+}
+
+// TestUnbornLedger_FailedRepairStaysCritical prevents a failed auto-repair from
+// being quieter than the detection that preceded it.
+//
+// Failure prevented: FailedCheck leaves priority empty, and categorizeCheck
+// routes anything non-critical into the "attention" bucket — so a failed repair
+// of a never-synced ledger would get demoted below the critical finding that
+// triggered it, and would lose the slug needed to correlate the two.
+func TestUnbornLedger_FailedRepairStaysCritical(t *testing.T) {
+	root := t.TempDir()
+	repo := filepath.Join(root, "ledger")
+	bare := filepath.Join(root, "bare.git")
+	seed := filepath.Join(root, "seed")
+
+	run := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), // safe: git subprocess in a temp fixture repo, not the ox CLI
+			"GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
+			"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+			"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		out, err := cmd.CombinedOutput()
+		// Fail fixture setup loudly. Silently discarding git errors here would
+		// let the test run against a repo in an unintended state and "pass".
+		require.NoError(t, err, "fixture git %v failed: %s", args, out)
+	}
+	run(root, "init", "--bare", "--initial-branch=main", bare)
+	run(root, "clone", bare, repo)
+	run(root, "clone", bare, seed)
+	require.NoError(t, os.WriteFile(filepath.Join(seed, "a.txt"), []byte("a"), 0o644))
+	run(seed, "add", "-A")
+	run(seed, "commit", "-m", "seed")
+	run(seed, "push", "origin", "main")
+
+	// Remote has commits, so the repair path runs — but the branch does not
+	// exist anywhere, so both the local checkout and the fetch must fail.
+	res := unbornLedgerFailure(repo, "no-such-branch", true)
+
+	// Assert unconditionally. Guarding these behind `if !res.passed` would let
+	// the regression pass vacuously if the repair were ever skipped and returned
+	// success (see .claude/rules/testing.md on conditional assertions).
+	require.False(t, res.passed, "repairing a branch that exists nowhere must fail")
+	assert.Equal(t, "critical", res.priority,
+		"a failed repair must stay critical, not be demoted to the attention bucket")
+	assert.Equal(t, CheckSlugLedgerBranchStatus, res.slug,
+		"slug must survive so the failure correlates with the original check")
+}
