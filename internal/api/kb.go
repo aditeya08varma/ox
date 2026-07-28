@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,22 +17,38 @@ import (
 	"github.com/sageox/ox/internal/version"
 )
 
-// KB API endpoint paths.
+// KB API endpoint paths. The list endpoint REQUIRES an explicit scope
+// (scope_type + scope_id) — the contextless "all my bubbles" union no longer
+// exists server-side (sageox-mono ADR-073: listing is per-context,
+// members-only; a bare GET is a 400).
 const (
-	kbListPath   = "/api/v1/kb"    // GET — list all knowledge bubbles the caller can access
-	kbDetailPath = "/api/v1/kb/%s" // GET — fetch a single bubble by kb_id (or slug, server resolves)
+	kbListPath    = "/api/v1/kb"         // GET ?scope_type=&scope_id= — list one scope's bubbles
+	kbDetailPath  = "/api/v1/kb/%s"      // GET — fetch a single bubble by kb_id
+	kbResolvePath = "/api/v1/kb/resolve" // GET ?scope_type=&scope_id=&slug= — scoped slug → kb_id
 )
 
+// KB scope types. Every bubble is owned by exactly one scope: a single user
+// or a single team (ADR-073). scope_id carries the matching usr_/team_ id.
+const (
+	KBScopeTypeUser = "user"
+	KBScopeTypeTeam = "team"
+)
+
+// KBScope identifies one listable context.
+type KBScope struct {
+	Type string // KBScopeTypeUser | KBScopeTypeTeam
+	ID   string // usr_… | team_…
+}
+
 // ErrKBAPIUnavailable is the sentinel returned when the KB endpoint is not
-// available to the caller (HTTP 403/404). This is non-fatal by design: the kb
-// API is one of three sources merged in internal/kb/merge.go, and a missing
-// or flag-gated endpoint must NOT fail the whole listing. Callers should
-// inspect with errors.Is and treat it as "kb-API source returned 0 rows".
+// available to the caller (HTTP 403/404 — feature flag off, non-member scope,
+// or endpoint missing). Non-fatal by design: callers should inspect with
+// errors.Is and treat it as "no bubbles for this caller/scope".
 var ErrKBAPIUnavailable = errors.New("kb API unavailable for this caller")
 
-// KBType matches the sageox-mono KBType enum (ADR-028 / ADR-036). Five known
-// kinds plus a client-side "unknown" fallback bucket for forward compatibility
-// when the server rolls out a sixth type before the CLI knows about it.
+// KBType matches the sageox-mono KBType enum. Six known kinds plus a
+// client-side "unknown" fallback bucket for forward compatibility when the
+// server rolls out a new type before the CLI knows about it.
 type KBType string
 
 const (
@@ -40,42 +57,99 @@ const (
 	KBTypeTeam     KBType = "team"
 	KBTypeRepo     KBType = "repo"
 	KBTypeCustom   KBType = "custom"
+	KBTypeChannel  KBType = "channel"
 	// KBTypeUnknown is the client-side fallback bucket when the server
 	// returns a kb_type the CLI doesn't recognize. Never sent by the server.
 	KBTypeUnknown KBType = "unknown"
 )
 
 // KB represents a knowledge bubble row from GET /api/v1/kb (list) or
-// GET /api/v1/kb/{id} (detail). Field set tracks the sageox-mono response
+// GET /api/v1/kb/{id} (detail). Field set tracks the sageox-mono KBResponse
 // schema; new server fields can be added without breaking older clients
 // because the JSON decoder ignores unknown keys by default.
+//
+// Note ViewerRole: the server omits it from LIST responses (role is per-KB
+// but the list is scope-wide); it is populated on single-bubble reads.
 type KB struct {
-	KBID           string `json:"kb_id"`
+	KBID           string `json:"id"`
 	KBType         KBType `json:"kb_type"`
 	Slug           string `json:"slug"`
 	Name           string `json:"name"`
 	OwnerUserID    string `json:"owner_user_id,omitempty"`
-	LifecycleState string `json:"lifecycle_state,omitempty"` // e.g. "active", "provision-failed"
-	ViewerRole     string `json:"viewer_role,omitempty"`     // e.g. "owner", "member", "viewer"
-	RepoURL        string `json:"repo_url,omitempty"`        // git clone URL when provisioned
+	LifecycleState string `json:"lifecycle_state,omitempty"` // "provisioning", "active", "provision-failed"
+	ViewerRole     string `json:"viewer_role,omitempty"`     // "admin", "member", "viewer" (single reads only)
 	CreatedAt      string `json:"created_at,omitempty"`      // RFC3339 timestamp
-	UpdatedAt      string `json:"updated_at,omitempty"`      // RFC3339 timestamp
+
+	// ScopeType/ScopeID locate the bubble: "user"|"team" + the usr_/team_
+	// owner id (ADR-073). Immutable after creation.
+	ScopeType string `json:"scope_type,omitempty"`
+	ScopeID   string `json:"scope_id,omitempty"`
+
+	// Manager is the bubble admin — the single human in charge (a label,
+	// not an ACL; ADR-073 §2). Same value as owner_user_id today.
+	Manager string `json:"manager,omitempty"`
+
+	// Description is the bubble's free-text description.
+	Description string `json:"description,omitempty"`
+
+	// Steering is the free-text curator-steering value (ADR-097 C9).
+	// Unset ⇒ the bubble opted out of curator routing.
+	Steering string `json:"steering,omitempty"`
+
+	// Topics is the declared topic list (server sends [] when none).
+	Topics []string `json:"topics,omitempty"`
+
+	// GitPath is the host-relative git project path (e.g. "kb/kb_xxx").
+	// Combine with the endpoint's git host to build a clone URL; empty
+	// until the bubble's repo is provisioned.
+	GitPath string `json:"git_path,omitempty"`
+
+	// DefaultBranch is the bubble repo's default branch (almost always "main").
+	DefaultBranch string `json:"default_branch,omitempty"`
+
+	// LastActivityAt is GitLab's project last_activity_at — the only
+	// activity signal that reflects out-of-band pushes. RFC3339.
+	LastActivityAt string `json:"last_activity_at,omitempty"`
+
+	// RepoURL is a full git clone URL when the server supplies one
+	// (older response shapes). Prefer GitPath + endpoint-derived host.
+	RepoURL string `json:"repo_url,omitempty"`
 
 	// RepoID scopes a kb_type=repo bubble to a specific project. When set,
 	// the per-project symlink reconciler only links this bubble into the
-	// project whose ProjectConfig.RepoID matches. Empty for non-repo
-	// bubbles. May also be empty on legacy/un-migrated repo bubbles —
-	// those are skipped by the symlink reconciler since there's no way
-	// to know which project they belong to.
+	// project whose ProjectConfig.RepoID matches.
 	RepoID string `json:"repo_id,omitempty"`
 }
 
-// kbListResponse is the envelope shape for GET /api/v1/kb. The server may
-// either return a bare JSON array or an object with a "bubbles" key; this
-// struct supports the object form, and ListBubbles falls back to bare-array
-// decoding when the object form fails to populate.
+// UnmarshalJSON accepts both the current server key ("id") and the older
+// "kb_id" alias so fixtures and any transitional response shape decode to
+// the same struct. All other fields use the standard decoder.
+func (k *KB) UnmarshalJSON(data []byte) error {
+	type kbAlias KB // no methods — avoids recursion
+	aux := struct {
+		*kbAlias
+		LegacyKBID string `json:"kb_id"`
+	}{kbAlias: (*kbAlias)(k)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if k.KBID == "" && aux.LegacyKBID != "" {
+		k.KBID = aux.LegacyKBID
+	}
+	return nil
+}
+
+// kbListResponse is the envelope for GET /api/v1/kb. The current server
+// returns {"kbs": [...]}; the older shape used {"bubbles": [...]} and some
+// fixtures use a bare array — ListBubbles tolerates all three.
 type kbListResponse struct {
+	KBs     []KB `json:"kbs"`
 	Bubbles []KB `json:"bubbles"`
+}
+
+// kbResolveResponse is the envelope for GET /api/v1/kb/resolve.
+type kbResolveResponse struct {
+	KBID string `json:"kb_id"`
 }
 
 // KBClient handles API communication with the SageOx kb endpoints.
@@ -131,21 +205,34 @@ func (c *KBClient) Endpoint() string {
 	return c.baseURL
 }
 
-// ListBubbles calls GET /api/v1/kb to list knowledge bubbles the caller can
-// access. A 403 or 404 maps to ErrKBAPIUnavailable (non-fatal — see the
-// sentinel doc). Other non-2xx statuses return a wrapped error.
-func (c *KBClient) ListBubbles(ctx context.Context) ([]KB, error) {
-	reqURL := strings.TrimSuffix(c.baseURL, "/") + kbListPath
+// ListBubbles calls GET /api/v1/kb?scope_type=&scope_id= to list one scope's
+// bubbles. The scope is REQUIRED — the server 400s a bare request and 403s a
+// non-member scope (which maps to ErrKBAPIUnavailable like a flag-off 404,
+// since both mean "no bubbles visible here for this caller").
+func (c *KBClient) ListBubbles(ctx context.Context, scope KBScope) ([]KB, error) {
+	if scope.Type == "" || scope.ID == "" {
+		return nil, fmt.Errorf("kb list requires a scope (scope_type + scope_id)")
+	}
+
+	q := url.Values{}
+	q.Set("scope_type", scope.Type)
+	q.Set("scope_id", scope.ID)
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + kbListPath + "?" + q.Encode()
 
 	bodyBytes, err := c.do(ctx, "GET", reqURL)
 	if err != nil {
 		return nil, err
 	}
 
-	// prefer the envelope shape; if it decodes empty, retry as a bare array
+	// prefer the envelope shapes; fall back to a bare array
 	var envelope kbListResponse
-	if err := json.Unmarshal(bodyBytes, &envelope); err == nil && envelope.Bubbles != nil {
-		return c.normalizeTypes(envelope.Bubbles), nil
+	if err := json.Unmarshal(bodyBytes, &envelope); err == nil {
+		if envelope.KBs != nil {
+			return c.normalizeTypes(envelope.KBs), nil
+		}
+		if envelope.Bubbles != nil {
+			return c.normalizeTypes(envelope.Bubbles), nil
+		}
 	}
 
 	var bare []KB
@@ -155,14 +242,14 @@ func (c *KBClient) ListBubbles(ctx context.Context) ([]KB, error) {
 	return c.normalizeTypes(bare), nil
 }
 
-// GetBubble calls GET /api/v1/kb/{id} for a single bubble. The id may be a
-// kb_id or a slug — server is responsible for resolving. 403/404 → sentinel.
+// GetBubble calls GET /api/v1/kb/{id} for a single bubble by kb_id.
+// 403/404 → sentinel. Slug resolution goes through ResolveSlug.
 func (c *KBClient) GetBubble(ctx context.Context, kbID string) (*KB, error) {
 	if strings.TrimSpace(kbID) == "" {
 		return nil, fmt.Errorf("kb id is required")
 	}
 
-	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(kbDetailPath, kbID)
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + fmt.Sprintf(kbDetailPath, url.PathEscape(kbID))
 
 	bodyBytes, err := c.do(ctx, "GET", reqURL)
 	if err != nil {
@@ -175,6 +262,36 @@ func (c *KBClient) GetBubble(ctx context.Context, kbID string) (*KB, error) {
 	}
 	bubble.KBType = normalizeKBType(bubble.KBType)
 	return &bubble, nil
+}
+
+// ResolveSlug calls GET /api/v1/kb/resolve to map a scoped slug to its
+// kb_id, following server-side rename aliases. Members-only: not-found and
+// no-access both surface as ErrKBAPIUnavailable (the server deliberately
+// returns an identical 404 for both so slugs cannot be enumerated).
+func (c *KBClient) ResolveSlug(ctx context.Context, scope KBScope, slug string) (string, error) {
+	if scope.Type == "" || scope.ID == "" || strings.TrimSpace(slug) == "" {
+		return "", fmt.Errorf("kb resolve requires scope_type, scope_id, and slug")
+	}
+
+	q := url.Values{}
+	q.Set("scope_type", scope.Type)
+	q.Set("scope_id", scope.ID)
+	q.Set("slug", slug)
+	reqURL := strings.TrimSuffix(c.baseURL, "/") + kbResolvePath + "?" + q.Encode()
+
+	bodyBytes, err := c.do(ctx, "GET", reqURL)
+	if err != nil {
+		return "", err
+	}
+
+	var resp kbResolveResponse
+	if err := json.Unmarshal(bodyBytes, &resp); err != nil {
+		return "", fmt.Errorf("failed to decode kb resolve response: %w", err)
+	}
+	if resp.KBID == "" {
+		return "", fmt.Errorf("kb resolve returned an empty kb_id")
+	}
+	return resp.KBID, nil
 }
 
 // do issues the HTTP request, applies standard auth+UA headers, and returns
@@ -212,9 +329,9 @@ func (c *KBClient) do(ctx context.Context, method, reqURL string) ([]byte, error
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		// 403 and 404 are the "kb feature flag is off / endpoint missing"
-		// signal — both surface as the same non-fatal sentinel so callers
-		// can treat them uniformly via errors.Is.
+		// 403 and 404 are the "kb feature flag is off / endpoint missing /
+		// non-member scope" signal — all surface as the same non-fatal
+		// sentinel so callers can treat them uniformly via errors.Is.
 		if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusNotFound {
 			return nil, fmt.Errorf("%w: HTTP %d from %s", ErrKBAPIUnavailable, resp.StatusCode, reqURL)
 		}
@@ -249,7 +366,7 @@ func normalizeKBType(t KBType) KBType {
 	switch t {
 	case "":
 		return ""
-	case KBTypePersonal, KBTypeProfile, KBTypeTeam, KBTypeRepo, KBTypeCustom, KBTypeUnknown:
+	case KBTypePersonal, KBTypeProfile, KBTypeTeam, KBTypeRepo, KBTypeCustom, KBTypeChannel, KBTypeUnknown:
 		return t
 	default:
 		return KBTypeUnknown

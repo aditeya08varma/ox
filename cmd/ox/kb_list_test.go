@@ -99,6 +99,74 @@ func TestRenderKBListResult_HappyJSON(t *testing.T) {
 	}
 }
 
+// TestRenderKBListResult_JSONNewScopeFields verifies the ADR-028 §5 JSON
+// additions: bubble rows carry scope_type/scope_id, description, and
+// topics when set, and omit them (omitempty) when unset.
+//
+// Failure prevented: dropping the scope/description/topics keys would
+// break consumers that disambiguate per-scope bubbles in scripts; emitting
+// empty keys would make "field missing" indistinguishable from "unset".
+func TestRenderKBListResult_JSONNewScopeFields(t *testing.T) {
+	t.Parallel()
+
+	res := kb.ListResult{
+		Bubbles: []kb.Bubble{
+			{
+				KBID:        "kb_full",
+				Type:        api.KBTypeTeam,
+				Slug:        "platform",
+				Name:        "Platform",
+				ScopeType:   "team",
+				ScopeID:     "team_abc",
+				Description: "Curated platform knowledge",
+				Topics:      []string{"infra", "deploys"},
+			},
+			{
+				KBID: "kb_sparse",
+				Type: api.KBTypeTeam,
+				Slug: "sparse",
+			},
+		},
+	}
+
+	var buf bytes.Buffer
+	if err := renderKBListResult(&buf, res, "", true, ""); err != nil {
+		t.Fatalf("renderKBListResult: %v", err)
+	}
+
+	var decoded struct {
+		Bubbles []map[string]any `json:"bubbles"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &decoded); err != nil {
+		t.Fatalf("unmarshal: %v\noutput: %s", err, buf.String())
+	}
+	if len(decoded.Bubbles) != 2 {
+		t.Fatalf("expected 2 bubbles, got %d", len(decoded.Bubbles))
+	}
+
+	full := decoded.Bubbles[0]
+	if full["scope_type"] != "team" {
+		t.Errorf("scope_type: got %v, want team", full["scope_type"])
+	}
+	if full["scope_id"] != "team_abc" {
+		t.Errorf("scope_id: got %v, want team_abc", full["scope_id"])
+	}
+	if full["description"] != "Curated platform knowledge" {
+		t.Errorf("description: got %v", full["description"])
+	}
+	topics, ok := full["topics"].([]any)
+	if !ok || len(topics) != 2 || topics[0] != "infra" || topics[1] != "deploys" {
+		t.Errorf("topics: got %v, want [infra deploys]", full["topics"])
+	}
+
+	sparse := decoded.Bubbles[1]
+	for _, key := range []string{"scope_type", "scope_id", "description", "topics"} {
+		if _, present := sparse[key]; present {
+			t.Errorf("unset field %q must be omitted for the sparse row: %v", key, sparse)
+		}
+	}
+}
+
 // TestRenderKBListResult_JSONHasNoLegacyOrSourceKeys pins the ADR-028
 // inversion of the old legacy-row rendering: bubble rows come from the KB
 // API only, so the JSON envelope must not carry the retired `legacy`,

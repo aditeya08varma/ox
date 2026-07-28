@@ -1,7 +1,7 @@
 ---
 title: "ox kb list"
 description: "CLI reference for ox kb list"
-sidebar_position: 55
+sidebar_position: 56
 ---
 
 ## ox kb list
@@ -10,15 +10,19 @@ List knowledge bubbles you can access
 
 ### Synopsis
 
-List the knowledge bubbles available to you.
+List the knowledge bubbles available in this project's context.
 
-Bubbles come from the KB API (/api/v1/kb). Team contexts and ledgers are
-separate, permanent conversation stores — list them with `ox teams` and
-`ox status`, not here.
+Bubbles are Curator-maintained syntheses of your team's knowledge (ox
+ADR-028), listed per scope from the KB API. Inside an ox-initialized repo,
+the ambient scope is the repo's team. Personal-scope listing is not yet
+available — it remains deferred until personal-team provisioning is fully
+rolled out. Team Contexts and Ledgers
+are separate, permanent conversation stores — list them with `ox teams`
+and `ox status`, not here.
 
 Examples:
-  ox kb list                  # all bubbles
-  ox kb list --type=team      # only team bubbles
+  ox kb list                  # bubbles in this project's scopes
+  ox kb list --type=team      # only team-type bubbles
   ox kb list --json           # scriptable JSON output
 
 ```

@@ -43,9 +43,15 @@ Feature: Listing and Inspecting Knowledge Bubbles
         | repo     |
         | custom   |
 
-  Rule: A bubble can be inspected
+  Rule: A bubble can be described
 
-    Scenario: Devon inspects what a team bubble holds
-      Given Devon sees a team bubble in his list
-      When he inspects that bubble
-      Then ox shows him what the bubble holds
+    Scenario: Devon describes a team bubble by slug
+      Given Devon sees a team bubble "#engineering" in his list
+      When he describes "#engineering"
+      Then ox resolves the slug within his team's scope
+      And shows the bubble's name, description, topics, and local mount path
+
+    Scenario: The personal scope is recognized but deferred
+      Given personal-team provisioning has not fully rolled out
+      When Devon describes a bubble with the personal scope
+      Then ox explains the personal scope is not available yet

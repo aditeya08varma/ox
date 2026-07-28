@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"log/slog"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -270,6 +271,83 @@ func TestOutput_KBAndConversationStoresCoexist(t *testing.T) {
 	assert.Contains(t, jsonStr, `"kb":`, "kb envelope must serialize")
 	assert.Contains(t, jsonStr, `"team_context":`, "team_context conversation store must serialize")
 	assert.Contains(t, jsonStr, `"ledger":`, "ledger conversation store must serialize")
+}
+
+// TestBuildKBInfos_DescriptionTopicsFlowThrough verifies the bubble's own
+// description and declared topic list survive the kb.Bubble → KBInfo
+// conversion and serialize under the documented JSON keys.
+//
+// Failure prevented: dropping description/topics in bubbleToKBInfo would
+// strip the only self-describing metadata agents get before opening the
+// bubble's AGENTS.md — the fields prime's <knowledge-bubbles> table and
+// the JSON envelope both key off.
+func TestBuildKBInfos_DescriptionTopicsFlowThrough(t *testing.T) {
+	res := kb.ListResult{
+		Bubbles: []kb.Bubble{
+			{
+				KBID:        "kb_team",
+				Type:        api.KBTypeTeam,
+				Slug:        "platform",
+				Name:        "Platform",
+				Description: "Curated platform-team knowledge",
+				Topics:      []string{"infra", "deploys"},
+			},
+			{
+				// no description/topics — omitempty must drop the keys
+				KBID: "kb_bare",
+				Type: api.KBTypeRepo,
+				Slug: "my-app",
+			},
+		},
+	}
+
+	got := BuildKBInfos(res, nil)
+	require.Len(t, got, 2)
+
+	assert.Equal(t, "Curated platform-team knowledge", got[0].Description)
+	assert.Equal(t, []string{"infra", "deploys"}, got[0].Topics)
+
+	b, err := json.Marshal(got)
+	require.NoError(t, err)
+	jsonStr := string(b)
+	assert.Contains(t, jsonStr, `"description":"Curated platform-team knowledge"`)
+	assert.Contains(t, jsonStr, `"topics":["infra","deploys"]`)
+
+	// the bare row must not fabricate the keys
+	bare, err := json.Marshal(got[1])
+	require.NoError(t, err)
+	assert.NotContains(t, string(bare), `"description"`)
+	assert.NotContains(t, string(bare), `"topics"`)
+}
+
+// TestOutput_KBGuidanceMarshalsAsKBGuidance pins the prime envelope contract
+// that Output carries a KBGuidance field serializing as "kb_guidance" —
+// cmd/ox/agent_prime.go sets it to prime.KBGuidanceText whenever the KB
+// envelope is non-empty, and the XML renderer inlines it into the
+// <knowledge-bubbles> block.
+//
+// The field is located via reflection so this test compiles (and fails with
+// a precise message) even while the field is missing from prime.Output —
+// which is exactly the production bug this test exists to catch.
+//
+// Failure prevented: dropping/renaming the field would silently strip the
+// consumption guidance from every JSON prime consumer.
+func TestOutput_KBGuidanceMarshalsAsKBGuidance(t *testing.T) {
+	out := Output{KB: []KBInfo{{Type: "team", Slug: "platform"}}}
+
+	f := reflect.ValueOf(&out).Elem().FieldByName("KBGuidance")
+	require.True(t, f.IsValid(),
+		`prime.Output is missing the KBGuidance field (json "kb_guidance") — cmd/ox/agent_prime.go:631 already sets it`)
+	require.Equal(t, reflect.String, f.Kind())
+	f.SetString(KBGuidanceText)
+
+	b, err := json.Marshal(out)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), `"kb_guidance":`)
+
+	var decoded map[string]any
+	require.NoError(t, json.Unmarshal(b, &decoded))
+	assert.Equal(t, KBGuidanceText, decoded["kb_guidance"])
 }
 
 // captureSlog redirects the default slog logger to a buffer for the test

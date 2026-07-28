@@ -263,7 +263,8 @@ func TestSyncBubbles_Backoff_UnauthorizedSurfacedDistinctly(t *testing.T) {
 	// rather than the kb-availability sentinel — proves the daemon is
 	// not silently swallowing an auth-failure as "flag off".
 	client := api.NewKBClientWithEndpoint(srv.URL).WithAuthToken("expired-token")
-	_, err := client.ListBubbles(context.Background())
+	_, err := client.ListBubbles(context.Background(),
+		api.KBScope{Type: api.KBScopeTypeTeam, ID: kbTestTeamID})
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, api.ErrKBAPIUnavailable),
 		"401 must NOT collapse to ErrKBAPIUnavailable — that's reserved for 403/404")

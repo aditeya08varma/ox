@@ -5,47 +5,42 @@ import (
 	"time"
 )
 
-// TestIntervalForType pins the cadence-by-type selection so future
-// callers (ox-yvc1.3 migration of ledger and team-context paths) can rely
-// on stable behavior when they replace their per-callsite switches.
+// TestIntervalForType pins the uniform cadence: under ADR-028 every kb
+// type is a curated synthesis that changes only when a curator
+// publishes, so ALL types ride SyncIntervalRead. The per-type seam
+// survives (this function is still the single routing point), but no
+// type may route to the faster team-context cadence anymore.
 //
-// Failure prevented: a kb type silently routes to the wrong cadence,
-// either hammering the API (too fast) or falling stale (too slow).
+// Failure prevented: a type silently regaining the 15s tier and
+// hammering the API for content that only changes on publish.
 func TestIntervalForType(t *testing.T) {
 	cfg := &Config{
 		SyncIntervalRead:        60 * time.Second,
-		TeamContextSyncInterval: 15 * time.Second,
+		TeamContextSyncInterval: 15 * time.Second, // must be ignored by kb routing
 	}
-	cases := []struct {
-		kind string
-		want time.Duration
-	}{
-		{"personal", 15 * time.Second},
-		{"profile", 15 * time.Second},
-		{"team", 15 * time.Second},
-		{"repo", 60 * time.Second},
-		{"custom", 60 * time.Second},
-		{"unknown", 60 * time.Second},
-		{"", 60 * time.Second},
-		{"future_type_we_dont_know_yet", 60 * time.Second},
+	cases := []string{
+		"personal", "profile", "team", "repo", "custom", "channel",
+		"unknown", "", "future_type_we_dont_know_yet",
 	}
-	for _, c := range cases {
-		t.Run(c.kind, func(t *testing.T) {
-			got := intervalForType(cfg, c.kind)
-			if got != c.want {
-				t.Errorf("intervalForType(%q) = %v, want %v", c.kind, got, c.want)
+	for _, kind := range cases {
+		t.Run(kind, func(t *testing.T) {
+			got := intervalForType(cfg, kind)
+			if got != 60*time.Second {
+				t.Errorf("intervalForType(%q) = %v, want uniform 60s read cadence", kind, got)
 			}
 		})
 	}
 }
 
 // TestIntervalForType_Defaults verifies the helper's hard-coded fallback
-// kicks in when both Config fields are zero — a misconfigured daemon
-// must still pick a sane cadence rather than busy-loop.
+// kicks in when the config interval is zero (or the config itself nil) —
+// a misconfigured daemon must still pick a sane cadence rather than
+// busy-loop.
 func TestIntervalForType_Defaults(t *testing.T) {
-	cfg := &Config{} // both intervals zero
-	got := intervalForType(cfg, "team")
-	if got != 60*time.Second {
+	if got := intervalForType(&Config{}, "team"); got != 60*time.Second {
 		t.Errorf("zero-config team interval = %v, want 60s fallback", got)
+	}
+	if got := intervalForType(nil, "team"); got != 60*time.Second {
+		t.Errorf("nil-config team interval = %v, want 60s fallback", got)
 	}
 }

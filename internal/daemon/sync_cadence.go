@@ -7,23 +7,16 @@ import "time"
 // future migrations (ox-yvc1.3) replace per-callsite switches with calls
 // to this function.
 //
-// Cadence rationale: high-churn types (personal/profile/team mutate as
-// users edit and AI coworkers write) get the faster team-context cadence;
-// lower-churn types (repo, custom) get the slower read cadence used for
-// ledgers historically. Unknown types fall through to the read cadence —
-// safe default that keeps an unrecognized kb visible without hammering
-// the API.
+// Cadence rationale (ADR-028): every bubble is now a curated synthesis
+// that changes only when a curator publishes — there is no high-churn
+// personal/profile/team tier anymore, so ALL types share the slower
+// read cadence (SyncIntervalRead, 60s default). The per-type seam is
+// deliberately kept even though the switch is gone: if a future kb kind
+// reintroduces a faster tier, this function is the single place to
+// route it.
 func intervalForType(cfg *Config, kbType string) time.Duration {
-	if cfg == nil {
-		return 60 * time.Second
-	}
-	switch kbType {
-	case "personal", "profile", "team":
-		if cfg.TeamContextSyncInterval > 0 {
-			return cfg.TeamContextSyncInterval
-		}
-	}
-	if cfg.SyncIntervalRead > 0 {
+	_ = kbType // uniform cadence across all kb types — see rationale above
+	if cfg != nil && cfg.SyncIntervalRead > 0 {
 		return cfg.SyncIntervalRead
 	}
 	return 60 * time.Second

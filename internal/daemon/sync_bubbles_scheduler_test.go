@@ -15,7 +15,6 @@ package daemon
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -46,6 +45,7 @@ func TestSyncBubbles_Scheduler_RegisteredOnTeamContextTicker(t *testing.T) {
 	kbTestEnv(t)
 
 	projectDir := setupProjectWithConfig(t, "")
+	kbProjectWithTeam(t, projectDir)
 	cfg := DefaultConfig()
 	cfg.ProjectRoot = projectDir
 	// fast tickers so a 1-second context window is enough.
@@ -102,6 +102,7 @@ func TestSyncBubbles_Scheduler_NoTickerWhenIntervalZero(t *testing.T) {
 	kbTestEnv(t)
 
 	projectDir := setupProjectWithConfig(t, "")
+	kbProjectWithTeam(t, projectDir)
 	cfg := DefaultConfig()
 	cfg.ProjectRoot = projectDir
 	cfg.SyncIntervalRead = time.Hour
@@ -202,46 +203,28 @@ func TestSyncBubbles_Checkout_MainBranch(t *testing.T) {
 		"HEAD must point at main, got: %q", headRef)
 }
 
-// TestSyncBubbles_Scheduler_HighChurnVsLowChurnRouting verifies the
-// FETCH_HEAD dedup gate inside pullManagedRepo treats high-churn
-// bubbles (personal/profile/team) as "tick at team-context cadence"
-// and lower-churn bubbles (repo/custom/unknown) as "tick at read
-// cadence". We can't observe the cadence directly without a real
-// scheduler loop, but we can prove the routing function exposes the
-// right interval per type and that the value reaches pullManagedRepo
-// by checking the sync interval for each kind.
+// TestSyncBubbles_Scheduler_UniformCadenceFromConfig verifies every kb
+// type resolves to the scheduler config's SyncIntervalRead — curator
+// bubbles change only when a synthesis publishes, so the 15s
+// personal/profile/team tier is gone (ADR-028). The value must come
+// from the scheduler config, not a hard-coded constant.
 //
-// Failure prevented: cadence routing being silently flattened to a
-// single value, which would make personal bubbles feel stale (slow
-// path) or hammer the network for repo bubbles (fast path).
-//
-// This complements TestSyncBubbles_CadenceRouting in
-// sync_bubbles_test.go by also asserting the values *come from the
-// scheduler config*, not from hard-coded constants.
-func TestSyncBubbles_Scheduler_HighChurnVsLowChurnRouting(t *testing.T) {
+// Failure prevented: a type silently regaining the team-context cadence
+// and hammering the API, or the interval decoupling from config.
+func TestSyncBubbles_Scheduler_UniformCadenceFromConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.TeamContextSyncInterval = 7 * time.Second
+	cfg.TeamContextSyncInterval = 7 * time.Second // must be ignored
 	cfg.SyncIntervalRead = 91 * time.Second
 	s := &SyncScheduler{config: cfg}
 
-	cases := []struct {
-		name     string
-		kbType   api.KBType
-		want     time.Duration
-		category string
-	}{
-		{"personal", api.KBTypePersonal, 7 * time.Second, "high-churn"},
-		{"profile", api.KBTypeProfile, 7 * time.Second, "high-churn"},
-		{"team", api.KBTypeTeam, 7 * time.Second, "high-churn"},
-		{"repo", api.KBTypeRepo, 91 * time.Second, "low-churn"},
-		{"custom", api.KBTypeCustom, 91 * time.Second, "low-churn"},
-		{"unknown", api.KBTypeUnknown, 91 * time.Second, "low-churn"},
-	}
-	for _, tc := range cases {
-		t.Run(fmt.Sprintf("%s_%s", tc.category, tc.name), func(t *testing.T) {
-			got := intervalForType(s.config, string(tc.kbType))
-			assert.Equal(t, tc.want, got,
-				"%s bubble (%s) should use cadence %v, got %v", tc.name, tc.category, tc.want, got)
+	for _, kbType := range []api.KBType{
+		api.KBTypePersonal, api.KBTypeProfile, api.KBTypeTeam,
+		api.KBTypeRepo, api.KBTypeCustom, api.KBTypeChannel, api.KBTypeUnknown,
+	} {
+		t.Run(string(kbType), func(t *testing.T) {
+			got := intervalForType(s.config, string(kbType))
+			assert.Equal(t, 91*time.Second, got,
+				"%s bubble must use the config's read cadence", kbType)
 		})
 	}
 }

@@ -36,7 +36,7 @@ type dynamicKBLister struct {
 	calls atomic.Int32
 }
 
-func (d *dynamicKBLister) ListBubbles(_ context.Context) ([]api.KB, error) {
+func (d *dynamicKBLister) ListBubbles(_ context.Context, _ api.KBScope) ([]api.KB, error) {
 	d.calls.Add(1)
 	return d.get()
 }

@@ -166,10 +166,25 @@ func defaultKBDoctorRoot() (root string, err error) {
 }
 
 // defaultKBDoctorList builds a kb API client bound to the project endpoint
-// and lists bubbles. Returns api.ErrKBAPIUnavailable when no project
-// endpoint or auth token is available so callers skip API-dependent checks.
+// and lists the project's ambient-scope bubbles (ADR-073: the list
+// endpoint requires one scope per call; ambientKBScopes derives them
+// from the project's team binding). Returns api.ErrKBAPIUnavailable when
+// no endpoint is configured or no ambient scope exists — there is then
+// no API truth to compare against, and the API-dependent checks report
+// skip (never failure).
+//
+// Fan-out semantics mirror the daemon's syncBubbles union for the
+// success path, but any per-scope hard error aborts the whole list:
+// the orphan check (and its GC autofix) deletes on the strength of
+// this list, and a partially-listed union would make a failed scope's
+// bubbles look orphaned.
 func defaultKBDoctorList(ctx context.Context) ([]api.KB, error) {
 	gitRoot := findGitRoot()
+	scopes := ambientKBScopes(gitRoot)
+	if len(scopes) == 0 {
+		return nil, api.ErrKBAPIUnavailable
+	}
+
 	ep := endpoint.GetForProject(gitRoot)
 	if ep == "" {
 		ep = endpoint.Get()
@@ -183,7 +198,35 @@ func defaultKBDoctorList(ctx context.Context) ([]api.KB, error) {
 	if tok != nil && tok.AccessToken != "" {
 		client = client.WithAuthToken(tok.AccessToken)
 	}
-	return client.ListBubbles(ctx)
+
+	var out []api.KB
+	seen := make(map[string]bool)
+	anyOK := false
+	for _, scope := range scopes {
+		rows, err := client.ListBubbles(ctx, scope)
+		if err != nil {
+			if errors.Is(err, api.ErrKBAPIUnavailable) {
+				// flag off / non-member for this scope — zero rows here,
+				// other scopes may still answer.
+				continue
+			}
+			return nil, err
+		}
+		anyOK = true
+		for _, r := range rows {
+			if r.KBID != "" && seen[r.KBID] {
+				continue
+			}
+			if r.KBID != "" {
+				seen[r.KBID] = true
+			}
+			out = append(out, r)
+		}
+	}
+	if !anyOK {
+		return nil, api.ErrKBAPIUnavailable
+	}
+	return out, nil
 }
 
 // defaultKBDoctorSync asks the daemon to run an immediate sync. Returns a

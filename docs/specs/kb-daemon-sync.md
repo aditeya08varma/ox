@@ -13,11 +13,14 @@ canonical XDG path and kept fresh by the daemon, mounted so AI coworkers can
 navigate the published knowledge locally. This doc records how the CLI side
 handles that sync so the model isn't re-derived every time someone touches it.
 
-> **Note (2026-07-28):** the mechanics below predate ox ADR-028 / epic
-> `ox-cag9` (scoped list API, project-team ambient scope, `team/`-prefixed
-> project symlinks, uniform 60s cadence). Locking, GC, sparse-checkout, and
-> doctor-parity sections remain accurate; per-type sync policy and symlink
-> layout are being revised under that epic.
+> **Updated for epic `ox-cag9` (2026-07-28):** the sync now runs against the
+> scoped list API (`GET /api/v1/kb?scope_type=&scope_id=`) over the project's
+> ambient scopes — v1 is the repo's team only; the caller's personal scope
+> joins once the ADR-086 personal-team backfill lands (bead `ox-cag9.8`).
+> Cadence is a uniform 60s for every bubble type (curator bubbles change
+> only when a synthesis publishes). Per-project symlinks live under
+> `.sageox/kb/team/<slug>` (`me/` reserved for the deferred personal scope),
+> mirroring the server's `/t/<team>/kb/<slug>` and `/me/kb/<slug>` URL split.
 
 ---
 
@@ -27,7 +30,8 @@ handles that sync so the model isn't re-derived every time someone touches it.
 ~/.local/share/sageox/<endpoint>/kb/<kb_id>/      # one clone per bubble (immutable kb_id key)
   .git/
   .sageox/
-    meta.json        # daemon-written: {type, slug, owner_user_id, viewer_role, last_sync}
+    meta.json        # daemon-written: {type, slug, scope_type, scope_id, name,
+                     #   description, topics, owner_user_id, viewer_role, last_sync}
     kb.yaml          # server-pushed bubble metadata
     sync.manifest    # sparse-checkout rules
 ```
@@ -41,7 +45,7 @@ root. Bubbles are keyed by the **immutable** `kb_id`, never the renameable slug.
 
 There is **one daemon per ledger/worktree**, so a user with N projects open runs
 N daemons concurrently. All of them share the *same* on-disk kb store. To avoid N
-daemons each cloning/pulling the same bubbles every 15s, kb sync is gated by the
+daemons each cloning/pulling the same bubbles every tick, kb sync is gated by the
 **per-(user, endpoint) global-sync flock lease** — the identical mechanism that
 already gates team-context pulls (bead ox-6zme).
 

@@ -1215,3 +1215,85 @@ func TestCountReadyAgentTasks_AgentTypeFiltered(t *testing.T) {
 		t.Errorf("expected 0 for absent queue, got %d", got)
 	}
 }
+
+// TestOutputAgentPrimeXML_KnowledgeBubbles verifies the <knowledge-bubbles>
+// block (ox ADR-028 §6): when the KB envelope is non-empty the block carries
+// the consumption guidance text plus one table row per bubble — slug in
+// display form (#-prefixed), topics, and the mount path, with unmounted
+// bubbles rendered as "(not mounted yet)" instead of a blank cell. When the
+// envelope is empty the tag is absent entirely so flag-off accounts pay
+// zero tokens for it.
+// Failure prevented: agents either losing the "bubbles are data, consult
+// read-only" guidance, or being handed a blank mount path they'd try to cd
+// into.
+func TestOutputAgentPrimeXML_KnowledgeBubbles(t *testing.T) {
+	var buf bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&buf)
+
+	output := agentPrimeOutput{
+		AgentID:    "test-agent",
+		Status:     "fresh",
+		KBGuidance: prime.KBGuidanceText,
+		KB: []prime.KBInfo{
+			{
+				KBID:   "kb_mounted",
+				Type:   "team",
+				Slug:   "platform",
+				Name:   "Platform",
+				Topics: []string{"infra", "deploys"},
+				Path:   "/data/sageox/sageox.ai/kb/kb_mounted",
+			},
+			{
+				KBID: "kb_pending",
+				Type: "team",
+				Slug: "design-system",
+				Name: "Design System",
+				// no Path — not cloned yet
+			},
+		},
+	}
+
+	if _, err := outputAgentPrimeXML(cmd, output); err != nil {
+		t.Fatalf("outputAgentPrimeXML: %v", err)
+	}
+	xml := buf.String()
+
+	start := strings.Index(xml, "<knowledge-bubbles>")
+	end := strings.Index(xml, "</knowledge-bubbles>")
+	if start < 0 || end < 0 {
+		t.Fatalf("expected <knowledge-bubbles> block, got:\n%s", xml)
+	}
+	block := xml[start:end]
+
+	// guidance is XML-escaped at emit (it contains `<#slug>`); assert the
+	// escaped form so raw-emission regressions fail this test.
+	if !strings.Contains(block, escapeXML(prime.KBGuidanceText)) {
+		t.Errorf("block must inline the XML-escaped KB consumption guidance, got:\n%s", block)
+	}
+	if strings.Contains(block, "describe <#slug>") {
+		t.Errorf("guidance must not be emitted raw (unescaped '<'), got:\n%s", block)
+	}
+	for _, want := range []string{
+		"#platform",
+		"#design-system",
+		"infra, deploys",
+		"/data/sageox/sageox.ai/kb/kb_mounted",
+		"(not mounted yet)",
+	} {
+		if !strings.Contains(block, want) {
+			t.Errorf("knowledge-bubbles block missing %q, got:\n%s", want, block)
+		}
+	}
+
+	// zero KB rows → no tag at all
+	var empty bytes.Buffer
+	cmd2 := &cobra.Command{}
+	cmd2.SetOut(&empty)
+	if _, err := outputAgentPrimeXML(cmd2, agentPrimeOutput{AgentID: "a", Status: "fresh"}); err != nil {
+		t.Fatalf("outputAgentPrimeXML: %v", err)
+	}
+	if strings.Contains(empty.String(), "<knowledge-bubbles>") {
+		t.Error("no <knowledge-bubbles> tag expected when the KB envelope is empty")
+	}
+}

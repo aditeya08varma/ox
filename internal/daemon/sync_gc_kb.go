@@ -40,6 +40,7 @@ import (
 	"time"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -308,23 +309,37 @@ func parseKBTrashTimestamp(name string) (time.Time, bool) {
 }
 
 // buildKBGCListFn returns a kbAPIListFn backed by the production kb
-// lister wired through buildKBLister(). On nil lister (no project
-// root, not logged in, etc.) the returned fn reports
-// ErrKBAPIUnavailable so the GC pass skips cleanly.
+// lister wired through buildKBLister(), fanning out over the project's
+// ambient scopes (same derivation as syncBubbles). On nil lister (no
+// project root, not logged in, etc.) or no ambient scopes, the returned
+// fn reports ErrKBAPIUnavailable so the GC pass skips cleanly.
+//
+// Strictness: unlike syncBubbles (which unions best-effort — it only
+// clones/pulls), GC deletes on the strength of this list. A scope that
+// fails to list would make its bubbles look orphaned, so ANY per-scope
+// error aborts the whole list ("when in doubt, don't delete").
 func (s *SyncScheduler) buildKBGCListFn() kbAPIListFn {
 	return func(ctx context.Context) ([]string, error) {
 		lister := s.buildKBLister()
 		if lister == nil {
 			return nil, api.ErrKBAPIUnavailable
 		}
-		bubbles, err := lister.ListBubbles(ctx)
-		if err != nil {
-			return nil, err
+		scopes := kb.AmbientScopes(s.projectTeamIDForKB())
+		if len(scopes) == 0 {
+			return nil, api.ErrKBAPIUnavailable
 		}
-		ids := make([]string, 0, len(bubbles))
-		for _, b := range bubbles {
-			if b.KBID != "" {
-				ids = append(ids, b.KBID)
+		var ids []string
+		seen := make(map[string]bool)
+		for _, scope := range scopes {
+			bubbles, err := lister.ListBubbles(ctx, scope)
+			if err != nil {
+				return nil, err
+			}
+			for _, b := range bubbles {
+				if b.KBID != "" && !seen[b.KBID] {
+					seen[b.KBID] = true
+					ids = append(ids, b.KBID)
+				}
 			}
 		}
 		return ids, nil
