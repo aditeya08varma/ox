@@ -737,8 +737,9 @@ func formatWorkspaceGroups(status *StatusData, verbose bool) string {
 // formatKBGroup renders the Knowledge Bubbles section of `ox daemon status`:
 // a header with an owner badge (this daemon syncs them vs another daemon does)
 // and one tree row per locally-synced bubble. Returns "" when no bubbles are
-// on disk. Mirrors the Other Team Contexts block — bubbles ARE the kb-era
-// successor to team contexts (see docs/specs/kb-daemon-sync.md).
+// on disk. Rendering mirrors the Other Team Contexts block, but bubbles are
+// a separate primitive — curated syntheses, not team-context successors
+// (ox ADR-028; sync mechanics in docs/specs/kb-daemon-sync.md).
 func formatKBGroup(status *StatusData, verbose bool) string {
 	bubbles := status.Workspaces["kb"]
 	if len(bubbles) == 0 {

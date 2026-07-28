@@ -4,8 +4,8 @@ package prime
 // kb output against a committed testdata snapshot. The snapshot is the
 // reviewable artifact: any change to KBInfo's serialized shape (renamed
 // keys, dropped fields, new fields without omitempty) shows up as a diff
-// in the testdata file in PR review, which is exactly how the plan asks
-// us to detect silent envelope drift before it ships.
+// in the testdata file in PR review, which is exactly how we detect silent
+// envelope drift before it ships.
 //
 // Update protocol: when a deliberate envelope change is in flight, run
 //
@@ -26,11 +26,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// snapshotInputBubbles is the deliberate "three sources, one envelope"
-// fixture from the kb plan. Three live kb-API bubbles + one deprecated
-// team_context + one deprecated ledger row routed through the merger as
-// legacy synthesizers — exactly the migration window the snapshot
-// protects against silent drift.
+// snapshotInputBubbles is the canonical mixed-type fixture: one bubble per
+// primary kb_type, all sourced from the KB API — under ox ADR-028 the KB
+// API is the only source of bubble rows (team contexts and ledgers are
+// conversation stores, never bubbles).
 func snapshotInputBubbles() []kb.Bubble {
 	return []kb.Bubble{
 		{
@@ -40,7 +39,6 @@ func snapshotInputBubbles() []kb.Bubble {
 			Name:       "Personal",
 			ViewerRole: "owner",
 			LocalPath:  "/data/sageox/sageox.ai/kb/kb_personal",
-			Source:     kb.SourceKB,
 		},
 		{
 			KBID:       "kb_team",
@@ -49,7 +47,6 @@ func snapshotInputBubbles() []kb.Bubble {
 			Name:       "Platform",
 			ViewerRole: "member",
 			LocalPath:  "/data/sageox/sageox.ai/kb/kb_team",
-			Source:     kb.SourceKB,
 		},
 		{
 			KBID:       "kb_repo",
@@ -58,30 +55,6 @@ func snapshotInputBubbles() []kb.Bubble {
 			Name:       "my-app",
 			ViewerRole: "owner",
 			LocalPath:  "/data/sageox/sageox.ai/kb/kb_repo",
-			Source:     kb.SourceKB,
-		},
-		// deprecated team_context legacy mirror, synthesized by the
-		// merger from /api/v1/cli/repos
-		{
-			Type:      api.KBTypeTeam,
-			Slug:      "team-old",
-			Name:      "Team (legacy)",
-			LocalPath: "/data/team-contexts/team-old",
-			RepoID:    "team_legacy",
-			Endpoint:  "https://sageox.ai",
-			Source:    kb.SourceTeamLegacy,
-			Legacy:    true,
-		},
-		// deprecated ledger legacy mirror
-		{
-			Type:      api.KBTypeRepo,
-			Slug:      "ledger-old",
-			Name:      "ox (legacy)",
-			LocalPath: "/data/ledgers/ox",
-			RepoID:    "repo_legacy",
-			Endpoint:  "https://sageox.ai",
-			Source:    kb.SourceLedger,
-			Legacy:    true,
 		},
 	}
 }
@@ -98,15 +71,15 @@ func snapshotInputBubbles() []kb.Bubble {
 func TestPrime_KBEnvelopeSnapshot(t *testing.T) {
 	t.Parallel()
 
-	res := kb.MergeResult{Bubbles: snapshotInputBubbles()}
+	res := kb.ListResult{Bubbles: snapshotInputBubbles()}
 	tokens := map[string]int64{
 		"personal": 100,
-		"team":     400, // split: kb-API team + legacy team
-		"repo":     50,  // split: kb-API repo + legacy ledger
+		"team":     400,
+		"repo":     50,
 	}
 
 	got := BuildKBInfos(res, tokens)
-	require.Len(t, got, 5, "all five rows must survive the build")
+	require.Len(t, got, 3, "all three rows must survive the build")
 
 	// stable indented JSON so diffs in testdata read like prose.
 	body, err := json.MarshalIndent(got, "", "  ")
@@ -131,34 +104,31 @@ func TestPrime_KBEnvelopeSnapshot(t *testing.T) {
 }
 
 // TestPrime_TokenTotalsConsistency verifies the contract that the sum of
-// KBInfo.Tokens per type equals the per-type rollup the deprecated
-// CumulativeContextTokensBySource mirror reports. This is the rollout
-// sanity check from the plan: "the new field equals the sum of the old
-// ones."
+// KBInfo.Tokens per type equals the per-type rollup the daemon's
+// counters report — the sanity check "the per-bubble field sums to the
+// per-type rollup."
 //
 // Failure prevented: a bug that splits tokens across the wrong number of
-// bubbles (e.g., counts legacy rows separately from new rows and double-
-// reports the type total) would silently inflate or deflate dashboard
-// numbers during the migration window.
+// bubbles would silently inflate or deflate dashboard numbers.
 func TestPrime_TokenTotalsConsistency(t *testing.T) {
 	t.Parallel()
 
-	res := kb.MergeResult{Bubbles: snapshotInputBubbles()}
-	deprecatedRollup := map[string]int64{
+	res := kb.ListResult{Bubbles: snapshotInputBubbles()}
+	rollup := map[string]int64{
 		"personal": 100,
-		"team":     400, // shared across the kb-API team row + legacy team row
-		"repo":     50,  // shared across the kb-API repo row + legacy ledger row
+		"team":     400,
+		"repo":     50,
 	}
 
-	got := BuildKBInfos(res, deprecatedRollup)
+	got := BuildKBInfos(res, rollup)
 
 	sum := map[string]int{}
 	for _, k := range got {
 		sum[k.Type] += k.Tokens
 	}
-	assert.Equal(t, int(deprecatedRollup["personal"]), sum["personal"], "personal tokens must equal the per-type rollup")
-	assert.Equal(t, int(deprecatedRollup["team"]), sum["team"], "team tokens (new + legacy) must equal the per-type rollup")
-	assert.Equal(t, int(deprecatedRollup["repo"]), sum["repo"], "repo tokens (new + legacy) must equal the per-type rollup")
+	assert.Equal(t, int(rollup["personal"]), sum["personal"], "personal tokens must equal the per-type rollup")
+	assert.Equal(t, int(rollup["team"]), sum["team"], "team tokens must equal the per-type rollup")
+	assert.Equal(t, int(rollup["repo"]), sum["repo"], "repo tokens must equal the per-type rollup")
 }
 
 // TestPrime_ForwardCompatUnknownType verifies a kb_type value the CLI
@@ -172,7 +142,7 @@ func TestPrime_TokenTotalsConsistency(t *testing.T) {
 func TestPrime_ForwardCompatUnknownType(t *testing.T) {
 	t.Parallel()
 
-	res := kb.MergeResult{Bubbles: []kb.Bubble{
+	res := kb.ListResult{Bubbles: []kb.Bubble{
 		{KBID: "kb_y", Type: api.KBTypeUnknown, Slug: "future-x", Name: "Future"},
 		{KBID: "kb_blank", Type: "", Slug: "blank", Name: "Blank"},
 	}}
@@ -196,7 +166,7 @@ func TestPrime_ForwardCompatUnknownType(t *testing.T) {
 func TestPrime_KBEnvelopeRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	res := kb.MergeResult{Bubbles: snapshotInputBubbles()}
+	res := kb.ListResult{Bubbles: snapshotInputBubbles()}
 	tokens := map[string]int64{"personal": 100, "team": 400, "repo": 50}
 
 	got := BuildKBInfos(res, tokens)

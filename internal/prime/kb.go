@@ -1,9 +1,9 @@
 package prime
 
-// kb.go — converts an internal/kb.MergeResult into the []KBInfo envelope
+// kb.go — converts an internal/kb.ListResult into the []KBInfo envelope
 // emitted by `ox agent prime`. Pure function so the conversion + sort + the
 // "personal bubble must always appear" guarantee can be unit-tested without
-// standing up the merger or its three live sources.
+// a live KB API.
 
 import (
 	"log/slog"
@@ -19,13 +19,13 @@ import (
 const (
 	hintPersonal = "your personal scratchpad — your own notes/decisions across all repos"
 	hintProfile  = "your public profile bubble"
-	hintTeam     = "team-wide decisions/conventions; read with 'ox agent team-ctx'"
-	hintRepoSyn  = "ledger archive — read on demand"
+	hintTeam     = "team-scoped knowledge bubble"
+	hintRepo     = "repo-scoped knowledge bubble"
 	hintCustom   = "custom knowledge bubble"
 	hintChannel  = "channel bubble — broadcast/presence surface; manual session recording"
 )
 
-// BuildKBInfos converts a merger result into the prime KB envelope.
+// BuildKBInfos converts a KB fetch result into the prime KB envelope.
 //
 // tokensByType is consulted to populate KBInfo.Tokens — typically sourced
 // from the daemon's per-kb-type cumulative counters (or the prime per-source
@@ -35,9 +35,9 @@ const (
 // numbers the daemon doesn't actually track today. Pass a nil map when no
 // token data is available — Tokens will be left at zero.
 //
-// Sort order matches `ox kb list`: type-priority, then non-legacy before
-// legacy within a type, then slug. Stable so test snapshots don't churn.
-func BuildKBInfos(result kb.MergeResult, tokensByType map[string]int64) []KBInfo {
+// Sort order matches `ox kb list`: type-priority, then slug. Stable so
+// test snapshots don't churn.
+func BuildKBInfos(result kb.ListResult, tokensByType map[string]int64) []KBInfo {
 	if len(result.Bubbles) == 0 {
 		return nil
 	}
@@ -63,19 +63,15 @@ func BuildKBInfos(result kb.MergeResult, tokensByType map[string]int64) []KBInfo
 		if pi != pj {
 			return pi < pj
 		}
-		// non-legacy before legacy within the same type bucket
-		if out[i].Legacy != out[j].Legacy {
-			return !out[i].Legacy
-		}
 		return out[i].Slug < out[j].Slug
 	})
 	return out
 }
 
 // bubbleToKBInfo builds one KBInfo row. Path falls back to LocalPath from
-// the merger; populating the canonical paths.KBDir is the daemon's job once
-// the bubble is checked out, so we don't fabricate a path here when the
-// merger doesn't supply one (kb-API rows that haven't been pulled yet).
+// the fetch; populating the canonical paths.KBDir is the daemon's job once
+// the bubble is checked out, so we don't fabricate a path here for rows
+// that haven't been pulled yet.
 func bubbleToKBInfo(b kb.Bubble, sameTypeCount int, tokensByType map[string]int64) KBInfo {
 	typeStr := normalizedTypeKey(b.Type)
 
@@ -86,8 +82,7 @@ func bubbleToKBInfo(b kb.Bubble, sameTypeCount int, tokensByType map[string]int6
 		Name:       b.Name,
 		Path:       b.LocalPath,
 		ViewerRole: b.ViewerRole,
-		Legacy:     b.Legacy,
-		Hint:       hintForType(b.Type, b.Legacy),
+		Hint:       hintForType(b.Type),
 	}
 
 	// per-bubble tokens: split the per-type rollup evenly so the sum
@@ -112,10 +107,8 @@ func normalizedTypeKey(t api.KBType) string {
 	return string(t)
 }
 
-// hintForType returns a short, type-specific agent hint. Legacy ledger rows
-// (synthesized as KBTypeRepo) keep the existing "ledger archive — read on
-// demand" guidance so prior agent prompts continue to work.
-func hintForType(t api.KBType, legacy bool) string {
+// hintForType returns a short, type-specific AI-coworker hint.
+func hintForType(t api.KBType) string {
 	switch t {
 	case api.KBTypePersonal:
 		return hintPersonal
@@ -124,7 +117,7 @@ func hintForType(t api.KBType, legacy bool) string {
 	case api.KBTypeTeam:
 		return hintTeam
 	case api.KBTypeRepo:
-		return hintRepoSyn
+		return hintRepo
 	case api.KBTypeCustom:
 		return hintCustom
 	case "channel":
@@ -133,7 +126,6 @@ func hintForType(t api.KBType, legacy bool) string {
 		// rows that arrive as kb_type="channel" still get the right hint.
 		return hintChannel
 	default:
-		_ = legacy // intentionally unused; reserved for future per-source nuance
 		return ""
 	}
 }
@@ -165,15 +157,14 @@ func kbTypePriority(t string) int {
 // EnsurePersonalKBPresent enforces the I2 invariant: the caller's personal
 // bubble must always appear in the KB envelope. Returns the input unchanged
 // today — the server-side EnsurePersonalKBMiddleware lazy-provisions the row
-// during the kb-API call, so the merger result is expected to already
+// during the kb-API call, so the fetch result is expected to already
 // contain it. This helper exists to log a defensive warning when the
 // expectation is violated despite the kb-API source being reachable.
 //
-// kbSourceReachable reports whether the kb-API source contributed at least
+// kbSourceReachable reports whether the kb-API call contributed at least
 // one row (true) — the proxy for "kb-API call succeeded with the feature
 // flag on". When false (kb API was unavailable / flag off / OX_KB_DISABLE),
-// the absence of a personal bubble is silently tolerated because legacy
-// world doesn't have personal bubbles.
+// the absence of a personal bubble is silently tolerated.
 func EnsurePersonalKBPresent(kbInfos []KBInfo, kbSourceReachable bool) []KBInfo {
 	for _, k := range kbInfos {
 		if k.Type == string(api.KBTypePersonal) {
@@ -188,15 +179,10 @@ func EnsurePersonalKBPresent(kbInfos []KBInfo, kbSourceReachable bool) []KBInfo 
 	return kbInfos
 }
 
-// KBSourceReachable reports whether the merge result contains at least one
-// row sourced from /api/v1/kb. Used as the proxy for "kb feature flag is
-// on for this caller and the API call succeeded" — when true and the
-// personal bubble is still missing, EnsurePersonalKBPresent emits a warn.
-func KBSourceReachable(result kb.MergeResult) bool {
-	for _, b := range result.Bubbles {
-		if b.Source == kb.SourceKB {
-			return true
-		}
-	}
-	return false
+// KBSourceReachable reports whether the fetch returned at least one row
+// from /api/v1/kb. Used as the proxy for "kb feature flag is on for this
+// caller and the API call succeeded" — when true and the personal bubble is
+// still missing, EnsurePersonalKBPresent emits a warn.
+func KBSourceReachable(result kb.ListResult) bool {
+	return len(result.Bubbles) > 0
 }

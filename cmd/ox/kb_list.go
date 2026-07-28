@@ -13,24 +13,20 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/cli"
-	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/kb"
 	"github.com/spf13/cobra"
 )
 
-// kb_list.go — `ox kb list` subcommand. Fans out via the F3 three-source
-// merger (internal/kb.Merger) and renders a unified table of bubbles to the
-// user. The merger owns kb-API + legacy team-context + legacy ledger fan-out
-// and dedup; this file is purely the CLI shell + presentation.
+// kb_list.go — `ox kb list` subcommand. Fetches the caller's bubbles from
+// the KB API (the only source of bubble rows under ox ADR-028 — team
+// contexts and ledgers are conversation stores, never presented as bubbles)
+// and renders them.
 //
 // Design notes:
-//   - The command wires up production sources only inside runKBList; the
+//   - The command wires up the production client only inside runKBList; the
 //     core rendering logic in renderKBListResult takes a pre-built
-//     MergeResult so it stays trivial to unit-test.
-//   - The merger interface (kbListMerger) is intentionally narrow — one
-//     method, the same shape Merger.Merge has — so tests can inject a fake
-//     without standing up httptest servers.
+//     kb.ListResult so it stays trivial to unit-test.
 
 // kbCmd is the parent command for knowledge bubble (`ox kb …`) operations.
 // Moved here from kb_path.go when `ox kb path` was removed (ox ADR-028 /
@@ -55,30 +51,18 @@ Use ` + "`ox kb list`" + ` to see the bubbles you can access and
 ` + "`ox kb show <slug>`" + ` for details on one.`,
 }
 
-// kbListMerger is the seam between runKBList and the F3 three-source merger.
-// Production wires *kb.Merger; tests provide a fake. Mirrors the surface of
-// kb.Merger.Merge so swapping in the real one is a one-line construction.
-type kbListMerger interface {
-	Merge(ctx context.Context) (kb.MergeResult, error)
-}
-
 var kbListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List knowledge bubbles you can access",
-	Long: `List the knowledge bubbles available to you across all sources.
+	Long: `List the knowledge bubbles available to you.
 
-Merges three sources concurrently:
-  - The kb API (/api/v1/kb) — the new typed knowledge-bubble surface
-  - Legacy team contexts (/api/v1/cli/repos)
-  - Local ledger registry
-
-Legacy team contexts and ledgers surface here too — they're synthesized from
-the per-source data and shown alongside new kb-API rows so the list is
-complete during the migration window.
+Bubbles come from the KB API (/api/v1/kb). Team contexts and ledgers are
+separate, permanent conversation stores — list them with ` + "`ox teams`" + ` and
+` + "`ox status`" + `, not here.
 
 Examples:
   ox kb list                  # all bubbles
-  ox kb list --type=team      # only team bubbles (legacy + new)
+  ox kb list --type=team      # only team bubbles
   ox kb list --json           # scriptable JSON output`,
 	Args: cobra.NoArgs,
 	RunE: runKBList,
@@ -98,7 +82,7 @@ type kbListJSONOutput struct {
 }
 
 // kbListJSONBubble mirrors kb.Bubble for JSON. Defined separately so the
-// JSON tags are stable even if the merger struct gains internal-only fields.
+// JSON tags are stable even if the internal struct gains internal-only fields.
 type kbListJSONBubble struct {
 	KBID       string `json:"kb_id,omitempty"`
 	Type       string `json:"type"`
@@ -107,15 +91,11 @@ type kbListJSONBubble struct {
 	ViewerRole string `json:"viewer_role,omitempty"`
 	LocalPath  string `json:"local_path,omitempty"`
 	RepoURL    string `json:"repo_url,omitempty"`
-	RepoID     string `json:"repo_id,omitempty"`
 	Endpoint   string `json:"endpoint,omitempty"`
-	Source     string `json:"source"`
-	Legacy     bool   `json:"legacy"`
 }
 
 type kbListJSONWarning struct {
-	Source string `json:"source"`
-	Error  string `json:"error"`
+	Error string `json:"error"`
 }
 
 func runKBList(cmd *cobra.Command, args []string) error {
@@ -123,115 +103,39 @@ func runKBList(cmd *cobra.Command, args []string) error {
 	jsonOutput, _ := cmd.Root().PersistentFlags().GetBool("json")
 
 	projectRoot, _ := findProjectRoot()
-	merger := newDefaultKBListMerger(projectRoot)
+	source, ep := newDefaultKBListSource(projectRoot)
 
 	ctx, cancel := context.WithTimeout(cmd.Context(), 15*time.Second)
 	defer cancel()
 
-	res, err := merger.Merge(ctx)
-	if err != nil {
-		return fmt.Errorf("kb list: merge failed: %w", err)
-	}
-
+	res := kb.FetchBubbles(ctx, source, ep)
 	return renderKBListResult(cmd.OutOrStdout(), res, typeFilter, jsonOutput, projectRoot)
 }
 
-// newDefaultKBListMerger wires up the three production sources for the merger.
-// Pulled out so tests can swap the whole merger via a fake without touching
-// auth/credential plumbing.
-func newDefaultKBListMerger(projectRoot string) kbListMerger {
+// newDefaultKBListSource builds the authenticated production KB client (and
+// resolves the endpoint it targets). Pulled out so tests can swap the source
+// via a fake without touching auth/credential plumbing.
+func newDefaultKBListSource(projectRoot string) (kb.KBSource, string) {
 	ep := endpoint.Get()
 	if projectRoot != "" {
 		ep = endpoint.GetForProject(projectRoot)
 	}
 
-	// kb-API source — authenticated when a token is available; the kb client
-	// translates 403/404 into ErrKBAPIUnavailable which the merger treats as
-	// "0 rows from this source", not a warning.
+	// authenticated when a token is available; the kb client translates
+	// 403/404 into ErrKBAPIUnavailable which FetchBubbles treats as "no
+	// bubbles for this caller", not a warning.
 	kbClient := api.NewKBClientWithEndpoint(ep)
 	if token, err := auth.GetTokenForEndpoint(ep); err == nil && token != nil && token.AccessToken != "" {
 		kbClient = kbClient.WithAuthToken(token.AccessToken)
 	}
-
-	// legacy sources — defined inline to keep the production wiring close to
-	// the construction site. Each adapter is small enough that hoisting it
-	// to a top-level type would obscure rather than clarify.
-	teams := &kbListTeamSource{projectRoot: projectRoot, endpoint: ep}
-	ledger := &kbListLedgerSource{projectRoot: projectRoot}
-
-	return kb.NewMerger(kbClient, teams, ledger)
-}
-
-// kbListTeamSource adapts the existing team-discovery pipeline to the
-// merger's LegacyTeamSource interface.
-type kbListTeamSource struct {
-	projectRoot string
-	endpoint    string
-}
-
-func (s *kbListTeamSource) ListTeamContexts(_ context.Context) ([]kb.LegacyTeamRow, string, error) {
-	var teams []enrichedTeam
-	if s.projectRoot != "" {
-		teams = discoverAllTeams(s.projectRoot)
-	}
-	if len(teams) == 0 {
-		teams = discoverTeamsGlobal()
-	}
-	rows := make([]kb.LegacyTeamRow, 0, len(teams))
-	for _, t := range teams {
-		rows = append(rows, kb.LegacyTeamRow{
-			TeamID:   t.TeamID,
-			Name:     t.Name,
-			Slug:     t.Slug,
-			LocalDir: t.Path,
-		})
-	}
-	return rows, s.endpoint, nil
-}
-
-// kbListLedgerSource adapts the local ledger registry to the merger's
-// LedgerSource interface. Today the implementation is intentionally minimal:
-// it surfaces the project's own ledger when discoverable, and leaves
-// cross-project ledger enumeration to a future iteration. The merger will
-// dedup against any kb-API row that claims the same repo_id, so partial
-// coverage here doesn't cause double-listing.
-type kbListLedgerSource struct {
-	projectRoot string
-}
-
-func (s *kbListLedgerSource) ListLedgers(_ context.Context) ([]kb.LegacyLedgerRow, error) {
-	if s.projectRoot == "" {
-		return nil, nil
-	}
-	cfg, err := config.LoadProjectConfig(s.projectRoot)
-	if err != nil || cfg == nil || cfg.RepoID == "" {
-		return nil, nil
-	}
-	ledgerPath := getLedgerPath()
-	if ledgerPath == "" {
-		return nil, nil
-	}
-	// ProjectConfig doesn't carry the repo's display name/slug — those live
-	// only on the server today. Surface the project label as a best-effort
-	// name so the row isn't blank; slug is left empty (the merger uses
-	// (slug + endpoint) only as a tertiary dedup key).
-	name := cfg.Project
-	if name == "" {
-		name = cfg.RepoID
-	}
-	return []kb.LegacyLedgerRow{{
-		RepoID:   cfg.RepoID,
-		Name:     name,
-		LocalDir: ledgerPath,
-		Endpoint: endpoint.GetForProject(s.projectRoot),
-	}}, nil
+	return kbClient, ep
 }
 
 // renderKBListResult is the unit-testable core: it takes a pre-built
-// MergeResult, applies the (post-merge) type filter, and emits either JSON
-// or a human-readable table. Splitting this out lets tests skip the entire
+// kb.ListResult, applies the type filter, and emits either JSON or a
+// human-readable table. Splitting this out lets tests skip the entire
 // auth + endpoint dance and just feed bubbles in.
-func renderKBListResult(w io.Writer, res kb.MergeResult, typeFilter string, jsonOutput bool, projectRoot string) error {
+func renderKBListResult(w io.Writer, res kb.ListResult, typeFilter string, jsonOutput bool, projectRoot string) error {
 	bubbles := filterAndSortBubbles(res.Bubbles, typeFilter)
 
 	if jsonOutput {
@@ -251,11 +155,8 @@ func renderKBListResult(w io.Writer, res kb.MergeResult, typeFilter string, json
 	return nil
 }
 
-// filterAndSortBubbles applies the --type filter (if any) AFTER the merge
-// has happened — that way a bubble appearing under both kb-API and legacy
-// sources still dedups before the filter sees it. Sort order is stable on
-// (type-priority, slug); legacy entries sort within their type group, after
-// non-legacy.
+// filterAndSortBubbles applies the --type filter (if any). Sort order is
+// stable on (type-priority, slug).
 func filterAndSortBubbles(in []kb.Bubble, typeFilter string) []kb.Bubble {
 	out := make([]kb.Bubble, 0, len(in))
 	for _, b := range in {
@@ -268,10 +169,6 @@ func filterAndSortBubbles(in []kb.Bubble, typeFilter string) []kb.Bubble {
 		pi, pj := kbTypePriority(out[i].Type), kbTypePriority(out[j].Type)
 		if pi != pj {
 			return pi < pj
-		}
-		// non-legacy before legacy within the same type bucket
-		if out[i].Legacy != out[j].Legacy {
-			return !out[i].Legacy
 		}
 		return out[i].Slug < out[j].Slug
 	})
@@ -304,14 +201,7 @@ func kbTypePriority(t api.KBType) int {
 
 // formatKBType renders the TYPE column. Empty/unknown types render as
 // "unknown" so a forward-compat row never produces a blank column.
-//
-// Legacy origin (team-context list / ledger registry vs the new kb API) is
-// tracked on the Bubble struct (Legacy bool) and used for sort-stability,
-// but the rendered TYPE column intentionally omits it for now — keeps the
-// column narrow during the migration window. Re-enable the suffix later
-// once we want users to see migration progress at a glance.
-func formatKBType(t api.KBType, legacy bool) string {
-	_ = legacy
+func formatKBType(t api.KBType) string {
 	base := string(t)
 	if base == "" || t == api.KBTypeUnknown {
 		base = "unknown"
@@ -379,7 +269,7 @@ func printKBListHeader(w io.Writer) {
 }
 
 func printKBListRow(w io.Writer, b kb.Bubble) {
-	typeStr := formatKBType(b.Type, b.Legacy)
+	typeStr := formatKBType(b.Type)
 	typeCol := fmt.Sprintf("%-*s", kbListColTypeWidth, truncateForColumn(typeStr, kbListColTypeWidth))
 
 	// Human-display form is `#<slug>`; storage and JSON keep the bare slug.
@@ -417,7 +307,7 @@ func truncateForColumn(s string, width int) string {
 // emitKBListJSON writes the JSON envelope to w. Used directly when --json is
 // set; outputJSON's hardcoded os.Stdout would defeat the writer abstraction
 // the rest of this file uses for testability.
-func emitKBListJSON(w io.Writer, bubbles []kb.Bubble, warnings []kb.SourceWarning) error {
+func emitKBListJSON(w io.Writer, bubbles []kb.Bubble, warnings []kb.Warning) error {
 	out := kbListJSONOutput{
 		Bubbles:  make([]kbListJSONBubble, 0, len(bubbles)),
 		Warnings: make([]kbListJSONWarning, 0, len(warnings)),
@@ -431,17 +321,11 @@ func emitKBListJSON(w io.Writer, bubbles []kb.Bubble, warnings []kb.SourceWarnin
 			ViewerRole: b.ViewerRole,
 			LocalPath:  b.LocalPath,
 			RepoURL:    b.RepoURL,
-			RepoID:     b.RepoID,
 			Endpoint:   b.Endpoint,
-			Source:     string(b.Source),
-			Legacy:     b.Legacy,
 		})
 	}
 	for _, sw := range warnings {
-		out.Warnings = append(out.Warnings, kbListJSONWarning{
-			Source: string(sw.Source),
-			Error:  sw.Err,
-		})
+		out.Warnings = append(out.Warnings, kbListJSONWarning{Error: sw.Err})
 	}
 	return writeJSONIndent(w, out)
 }
@@ -456,15 +340,15 @@ func jsonTypeForBubble(t api.KBType) string {
 	return string(t)
 }
 
-// emitKBListEmpty handles the no-bubbles case. When at least one source
-// warned, surface the warnings + an `ox doctor` hint so the user can act.
-// Otherwise default to a clean "no bubbles + how to bootstrap" message.
-func emitKBListEmpty(w io.Writer, warnings []kb.SourceWarning, projectRoot string) {
+// emitKBListEmpty handles the no-bubbles case. When the fetch warned,
+// surface the warnings + an `ox doctor` hint so the user can act. Otherwise
+// default to a clean "no bubbles + how to bootstrap" message.
+func emitKBListEmpty(w io.Writer, warnings []kb.Warning, projectRoot string) {
 	fmt.Fprintln(w)
 	if len(warnings) > 0 {
-		fmt.Fprintln(w, "  "+kbListWarnStyle.Render("No knowledge bubbles available; some sources errored:"))
+		fmt.Fprintln(w, "  "+kbListWarnStyle.Render("No knowledge bubbles available; the KB API errored:"))
 		for _, sw := range warnings {
-			fmt.Fprintf(w, "  %s %s: %s\n", kbListWarnStyle.Render("⚠"), kbListWarnStyle.Render(string(sw.Source)), sw.Err)
+			fmt.Fprintf(w, "  %s %s\n", kbListWarnStyle.Render("⚠"), sw.Err)
 		}
 		fmt.Fprintln(w)
 		cli.PrintHint("Run 'ox doctor' to diagnose source errors.")
@@ -487,14 +371,10 @@ func emitKBListEmpty(w io.Writer, warnings []kb.SourceWarning, projectRoot strin
 // emitKBListWarningFooter prints a one-line dim footer when results were
 // non-empty but at least one source still errored. Keeps the table the
 // primary signal; the warning is informational, not blocking.
-func emitKBListWarningFooter(w io.Writer, warnings []kb.SourceWarning) {
-	srcs := make([]string, 0, len(warnings))
-	for _, sw := range warnings {
-		srcs = append(srcs, string(sw.Source))
-	}
+func emitKBListWarningFooter(w io.Writer, warnings []kb.Warning) {
 	fmt.Fprintf(w, "%s %s\n",
 		kbListWarnStyle.Render("!"),
-		kbListWarnStyle.Render(fmt.Sprintf("%d source had errors (%s) — run 'ox doctor' to investigate", len(warnings), strings.Join(srcs, ","))),
+		kbListWarnStyle.Render(fmt.Sprintf("%d KB API error(s) — run 'ox doctor' to investigate", len(warnings))),
 	)
 }
 

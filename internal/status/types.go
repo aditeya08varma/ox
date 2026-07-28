@@ -4,11 +4,9 @@ import "time"
 
 // JSONOutput is the JSON output structure for ox status --json.
 //
-// Ledger and TeamContexts are deprecated mirrors retained for one release
-// while consumers migrate to the unified Bubbles field. New consumers
-// should read Bubbles; legacy consumers continue to read Ledger /
-// TeamContexts unchanged. See plan: "ox status" — collapse to bubbles
-// summary; keep mirrors one release.
+// Ledger and TeamContexts are permanent, first-class fields — conversation
+// stores are not bubbles and never collapse into the Bubbles summary
+// (ox ADR-028). Bubbles carries only real KB-API rows.
 type JSONOutput struct {
 	Auth         *AuthJSON         `json:"auth"`
 	Config       *ConfigJSON       `json:"config"`
@@ -43,11 +41,10 @@ type BubblesJSON struct {
 	Warnings []BubbleWarningJSON `json:"warnings,omitempty"`
 }
 
-// BubbleWarningJSON mirrors kb.SourceWarning for JSON output. Defined
+// BubbleWarningJSON mirrors kb.Warning for JSON output. Defined
 // in internal/status to avoid pulling internal/kb into this package.
 type BubbleWarningJSON struct {
-	Source string `json:"source"`
-	Error  string `json:"error"`
+	Error string `json:"error"`
 }
 
 // AICoworkerJSON represents an AI coworker in JSON output.

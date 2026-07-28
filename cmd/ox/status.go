@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -700,9 +701,12 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		}
 	}
 
-	// helper: render a single cloud team context entry
+	// helper: render a single cloud team context entry. showPath gates the
+	// Path row: always shown for this repo's primary team, gated behind
+	// --verbose for the Other Team Contexts cards (restored under ox
+	// ADR-028) so the section stays dense by default.
 	renderedTeams := make(map[string]bool)
-	renderCloudTC := func(cloudTC api.RepoInfo) {
+	renderCloudTC := func(cloudTC api.RepoInfo, showPath bool) {
 		expectedPath := paths.TeamContextDir(cloudTC.StableID(), projectEndpoint)
 		if renderedTeams[expectedPath] {
 			return
@@ -727,9 +731,11 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(renderVisibilityWithAccess(visibility, accessLevel))
 		b.WriteString("\n")
 
-		b.WriteString(statusLabelStyle.Render("  Path"))
-		b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/teams/primary", ".sageox/teams/"+cloudTC.StableID())))
-		b.WriteString("\n")
+		if showPath {
+			b.WriteString(statusLabelStyle.Render("  Path"))
+			b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/teams/primary", ".sageox/teams/"+cloudTC.StableID())))
+			b.WriteString("\n")
+		}
 
 		gitDir := filepath.Join(expectedPath, ".git")
 		if _, err := os.Stat(gitDir); err == nil {
@@ -785,8 +791,9 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 	}
 
-	// helper: render a single detail-only team context entry
-	renderDetailTC := func(detailTC api.RepoDetailTeamContext) {
+	// helper: render a single detail-only team context entry (showPath as
+	// in renderCloudTC).
+	renderDetailTC := func(detailTC api.RepoDetailTeamContext, showPath bool) {
 		expectedPath := paths.TeamContextDir(detailTC.StableID(), projectEndpoint)
 		if renderedTeams[expectedPath] {
 			return
@@ -804,9 +811,11 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString(statusLabelStyle.Render("  Visibility"))
 		b.WriteString(renderVisibilityWithAccess(detailVisibility, detailTC.AccessLevel))
 		b.WriteString("\n")
-		b.WriteString(statusLabelStyle.Render("  Path"))
-		b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/teams/primary", ".sageox/teams/"+detailTC.StableID())))
-		b.WriteString("\n")
+		if showPath {
+			b.WriteString(statusLabelStyle.Render("  Path"))
+			b.WriteString(statusMutedStyle.Render(shortenPathViaSymlink(projectRoot, expectedPath, ".sageox/teams/primary", ".sageox/teams/"+detailTC.StableID())))
+			b.WriteString("\n")
+		}
 
 		gitDir := filepath.Join(expectedPath, ".git")
 		if _, err := os.Stat(gitDir); err == nil {
@@ -851,10 +860,10 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 	b.WriteString("\n")
 	if repoCloudTC != nil {
 		hasAnyTeams = true
-		renderCloudTC(repoCloudTC.info)
+		renderCloudTC(repoCloudTC.info, true)
 	} else if repoDetailTC != nil {
 		hasAnyTeams = true
-		renderDetailTC(repoDetailTC.info)
+		renderDetailTC(repoDetailTC.info, true)
 	} else {
 		// no repo team context found
 		b.WriteString(statusLabelStyle.Render("Status"))
@@ -862,90 +871,65 @@ func renderGitReposSection(localCfg *config.LocalConfig, projectRoot string, dae
 		b.WriteString("\n")
 	}
 
-	// Knowledge bubbles — dense, owner-grouped listing of the team contexts
-	// available beyond this repo. Replaces the old count-only line plus the
-	// "Other Team Contexts" section, which duplicated these teams and printed
-	// a full on-disk path per row. Each owner shows as @slug with a compact,
-	// color-coded status; the shared path prefix is printed once. This-repo's
-	// ledger and primary team stay in Project Status above.
-	buildOtherRow := func(name, slug, teamID, visibility, access string) otherTeamRow {
-		if slug == "" {
-			slug = api.DeriveSlug(name)
+	// Knowledge bubbles — count-only summary of real KB-API rows. Team
+	// contexts are conversation stores, not bubbles (ox ADR-028), and render
+	// in their own section below.
+	b.WriteString(renderBubblesLine(bubblesSummary))
+
+	// Other team contexts — restored under ox ADR-028 (epic ox-gmkd) after
+	// the bubble-listing detour. Cards reuse renderCloudTC/renderDetailTC
+	// with Path rows gated behind --verbose; entries that need attention
+	// (not cloned yet) sort first. Full git-status attention is computed
+	// inside the card renderers — re-deriving it here for ordering would
+	// double the git work, so "not cloned" is the cheap proxy.
+	hasOtherTCs := len(otherCloudTCs) > 0 || len(otherDetailTCs) > 0
+	if hasOtherTCs {
+		notCloned := func(teamID string) bool {
+			_, err := os.Stat(filepath.Join(paths.TeamContextDir(teamID, projectEndpoint), ".git"))
+			return err != nil
 		}
-		expectedPath := paths.TeamContextDir(teamID, projectEndpoint)
-		row := otherTeamRow{name: name, slug: slug, bubbleType: "team", visibility: visibility, access: access, path: expectedPath}
-		if _, err := os.Stat(filepath.Join(expectedPath, ".git")); err == nil {
-			row.cloned = true
-			var lastSync time.Time
-			hasSync := false
-			if ds, ok := daemonStatus.LastSyncForPath(expectedPath); ok {
-				lastSync, hasSync = ds, true
-			} else if localCfg != nil {
-				if tc := localCfg.GetTeamContext(teamID); tc != nil && tc.HasLastSync() {
-					lastSync, hasSync = tc.LastSync, true
-				}
+		// merge cloud + detail-only entries into ONE ordered list so the
+		// needs-attention-first ordering holds across sources — sorting the
+		// two collections independently would rank a healthy cloud team
+		// above a not-cloned detail-only team.
+		type otherTCEntry struct {
+			render    func()
+			notCloned bool
+			name      string
+		}
+		merged := make([]otherTCEntry, 0, len(otherCloudTCs)+len(otherDetailTCs))
+		for _, entry := range otherCloudTCs {
+			info := entry.info
+			merged = append(merged, otherTCEntry{
+				render:    func() { renderCloudTC(info, verbose) },
+				notCloned: notCloned(info.StableID()),
+				name:      info.Name,
+			})
+		}
+		for _, entry := range otherDetailTCs {
+			info := entry.info
+			merged = append(merged, otherTCEntry{
+				render:    func() { renderDetailTC(info, verbose) },
+				notCloned: notCloned(info.StableID()),
+				name:      info.Name,
+			})
+		}
+		sort.SliceStable(merged, func(i, j int) bool {
+			if merged[i].notCloned != merged[j].notCloned {
+				return merged[i].notCloned
 			}
-			row.st = getGitRepoStatus(expectedPath, lastSync, hasSync)
-		}
-		row.attention = !row.cloned || row.st.Error != "" || row.st.UncommittedCount > 0 || row.st.IsWedged()
-		return row
-	}
+			return merged[i].name < merged[j].name
+		})
 
-	var otherRows []otherTeamRow
-	seenBubblePath := make(map[string]bool)
-	for _, entry := range otherCloudTCs {
-		visibility, access := "private", "member"
-		if d, ok := teamDetail[entry.info.StableID()]; ok {
-			if d.Visibility != "" {
-				visibility = d.Visibility
-			}
-			if d.AccessLevel != "" {
-				access = d.AccessLevel
-			}
-		}
-		row := buildOtherRow(entry.info.Name, entry.info.Slug, entry.info.StableID(), visibility, access)
-		if seenBubblePath[row.path] {
-			continue
-		}
-		seenBubblePath[row.path] = true
-		otherRows = append(otherRows, row)
-	}
-	for _, entry := range otherDetailTCs {
-		visibility := entry.info.Visibility
-		if visibility == "" {
-			visibility = "private"
-		}
-		row := buildOtherRow(entry.info.Name, entry.info.Slug, entry.info.StableID(), visibility, entry.info.AccessLevel)
-		if seenBubblePath[row.path] {
-			continue
-		}
-		seenBubblePath[row.path] = true
-		otherRows = append(otherRows, row)
-	}
-
-	sortOtherBubbleRows(otherRows)
-
-	if len(otherRows) > 0 {
-		hasAnyTeams = true
-	}
-
-	if bubblesSummary.Total > 0 || len(otherRows) > 0 {
 		b.WriteString("\n")
-		b.WriteString(statusHeaderStyle.Render("Knowledge Bubbles"))
-		b.WriteString("  ")
-		b.WriteString(statusMutedStyle.Render(bubblesCountSummary(bubblesSummary, len(otherRows))))
+		b.WriteString(statusHeaderStyle.Render("Other Team Contexts"))
 		b.WriteString("\n")
-		b.WriteString(statusMutedStyle.Render("─────────────────"))
+		b.WriteString(statusMutedStyle.Render("───────────────────"))
 		b.WriteString("\n")
-		if len(otherRows) > 0 {
-			b.WriteString(renderOtherBubbleRows(otherRows, daemonStatus.IsBootstrapping(), verbose))
-		} else {
-			// bubbles exist (e.g. personal/profile) but none are team contexts
-			// cloned locally — point at the full list rather than leave an
-			// empty block under the header.
-			b.WriteString(statusLabelStyle.Render(""))
-			b.WriteString(statusMutedStyle.Render("no team contexts cloned locally — run 'ox kb list' to see all bubbles"))
-			b.WriteString("\n")
+
+		for _, entry := range merged {
+			hasAnyTeams = true
+			entry.render()
 		}
 	}
 
@@ -1551,13 +1535,13 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		}
 
 		// collect bubbles summary once — used by both JSON and human output.
-		// failure of the merger is not allowed to block the rest of status,
+		// failure of the KB fetch is not allowed to block the rest of status,
 		// so collectBubblesSummary swallows errors into Unavailable=true.
 		var bubblesSummary statusBubblesSummary
 		if gitRoot != "" || projectInitialized {
-			bubblesSummary = collectBubblesSummary(statusBubblesMergerForRoot(gitRoot))
+			bubblesSummary = collectBubblesSummary(statusBubblesFetchForRoot(gitRoot))
 		} else {
-			// outside a project the merger has nothing useful to say;
+			// outside a project the KB fetch has nothing useful to say;
 			// surface zero rather than "(unavailable)" which would imply
 			// a transient error.
 			bubblesSummary = statusBubblesSummary{}
@@ -1653,9 +1637,9 @@ daemon health, and a tree view of all SageOx directory locations.`,
 // daemonStatus and daemonClient are pre-fetched from the daemon to avoid a second ping
 // that could race with the first (one succeeds, the other times out = contradictory output).
 //
-// bubblesSummary is the F3 three-source merger result. The deprecated
-// team_contexts/ledger fields are still populated from localCfg for one
-// release while consumers migrate to the new bubbles field.
+// bubblesSummary is the KB-API fetch result. The team_contexts/ledger
+// fields are permanent, first-class output — conversation stores are not
+// bubbles (ox ADR-028) and never fold into the bubbles field.
 func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken, endpointSlug, authFile string, authFileExists bool,
 	userConfigDir, cwd, sageoxDir string, projectInitialized bool, localCfg *config.LocalConfig, gitRoot string,
 	repoDetail *api.RepoDetailResponse, codeStats *daemon.CodeDBStats,
@@ -1664,8 +1648,8 @@ func buildStatusJSON(authenticated bool, authErr error, token *auth.StoredToken,
 
 	output := statusJSONOutput{}
 
-	// bubbles section — additive; team_contexts/ledger mirrors below
-	// stay populated for one release per the kb plan.
+	// bubbles section — real KB-API rows only; team_contexts/ledger below
+	// are permanent first-class fields (ox ADR-028), not mirrors of this.
 	output.Bubbles = buildBubblesJSON(bubblesSummary)
 
 	// agent-task queue summary — mirror the human one-liner; omit when empty so

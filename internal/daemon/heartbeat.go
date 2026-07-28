@@ -719,14 +719,11 @@ func normalizeKBTypeSlug(s string) string {
 	}
 }
 
-// kbTypeForLegacySource maps a legacy budget source name to its
-// best-effort kb_type bucket. Only used when the heartbeat sent a
-// per-source split but no explicit per-kb_type split. The mapping
-// follows the spirit of the kb migration: the legacy team-context
-// source is kind=team, and the legacy ledger source (carried under
-// the "project" budget bucket today) is kind=repo. Tool overhead
-// ("sageox") and any future / unmapped source falls under "unknown"
-// because it doesn't represent a single kb of any kind.
+// kbTypeForLegacySource maps a per-source budget name to a kb_type bucket
+// when the heartbeat sent no explicit per-kb_type split. Team contexts and
+// ledgers are NOT bubbles (ox ADR-028) — this stopgap keeps old heartbeat
+// payloads from vanishing out of the rollup, nothing more. Tool overhead
+// ("sageox") and any unmapped source falls under "unknown".
 func kbTypeForLegacySource(source string) string {
 	switch source {
 	case "team":
