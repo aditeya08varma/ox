@@ -46,6 +46,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -217,9 +218,31 @@ func desiredSymlinks(bubbles []api.KB) map[string]string {
 		if b.KBID == "" || b.Slug == "" {
 			continue
 		}
+		// Slugs are server-normalized kebab-case, but the daemon must not
+		// trust that: a slug carrying a path separator or dot-segment would
+		// let filepath.Join escape .sageox/kb/team/. Reject anything that
+		// isn't a clean single path component.
+		if !isSafeSlugComponent(b.Slug) {
+			slog.Warn("kb_symlink skipping bubble with unsafe slug", "kb_id", b.KBID, "slug", b.Slug)
+			continue
+		}
 		out[kbTeamScopeDir+"/"+b.Slug] = b.KBID
 	}
 	return out
+}
+
+// isSafeSlugComponent reports whether s is usable as exactly one relative
+// path component: no separators, no traversal, no platform-specific prefixes.
+func isSafeSlugComponent(s string) bool {
+	if s == "" || s == "." || s == ".." {
+		return false
+	}
+	if strings.ContainsAny(s, `/\`) {
+		return false
+	}
+	// filepath.Base/Clean round-trip catches anything platform-specific
+	// (e.g. Windows volume names) the character check misses.
+	return filepath.Clean(s) == s && filepath.Base(s) == s
 }
 
 // readCurrentSymlinks returns link-relative-path -> resolved-target for

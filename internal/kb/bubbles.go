@@ -23,6 +23,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 
@@ -191,17 +192,31 @@ func bubbleFromRow(r api.KB, endpointURL string) Bubble {
 	}
 }
 
-// GitCloneURL derives a bubble's HTTPS clone URL from the SageOx endpoint
-// and the server-reported git project path, following the platform's
-// git-subdomain convention (https://git.<endpoint-host>/<path>.git).
-// Returns "" when either input is empty.
+// GitCloneURL derives a bubble's clone URL from the SageOx endpoint and the
+// server-reported git project path, following the platform's git-subdomain
+// convention (git.<endpoint-host>). The endpoint's scheme and port are
+// preserved so custom/dev endpoints (http, nondefault ports) keep working;
+// scheme defaults to https when the endpoint carries none. Returns "" when
+// either input is empty.
 func GitCloneURL(endpointURL, gitPath string) string {
-	host := endpoint.NormalizeSlug(endpointURL)
 	gitPath = strings.Trim(strings.TrimSpace(gitPath), "/")
-	if host == "" || gitPath == "" {
+	normalized := endpoint.NormalizeEndpoint(endpointURL)
+	if normalized == "" || gitPath == "" {
 		return ""
 	}
-	return "https://git." + host + "/" + gitPath + ".git"
+	u, err := url.Parse(normalized)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	scheme := u.Scheme
+	if scheme == "" {
+		scheme = "https"
+	}
+	host := u.Host // includes the port when present
+	if !strings.HasPrefix(host, "git.") {
+		host = "git." + host
+	}
+	return scheme + "://" + host + "/" + gitPath + ".git"
 }
 
 // kbDisabledByEnv returns true when OX_KB_DISABLE is set to a value commonly

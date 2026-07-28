@@ -678,3 +678,27 @@ func TestReconcileProjectSymlinks_ManyBubblesScale(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 50, len(entries), "all 50 bubbles must be linked")
 }
+
+// TestDesiredSymlinks_UnsafeSlugSkipped pins the mount-scope containment
+// guard: a server row whose slug carries path separators or dot-segments
+// must never produce a symlink path outside .sageox/kb/team/.
+// Failure prevented: a compromised or buggy server response writing
+// symlinks anywhere the daemon user can write.
+func TestDesiredSymlinks_UnsafeSlugSkipped(t *testing.T) {
+	t.Parallel()
+	bubbles := []api.KB{
+		{KBID: "kb_ok", Slug: "safe-slug"},
+		{KBID: "kb_tr1", Slug: "../escape"},
+		{KBID: "kb_tr2", Slug: "a/b"},
+		{KBID: "kb_tr3", Slug: `a\b`},
+		{KBID: "kb_tr4", Slug: ".."},
+		{KBID: "kb_tr5", Slug: "."},
+	}
+	got := desiredSymlinks(bubbles)
+	if len(got) != 1 {
+		t.Fatalf("expected only the safe slug to survive, got %v", got)
+	}
+	if got["team/safe-slug"] != "kb_ok" {
+		t.Errorf("safe slug missing from desired set: %v", got)
+	}
+}

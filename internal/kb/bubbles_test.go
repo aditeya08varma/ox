@@ -350,3 +350,27 @@ func TestAmbientScopes(t *testing.T) {
 		}
 	})
 }
+
+// TestGitCloneURL_PreservesSchemeAndPort pins clone-URL derivation for
+// custom/dev endpoints: scheme (http) and nondefault ports must survive,
+// and an endpoint already on the git. subdomain must not double-prefix.
+// Failure prevented: every current-shape bubble clone failing on dev
+// endpoints because derivation forced https://git.<bare-host>.
+func TestGitCloneURL_PreservesSchemeAndPort(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, endpoint, gitPath, want string
+	}{
+		{"https default", "https://test.sageox.ai", "kb/kb_1", "https://git.test.sageox.ai/kb/kb_1.git"},
+		{"http localhost with port", "http://localhost:8080", "kb/kb_1", "http://git.localhost:8080/kb/kb_1.git"},
+		{"bare host defaults https", "test.sageox.ai", "kb/kb_1", "https://git.test.sageox.ai/kb/kb_1.git"},
+		{"git subdomain not doubled", "https://git.test.sageox.ai", "kb/kb_1", "https://git.test.sageox.ai/kb/kb_1.git"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GitCloneURL(tt.endpoint, tt.gitPath); got != tt.want {
+				t.Errorf("GitCloneURL(%q, %q) = %q, want %q", tt.endpoint, tt.gitPath, got, tt.want)
+			}
+		})
+	}
+}
