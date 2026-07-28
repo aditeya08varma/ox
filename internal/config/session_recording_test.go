@@ -58,7 +58,7 @@ func TestResolveSessionRecording_NoProjectConfig_DefaultsToManual(t *testing.T) 
 	t.Setenv("OX_XDG_ENABLE", "1")
 	t.Setenv("XDG_CONFIG_HOME", userConfigDir)
 
-	resolved := ResolveSessionRecording(tmpDir, "", "")
+	resolved := ResolveSessionRecording(tmpDir)
 
 	assert.Equal(t, SessionRecordingManual, resolved.Mode)
 	assert.Equal(t, SessionRecordingSourceDefault, resolved.Source)
@@ -83,7 +83,7 @@ func TestResolveSessionRecording_ReadsFromProjectConfig(t *testing.T) {
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configContent), 0644))
 
-	resolved := ResolveSessionRecording(tmpDir, "", "")
+	resolved := ResolveSessionRecording(tmpDir)
 
 	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
 	assert.Equal(t, SessionRecordingSourceRepo, resolved.Source)
@@ -106,7 +106,7 @@ func TestResolveSessionRecording_EmptyProjectConfig_DefaultsToAuto(t *testing.T)
 	}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configContent), 0644))
 
-	resolved := ResolveSessionRecording(tmpDir, "", "")
+	resolved := ResolveSessionRecording(tmpDir)
 
 	// ox-initialized repo with no explicit setting defaults to auto
 	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
@@ -203,7 +203,7 @@ func TestResolveSessionRecording_EnvVarOverridesAll(t *testing.T) {
 			configContent := `{"config_version": "2", "session_recording": "manual"}`
 			require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configContent), 0644))
 
-			resolved := ResolveSessionRecording(tmpDir, "", "")
+			resolved := ResolveSessionRecording(tmpDir)
 
 			assert.Equal(t, tt.wantMode, resolved.Mode)
 			assert.Equal(t, SessionRecordingSourceEnv, resolved.Source)
@@ -225,7 +225,7 @@ func TestResolveSessionRecording_EnvVarDisabledOverridesAutoConfig(t *testing.T)
 	configContent := `{"config_version": "2", "session_recording": "auto"}`
 	require.NoError(t, os.WriteFile(filepath.Join(sageoxDir, "config.json"), []byte(configContent), 0644))
 
-	resolved := ResolveSessionRecording(tmpDir, "", "")
+	resolved := ResolveSessionRecording(tmpDir)
 
 	assert.Equal(t, SessionRecordingDisabled, resolved.Mode)
 	assert.Equal(t, SessionRecordingSourceEnv, resolved.Source)
@@ -257,7 +257,7 @@ func TestResolveSessionRecording_UserOverridesProject(t *testing.T) {
 		0644,
 	))
 
-	resolved := ResolveSessionRecording(tmpDir, "", "")
+	resolved := ResolveSessionRecording(tmpDir)
 	// NormalizeSessionRecording maps "disabled" → "disabled"
 	// but sessions.GetMode() returns "disabled" for mode: disabled
 	// The function checks if mode != "" && mode != "none"
@@ -276,7 +276,7 @@ func TestResolveSessionRecording_DefaultIsManual(t *testing.T) {
 	t.Setenv("OX_SESSION_RECORDING", "")
 
 	// no .sageox/ project config, no user config → should default to manual
-	resolved := ResolveSessionRecording(tmpDir, "", "")
+	resolved := ResolveSessionRecording(tmpDir)
 	assert.Equal(t, SessionRecordingManual, resolved.Mode)
 	assert.Equal(t, SessionRecordingSourceDefault, resolved.Source)
 }
@@ -356,120 +356,75 @@ func writeUserMode(t *testing.T, mode string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.yaml"), []byte(body), 0644))
 }
 
-func TestResolveSessionRecording_KB_PrecedenceMatrix(t *testing.T) {
-	tests := []struct {
-		name          string
-		envMode       string
-		userMode      string
-		kbMode        string
-		kbID          string
-		kbType        string
-		wantMode      string
-		wantSource    SessionRecordingSource
-		wantInversion bool
-	}{
-		{
-			name:          "env wins over everything",
-			envMode:       "auto",
-			userMode:      "disabled",
-			kbMode:        "disabled",
-			kbID:          "kb_test",
-			kbType:        "personal",
-			wantMode:      SessionRecordingAuto,
-			wantSource:    SessionRecordingSourceEnv,
-			wantInversion: false,
-		},
-		{
-			name:          "user beats kb",
-			userMode:      "auto",
-			kbMode:        "manual",
-			kbID:          "kb_test",
-			kbType:        "personal",
-			wantMode:      SessionRecordingAuto,
-			wantSource:    SessionRecordingSourceUser,
-			wantInversion: false,
-		},
-		{
-			name:          "kb set user unset",
-			kbMode:        "auto",
-			kbID:          "kb_test",
-			kbType:        "personal",
-			wantMode:      SessionRecordingAuto,
-			wantSource:    SessionRecordingSourceKB,
-			wantInversion: false,
-		},
-		{
-			name:          "user disabled vetoes kb auto",
-			userMode:      "disabled",
-			kbMode:        "auto",
-			kbID:          "kb_test",
-			kbType:        "personal",
-			wantMode:      SessionRecordingDisabled,
-			wantSource:    SessionRecordingSourceUser,
-			wantInversion: false,
-		},
-		{
-			name:          "kb disabled vetoes user auto",
-			userMode:      "auto",
-			kbMode:        "disabled",
-			kbID:          "kb_test",
-			kbType:        "personal",
-			wantMode:      SessionRecordingDisabled,
-			wantSource:    SessionRecordingSourceKB,
-			wantInversion: true,
-		},
-		{
-			name:          "default from personal kb type",
-			kbID:          "kb_missing",
-			kbType:        "personal",
-			wantMode:      SessionRecordingAuto,
-			wantSource:    SessionRecordingSourceDefault,
-			wantInversion: false,
-		},
-		{
-			name:          "default from profile kb type",
-			kbID:          "kb_missing",
-			kbType:        "profile",
-			wantMode:      SessionRecordingManual,
-			wantSource:    SessionRecordingSourceDefault,
-			wantInversion: false,
-		},
-	}
+// --- ox ADR-028 / epic ox-6hvs regression matrix ---
+//
+// Sessions record into the project ledger; Knowledge Bubbles play no part in
+// recording resolution. These tests pin two behaviors:
+//  1. the full precedence chain (env > user > project > team > default) for
+//     projects, byte-identical to the pre-ADR-017 resolver, and
+//  2. a project whose .sageox/config.yaml still carries a kb_id key (written
+//     by the abandoned ADR-017 migration) resolves EXACTLY like one without —
+//     the key is ignored, and no KB-side config can veto or enable recording.
+// Failure prevented: a stale kb_id binding silently changing whether a
+// coding session is recorded (privacy surface).
 
+func TestResolveSessionRecording_PrecedenceMatrix(t *testing.T) {
+	tests := []struct {
+		name        string
+		envMode     string
+		userMode    string
+		projectMode string
+		wantMode    string
+		wantSource  SessionRecordingSource
+	}{
+		{name: "env wins over everything", envMode: "manual", userMode: "disabled", projectMode: "auto", wantMode: SessionRecordingManual, wantSource: SessionRecordingSourceEnv},
+		{name: "user beats project", userMode: "disabled", projectMode: "auto", wantMode: SessionRecordingDisabled, wantSource: SessionRecordingSourceUser},
+		{name: "project set user unset", projectMode: "manual", wantMode: SessionRecordingManual, wantSource: SessionRecordingSourceRepo},
+		{name: "initialized default is auto", wantMode: SessionRecordingAuto, wantSource: SessionRecordingSourceRepo},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tmpDir, dataHome, ep := kbTestEnv(t)
-			if tt.envMode != "" {
-				t.Setenv("OX_SESSION_RECORDING", tt.envMode)
-			}
+			tmpDir, _, _ := kbTestEnv(t)
+			RequireSageoxDir(t, tmpDir)
+			cfg := &ProjectConfig{RepoID: "repo_x", SessionRecording: tt.projectMode}
+			require.NoError(t, SaveProjectConfig(tmpDir, cfg))
 			if tt.userMode != "" {
 				writeUserMode(t, tt.userMode)
 			}
-			if tt.kbMode != "" {
-				writeKBConfig(t, dataHome, ep, tt.kbID, tt.kbMode)
+			if tt.envMode != "" {
+				t.Setenv("OX_SESSION_RECORDING", tt.envMode)
 			}
-
-			resolved := ResolveSessionRecording(tmpDir, tt.kbID, tt.kbType)
+			resolved := ResolveSessionRecording(tmpDir)
 			assert.Equal(t, tt.wantMode, resolved.Mode)
 			assert.Equal(t, tt.wantSource, resolved.Source)
-			assert.Equal(t, tt.wantInversion, resolved.SafetyInversion)
-			assert.Equal(t, tt.kbID, resolved.KBID)
-			assert.Equal(t, tt.kbType, resolved.KBType)
 		})
 	}
 }
 
-func TestResolveSessionRecording_KB_BoundProjectDefaultsToAutoWhileTypeUnknown(t *testing.T) {
-	tmpDir, _, _ := kbTestEnv(t)
-	require.NoError(t, os.MkdirAll(filepath.Join(tmpDir, ".sageox"), 0o755))
-	require.NoError(t, os.WriteFile(
-		filepath.Join(tmpDir, ".sageox", "config.yaml"),
-		[]byte("kb_id: kb_project\nrepo_id: repo_abc\n"),
-		0o644,
-	))
+func TestResolveSessionRecording_StaleKBBindingIsIgnored(t *testing.T) {
+	// Two identical initialized projects; one additionally carries a
+	// .sageox/config.yaml with a kb_id (the abandoned ADR-017 binding) AND a
+	// staged KB-side config.yaml that says "disabled" — the exact setup that
+	// would have vetoed recording under the old resolver. Resolution must be
+	// identical for both projects.
+	resolve := func(withBinding bool) *ResolvedSessionRecording {
+		tmpDir, dataHome, endpointSlug := kbTestEnv(t)
+		RequireSageoxDir(t, tmpDir)
+		// stage a vetoing KB-side config at the location the old resolver
+		// would have consulted — it must have no effect now.
+		writeKBConfig(t, dataHome, endpointSlug, "kb_stale_binding", "disabled")
+		require.NoError(t, SaveProjectConfig(tmpDir, &ProjectConfig{RepoID: "repo_x"}))
+		if withBinding {
+			yamlBody := "kb_id: kb_stale_binding\nrepo_id: repo_x\n"
+			require.NoError(t, os.WriteFile(
+				filepath.Join(tmpDir, sageoxDir, projectConfigYAMLFilename),
+				[]byte(yamlBody), 0o644))
+		}
+		return ResolveSessionRecording(tmpDir)
+	}
 
-	resolved := ResolveSessionRecording(tmpDir, "kb_project", "")
-	assert.Equal(t, SessionRecordingAuto, resolved.Mode)
-	assert.Equal(t, SessionRecordingSourceDefault, resolved.Source)
-	assert.Equal(t, "kb_project", resolved.KBID)
+	without := resolve(false)
+	with := resolve(true)
+	assert.Equal(t, without.Mode, with.Mode, "stale kb_id binding must not change the recording mode")
+	assert.Equal(t, without.Source, with.Source, "stale kb_id binding must not change the recording source")
 }

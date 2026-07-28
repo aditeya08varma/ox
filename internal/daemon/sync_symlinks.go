@@ -280,7 +280,7 @@ func desiredSymlinks(bubbles []api.KB, projectRepoID string) map[string]string {
 				continue
 			}
 		case api.KBType("channel"):
-			// channel is defined in kbconfig but not yet promoted into
+			// channel is a server-side kb_type not yet promoted into
 			// internal/api as a typed KBType. Same policy as custom: skip
 			// until explicit subscribe.
 			continue

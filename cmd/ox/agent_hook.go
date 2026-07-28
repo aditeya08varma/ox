@@ -15,7 +15,6 @@ import (
 	"github.com/sageox/agentx"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
-	"github.com/sageox/ox/internal/kb"
 	"github.com/sageox/ox/internal/prime"
 	"github.com/sageox/ox/internal/proc"
 	"github.com/sageox/ox/internal/session"
@@ -225,15 +224,7 @@ func emitStartupBanner(w io.Writer, ctx *HookContext) {
 	default:
 		return
 	}
-	// resolve KB binding from the hook's actual working directory so nested
-	// KB bindings in subdirectories are honored. Fall back to project root
-	// if Getwd fails (e.g., directory deleted out from under the process).
-	resolveFrom := ctx.ProjectRoot
-	if wd, wdErr := os.Getwd(); wdErr == nil && wd != "" {
-		resolveFrom = wd
-	}
-	kbID, kbType := kb.ResolveCurrentKBIDAndType(resolveFrom)
-	recording := config.ResolveSessionRecording(ctx.ProjectRoot, kbID, kbType)
+	recording := config.ResolveSessionRecording(ctx.ProjectRoot)
 	canonicalType := agentx.ResolveAgentENV(ctx.AgentType)
 	if canonicalType == agentx.AgentTypeUnknown {
 		canonicalType = agentx.AgentType(ctx.AgentType)
@@ -875,14 +866,7 @@ func buildPrimeEnv(agentID string) []string {
 // startSessionRecordingIfConfigured attempts to start session recording
 // if the configuration enables auto-recording.
 func startSessionRecordingIfConfigured(ctx *HookContext) {
-	// resolve KB binding from the hook's actual working directory so nested
-	// KB bindings are honored. Falls back to project root if Getwd fails.
-	resolveFrom := ctx.ProjectRoot
-	if wd, wdErr := os.Getwd(); wdErr == nil && wd != "" {
-		resolveFrom = wd
-	}
-	kbID, kbType := kb.ResolveCurrentKBIDAndType(resolveFrom)
-	resolved := config.ResolveSessionRecording(ctx.ProjectRoot, kbID, kbType)
+	resolved := config.ResolveSessionRecording(ctx.ProjectRoot)
 	if !resolved.IsAuto() {
 		return
 	}

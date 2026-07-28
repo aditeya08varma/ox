@@ -156,12 +156,6 @@ type ProjectConfig struct {
 	// falls through to the documented default discovery dirs.
 	Decision *DecisionConfig `json:"decision,omitempty" yaml:"decision,omitempty"`
 
-	// KBID is the immutable knowledge-bubble identifier this project is bound
-	// to (ADR-017). Populated when the project has been migrated to the new
-	// .sageox/config.yaml format. Empty for legacy JSON-only projects that
-	// haven't been migrated yet.
-	KBID string `json:"-" yaml:"kb_id,omitempty"`
-
 	// Format records which on-disk format the loader treated as authoritative
 	// when constructing this struct. Values: "json", "yaml", "both", "none".
 	// Useful for doctor to decide whether a migration is pending.
@@ -188,21 +182,20 @@ const (
 )
 
 // ProjectConfigYAML is the binding subset of the project-side
-// .sageox/config.yaml (ADR-017). The file itself may contain the full
-// ProjectConfig shape; yaml.v3 honors json tags, so LoadProjectConfig can
-// unmarshal directly into ProjectConfig and preserve existing per-project
-// settings. This narrower view is kept for code paths that only need the
-// binding fields (kb_id + repo_id), such as doctor reconciliation tests.
+// .sageox/config.yaml. The file itself may contain the full ProjectConfig
+// shape; yaml.v3 honors json tags, so LoadProjectConfig can unmarshal
+// directly into ProjectConfig and preserve existing per-project settings.
+// This narrower view is kept for code paths that only need the repo_id
+// binding. (The ADR-017 kb_id binding was removed under ox ADR-028 / epic
+// ox-6hvs — a kb_id key in an existing config.yaml is simply ignored.)
 type ProjectConfigYAML struct {
-	KBID   string `yaml:"kb_id,omitempty"`
 	RepoID string `yaml:"repo_id,omitempty"`
 }
 
 // IsInitialized checks if SageOx is initialized in the given git root directory.
 // Returns true if .sageox/config.json OR .sageox/config.yaml exists. Both
-// formats co-exist during the staged deprecation window (ADR-017 §7).
-//
-// TODO(release N+3): drop the JSON fallback once all repos have migrated.
+// formats are read; JSON remains the canonical write target (the ADR-017
+// JSON→YAML migration was abandoned under ox ADR-028).
 func IsInitialized(gitRoot string) bool {
 	jsonPath := filepath.Join(gitRoot, sageoxDir, projectConfigFilename)
 	if _, err := os.Stat(jsonPath); err == nil {
@@ -268,9 +261,9 @@ func GetDefaultProjectConfig() *ProjectConfig {
 }
 
 // LoadProjectConfig loads the project configuration from .sageox/config.json,
-// then merges in .sageox/config.yaml (ADR-017) when present.
+// then merges in .sageox/config.yaml when present.
 //
-// Hybrid read posture during the staged migration window (ADR-017 §7):
+// Hybrid read posture (both formats tolerated; JSON canonical):
 //
 //   - JSON only present  → Format="json".
 //   - YAML only present  → Format="yaml"; unmarshal YAML directly into the
@@ -376,9 +369,6 @@ func mergeProjectConfigYAML(data []byte, cfg *ProjectConfig) error {
 	var binding ProjectConfigYAML
 	if err := yaml.Unmarshal(data, &binding); err != nil {
 		return err
-	}
-	if binding.KBID != "" {
-		cfg.KBID = binding.KBID
 	}
 	if binding.RepoID != "" {
 		cfg.RepoID = binding.RepoID
@@ -528,10 +518,9 @@ func FindProjectRoot() string {
 }
 
 // findProjectConfigPathFromDir walks up from the given directory looking for
-// .sageox/config.json, or .sageox/config.yaml when JSON is absent (ADR-017).
-// Prefer JSON during the migration window so existing tooling/callers that
-// expect a JSON path keep working; fall back to YAML so YAML-only repos are
-// still discoverable.
+// .sageox/config.json, or .sageox/config.yaml when JSON is absent. JSON is
+// preferred (canonical) so existing tooling/callers that expect a JSON path
+// keep working; the YAML fallback keeps YAML-only repos discoverable.
 func findProjectConfigPathFromDir(startDir string) (string, error) {
 	currentDir := startDir
 

@@ -681,15 +681,6 @@ func init() {
 		Run:         checkKBStaleSync,
 	})
 
-	RegisterDoctorCheck(&DoctorCheck{
-		Slug:        CheckSlugKBProjectConfigMigrate,
-		Name:        "kb project config migrate",
-		Category:    "Knowledge Bubbles",
-		FixLevel:    FixLevelAuto,
-		Description: "Migrates legacy .sageox/config.json projects to the new config.yaml binding format (ADR-017)",
-		Run:         checkKBProjectConfigMigrate,
-	})
-
 	// repo-health parity with ledger/team-context git doctoring — see
 	// doctor_kb_repo_health.go. Repairs kick the daemon (it owns kb git writes).
 	RegisterDoctorCheck(&DoctorCheck{
