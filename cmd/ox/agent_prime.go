@@ -480,8 +480,8 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 	phaseStart = time.Now()
 	ledgerStatus := discoverLedger(teamCtx)
 
-	// fan out to the F3 three-source merger (kb API + legacy team-contexts +
-	// legacy ledger registry) and build the unified KB envelope. The merger
+	// fetch the caller's bubbles from the KB API (the only source of bubble
+	// rows under ox ADR-028) and build the KB envelope. The fetch
 	// owns dedup and per-source error handling; failures don't fail prime —
 	// at worst the KB array is empty and the deprecated mirrors carry the
 	// session through.
@@ -2330,15 +2330,14 @@ func discoverLedger(teamCtx *teamContextInfo) *ledgerInfo {
 	}
 }
 
-// buildPrimeKBEnvelope runs the F3 three-source merger and converts the
+// buildPrimeKBEnvelope fetches the caller's bubbles and converts the
 // result into the prime []KBInfo envelope, enforcing the I2 invariant that
 // the caller's personal bubble must always be present when the kb-API
 // source is reachable.
 //
-// Reuses newDefaultKBListMerger so the prime envelope and `ox kb list` see
+// Reuses newDefaultKBListSource so the prime envelope and `ox kb list` see
 // the exact same view of the world (no chance of one rendering a bubble
-// the other can't see). A short timeout caps prime's worst-case latency —
-// merger fan-out is parallel across the three sources.
+// the other can't see). A short timeout caps prime's worst-case latency.
 //
 // Returns:
 //   - the sorted []KBInfo envelope (nil when no rows merged)
@@ -2350,17 +2349,11 @@ func buildPrimeKBEnvelope(ctx context.Context, projectRoot string) ([]prime.KBIn
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	mergeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	fetchCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
-	merger := newDefaultKBListMerger(projectRoot)
-	res, err := merger.Merge(mergeCtx)
-	if err != nil {
-		// catastrophic merger failure — per-source errors land in
-		// res.Warnings, never here. Keep prime alive with an empty KB.
-		slog.Warn("prime_kb_merge_failed", "err", err.Error())
-		return nil, false
-	}
+	source, ep := newDefaultKBListSource(projectRoot)
+	res := kb.FetchBubbles(fetchCtx, source, ep)
 
 	// per-bubble token attribution is filled in by the caller AFTER agentID
 	// is resolved — see enrichKBTokensFromInstance below. Building the
@@ -2379,7 +2372,7 @@ func buildPrimeKBEnvelope(ctx context.Context, projectRoot string) ([]prime.KBIn
 // that populates CumulativeContextTokens). The kb-type totals are split
 // evenly across same-type bubbles so the per-bubble sum matches the
 // deprecated mirror's per-source rollup; types with no matching bubble
-// are dropped (the merger source list and the heartbeat tag should
+// are dropped (the KB fetch and the heartbeat tag should
 // agree, but be defensive).
 func enrichKBTokensFromInstance(kbInfos []prime.KBInfo, tokensByType map[string]int64) []prime.KBInfo {
 	if len(tokensByType) == 0 || len(kbInfos) == 0 {

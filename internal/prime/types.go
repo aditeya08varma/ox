@@ -21,27 +21,22 @@ type SessionStatus struct {
 
 // LedgerInfo represents discovered ledger state for prime output.
 //
-// MIGRATION NOTE: New callers should consume Output.KB (typed entries with
-// type=repo). LedgerInfo is the legacy mirror retained for one release while
-// downstream consumers migrate; it will be removed once the kb envelope has
-// shipped for one full release cycle.
+// Permanent, first-class: the ledger is a conversation store, not a bubble
+// (ox ADR-028), so this field is NOT a deprecated mirror of Output.KB and
+// never migrates into it.
 type LedgerInfo struct {
 	Exists bool   `json:"exists"`
 	Path   string `json:"path,omitempty"`
 	Hint   string `json:"hint,omitempty"`
 }
 
-// KBInfo is one row in Output.KB — the unified per-knowledge-bubble envelope
-// emitted by `ox agent prime`. Built from the F3 three-source merger
-// (internal/kb.Merger) so kb-API rows, legacy team contexts, and legacy
-// ledger rows all flow through the same shape.
+// KBInfo is one row in Output.KB — the per-knowledge-bubble envelope
+// emitted by `ox agent prime`, built from KB-API rows only (ox ADR-028).
+// Team contexts and ledgers are conversation stores with their own
+// first-class envelope fields; they never appear here.
 //
-// Per the kb plan: per-kind rendering in prime stays differentiated (the
-// rich `team_context` mirror still carries the full team payload for one
-// release). KBInfo itself is intentionally minimal — it identifies the
-// bubble, where it lives on disk, the caller's role, and a short hint;
-// payloads are emitted in their type-specific siblings until the legacy
-// mirrors are removed.
+// KBInfo is intentionally minimal — it identifies the bubble, where it
+// lives on disk, the caller's role, and a short hint.
 type KBInfo struct {
 	KBID       string `json:"kb_id,omitempty"`
 	Type       string `json:"type"` // kb_type slug ("personal", "team", "repo", ...)
@@ -50,8 +45,7 @@ type KBInfo struct {
 	Path       string `json:"path,omitempty"`        // canonical XDG path (paths.KBDir) or legacy local dir
 	ViewerRole string `json:"viewer_role,omitempty"` // "owner", "member", "viewer"
 	Tokens     int    `json:"tokens,omitempty"`      // estimated/observed tokens contributed by this bubble
-	Legacy     bool   `json:"legacy,omitempty"`      // true for legacy team-context / ledger synthesized rows
-	Hint       string `json:"hint,omitempty"`        // short, type-specific guidance for the agent
+	Hint       string `json:"hint,omitempty"`        // short, type-specific guidance for the AI coworker
 }
 
 // CapturePriorGuidance provides instructions for capturing prior history
@@ -64,12 +58,10 @@ type CapturePriorGuidance struct {
 
 // TeamContextInfo represents discovered team context for prime output.
 //
-// MIGRATION NOTE: New callers should consume Output.KB (typed entries with
-// type=team). TeamContextInfo is the legacy mirror retained for one release
-// while downstream consumers migrate; the full payload (AGENTS.md, team_docs,
-// team_rules, soul/team hints, memory) continues to flow here for now because
-// KBInfo is the minimal-envelope contract — per-type rich content moves into
-// KB entries in a follow-up bead.
+// Permanent, first-class: team contexts are conversation stores, not
+// bubbles (ox ADR-028), so this payload (AGENTS.md, team_docs, team_rules,
+// soul/team hints, memory) is NOT a deprecated mirror of Output.KB and
+// never migrates into it.
 type TeamContextInfo struct {
 	TeamID     string   `json:"team_id"`
 	TeamName   string   `json:"team_name,omitempty"`

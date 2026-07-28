@@ -1,14 +1,15 @@
-// Package kb is shared infrastructure for ox's knowledge-base git repos:
-// the per-project ledger and team-context clones. They have the same
-// shape — a managed git working tree the daemon pulls and the CLI
-// pushes to — and the same multi-writer hazards: server-side seed,
-// CLI-side seed, several coworkers committing in parallel.
+// Package kb is the CLI-side home of Knowledge Bubble handling (catalog
+// fetch, git-transport resilience) — see ox ADR-028 for what a bubble is.
 //
-// Anything that's true for both repo types belongs here. Things that
-// are only true for one of them stay in their own package
-// (internal/ledger/* for ledger-specific paths and lifecycle; the
-// team-context layer in cmd/ox + internal/teamdocs for TC-specific
-// behavior).
+// One deliberate scope note: the merge-attributes guard in this file is
+// shared BY ledger and team-context clones too. Those are conversation
+// stores, not bubbles — but all three are managed git working trees the
+// daemon pulls (and, for the stores, the CLI pushes to), with the same
+// multi-writer hazards: server-side seed, CLI-side seed, several coworkers
+// committing in parallel. Transport-level resilience that is true for every
+// managed clone lives here; store-specific behavior stays in its own
+// package (internal/ledger/*, the team-context layer in cmd/ox +
+// internal/teamdocs).
 package kb
 
 import (

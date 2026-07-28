@@ -1,26 +1,32 @@
 Feature: Listing and Inspecting Knowledge Bubbles
   Devon runs `ox kb list` to see every Knowledge Bubble he can access — his
-  personal notes, profile, the team's shared bubbles, and the bubbles scoped to
-  the current repo — in one unified list. He can filter by type and inspect a
-  bubble to see what it holds and where it lives on disk. During the migration
-  window, legacy Team Contexts and Ledgers appear in the same listing so the
-  picture stays complete.
+  personal notes, profile, and the team's shared bubbles — in one list. He can
+  filter by type and inspect a bubble to see what it holds. Bubbles are
+  Curator-maintained syntheses (ox ADR-028): team contexts and ledgers are
+  separate, permanent conversation stores and never appear in this list —
+  Devon reads those with `ox teams` and `ox status`.
 
   See also: business-actions/inspect-bubbles.md
   See also: team-context/team-ctx.feature
 
-  Rule: Listing shows every bubble the coworker can access
+  Rule: Listing shows every bubble the coworker can access — and nothing else
 
     Scenario: Devon lists all his Knowledge Bubbles
       Given Devon is signed in and a member of "Acme Engineering"
       When he lists his Knowledge Bubbles
-      Then ox shows his personal, profile, team, and repo bubbles in one list
+      Then ox shows the bubbles returned by the KB API in one list
 
-    Scenario: Legacy team contexts and ledgers appear during migration
-      Given the team still has legacy team contexts and ledgers alongside new bubbles
+    Scenario: Conversation stores never appear as bubbles
+      Given Devon's team has team contexts and ledgers alongside its bubbles
       When Devon lists his Knowledge Bubbles
-      Then ox shows the legacy team contexts and ledgers alongside the new bubbles
-      And the list is complete
+      Then ox shows only real Knowledge Bubbles
+      And no team context or ledger is presented as a bubble
+
+    Scenario: The KB API being unavailable yields an empty list, not synthesized rows
+      Given the KB API is unavailable for Devon's account
+      When Devon lists his Knowledge Bubbles
+      Then ox shows an empty list
+      And no legacy rows are synthesized to fill the gap
 
   Rule: Bubbles can be filtered by type
 
@@ -37,14 +43,9 @@ Feature: Listing and Inspecting Knowledge Bubbles
         | repo     |
         | custom   |
 
-  Rule: A bubble can be inspected and located on disk
+  Rule: A bubble can be inspected
 
     Scenario: Devon inspects what a team bubble holds
       Given Devon sees a team bubble in his list
       When he inspects that bubble
       Then ox shows him what the bubble holds
-
-    Scenario: Devon finds where a bubble lives on disk
-      Given Devon wants the on-disk location of a bubble
-      When he asks ox to resolve its path
-      Then ox shows him the bubble's path on disk

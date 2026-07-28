@@ -10,20 +10,15 @@ List knowledge bubbles you can access
 
 ### Synopsis
 
-List the knowledge bubbles available to you across all sources.
+List the knowledge bubbles available to you.
 
-Merges three sources concurrently:
-  - The kb API (/api/v1/kb) — the new typed knowledge-bubble surface
-  - Legacy team contexts (/api/v1/cli/repos)
-  - Local ledger registry
-
-Legacy team contexts and ledgers surface here too — they're synthesized from
-the per-source data and shown alongside new kb-API rows so the list is
-complete during the migration window.
+Bubbles come from the KB API (/api/v1/kb). Team contexts and ledgers are
+separate, permanent conversation stores — list them with `ox teams` and
+`ox status`, not here.
 
 Examples:
   ox kb list                  # all bubbles
-  ox kb list --type=team      # only team bubbles (legacy + new)
+  ox kb list --type=team      # only team bubbles
   ox kb list --json           # scriptable JSON output
 
 ```

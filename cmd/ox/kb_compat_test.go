@@ -1,15 +1,19 @@
 package main
 
-// kb_compat_test.go — ox-gzp.30. Cross-cutting tests for the kb backward-
-// compatibility, escape-hatch, and lazy-provision paths. These cases
-// straddle the CLI commands (`ox kb list`, `ox kb show`)
-// and the merger contract; they live here rather than in any single
-// command's test file so the matrix is easy to read end-to-end.
+// kb_compat_test.go — pins ox ADR-028 behavior across the kb command
+// surfaces: knowledge bubbles come from the KB API and NOWHERE else.
+// Legacy team contexts and ledgers are permanent conversation stores —
+// they never appear as bubbles, even when the KB API is unavailable.
+// Also covers the OX_KB_DISABLE escape hatch, the no-persistent-disk
+// skip, lazy personal-bubble provisioning, and forward-compat unknown
+// kb_type handling. These cases straddle the CLI commands (`ox kb list`,
+// `ox kb show`) and the kb.FetchBubbles contract; they live here rather
+// than in any single command's test file so the matrix is easy to read
+// end-to-end.
 
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -21,27 +25,45 @@ import (
 	"github.com/sageox/ox/internal/runtime"
 )
 
-// --- A. knowledge-bubbles flag off (kb API returns 403) ---
+// resetRuntimeBaseline clears venue / capability env vars so the runtime
+// probe reports a "laptop default" baseline (PersistDisk=true). Otherwise a
+// sibling test that set OX_EPHEMERAL into the cached runtime.Caps() would
+// force the kb fetch disabled regardless of OX_KB_DISABLE — and tests would
+// fail intermittently depending on iteration order.
+func resetRuntimeBaseline(t *testing.T) {
+	t.Helper()
+	for _, ev := range []string{"OX_EPHEMERAL", "CLAUDE_CODE_REMOTE", "DEVIN_TASK_ID", "OX_PERSIST_DISK", "OX_NO_DAEMON"} {
+		t.Setenv(ev, "")
+	}
+	runtime.Reset()
+	t.Cleanup(runtime.Reset)
+}
 
-// TestCompat_KBFlagOff_ListShowsLegacyOnly verifies that when the kb API
-// returns ErrKBAPIUnavailable (the documented flag-off / endpoint-missing
-// signal), `ox kb list` still surfaces the user's legacy team-context
-// rows without an error and without a scary warning footer.
+// --- A. KB API unavailable (flag off / 403) ---
+
+// TestCompat_KBAPIUnavailable_ListShowsEmpty pins the ADR-028 inversion of
+// the old three-source fallback: when the KB API is unavailable (feature
+// flag off, 403/404), `ox kb list` shows an EMPTY list — legacy team
+// contexts and ledgers must NOT appear as bubbles, and the sentinel must
+// not surface as a warning.
 //
-// Failure prevented: every CLI invocation during the gradual flag rollout
-// would otherwise show a "kb API unavailable" warning that masks the
-// legacy listing the user actually wants.
-func TestCompat_KBFlagOff_ListShowsLegacyOnly(t *testing.T) {
-	t.Parallel()
+// Failure prevented: resurrecting the deleted merger's legacy-row
+// fallback would re-present conversation stores as bubbles, the exact
+// conflation ADR-028 removed.
+func TestCompat_KBAPIUnavailable_ListShowsEmpty(t *testing.T) {
+	resetRuntimeBaseline(t)
+	t.Setenv("OX_KB_DISABLE", "")
 
-	// Simulate the merger's view of the world after a 403: zero kb-API
-	// rows, no warning (the sentinel is silently swallowed), legacy
-	// rows pass through unchanged.
-	res := kb.MergeResult{
-		Bubbles: []kb.Bubble{
-			{Type: api.KBTypeTeam, Slug: "old-team", Name: "Old Team", Legacy: true, Source: kb.SourceTeamLegacy},
-			{Type: api.KBTypeRepo, Slug: "old-repo", Name: "Old Repo", Legacy: true, Source: kb.SourceLedger},
-		},
+	source := &compatFakeKBSource{listFn: func() ([]api.KB, error) {
+		return nil, fmt.Errorf("kb list: %w", api.ErrKBAPIUnavailable)
+	}}
+
+	res := kb.FetchBubbles(context.Background(), source, "https://sageox.ai")
+	if len(res.Bubbles) != 0 {
+		t.Fatalf("expected zero bubbles when KB API is unavailable, got %+v", res.Bubbles)
+	}
+	if len(res.Warnings) != 0 {
+		t.Fatalf("ErrKBAPIUnavailable must not surface as a warning, got %+v", res.Warnings)
 	}
 
 	var buf bytes.Buffer
@@ -50,11 +72,11 @@ func TestCompat_KBFlagOff_ListShowsLegacyOnly(t *testing.T) {
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "old-team") || !strings.Contains(out, "old-repo") {
-		t.Errorf("legacy rows must survive flag-off:\n%s", out)
+	if !strings.Contains(out, "No knowledge bubbles available.") {
+		t.Errorf("expected clean empty state, got:\n%s", out)
 	}
-	if strings.Contains(out, "source had errors") {
-		t.Errorf("flag-off must NOT surface as a warning footer:\n%s", out)
+	if strings.Contains(out, "errored") {
+		t.Errorf("flag-off must NOT render as a KB API error:\n%s", out)
 	}
 }
 
@@ -82,43 +104,59 @@ func TestCompat_KBFlagOff_ShowFallsBackGracefully(t *testing.T) {
 	}
 }
 
-// --- B. OX_KB_DISABLE escape hatch ---
+// --- B. OX_KB_DISABLE escape hatch + runtime-capability skip ---
 
-// TestCompat_OXKBDisable_MergerSkipsKBClient verifies that setting
-// OX_KB_DISABLE=1 short-circuits the merger before the kb client is
-// called, even if the client would otherwise return rows. This is the
+// TestCompat_OXKBDisable_SourceNotCalled verifies that setting
+// OX_KB_DISABLE=1 short-circuits kb.FetchBubbles before the KB source is
+// called, even if the source would otherwise return rows. This is the
 // operator-facing emergency switch for rollout incidents.
 //
 // Failure prevented: a regression in the env hook would silently call
 // the kb API anyway, eliminating the only knob operators have to bypass
 // a misbehaving kb endpoint without redeploying the CLI.
-func TestCompat_OXKBDisable_MergerSkipsKBClient(t *testing.T) {
-	// Cannot t.Parallel because t.Setenv is incompatible with parallel
-	// subtests sharing the same env var.
+func TestCompat_OXKBDisable_SourceNotCalled(t *testing.T) {
+	resetRuntimeBaseline(t)
 	t.Setenv("OX_KB_DISABLE", "1")
 
 	var calls atomic.Int32
-	listFn := func() ([]api.KB, error) {
+	source := &compatFakeKBSource{listFn: func() ([]api.KB, error) {
 		calls.Add(1)
 		return []api.KB{{KBID: "kb_should_not_appear", KBType: api.KBTypePersonal, Slug: "ghost"}}, nil
-	}
+	}}
 
-	merger := kb.NewMerger(
-		&compatFakeKBSource{listFn: listFn},
-		&compatFakeTeamSource{rows: []kb.LegacyTeamRow{{TeamID: "t1", Slug: "legacy", Name: "Legacy"}}, ep: "https://sageox.ai"},
-		nil,
-	)
-
-	res, err := merger.Merge(context.Background())
-	if err != nil {
-		t.Fatalf("merge: %v", err)
-	}
+	res := kb.FetchBubbles(context.Background(), source, "https://sageox.ai")
 	if calls.Load() != 0 {
-		t.Errorf("kb client called %d times, want 0", calls.Load())
+		t.Errorf("kb source called %d times, want 0", calls.Load())
 	}
-	// only the legacy row should land
-	if len(res.Bubbles) != 1 || res.Bubbles[0].Slug != "legacy" {
-		t.Errorf("expected only legacy row, got %+v", res.Bubbles)
+	if len(res.Bubbles) != 0 || len(res.Warnings) != 0 {
+		t.Errorf("expected empty result under OX_KB_DISABLE=1, got %+v", res)
+	}
+}
+
+// TestCompat_NoPersistDisk_SkipsFetch verifies kb.FetchBubbles also returns
+// an empty result when the runtime has no persistent disk (ephemeral
+// venue) — there is nothing on disk to reconcile the bubbles against.
+//
+// Failure prevented: an ephemeral-mode CLI (Claude Code remote, Devin,
+// CI) making a pointless KB API round-trip on every command.
+func TestCompat_NoPersistDisk_SkipsFetch(t *testing.T) {
+	resetRuntimeBaseline(t)
+	t.Setenv("OX_KB_DISABLE", "")
+	t.Setenv("OX_EPHEMERAL", "1")
+	runtime.Reset()
+
+	var calls atomic.Int32
+	source := &compatFakeKBSource{listFn: func() ([]api.KB, error) {
+		calls.Add(1)
+		return []api.KB{{KBID: "kb_x", KBType: api.KBTypePersonal, Slug: "ghost"}}, nil
+	}}
+
+	res := kb.FetchBubbles(context.Background(), source, "https://sageox.ai")
+	if calls.Load() != 0 {
+		t.Errorf("kb source called %d times without persistent disk, want 0", calls.Load())
+	}
+	if len(res.Bubbles) != 0 || len(res.Warnings) != 0 {
+		t.Errorf("expected empty result without persistent disk, got %+v", res)
 	}
 }
 
@@ -148,30 +186,19 @@ func TestCompat_OXKBDisable_VariantsAreRecognized(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.val, func(t *testing.T) {
-			// Clear venue / capability env vars so the runtime probe
-			// reports a "laptop default" baseline (PersistDisk=true).
-			// Otherwise a sibling test that set OX_EPHEMERAL into the
-			// cached runtime.Caps() would force kb disabled regardless
-			// of OX_KB_DISABLE — and the test would fail intermittently
-			// depending on iteration order.
-			for _, ev := range []string{"OX_EPHEMERAL", "CLAUDE_CODE_REMOTE", "DEVIN_TASK_ID", "OX_PERSIST_DISK", "OX_NO_DAEMON"} {
-				t.Setenv(ev, "")
-			}
-			runtime.Reset()
-			t.Cleanup(runtime.Reset)
+			resetRuntimeBaseline(t)
 			t.Setenv("OX_KB_DISABLE", tc.val)
 
 			var calls atomic.Int32
-			listFn := func() ([]api.KB, error) {
+			source := &compatFakeKBSource{listFn: func() ([]api.KB, error) {
 				calls.Add(1)
 				return nil, nil
-			}
-			merger := kb.NewMerger(&compatFakeKBSource{listFn: listFn}, nil, nil)
-			_, _ = merger.Merge(context.Background())
+			}}
+			_ = kb.FetchBubbles(context.Background(), source, "https://sageox.ai")
 
 			gotDisabled := calls.Load() == 0
 			if gotDisabled != tc.disabled {
-				t.Errorf("OX_KB_DISABLE=%q: kb client called=%d, want disabled=%v", tc.val, calls.Load(), tc.disabled)
+				t.Errorf("OX_KB_DISABLE=%q: kb source called=%d, want disabled=%v", tc.val, calls.Load(), tc.disabled)
 			}
 		})
 	}
@@ -182,7 +209,7 @@ func TestCompat_OXKBDisable_VariantsAreRecognized(t *testing.T) {
 // TestCompat_PersonalBubble_AppearsInListAfterAuth verifies the
 // EnsurePersonalKBMiddleware contract from the server side: the very
 // first `ox kb list` after `ox login` must surface a personal bubble.
-// We model the server's lazy-provision by having the kb client return a
+// We model the server's lazy-provision by having the kb source return a
 // personal bubble on the first call (as the real middleware would).
 //
 // Failure prevented: a regression that filters out kb_type=personal
@@ -192,10 +219,10 @@ func TestCompat_OXKBDisable_VariantsAreRecognized(t *testing.T) {
 func TestCompat_PersonalBubble_AppearsInListAfterAuth(t *testing.T) {
 	t.Parallel()
 
-	res := kb.MergeResult{
+	res := kb.ListResult{
 		Bubbles: []kb.Bubble{
-			{KBID: "kb_personal_lazy", Type: api.KBTypePersonal, Slug: "personal-abc", Name: "Personal", ViewerRole: "owner", Source: kb.SourceKB},
-			{KBID: "kb_team", Type: api.KBTypeTeam, Slug: "platform", Name: "Platform", Source: kb.SourceKB},
+			{KBID: "kb_personal_lazy", Type: api.KBTypePersonal, Slug: "personal-abc", Name: "Personal", ViewerRole: "owner"},
+			{KBID: "kb_team", Type: api.KBTypeTeam, Slug: "platform", Name: "Platform"},
 		},
 	}
 
@@ -209,9 +236,8 @@ func TestCompat_PersonalBubble_AppearsInListAfterAuth(t *testing.T) {
 		t.Errorf("personal bubble missing from list output:\n%s", out)
 	}
 	// ROLE column was dropped from the table for now — viewer_role still
-	// flows through the merger and the JSON envelope, but the human table
-	// is intentionally narrower. Re-add a role column assertion if/when
-	// the column comes back.
+	// flows through the JSON envelope, but the human table is intentionally
+	// narrower. Re-add a role column assertion if/when the column comes back.
 }
 
 // --- D. forward-compat unknown type across kb commands ---
@@ -226,7 +252,7 @@ func TestCompat_PersonalBubble_AppearsInListAfterAuth(t *testing.T) {
 func TestCompat_ForwardCompatUnknownType_ListRendersUnknown(t *testing.T) {
 	t.Parallel()
 
-	res := kb.MergeResult{Bubbles: []kb.Bubble{
+	res := kb.ListResult{Bubbles: []kb.Bubble{
 		{Type: api.KBTypeUnknown, Slug: "future-x", Name: "Future"},
 	}}
 	var buf bytes.Buffer
@@ -259,7 +285,6 @@ func TestCompat_ForwardCompatUnknownType_ShowResolvesByKBID(t *testing.T) {
 	}
 }
 
-// TestCompat_ForwardCompatUnknownType_PathByKBIDSkipsAPI verifies that
 func TestCompat_ForwardCompatSlugCollision_PersonalBeatsUnknown(t *testing.T) {
 	t.Parallel()
 
@@ -275,9 +300,9 @@ func TestCompat_ForwardCompatSlugCollision_PersonalBeatsUnknown(t *testing.T) {
 
 // --- helpers ---
 
-// compatFakeKBSource is a tiny fake just for this file's merger calls so
-// we don't depend on internal/kb's unexported test fakes. The shape
-// matches kb.KBSource — single ListBubbles method.
+// compatFakeKBSource is a tiny fake for kb.FetchBubbles calls so we don't
+// depend on internal/kb's unexported test fakes. The shape matches
+// kb.KBSource — single ListBubbles method.
 type compatFakeKBSource struct {
 	listFn func() ([]api.KB, error)
 }
@@ -288,20 +313,3 @@ func (f *compatFakeKBSource) ListBubbles(_ context.Context) ([]api.KB, error) {
 	}
 	return nil, nil
 }
-
-// compatFakeTeamSource adapts the local stub to kb.LegacyTeamSource.
-type compatFakeTeamSource struct {
-	rows []kb.LegacyTeamRow
-	ep   string
-	err  error
-}
-
-func (f *compatFakeTeamSource) ListTeamContexts(_ context.Context) ([]kb.LegacyTeamRow, string, error) {
-	if f.err != nil {
-		return nil, "", f.err
-	}
-	return f.rows, f.ep, nil
-}
-
-// _ keeps `errors` referenced in case future tests in this file need it.
-var _ = errors.Is
