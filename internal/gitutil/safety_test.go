@@ -1,6 +1,7 @@
 package gitutil
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -62,7 +63,7 @@ func TestRemoveStaleLockFiles(t *testing.T) {
 		lockPath := filepath.Join(gitDir, "index.lock")
 		require.NoError(t, os.WriteFile(lockPath, []byte{}, 0644))
 		// backdate to look old
-		oldTime := time.Now().Add(-(StaleLockAge + time.Second))
+		oldTime := time.Now().Add(-(AbandonedLockAge + time.Second))
 		require.NoError(t, os.Chtimes(lockPath, oldTime, oldTime))
 
 		removed, errs := RemoveStaleLockFiles(gitDir)
@@ -344,4 +345,221 @@ func TestFetchHeadAge(t *testing.T) {
 		assert.True(t, ok)
 		assert.Greater(t, age, 4*time.Minute)
 	})
+}
+
+// TestLockSweep_PidSuffixedAndSelfHealing covers the wedge that kept a real
+// ledger blocked for three months: a next-index-<pid>.lock left by a crashed
+// git. Its pid varies, so it can never be listed in knownLockFiles, and the
+// push pre-flight only ever *reported* locks — it never cleared them, unlike
+// the pull path. Detection and removal must agree, and IsSafeForGitOps must
+// self-heal an abandoned lock rather than blocking forever.
+func TestLockSweep_PidSuffixedAndSelfHealing(t *testing.T) {
+	stale := time.Now().Add(-2 * AbandonedLockAge)
+
+	newGitDir := func(t *testing.T) (repo, gitDir string) {
+		t.Helper()
+		repo = t.TempDir()
+		gitDir = filepath.Join(repo, ".git")
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+		return repo, gitDir
+	}
+
+	writeLock := func(t *testing.T, gitDir, name string, mtime time.Time) string {
+		t.Helper()
+		p := filepath.Join(gitDir, name)
+		require.NoError(t, os.WriteFile(p, []byte("lock"), 0644))
+		require.NoError(t, os.Chtimes(p, mtime, mtime))
+		return p
+	}
+
+	t.Run("pid-suffixed next-index lock is detected", func(t *testing.T) {
+		_, gitDir := newGitDir(t)
+		writeLock(t, gitDir, "next-index-13088.lock", stale)
+
+		assert.Contains(t, HasLockFiles(gitDir), "next-index-13088.lock",
+			"a lock we cannot detect is a lock we can never clear")
+	})
+
+	t.Run("pid-suffixed next-index lock is removable when stale", func(t *testing.T) {
+		_, gitDir := newGitDir(t)
+		p := writeLock(t, gitDir, "next-index-13088.lock", stale)
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Contains(t, removed, "next-index-13088.lock")
+		assert.NoFileExists(t, p)
+	})
+
+	t.Run("fresh locks are never swept", func(t *testing.T) {
+		_, gitDir := newGitDir(t)
+		fresh := writeLock(t, gitDir, "next-index-999.lock", time.Now())
+		freshIndex := writeLock(t, gitDir, "index.lock", time.Now())
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Empty(t, removed, "a live git process must not have its lock yanked")
+		assert.FileExists(t, fresh)
+		assert.FileExists(t, freshIndex)
+	})
+
+	t.Run("ref locks are left alone", func(t *testing.T) {
+		_, gitDir := newGitDir(t)
+		// packed-refs.lock belongs to a ref transaction, not the index. A broad
+		// "*.lock" sweep would eat it; we must not.
+		packed := writeLock(t, gitDir, "packed-refs.lock", stale)
+
+		removed, _ := RemoveStaleLockFiles(gitDir)
+		assert.NotContains(t, removed, "packed-refs.lock")
+		assert.FileExists(t, packed)
+	})
+
+	t.Run("IsSafeForGitOps self-heals an abandoned lock", func(t *testing.T) {
+		repo, gitDir := newGitDir(t)
+		p := writeLock(t, gitDir, "index.lock", stale)
+
+		assert.NoError(t, IsSafeForGitOps(repo),
+			"an abandoned lock must not block pushes forever")
+		assert.NoFileExists(t, p)
+	})
+
+	t.Run("IsSafeForGitOps still blocks on a live lock", func(t *testing.T) {
+		repo, gitDir := newGitDir(t)
+		writeLock(t, gitDir, "index.lock", time.Now())
+
+		assert.Error(t, IsSafeForGitOps(repo),
+			"a lock a running git may still hold must block")
+	})
+}
+
+// TestLockSweep_OwnerLivenessBeatsAge covers the case age alone gets wrong:
+// a lock whose owning process is STILL RUNNING must survive the sweep no matter
+// how old it is. Deleting it would let a second writer into the index mid-write
+// and lose uncommitted work — the one outcome worse than a blocked push.
+//
+// Only next-index-<pid>.lock encodes an owner. git's index.lock IS the lock (its
+// content is the partially-written index), so no owner exists to interrogate and
+// age remains the only available signal there.
+func TestLockSweep_OwnerLivenessBeatsAge(t *testing.T) {
+	ancient := time.Now().Add(-100 * AbandonedLockAge)
+
+	writeAged := func(t *testing.T, gitDir, name string) string {
+		t.Helper()
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+		p := filepath.Join(gitDir, name)
+		require.NoError(t, os.WriteFile(p, []byte("lock"), 0644))
+		require.NoError(t, os.Chtimes(p, ancient, ancient))
+		return p
+	}
+
+	t.Run("live owner retains the lock despite extreme age", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		// Our own PID is guaranteed alive for the duration of this test.
+		p := writeAged(t, gitDir, fmt.Sprintf("next-index-%d.lock", os.Getpid()))
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Empty(t, removed, "a lock held by a LIVE process must never be removed")
+		assert.FileExists(t, p, "removing it could corrupt the index mid-write")
+
+		// And the repo must stay blocked rather than silently proceeding.
+		assert.Error(t, IsSafeForGitOps(filepath.Dir(gitDir)),
+			"an actively-held lock must keep blocking git operations")
+	})
+
+	t.Run("dead owner allows removal", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		// PID 0x7FFFFFFF is not a live process on any realistic system.
+		p := writeAged(t, gitDir, "next-index-2147483647.lock")
+
+		removed, errs := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, errs)
+		assert.Contains(t, removed, "next-index-2147483647.lock",
+			"a lock whose owner is verifiably gone is abandoned")
+		assert.NoFileExists(t, p)
+	})
+
+	t.Run("ownerless lock still falls back to age", func(t *testing.T) {
+		// index.lock carries no PID, so age is the only signal git's format offers.
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		p := writeAged(t, gitDir, "index.lock")
+
+		removed, _ := RemoveStaleLockFiles(gitDir)
+		assert.Contains(t, removed, "index.lock")
+		assert.NoFileExists(t, p)
+	})
+
+	t.Run("ownerless lock younger than StaleLockAge is retained", func(t *testing.T) {
+		gitDir := filepath.Join(t.TempDir(), ".git")
+		require.NoError(t, os.MkdirAll(gitDir, 0755))
+		p := filepath.Join(gitDir, "index.lock")
+		require.NoError(t, os.WriteFile(p, []byte("lock"), 0644))
+
+		removed, _ := RemoveStaleLockFiles(gitDir)
+		assert.Empty(t, removed, "a lock a running git may still hold must survive")
+		assert.FileExists(t, p)
+	})
+}
+
+func TestLockOwnerPID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		lock    string
+		wantPID int
+		wantOK  bool
+	}{
+		{"next-index with pid", "next-index-13088.lock", 13088, true},
+		{"index.lock has no owner", "index.lock", 0, false},
+		{"shallow.lock has no owner", "shallow.lock", 0, false},
+		{"non-numeric pid", "next-index-abc.lock", 0, false},
+		{"empty pid", "next-index-.lock", 0, false},
+		{"zero pid rejected", "next-index-0.lock", 0, false},
+		{"negative pid rejected", "next-index--5.lock", 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			pid, ok := lockOwnerPID(tt.lock)
+			assert.Equal(t, tt.wantOK, ok)
+			assert.Equal(t, tt.wantPID, pid)
+		})
+	}
+}
+
+func TestProcessAlive(t *testing.T) {
+	assert.True(t, processAlive(os.Getpid()), "our own process is alive")
+	assert.False(t, processAlive(2147483647), "an implausible PID is not alive")
+}
+
+// TestLockSweep_OwnerlessLockSurvivesTheStaleWindow is the direct regression for
+// the review finding that age alone can displace a live writer.
+//
+// Failure prevented: a legitimate `git pull --rebase` on a large repo over a bad
+// network holds index.lock for more than StaleLockAge; a push preflight that
+// swept at that threshold would delete an ACTIVE lock, admit a second writer,
+// and risk index corruption or lost uncommitted changes. index.lock carries no
+// PID (it IS the lock), so no owner probe is possible and the only safe move is
+// a threshold no real index operation reaches.
+func TestLockSweep_OwnerlessLockSurvivesTheStaleWindow(t *testing.T) {
+	for _, lock := range []string{"index.lock", "shallow.lock", "config.lock", "HEAD.lock"} {
+		t.Run(lock+" held past StaleLockAge is retained", func(t *testing.T) {
+			repo := t.TempDir()
+			gitDir := filepath.Join(repo, ".git")
+			require.NoError(t, os.MkdirAll(gitDir, 0755))
+			p := filepath.Join(gitDir, lock)
+			require.NoError(t, os.WriteFile(p, []byte("lock"), 0644))
+
+			// Comfortably past the old 5-minute bar, far short of abandonment.
+			held := time.Now().Add(-(StaleLockAge * 3))
+			require.NoError(t, os.Chtimes(p, held, held))
+
+			removed, errs := RemoveStaleLockFiles(gitDir)
+			assert.Empty(t, errs)
+			assert.Empty(t, removed,
+				"a slow but legitimate git operation must not have its lock deleted")
+			assert.FileExists(t, p)
+			assert.Error(t, IsSafeForGitOps(repo),
+				"the repo must stay blocked while a writer may still hold the index")
+		})
+	}
 }

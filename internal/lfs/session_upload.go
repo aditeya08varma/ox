@@ -175,12 +175,26 @@ func FindPointerStubsWithMissingBlobs(client *Client, sessionPath string, logger
 // LFS pointer files and meta.json are committed to git; pointer files (~130 bytes)
 // reference uploaded LFS objects by OID to prevent garbage collection.
 // Overwrites legacy .gitignore that excluded content file extensions.
+//
+// It also excludes .needs-summary. That marker is machine-local scheduling
+// state whose payload is ABSOLUTE local paths (cache_dir, raw_path under the
+// writer's home directory), so its content can never agree between two
+// machines — committing it leaks local usernames into a shared repo AND
+// guarantees a perpetual merge conflict. Worse, the cloud summarizer deletes
+// the marker when it finishes while a local writer modifies it, producing a
+// modify/delete conflict that resolves in favor of the local modification and
+// resurrects a marker the cloud already retired. Excluding it deletes the whole
+// conflict class rather than merging it forever.
 func EnsureSessionsGitignore(sessionsDir string) error {
 	gitignorePath := filepath.Join(sessionsDir, ".gitignore")
 
 	newContent := "# LFS pointer files and meta.json are committed to git.\n" +
 		"# Content is stored in LFS; pointer files (~130 bytes) reference\n" +
-		"# uploaded objects by OID to prevent garbage collection.\n"
+		"# uploaded objects by OID to prevent garbage collection.\n" +
+		"\n" +
+		"# Machine-local summarization marker: holds absolute local paths and is\n" +
+		"# deleted by the cloud summarizer, so it can never merge cleanly.\n" +
+		".needs-summary\n"
 
 	existing, _ := os.ReadFile(gitignorePath)
 	if string(existing) == newContent {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -115,11 +116,24 @@ func ReconcileUnpushedPointers(ctx context.Context, ledgerPath, endpointURL stri
 		}
 
 		for _, obj := range resp.Objects {
-			if obj.Error != nil {
-				// mark ALL files that reference this OID, not just one
-				for _, idx := range oidToIndices[obj.OID] {
-					missing[idx] = true
-				}
+			if obj.Error == nil {
+				continue
+			}
+			// Only 404 proves the blob is genuinely absent. Any other status —
+			// 401 (token expired), 429 (rate limited), 5xx (server trouble) —
+			// says nothing about whether the object exists, and treating it as
+			// "gone" blanks a live recording to zero bytes, an operation with no
+			// inverse. Abort the reconcile instead: a push that stays blocked is
+			// recoverable, destroyed content is not.
+			if obj.Error.Code != http.StatusNotFound {
+				return result, fmt.Errorf(
+					"lfs batch check inconclusive for %s: HTTP %d: %s (refusing to treat "+
+						"as missing — retry once the LFS endpoint is healthy)",
+					obj.OID, obj.Error.Code, obj.Error.Message)
+			}
+			// mark ALL files that reference this OID, not just one
+			for _, idx := range oidToIndices[obj.OID] {
+				missing[idx] = true
 			}
 		}
 	}

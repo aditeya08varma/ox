@@ -8,7 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/manifest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,9 +90,17 @@ func TestPullManagedRepo_SessionMetaConflict_ClassifiesAsSessionConflictWedge(t 
 
 	s := newTestScheduler(t.TempDir())
 	result := s.pullManagedRepo(context.Background(), ManagedRepoPullOpts{
-		RepoPath:     localDir,
-		RepoName:     "ledger",
-		ResolveRules: ledger.DefaultResolveRules, // real production rules: sessions/ stays hard-denied
+		RepoPath: localDir,
+		RepoName: "ledger",
+		// Deliberately NOT ledger.DefaultResolveRules: production now
+		// auto-resolves sessions/, so this fixture would reconcile cleanly and
+		// never produce an Issue to escalate. The subject under test is the
+		// escalation MATH surviving a daemon restart, which applies to every
+		// wedge type; drive it with rules that leave the conflict unresolved so
+		// there is something to escalate. Coverage that production rules now
+		// resolve this fixture lives in
+		// TestSessionMetaConflict_AutoResolvesUnderProductionRules.
+		ResolveRules: []manifest.ResolveRule{{Mode: manifest.ResolveModeAuto, Path: "data/"}},
 		Logger:       discardLogger(),
 	})
 
@@ -233,9 +243,17 @@ func TestEscalateSessionConflictSeverity_SurvivesDaemonRestart(t *testing.T) {
 
 	s := newTestScheduler(t.TempDir())
 	result := s.pullManagedRepo(context.Background(), ManagedRepoPullOpts{
-		RepoPath:     localDir,
-		RepoName:     "ledger",
-		ResolveRules: ledger.DefaultResolveRules, // real production rules: sessions/ stays hard-denied
+		RepoPath: localDir,
+		RepoName: "ledger",
+		// Deliberately NOT ledger.DefaultResolveRules: production now
+		// auto-resolves sessions/, so this fixture would reconcile cleanly and
+		// never produce an Issue to escalate. The subject under test is the
+		// escalation MATH surviving a daemon restart, which applies to every
+		// wedge type; drive it with rules that leave the conflict unresolved so
+		// there is something to escalate. Coverage that production rules now
+		// resolve this fixture lives in
+		// TestSessionMetaConflict_AutoResolvesUnderProductionRules.
+		ResolveRules: []manifest.ResolveRule{{Mode: manifest.ResolveModeAuto, Path: "data/"}},
 		Logger:       discardLogger(),
 	})
 	require.NotNil(t, result.Issue)
@@ -315,4 +333,33 @@ func TestOldestUnpushedCommitAge_PicksOldestAcrossMultipleUnpushedCommits(t *tes
 	age, ok := oldestUnpushedCommitAge(context.Background(), cloneDir)
 	require.True(t, ok)
 	assert.GreaterOrEqual(t, age, 10*time.Hour, "must report the OLDEST unpushed commit's age, not the newest")
+}
+
+// TestSessionMetaConflict_AutoResolvesUnderProductionRules is the counterpart
+// to the escalation test above: under the REAL production rules, the same
+// sessions/*/meta.json fixture must reconcile cleanly instead of raising a
+// wedge issue.
+//
+// Failure prevented: sessions/ silently dropping out of
+// ledger.DefaultResolveRules would restore the 13-day production wedge, and
+// every other test in this file would still pass because they pin the
+// escalation math rather than the resolve outcome.
+func TestSessionMetaConflict_AutoResolvesUnderProductionRules(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: git clone operations")
+	}
+	localDir := makeSessionMetaConflictClone(t)
+
+	s := newTestScheduler(t.TempDir())
+	result := s.pullManagedRepo(context.Background(), ManagedRepoPullOpts{
+		RepoPath:     localDir,
+		RepoName:     "ledger",
+		ResolveRules: ledger.DefaultResolveRules,
+		Logger:       discardLogger(),
+	})
+
+	require.Nil(t, result.Issue,
+		"sessions/ conflicts must auto-resolve under production rules, not wedge")
+	require.False(t, gitutil.IsRebaseInProgress(localDir),
+		"no rebase may be left in progress after a successful reconcile")
 }

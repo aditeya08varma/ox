@@ -76,10 +76,47 @@ func ParsePointer(content string) (oid string, size int64, err error) {
 // auto-hydrate these files — hydration is handled by our own download path.
 
 // WritePointerFile writes a standard LFS pointer file at path.
-// Replaces any existing file (content is already uploaded to LFS).
+// Refuses to replace real content that does not match ref.OID — see
+// guardPointerOverwrite.
 func WritePointerFile(path string, ref FileRef) error {
+	if err := guardPointerOverwrite(path, ref); err != nil {
+		return err
+	}
 	content := FormatPointer(ref.OID, ref.Size)
 	return os.WriteFile(path, []byte(content), 0644)
+}
+
+// guardPointerOverwrite refuses to replace real on-disk content with a pointer
+// that does not describe that content.
+//
+// The happy path legitimately pointerizes real bytes: session upload writes
+// content, uploads it to LFS, then replaces it with a pointer. That stays
+// allowed, because the content hashes to ref.OID — it is provably in the store.
+//
+// The dangerous case is a meta.json whose Files map disagrees with the blob on
+// disk, which is exactly what independently-resolved merge conflicts produce.
+// UpdateMetaSummary calls WritePointerFiles over the WHOLE Files map, so a
+// single stale OID would silently destroy the only local copy of a recording —
+// and if that OID was never uploaded, the next push is rejected with "LFS
+// objects are missing", after which the reconcile path blanks the file to zero
+// bytes. Refusing here converts unrecoverable data loss into a loud error.
+func guardPointerOverwrite(path string, ref FileRef) error {
+	existing, err := os.ReadFile(path)
+	if err != nil || len(existing) == 0 {
+		return nil // nothing on disk to lose
+	}
+	if _, _, perr := ParsePointer(string(existing)); perr == nil {
+		// Already a pointer. Swapping one pointer for another loses nothing —
+		// a redaction pass legitimately installs a new OID.
+		return nil
+	}
+	if ComputeOID(existing) == ref.BareOID() {
+		return nil // content matches the OID: safely uploaded, pointerizing is correct
+	}
+	return fmt.Errorf(
+		"refusing to overwrite %s with an LFS pointer: on-disk content does not "+
+			"match OID %s (meta.json and the blob disagree — resolve before pointerizing)",
+		filepath.Base(path), ref.BareOID())
 }
 
 // WritePointerFiles writes LFS pointer files for each LFS-stored entry in

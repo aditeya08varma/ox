@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
 )
 
@@ -60,6 +61,7 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 
 	// resolve each conflicted file based on its conflict type
 	var toCheckoutTheirs []string // content conflicts: use checkout --theirs
+	var toCheckoutOurs []string   // content conflicts where the pointer side must win
 	var toAdd []string            // rename conflicts: stage the file as-is
 	var toRemove []string         // base-only: file deleted in both branches
 
@@ -69,10 +71,33 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 		hasOurs := stages[3]   // stage 3: version from commit being replayed
 
 		switch {
-		case hasBase && hasTheirs && hasOurs:
-			// content conflict: all three stages exist for the same path.
-			// working tree has conflict markers — use checkout --theirs to
-			// pick a clean version (during rebase, "theirs" = commit being replayed)
+		case hasTheirs && hasOurs:
+			// Both sides have content at this path. Two shapes land here:
+			//   - content conflict (base present): both modified the same file
+			//   - add/add conflict (no base): both CREATED the same file
+			//
+			// add/add used to fall through to the rename branch below, which
+			// stages the working-tree file as-is — conflict markers and all.
+			// That committed literal "<<<<<<< HEAD" into session artifacts, and
+			// it is the common shape when the cloud summarizer and the local CLI
+			// both write a brand-new session.md for the same session.
+			//
+			// Pointer-wins takes precedence over the positional rule. When one
+			// side is an LFS pointer and the other is hydrated bytes, this is
+			// not a content disagreement at all — it is a hydration-state
+			// disagreement, and the pointer is the only correct committed form
+			// (.claude/rules/cache-only-design.md). Committing the hydrated side
+			// permanently breaks pushes with "LFS objects are missing".
+			//
+			// Pointer-wins is also commutative and idempotent, so unlike the
+			// positional rule it converges regardless of which replica resolves
+			// first — that property is what stops a resolution from re-diverging.
+			if pointerWinsStage(ctx, repoPath, path) == 2 {
+				toCheckoutOurs = append(toCheckoutOurs, path)
+				continue
+			}
+			// Otherwise the positional rule: checkout --theirs picks stage 3,
+			// which during a rebase is the commit being replayed (the LOCAL side).
 			toCheckoutTheirs = append(toCheckoutTheirs, path)
 		case hasOurs && !hasBase:
 			// rename conflict: ours exists but no base at this path.
@@ -104,6 +129,20 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 		}
 	}
 
+	// resolve pointer-wins conflicts by taking stage 2 (the branch being rebased
+	// onto). Safe here because these are content conflicts, so all three stages
+	// exist and --ours cannot hit the modify/delete case where it errors out.
+	if len(toCheckoutOurs) > 0 {
+		checkoutArgs := append([]string{"checkout", "--ours", "--"}, toCheckoutOurs...)
+		if _, err := RunGit(ctx, repoPath, checkoutArgs...); err != nil {
+			return fmt.Errorf("checkout --ours (pointer wins): %w", err)
+		}
+		addArgs := append([]string{"add", "--"}, toCheckoutOurs...)
+		if _, err := RunGit(ctx, repoPath, addArgs...); err != nil {
+			return fmt.Errorf("git add after checkout --ours: %w", err)
+		}
+	}
+
 	// remove files that exist only in base (deleted in both branches)
 	if len(toRemove) > 0 {
 		rmArgs := append([]string{"rm", "--cached", "--quiet", "--"}, toRemove...)
@@ -131,6 +170,101 @@ func ResolveRebaseAcceptTheirs(ctx context.Context, repoPath string, safePrefixe
 	}
 
 	return nil
+}
+
+// lfsPointerPrefix is the first line of every Git LFS pointer file.
+//
+// Duplicated from internal/lfs rather than imported: internal/lfs depends on
+// gitutil, so importing it back would create a cycle. The value is fixed by the
+// LFS spec (https://github.com/git-lfs/git-lfs/blob/main/docs/spec.md), so it
+// cannot drift.
+const lfsPointerPrefix = "version https://git-lfs.github.com/spec/v1"
+
+// maxLFSPointerSize bounds how many bytes we read to classify a blob. Real
+// pointers are ~130 bytes; anything larger is content by definition.
+const maxLFSPointerSize = 200
+
+// isLFSPointerBlob reports whether the given blob content is a COMPLETE, valid
+// LFS pointer.
+//
+// The full shape is required, not just the version prefix. A truncated pointer
+// — or a short artifact that merely starts with the spec line — must not win a
+// conflict against valid content: downstream LFS parsing would reject it, so
+// "winning" would mean committing an unusable blob over a good one. Mirrors the
+// validation in lfs.ParsePointer, which gitutil cannot import (lfs depends on
+// gitutil, so the import would cycle).
+func isLFSPointerBlob(content string) bool {
+	if len(content) > maxLFSPointerSize || !strings.HasPrefix(content, lfsPointerPrefix) {
+		return false
+	}
+	var haveOID, haveSize bool
+	for _, line := range strings.Split(strings.TrimSpace(content), "\n") {
+		switch {
+		case strings.HasPrefix(line, "oid "):
+			// require a non-empty, hex-shaped digest with its algorithm prefix
+			oid := strings.TrimPrefix(line, "oid ")
+			if !strings.HasPrefix(oid, "sha256:") {
+				return false
+			}
+			digest := strings.TrimPrefix(oid, "sha256:")
+			if digest == "" || strings.ContainsAny(digest, " \t") {
+				return false
+			}
+			haveOID = true
+		case strings.HasPrefix(line, "size "):
+			size, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "size ")), 10, 64)
+			if err != nil || size <= 0 {
+				return false
+			}
+			haveSize = true
+		}
+	}
+	return haveOID && haveSize
+}
+
+// pointerWinsStage decides a content conflict where the two sides disagree
+// about HYDRATION STATE rather than content: one side is an LFS pointer, the
+// other is the hydrated bytes.
+//
+// Returns the index stage to keep (2 = branch being rebased onto, 3 = commit
+// being replayed), or 0 when both sides are the same kind and the caller should
+// fall back to its normal rule.
+//
+// Why the pointer always wins: a hydrated file committed in place breaks the
+// LFS linkage, and every subsequent push is rejected with "LFS objects are
+// missing" — a permanent, repo-wide wedge (see .claude/rules/cache-only-design.md
+// and the 2026-04-25 incident). The pointer side loses nothing, because the
+// bytes it references are already in the LFS store.
+//
+// The rule is a semilattice join — commutative, associative, idempotent — so
+// two replicas resolving the same conflict independently reach the same answer.
+// The positional rule (always take the replaying side) has no such property and
+// therefore has no fixed point.
+func pointerWinsStage(ctx context.Context, repoPath, path string) int {
+	onto, err := readIndexStage(ctx, repoPath, 2, path)
+	if err != nil {
+		return 0
+	}
+	replayed, err := readIndexStage(ctx, repoPath, 3, path)
+	if err != nil {
+		return 0
+	}
+
+	ontoIsPointer := isLFSPointerBlob(onto)
+	replayedIsPointer := isLFSPointerBlob(replayed)
+	switch {
+	case ontoIsPointer && !replayedIsPointer:
+		return 2
+	case replayedIsPointer && !ontoIsPointer:
+		return 3
+	default:
+		return 0 // same kind on both sides — no opinion
+	}
+}
+
+// readIndexStage returns the blob content for one stage of a conflicted path.
+func readIndexStage(ctx context.Context, repoPath string, stage int, path string) (string, error) {
+	return RunGit(ctx, repoPath, "cat-file", "blob", fmt.Sprintf(":%d:%s", stage, path))
 }
 
 // unmergedEntry represents one stage of an unmerged file in the git index.

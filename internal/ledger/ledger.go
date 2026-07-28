@@ -33,15 +33,42 @@ import (
 	"github.com/sageox/ox/internal/repotools"
 )
 
-// DefaultResolveRules is the canonical set of resolve rules for the ledger.
-// Delegates to manifest defaults so the set is configurable via
-// .sageox/sync.manifest without a code change. CLI callers (session upload,
-// doctor) use this; the daemon reads from the manifest directly when available.
-var DefaultResolveRules = manifest.DefaultResolveRules
+// DefaultResolveRules is the canonical set of resolve rules for the ledger:
+// the manifest defaults (data/, covering the idempotent import paths) plus
+// sessions/.
+//
+// Why sessions/ auto-resolves: sessions/<id>/meta.json is written by BOTH the
+// cloud summarizer and the local CLI, so it conflicts whenever both sides
+// touched the same session. With no rule the rebase halts, nothing can resolve
+// it, the abort restores the pre-rebase state, and the next attempt fails
+// identically — a deterministic wedge that never escalates and never self-heals.
+// One ledger sat 341 ahead / 1055 behind for 13 days with 281 such conflicts.
+//
+// Auto-resolving is acceptable because session artifacts are best-effort or
+// regenerable: title/summary/score are AI-generated and rebuildable via
+// `ox session regenerate`; entry_count is recomputed on every finalize; and
+// produced_commits / linked_prs / linked_issues / produced_plans are documented
+// in internal/lfs/meta.go as CACHES whose canonical source lives elsewhere (the
+// SageOx-Session commit trailer, the server-side PR reconciler, and each plan's
+// provenance.session_id). An imperfect summary beats a ledger that can never
+// sync again.
+//
+// SAFETY: this is only sound because gitutil.ResolveRebaseAcceptTheirs applies
+// pointer-wins before its positional rule. Session artifacts frequently conflict
+// as hydrated-bytes vs LFS-pointer, and committing the hydrated side breaks every
+// future push (.claude/rules/cache-only-design.md). Do not weaken that guard.
+//
+// NOTE: deliberately scoped to the LEDGER rather than added to
+// manifest.DefaultResolveRules, which also backs FallbackConfig() for team
+// contexts and project repos — neither has a sessions/ directory.
+var DefaultResolveRules = append(
+	append([]manifest.ResolveRule{}, manifest.DefaultResolveRules...),
+	manifest.ResolveRule{Mode: manifest.ResolveModeAuto, Path: "sessions/"},
+)
 
 // AutoResolvePrefixes extracts auto-resolve paths from the default rules.
 // Convenience for callers that need a flat []string (e.g., PushOpts).
-var AutoResolvePrefixes = manifest.AutoResolvePaths(manifest.DefaultResolveRules)
+var AutoResolvePrefixes = manifest.AutoResolvePaths(DefaultResolveRules)
 
 // ErrNotProvisioned indicates the ledger has not been provisioned by cloud and cloned.
 var ErrNotProvisioned = errors.New("ledger not provisioned")
