@@ -2,7 +2,7 @@ package main
 
 // kb_compat_test.go — ox-gzp.30. Cross-cutting tests for the kb backward-
 // compatibility, escape-hatch, and lazy-provision paths. These cases
-// straddle the CLI commands (`ox kb list`, `ox kb show`, `ox kb path`)
+// straddle the CLI commands (`ox kb list`, `ox kb show`)
 // and the merger contract; they live here rather than in any single
 // command's test file so the matrix is easy to read end-to-end.
 
@@ -55,40 +55,6 @@ func TestCompat_KBFlagOff_ListShowsLegacyOnly(t *testing.T) {
 	}
 	if strings.Contains(out, "source had errors") {
 		t.Errorf("flag-off must NOT surface as a warning footer:\n%s", out)
-	}
-}
-
-// TestCompat_KBFlagOff_PathFallsBackToLegacy verifies `ox kb path` still
-// resolves a slug when the kb API is unavailable, by walking through the
-// legacy resolver. Mirrors the existing kb_path_test.go contract but
-// labels it explicitly as a flag-off compat case so the matrix is easy
-// to find in code review.
-//
-// Failure prevented: a future refactor that drops the legacy fallback
-// during ErrKBAPIUnavailable would leave pre-flag users with `kb not
-// found:` for every slug they've used for months.
-func TestCompat_KBFlagOff_PathFallsBackToLegacy(t *testing.T) {
-	t.Parallel()
-
-	cmd, stdout, _ := newKBPathTestCmd(t)
-
-	deps := kbPathDeps{
-		resolver: &stubKBResolver{listErr: fmt.Errorf("flag off: %w", api.ErrKBAPIUnavailable)},
-		legacy: func(slug string) (string, string, bool) {
-			if slug == "legacy-slug" {
-				return "team_legacy_id", "/legacy/path", true
-			}
-			return "", "", false
-		},
-		pathFor: fakePathFor,
-	}
-
-	if err := runKBPathWithDeps(cmd, "legacy-slug", false, deps); err != nil {
-		t.Fatalf("expected legacy fallback to succeed, got: %v", err)
-	}
-	want := fakePathFor("team_legacy_id") + "\n"
-	if got := stdout.String(); got != want {
-		t.Errorf("legacy fallback path: got %q, want %q", got, want)
 	}
 }
 
@@ -294,40 +260,6 @@ func TestCompat_ForwardCompatUnknownType_ShowResolvesByKBID(t *testing.T) {
 }
 
 // TestCompat_ForwardCompatUnknownType_PathByKBIDSkipsAPI verifies that
-// `ox kb path kb_<id>` resolves without calling the API for an unknown-
-// type kb_id. Mirrors the existing TestKBPath_ResolveByKBID but as part
-// of the explicit forward-compat matrix.
-//
-// Failure prevented: any behavior that requires "type must be known"
-// before kb_id direct resolution would fail-open here on a future server
-// rollout.
-func TestCompat_ForwardCompatUnknownType_PathByKBIDSkipsAPI(t *testing.T) {
-	cmd, stdout, _ := newKBPathTestCmd(t)
-
-	deps := kbPathDeps{
-		// resolver is non-nil to prove kb_id never calls it
-		resolver: &stubKBResolver{},
-		legacy:   func(string) (string, string, bool) { return "", "", false },
-		pathFor:  fakePathFor,
-	}
-	if err := runKBPathWithDeps(cmd, "kb_future", false, deps); err != nil {
-		t.Fatalf("kb_id direct path failed for unknown-type kb: %v", err)
-	}
-	want := fakePathFor("kb_future") + "\n"
-	if got := stdout.String(); got != want {
-		t.Errorf("got %q, want %q", got, want)
-	}
-}
-
-// TestCompat_ForwardCompatSlugCollision_PersonalBeatsUnknown verifies
-// that when a slug matches both a recognized type and an unknown future
-// type, the recognized one wins per the documented priority order. This
-// pins the behavior so a future "be lenient toward unknown types" change
-// can't promote them above personal/team without an explicit decision.
-//
-// Failure prevented: a slug shared by a personal bubble and a future-
-// typed bubble silently routing `ox kb show <slug>` at the future bubble
-// once the server rolls it out.
 func TestCompat_ForwardCompatSlugCollision_PersonalBeatsUnknown(t *testing.T) {
 	t.Parallel()
 

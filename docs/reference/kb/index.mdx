@@ -10,12 +10,15 @@ Work with knowledge bubbles
 
 ### Synopsis
 
-Work with knowledge bubbles — the unified primitive for organizing knowledge.
+Work with knowledge bubbles — curated syntheses of your team's knowledge.
 
-Knowledge bubbles replace the legacy team-context + ledger model with a single
-typed surface (personal, profile, team, repo, custom). Use `ox kb list` to
-see what you have access to, `ox kb show <slug>` for details, and
-`ox kb path <slug>` for the local checkout path (scriptable: cd $(ox kb path <slug>)).
+A knowledge bubble is a Curator-maintained, read-only synthesis of your
+team's distilled conversations for one area of work (see ox ADR-028). Team
+contexts and ledgers are separate, permanent conversation stores — they are
+not bubbles.
+
+Use `ox kb list` to see the bubbles you can access and
+`ox kb show <slug>` for details on one.
 
 ### Options
 
@@ -37,9 +40,6 @@ see what you have access to, `ox kb show <slug>` for details, and
 ### SEE ALSO
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
-* [ox kb config](/kb/config)	 - Inspect KB configuration values (read-only)
-* [ox kb hydrate](/kb/hydrate)	 - Materialize LFS pointer files in a knowledge bubble
 * [ox kb list](/kb/list)	 - List knowledge bubbles you can access
-* [ox kb path](/kb/path)	 - Print the local path of a knowledge bubble (scriptable)
 * [ox kb show](/kb/show)	 - Show details for a knowledge bubble
 
