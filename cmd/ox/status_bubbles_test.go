@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/kb"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -333,13 +334,15 @@ func TestCollectBubblesSummary_UsesFetchResult(t *testing.T) {
 			Warnings: []kb.Warning{{Err: "partial"}},
 		}
 	}
-	s := collectBubblesSummary(fetch)
+	s := collectBubblesSummary(fetch, "https://api.test.sageox.ai")
 	assert.False(t, s.Unavailable)
 	assert.Equal(t, 2, s.Total)
 	assert.Equal(t, 1, s.ByType["team"])
 	assert.Equal(t, 1, s.ByType["repo"])
 	require.Len(t, s.Warnings, 1)
 	assert.Equal(t, "partial", s.Warnings[0].Err)
+	assert.Equal(t, "https://api.test.sageox.ai", s.Endpoint,
+		"the fetch endpoint must ride along — mount paths are resolved under it")
 }
 
 // TestCollectBubblesSummary_NilFetchIsUnavailable verifies the defensive
@@ -350,7 +353,7 @@ func TestCollectBubblesSummary_UsesFetchResult(t *testing.T) {
 func TestCollectBubblesSummary_NilFetchIsUnavailable(t *testing.T) {
 	t.Parallel()
 
-	s := collectBubblesSummary(nil)
+	s := collectBubblesSummary(nil, "https://api.sageox.ai")
 	assert.True(t, s.Unavailable)
 }
 
@@ -426,7 +429,7 @@ func fakeKBStore(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	orig := statusKBDirForBubble
-	statusKBDirForBubble = func(kbID string) string {
+	statusKBDirForBubble = func(_, kbID string) string {
 		return filepath.Join(dir, kbID)
 	}
 	t.Cleanup(func() { statusKBDirForBubble = orig })
@@ -471,6 +474,71 @@ func TestCollectBubbleRows_PathAndSortOrder(t *testing.T) {
 	assert.Equal(t, "kb_team", rows[1].Bubble.KBID)
 	assert.True(t, rows[1].Cloned, "a real git checkout must be detected as cloned")
 	assert.Equal(t, clonedPath, rows[1].Path)
+}
+
+// TestCollectBubbleRows_ResolvesPathUnderSummaryEndpoint drives the
+// PRODUCTION path resolver (no fakeKBStore seam — the temp-dir fake ignores
+// the endpoint and would hide exactly this bug) and verifies rows land in
+// the KB store of the endpoint the rows were fetched from.
+//
+// Failure prevented: a test.sageox.ai project's cards pointing at the
+// production store — the class of bug PR #734 fixed. It surfaces only as
+// bubbles resolving to the wrong directory (mounted bubbles reported "not
+// cloned", and vice versa), never as an error.
+func TestCollectBubbleRows_ResolvesPathUnderSummaryEndpoint(t *testing.T) {
+	// not parallel: t.Setenv, plus this reads the package-global
+	// statusKBDirForBubble seam other tests in this file swap out.
+	const projectEP = "https://api.test.sageox.ai"
+	const defaultEP = "https://api.sageox.ai"
+
+	// Pin the XDG data root to a temp dir. Keeping the production resolver
+	// is the point of this test, but letting it resolve into the real
+	// ~/.local/share/sageox is not: test.sageox.ai is the staging slug, so a
+	// SageOx developer plausibly has a genuine kb_x checkout there. That
+	// would make Cloned/Git non-deterministic and run git against a real
+	// repo. OX_XDG_DISABLE is cleared so the root is honored either way.
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	// Decoy ambient endpoint — it must never leak into the explicit-ep
+	// path. Same guard internal/paths/paths_kb_test.go uses.
+	t.Setenv("SAGEOX_ENDPOINT", "https://decoy.example.invalid")
+
+	s := summarizeBubbles(kb.ListResult{
+		Bubbles: []kb.Bubble{{KBID: "kb_x", Type: api.KBTypeTeam, Slug: "eng", ScopeType: "team"}},
+	})
+	s.Endpoint = projectEP
+
+	rows := collectBubbleRows(s, nil)
+	require.Len(t, rows, 1)
+	assert.Equal(t, paths.KBDir(projectEP, "kb_x"), rows[0].Path)
+	assert.Contains(t, rows[0].Path, filepath.Join("test.sageox.ai", "kb"),
+		"mount path must be scoped by the project endpoint's slug")
+	assert.NotEqual(t, paths.KBDir(defaultEP, "kb_x"), rows[0].Path,
+		"resolving under the endpoint.Get() default reintroduces the #734 bug")
+	assert.NotContains(t, rows[0].Path, "decoy.example.invalid",
+		"the ambient SAGEOX_ENDPOINT must not leak into an explicitly-scoped path")
+	// Deterministic now that the data root is empty: nothing is on disk.
+	assert.False(t, rows[0].Cloned, "temp data root must contain no checkout")
+}
+
+// TestCollectBubbleRows_EmptyEndpointDegrades verifies an unresolved
+// endpoint yields an empty path instead of aborting `ox status`.
+//
+// Failure prevented: paths.KBDir panics on an empty endpoint by contract;
+// a fresh install or unconfigured shell would crash the whole status run
+// instead of rendering the bubble without a mount path.
+func TestCollectBubbleRows_EmptyEndpointDegrades(t *testing.T) {
+	s := summarizeBubbles(kb.ListResult{
+		Bubbles: []kb.Bubble{{KBID: "kb_x", Type: api.KBTypeTeam}},
+	})
+	s.Endpoint = ""
+
+	require.NotPanics(t, func() {
+		rows := collectBubbleRows(s, nil)
+		require.Len(t, rows, 1)
+		assert.Empty(t, rows[0].Path)
+		assert.False(t, rows[0].Cloned)
+	})
 }
 
 // TestRenderBubblesSection_CardsShowPathAndStatus verifies the human
