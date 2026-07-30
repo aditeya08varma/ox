@@ -51,6 +51,19 @@ const MaxPlanAge = 90 * 24 * time.Hour
 // DefaultLimit is returned when callers pass limit <= 0.
 const DefaultLimit = 5
 
+// maxHitsPerTerm bounds the per-term term-frequency scan so scoring stays cheap
+// on large documents. It also bounds the density bonus: extraHits can never
+// exceed (maxHitsPerTerm-1) * len(terms), which is why tfDensityDivisor has to
+// be tuned against it rather than picked freely.
+const maxHitsPerTerm = 10
+
+// tfDensityDivisor scales the density bonus in scoreContent. Raising it makes
+// scoring stricter about density and therefore biased against large documents;
+// lowering it lets bigger on-topic documents clear callers' thresholds. See the
+// tuning rationale in scoreContent — this is the knob that decides how large an
+// on-topic document may be and still be findable.
+const tfDensityDivisor = 5.0
+
 // Result is a single hit returned to callers. Shape mirrors api.QueryResult
 // loosely so 'ox query --local' output stays compatible with team-context
 // query consumers, but this package stays free of api/ imports to keep the
@@ -450,7 +463,8 @@ func planTimestamp(planPath, dirName string) time.Time {
 }
 
 // scoreContent returns a relevance score and a short snippet for content matching all terms.
-// Score = (matched-term-count / total-terms) + tf-bonus capped at 1.0.
+// AND semantics: every term must appear, or the score is 0. A match scores a flat
+// 0.5 floor plus a density bonus in [0, 0.5], so the range is [0.5, 1.0].
 // Snippet is the first ~160 chars around the first matched term.
 func scoreContent(content string, terms []string) (float64, string) {
 	if content == "" {
@@ -469,10 +483,10 @@ func scoreContent(content string, terms []string) (float64, string) {
 		if firstIdx < 0 || idx < firstIdx {
 			firstIdx = idx
 		}
-		// count tf with a cheap bounded scan (max 10 hits per term)
+		// count tf with a cheap bounded scan (maxHitsPerTerm hits per term)
 		hits := 0
 		start := 0
-		for hits < 10 {
+		for hits < maxHitsPerTerm {
 			next := strings.Index(lower[start:], t)
 			if next < 0 {
 				break
@@ -489,7 +503,32 @@ func scoreContent(content string, terms []string) (float64, string) {
 	if matched < len(terms) {
 		return 0, ""
 	}
-	tfBonus := float64(totalHits) / 100.0
+	// The tf bonus rewards term DENSITY, not raw volume. The previous form
+	// (totalHits/100, capped) was length-biased: any long transcript that
+	// mentioned each term somewhere accumulated enough scattered hits to score
+	// ~0.95, so "long and vaguely related" outranked "short and on-topic" and
+	// sailed past callers' relevance thresholds (plan enrich surfaced unrelated
+	// sessions at 0.95 exactly this way). Normalizing by content size makes the
+	// bonus mean "these terms are what this document is ABOUT": hits beyond the
+	// first per term, per KB of content.
+	//
+	// tfDensityDivisor is what keeps this from over-correcting. The scan above
+	// caps at maxHitsPerTerm, so extraHits <= (maxHitsPerTerm-1)*len(terms) —
+	// which means the divisor sets a hard ceiling on how large a document can
+	// be and still clear a caller's threshold. At 20 (the first cut of this
+	// fix) a 3-term query could not surface anything over ~13.5 KB past plan
+	// enrich's 0.6 gate, silently dropping 14% of this repo's own saved plans
+	// no matter how on-topic they were. At 5 a densely on-topic 20 KB plan
+	// scores ~0.77 while a 96 KB transcript with scattered hits still decays to
+	// ~0.51 — false positives stay gated, true positives survive.
+	extraHits := totalHits - matched
+	kb := float64(len(content)) / 1024.0
+	if kb < 1 {
+		// floor tiny documents at 1 KB so a 200-byte doc with one repeat
+		// cannot out-score everything by density alone.
+		kb = 1
+	}
+	tfBonus := (float64(extraHits) / kb) / tfDensityDivisor
 	if tfBonus > 0.5 {
 		tfBonus = 0.5
 	}

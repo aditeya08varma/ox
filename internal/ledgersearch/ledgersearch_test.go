@@ -482,3 +482,79 @@ func TestSnippetAround_Markers(t *testing.T) {
 		t.Errorf("unexpected marker when window covers whole string: %q", full)
 	}
 }
+
+// TestScoreContent_DensityNotLength is the regression for the length bias that
+// made `ox plan enrich` surface unrelated sessions at 0.95: a long document
+// containing every query term scattered incidentally must NOT out-score (or
+// even approach) a short document that is actually about those terms.
+//
+// Failure prevented: restoring the un-normalized totalHits/100 bonus. Both
+// fixtures below saturate the maxHitsPerTerm scan cap, so under the old formula
+// they score identically (0.800) and the threshold assertion goes red — the
+// earlier version of this test used a scattered doc with only 6 total hits,
+// which the old formula scored 0.56 and which therefore passed either way.
+func TestScoreContent_DensityNotLength(t *testing.T) {
+	terms := []string{"mcp", "doctrine", "priming"}
+
+	// short and on-topic: repeats the terms in ~1 KB of content
+	focused := strings.Repeat("mcp doctrine priming shapes the mcp surface. ", 22)
+
+	// long and incidental: each term appears maxHitsPerTerm times, dispersed
+	// through ~100 KB, so the scan cap saturates exactly as it does for focused.
+	filler := strings.Repeat("unrelated transcript chatter about run jobs and browsers. ", 170)
+	scattered := strings.Repeat("mcp doctrine priming "+filler, maxHitsPerTerm)
+
+	fs, fsn := scoreContent(focused, terms)
+	ss, ssn := scoreContent(scattered, terms)
+	if fsn == "" || ssn == "" {
+		t.Fatal("expected snippets for matching content")
+	}
+	// Checked first: this is the assertion the contract above is about, and it
+	// fires on the old formula before the ordering comparison can mask it.
+	if ss >= 0.6 {
+		t.Fatalf("scattered long doc score = %.3f, want < 0.6 (the caller threshold it previously blew through)", ss)
+	}
+	if fs <= ss {
+		t.Fatalf("focused doc must out-score scattered long doc: focused=%.3f scattered=%.3f", fs, ss)
+	}
+	if fs < 0.6 {
+		t.Fatalf("focused doc score = %.3f, want >= 0.6", fs)
+	}
+}
+
+// TestScoreContent_LargeOnTopicDocStillSurfaces guards the other side of the
+// density fix. Normalizing by document size interacts with the maxHitsPerTerm
+// scan cap to impose a hard size ceiling: extraHits is bounded, so past some
+// byte count NO document can clear a caller's threshold however on-topic it is.
+//
+// Failure prevented: raising tfDensityDivisor back toward 20, which put that
+// ceiling at ~13.5 KB for a 3-term query — below the p90 of this repo's own
+// saved plans, so 14% of them became permanently unfindable as prior art.
+func TestScoreContent_LargeOnTopicDocStillSurfaces(t *testing.T) {
+	terms := []string{"mcp", "doctrine", "priming"}
+
+	// ~20 KB and densely on-topic: the terms recur throughout, not just once.
+	unit := "mcp doctrine priming drive the design here. " +
+		strings.Repeat("supporting prose that carries the argument forward. ", 8)
+	dense := strings.Repeat(unit, 40)
+	if len(dense) < 15*1024 {
+		t.Fatalf("fixture too small to exercise the ceiling: %d bytes", len(dense))
+	}
+
+	// same size, but the terms appear once each — genuinely tangential.
+	tangential := "mcp doctrine priming\n" +
+		strings.Repeat("prose with no bearing on the query at all. ", 480)
+
+	ds, _ := scoreContent(dense, terms)
+	ts, _ := scoreContent(tangential, terms)
+
+	if ds < 0.6 {
+		t.Fatalf("dense %d-byte on-topic doc scored %.3f, want >= 0.6 — the density divisor has re-introduced a size ceiling", len(dense), ds)
+	}
+	if ts >= 0.6 {
+		t.Fatalf("tangential %d-byte doc scored %.3f, want < 0.6", len(tangential), ts)
+	}
+	if ds <= ts {
+		t.Fatalf("dense doc must out-score tangential doc of the same size: dense=%.3f tangential=%.3f", ds, ts)
+	}
+}
