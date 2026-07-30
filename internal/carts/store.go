@@ -55,12 +55,13 @@ func New(ctx context.Context, cfg *Config) (*Store, error) {
 		}
 	}
 
-	user := cfg.CommitterName
-	if user == "" {
-		user = "root"
-	}
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/?parseTime=true&interpolateParams=true&timeout=5s&readTimeout=30s&writeTimeout=30s",
-		user, cfg.ServerHost, port)
+	// Always connect as root: `dolt sql-server` only ever provisions root, and
+	// EnsureServer's readiness probe authenticates as root too. CommitterName is
+	// a git author name ("Ada Lovelace"), not a SQL account — using it here made
+	// every command fail with "Access denied for user '<name>'" unless the user
+	// happened to be called root. It stays reserved for the DOLT_COMMIT author.
+	dsn := fmt.Sprintf("root@tcp(%s:%d)/?parseTime=true&interpolateParams=true&timeout=5s&readTimeout=30s&writeTimeout=30s",
+		cfg.ServerHost, port)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {

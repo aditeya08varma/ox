@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -47,8 +48,12 @@ func runningServerPort(cartsDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// Signal 0 checks if process exists
-	if err := proc.Signal(os.Signal(nil)); err != nil {
+	// Signal 0 checks if the process exists. It must be syscall.Signal(0), not a
+	// nil os.Signal: os.Process.Signal type-asserts its argument to syscall.Signal,
+	// which nil fails, so a nil signal ALWAYS errored. That made reuse dead code —
+	// every invocation started another sql-server and all but the first died on
+	// dolt's exclusive write lock.
+	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		return 0, fmt.Errorf("server process %d not running: %w", pid, err)
 	}
 
@@ -59,6 +64,13 @@ func runningServerPort(cartsDir string) (int, error) {
 	port, err := strconv.Atoi(strings.TrimSpace(string(portData)))
 	if err != nil {
 		return 0, err
+	}
+
+	// A live PID is not proof the server is ours — the OS recycles PIDs, so a
+	// stale file can name an unrelated process. Confirm something is actually
+	// serving on the recorded port before handing it back.
+	if err := waitForServer("127.0.0.1", port, 2*time.Second); err != nil {
+		return 0, fmt.Errorf("server process %d is not serving port %d: %w", pid, port, err)
 	}
 	return port, nil
 }
@@ -99,17 +111,25 @@ func startServer(cartsDir string) (int, error) {
 	}
 	logFile.Close()
 
+	// Wait for readiness BEFORE recording state. Writing the files first let a
+	// starter that was about to lose dolt's write-lock race overwrite the
+	// metadata of the server that won it, permanently orphaning the healthy
+	// server: every later invocation read the loser's dead PID and started yet
+	// another doomed one.
+	if err := waitForServer("127.0.0.1", port, 30*time.Second); err != nil {
+		// Reap the process we spawned; otherwise a failed start leaves a
+		// process holding the lock that nothing has a PID file for.
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		return 0, fmt.Errorf("server failed to start: %w", err)
+	}
+
 	// Write state files
 	if err := os.WriteFile(filepath.Join(cartsDir, pidFileName), []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
 		return 0, err
 	}
 	if err := os.WriteFile(filepath.Join(cartsDir, portFileName), []byte(strconv.Itoa(port)), 0o644); err != nil {
 		return 0, err
-	}
-
-	// Wait for server to be ready
-	if err := waitForServer("127.0.0.1", port, 30*time.Second); err != nil {
-		return 0, fmt.Errorf("server failed to start: %w", err)
 	}
 
 	return port, nil
