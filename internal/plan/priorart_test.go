@@ -433,3 +433,71 @@ func TestExcludeSelfPlan_EmptySlugIsNoOp(t *testing.T) {
 		t.Fatalf("empty slug dropped hits: got %d, want 1", len(got))
 	}
 }
+
+// TestPlanTopic_MatchesSavePathDerivation pins the invariant that makes
+// self-exclusion work at all: the slug the enricher excludes on must be the
+// slug the save path writes. PlanTopic is shared with the CLI's planTopic for
+// exactly that reason, so it has to keep deriving the topic the same way —
+// explicit --topic wins, otherwise the document TITLE (H1-first).
+//
+// Failure prevented: re-deriving the topic by walking Sections for the first
+// heading. Parse splits on "## " only, so an H1 lives in the Heading==""
+// preamble section and such a walk cannot see it — the ox-1tjj.8 bug. That
+// breaks self-exclusion silently (the enricher computes a different slug than
+// the ledger dir, so the self-match survives) AND regresses plan titles.
+func TestPlanTopic_MatchesSavePathDerivation(t *testing.T) {
+	tests := []struct {
+		name string
+		in   Input
+		want string
+	}{
+		{
+			name: "H1 wins over a numbered context H2",
+			in:   Parse("# Conversation model update\n\n## 1. Context — Why Now\n\nprose.\n"),
+			want: "Conversation model update",
+		},
+		{
+			name: "H1 wins over a TL;DR H2",
+			in:   Parse("# ox plan — enriched plans\n\n## TL;DR\n\nShip it.\n"),
+			want: "ox plan — enriched plans",
+		},
+		{
+			name: "no H1 falls back to the first H2",
+			in:   Parse("preamble\n\n## First Section\n\nbody\n"),
+			want: "First Section",
+		},
+		{
+			name: "explicit topic short-circuits the document title",
+			in:   Input{Topic: "explicit consult topic", Raw: "# A Different Title\n\nbody\n"},
+			want: "explicit consult topic",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PlanTopic(tc.in); got != tc.want {
+				t.Errorf("PlanTopic(...) = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExcludeSelfPlan_UsesTheTitleDerivedSlug closes the loop end-to-end: a
+// plan whose H1 is its real title must exclude the ledger entry saved under
+// that H1's slug. Under the Sections-walk derivation this test fails, because
+// the enricher would compute the H2's slug and leave the true self-match in.
+func TestExcludeSelfPlan_UsesTheTitleDerivedSlug(t *testing.T) {
+	in := Parse("# Conversation model update\n\n## 1. Context — Why Now\n\nprose.\n")
+	selfSlug := Slugify(PlanTopic(in))
+
+	hits := []priorArtHit{
+		{Score: 0.9, DocType: "plan", SourceID: "2026-07-30-" + selfSlug},
+		{Score: 0.8, DocType: "plan", SourceID: "2026-07-29-some-other-plan"},
+	}
+	got := excludeSelfPlan(hits, selfSlug)
+	if len(got) != 1 {
+		t.Fatalf("got %d hit(s), want 1 (own entry dropped, other plan kept)", len(got))
+	}
+	if got[0].SourceID != "2026-07-29-some-other-plan" {
+		t.Errorf("wrong hit survived: %q", got[0].SourceID)
+	}
+}

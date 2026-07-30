@@ -649,22 +649,22 @@ var slugStopWords = map[string]bool{
 	"and": true, "for": true, "in": true, "on": true, "with": true,
 }
 
-// PlanTopic returns the plan's title — the first non-empty H2 heading, else the
-// first non-empty raw line. Shared with the CLI's planTopic so the slug the
-// enricher self-excludes on (priorart.go) cannot drift from the slug the save
-// path writes to the ledger.
+// PlanTopic returns the topic a plan is saved under: an explicit --topic wins,
+// otherwise the document's title. Shared with the CLI's planTopic so the slug
+// the enricher self-excludes on (priorart.go) cannot drift from the slug the
+// save path writes to the ledger — which is the whole point of it being one
+// function, so it MUST stay a thin wrapper over the save path's derivation.
+//
+// It delegates to Title rather than re-deriving: Title prefers the document's
+// H1 and only then falls back to the first H2. Walking Sections for the first
+// heading directly is the ox-1tjj.8 bug — Parse splits on "## " only, so an H1
+// lives in the Heading=="" preamble section and is invisible to that walk,
+// which saved "# Real Title" + "## 1. Context" under "1. Context".
 func PlanTopic(in Input) string {
-	for _, sec := range in.Sections {
-		if h := strings.TrimSpace(sec.Heading); h != "" {
-			return h
-		}
+	if t := strings.TrimSpace(in.Topic); t != "" {
+		return t
 	}
-	for _, line := range strings.Split(in.Raw, "\n") {
-		if line = strings.TrimSpace(strings.TrimLeft(line, "# ")); line != "" {
-			return line
-		}
-	}
-	return "untitled plan"
+	return Title(in)
 }
 
 // Slugify derives a kebab-case slug from a topic/title. Lowercases, strips
