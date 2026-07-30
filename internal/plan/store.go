@@ -649,6 +649,24 @@ var slugStopWords = map[string]bool{
 	"and": true, "for": true, "in": true, "on": true, "with": true,
 }
 
+// PlanTopic returns the plan's title — the first non-empty H2 heading, else the
+// first non-empty raw line. Shared with the CLI's planTopic so the slug the
+// enricher self-excludes on (priorart.go) cannot drift from the slug the save
+// path writes to the ledger.
+func PlanTopic(in Input) string {
+	for _, sec := range in.Sections {
+		if h := strings.TrimSpace(sec.Heading); h != "" {
+			return h
+		}
+	}
+	for _, line := range strings.Split(in.Raw, "\n") {
+		if line = strings.TrimSpace(strings.TrimLeft(line, "# ")); line != "" {
+			return line
+		}
+	}
+	return "untitled plan"
+}
+
 // Slugify derives a kebab-case slug from a topic/title. Lowercases, strips
 // punctuation, keeps the first slugWordCap meaningful words, then trims any
 // trailing stopword(s) — interior stopwords are left alone. An empty,

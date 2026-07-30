@@ -525,12 +525,7 @@ func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 // saved via --persist/--text, where no document exists yet (in.Raw is empty
 // and in.Sections carries only the synthetic pre-draft section — see
 // newTopicInput), so plan.Title would have nothing to derive from.
-func planTopic(in plan.Input) string {
-	if t := strings.TrimSpace(in.Topic); t != "" {
-		return t
-	}
-	return plan.Title(in)
-}
+func planTopic(in plan.Input) string { return plan.PlanTopic(in) }
 
 // planAuthors returns the capturing coworker's display name (privacy-safe, not
 // an email) when resolvable, else nil.

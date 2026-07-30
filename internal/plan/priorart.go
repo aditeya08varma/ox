@@ -2,6 +2,7 @@ package plan
 
 import (
 	"context"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -71,7 +72,7 @@ func (d *priorArtDetector) Detect(ctx context.Context, in Input, gitRoot string)
 		return nil, nil
 	}
 
-	hits := rankHits(results)
+	hits := excludeSelfPlan(rankHits(results), Slugify(PlanTopic(in)))
 	if len(hits) == 0 {
 		return nil, nil
 	}
@@ -195,6 +196,35 @@ type priorArtHit struct {
 	Author   string
 	Date     string // YYYY-MM-DD if derivable, else ""
 	Text     string // ledgersearch snippet around the matched term (relevance)
+}
+
+// datedSlugRe matches a ledger plan ref's date prefix, e.g.
+// "2026-07-30-the-mcp-doctrine-plan-context-engineering" — the shape ox plan
+// save writes. Stripping the prefix leaves the bare slug to compare.
+var datedSlugRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-`)
+
+// excludeSelfPlan drops the plan-under-enrichment's OWN ledger entry from prior
+// art. Once a plan is saved and re-enriched, its own save is a guaranteed
+// top-scoring self-match (observed: it was the sole surviving hit after the
+// density-scoring fix). Conservative: only drops entries whose ref is a plan
+// (under data/plans/, or the dated-slug shape) matching THIS plan's slug —
+// never a session that merely mentions the topic, and never a DIFFERENT plan
+// (other plans are legitimate prior art).
+func excludeSelfPlan(hits []priorArtHit, selfSlug string) []priorArtHit {
+	if selfSlug == "" {
+		return hits
+	}
+	out := hits[:0]
+	for _, h := range hits {
+		ref := h.SourceID
+		bare := datedSlugRe.ReplaceAllString(ref, "")
+		isPlanRef := strings.Contains(ref, "data/plans/") || datedSlugRe.MatchString(ref)
+		if isPlanRef && (bare == selfSlug || strings.Contains(ref, "data/plans/"+selfSlug)) {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
 }
 
 // rankHits filters raw ledger results below the threshold, sorts by score

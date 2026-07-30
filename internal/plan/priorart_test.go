@@ -400,3 +400,36 @@ func TestDetectorRegistered(t *testing.T) {
 		t.Fatal("prior-art detector not registered via init()")
 	}
 }
+
+// TestExcludeSelfPlan_DropsOwnLedgerEntry is the regression for the enrich
+// self-match: once a plan is saved and re-enriched, its own ledger entry is a
+// guaranteed top hit and must not surface as "prior art". A different plan's
+// slug and a topical session must both survive.
+//
+// Mutation that turns this red: skip the excludeSelfPlan call in Detect.
+func TestExcludeSelfPlan_DropsOwnLedgerEntry(t *testing.T) {
+	self := "the-mcp-doctrine-plan-context-engineering"
+	hits := []priorArtHit{
+		{Score: 0.9, DocType: "plan", SourceID: "2026-07-30-" + self},                            // own entry — drop
+		{Score: 0.8, DocType: "plan", SourceID: "2026-07-12-some-other-plan"},                    // different plan — keep
+		{Score: 0.85, DocType: "session-transcript", SourceID: "2026-07-05T20-12-galexy-OxduHB"}, // session — keep
+	}
+	got := excludeSelfPlan(hits, self)
+	if len(got) != 2 {
+		t.Fatalf("got %d hits, want 2 (own plan dropped, other plan + session kept)", len(got))
+	}
+	for _, h := range got {
+		if h.SourceID == "2026-07-30-"+self {
+			t.Error("own ledger entry survived — self-match not excluded")
+		}
+	}
+}
+
+// TestExcludeSelfPlan_EmptySlugIsNoOp — a plan with no derivable slug must not
+// accidentally drop everything.
+func TestExcludeSelfPlan_EmptySlugIsNoOp(t *testing.T) {
+	hits := []priorArtHit{{Score: 0.9, DocType: "plan", SourceID: "2026-07-30-anything"}}
+	if got := excludeSelfPlan(hits, ""); len(got) != 1 {
+		t.Fatalf("empty slug dropped hits: got %d, want 1", len(got))
+	}
+}
