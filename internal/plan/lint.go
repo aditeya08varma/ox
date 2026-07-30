@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"strings"
 )
 
 // Finding is one advisory lint result on a rendered plan HTML — attribution
@@ -33,14 +34,113 @@ func countDeterministic(res Result) int {
 	return n
 }
 
+// isEnriched reports whether a plan carried SageOx enrichment: any annotation
+// (deterministic OR judgment) or any context-bundle item. This is THE gate for
+// every "did SageOx earn credit here" rule — LintBranding's footer credit and
+// lintWordmark both use it, so the two can never drift apart on a judgment-only
+// plan (which the renderer does give a wordmark: render.go sets FooterCredit on
+// this same condition). countDeterministic is deliberately narrower and belongs
+// only to the anchored-OX-marker rule.
+func isEnriched(res Result) bool {
+	return len(res.Annotations) > 0 || len(res.Context) > 0
+}
+
 // LintRender runs the full advisory contract over a rendered plan HTML: SageOx
-// attribution (LintBranding) plus diagram validity (LintMermaid). It is the
-// single entrypoint `ox plan lint` / `ox plan save` call. Fail-open: an empty
-// page returns nil.
+// attribution (LintBranding, lintWordmark) plus diagram validity (LintMermaid,
+// lintMermaidFontRace). It is the single entrypoint `ox plan lint` /
+// `ox plan save` call. Fail-open: an empty page returns nil.
 func LintRender(htmlBytes []byte, res Result) []Finding {
 	out := LintBranding(htmlBytes, res)
 	out = append(out, LintMermaid(htmlBytes)...)
+	out = append(out, lintMermaidFontRace(htmlBytes)...)
+	out = append(out, lintWordmark(htmlBytes, res)...)
 	return out
+}
+
+// lintWordmark flags an enriched render missing the SageOx wordmark. The Go
+// renderer injects it bottom-left as part of the ox chrome; this advisory
+// exists for renders that bypass that path, where the mark is part of the spec
+// but the author is fallible. Advisory, and only when the plan actually carried
+// enrichment — the same conditionality as the footer credit.
+func lintWordmark(html []byte, res Result) []Finding {
+	if len(html) == 0 {
+		return nil // nothing rendered; nothing to lint
+	}
+	if !isEnriched(res) {
+		return nil
+	}
+	// Match the emitted marker, not prose. `data-ox-wordmark` is stamped on the
+	// lockup by both the Go template and the `ox plan viz wordmark` snippet;
+	// matching the SVG <title> text instead would let a page that merely
+	// mentions "SageOx Wordmark" satisfy the rule, and would fail a correctly
+	// placed mark whose SVG was minified or title-stripped.
+	if bytes.Contains(html, []byte("data-ox-wordmark")) {
+		return nil
+	}
+	return []Finding{{
+		Rule:    "branding.wordmark-missing",
+		Message: "enriched plan render carries no SageOx wordmark — add the bottom-left mark via `ox plan viz wordmark` (both theme variants, inline SVG)",
+	}}
+}
+
+// mermaidScriptRe extracts <script> bodies so the font-race check reasons about
+// executable code rather than visible prose. A plan that merely quotes
+// "document.fonts.ready" in a code sample must neither trigger nor suppress it.
+var mermaidScriptRe = regexp.MustCompile(`(?is)<script\b[^>]*>(.*?)</script>`)
+
+// mermaidDiagramRe is the diagram-presence signal: an actual Mermaid container,
+// not the word "mermaid" appearing anywhere in CSS, a URL, or body text.
+var mermaidDiagramRe = regexp.MustCompile(`class="[^"]*\bmermaid\b`)
+
+var (
+	// jsBlockCommentRe strips /* ... */ comments from script bodies.
+	jsBlockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	// jsLineCommentRe strips // ... comments. The negative lookbehind for ':' is
+	// spelled as a captured prefix because Go's regexp has no lookbehind — it
+	// keeps "https://…" inside a string literal from being treated as a comment.
+	jsLineCommentRe = regexp.MustCompile(`(^|[^:])//[^\n]*`)
+)
+
+// stripJSComments removes comments from script source so a rule can distinguish
+// code that DOES something from a comment that merely talks about it. Without
+// this, a scaffold comment reading "re-render on document.fonts.ready" silences
+// the very rule that comment describes.
+func stripJSComments(js string) string {
+	js = jsBlockCommentRe.ReplaceAllString(js, " ")
+	return jsLineCommentRe.ReplaceAllString(js, "$1")
+}
+
+// lintMermaidFontRace flags the webfont measurement race: a page that renders
+// Mermaid and loads a webfont but never re-renders on document.fonts.ready will
+// clip node labels mid-word once the wider font swaps in. Advisory — the fix is
+// one line and the symptom is invisible until someone screenshots the diagram.
+func lintMermaidFontRace(html []byte) []Finding {
+	if len(html) == 0 {
+		return nil
+	}
+	h := string(html)
+	// Needs all three: a real diagram, a webfont, and Mermaid actually invoked.
+	if !mermaidDiagramRe.MatchString(h) || !strings.Contains(h, "fonts.googleapis.com") {
+		return nil
+	}
+	var scripts strings.Builder
+	for _, m := range mermaidScriptRe.FindAllStringSubmatch(h, -1) {
+		scripts.WriteString(m[1])
+		scripts.WriteString("\n")
+	}
+	js := stripJSComments(scripts.String())
+	if !strings.Contains(js, "mermaid") {
+		return nil // fonts + a .mermaid block, but nothing renders it
+	}
+	// Require the font-ready path to actually be invoked, not just named: a
+	// comment or a prose snippet describing the fix must not silence the rule.
+	if strings.Contains(js, "fonts.ready") {
+		return nil
+	}
+	return []Finding{{
+		Rule:    "mermaid.font-race",
+		Message: "page renders Mermaid and loads a webfont but never re-renders on document.fonts.ready — node labels will clip mid-word when the font swaps in; add document.fonts.ready.then(()=>renderMermaid())",
+	}}
 }
 
 var (
@@ -127,9 +227,10 @@ func LintBranding(html []byte, res Result) []BrandingFinding {
 
 	var findings []BrandingFinding
 
-	// "carried enrichment" mirrors the skill's own gate: any deterministic
-	// badges OR context-bundle items present.
-	enriched := len(res.Annotations) > 0 || len(res.Context) > 0
+	// "carried enrichment" mirrors the skill's own gate: any annotation OR
+	// context-bundle item present. Shared with lintWordmark via isEnriched so
+	// the credit and the mark can never disagree about what "enriched" means.
+	enriched := isEnriched(res)
 	hasCredit := footerCreditRe.Match(html)
 
 	switch {

@@ -113,6 +113,23 @@ quick, low-stakes plans only**. The markdown renderer auto-renders:
 
 Good for a small plan; it approximates. A material plan gets an authored page.
 
+## Two Mermaid renderer traps
+
+Both were hit in real renders. They are encoded here so they don't have to be
+rediscovered, and the first one is also caught by the `mermaid.font-race` lint.
+
+- **The webfont race.** Mermaid measures node boxes using whatever font is
+  loaded at render time. When a webfont swaps in later, its wider glyphs
+  overflow the boxes that were sized for the fallback, and every label clips
+  mid-word. The symptom is invisible until someone screenshots the diagram. In
+  an authored page, re-render once the font settles:
+  `document.fonts.ready.then(() => renderMermaid())`. The ox scaffold already
+  does this; a page that hand-rolls its own Mermaid init must do it too.
+- **Parallel groups sprawl horizontally.** Disconnected subgraphs that share a
+  sink lay out side by side and overflow the column. Chain them with invisible
+  links (`A ~~~ B`) to force a vertical stack, and move byte counts and other
+  detail out of node labels into the caption under the diagram.
+
 ## Trust posture
 
 The plan is the developer's **own local content rendered locally for that

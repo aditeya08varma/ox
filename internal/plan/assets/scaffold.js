@@ -52,7 +52,18 @@
     var obs=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){activate(e.target.id,false);}});},{rootMargin:'-12% 0px -75% 0px'});
     document.querySelectorAll('section[id]').forEach(function(s){obs.observe(s);});
   }
-  function start(){renderMer();}
+  // Mermaid measures label text to size nodes. The page loads webfonts async
+  // (display=swap), so a first render that happens before the font arrives
+  // measures the fallback and clips labels mid-word once the wider face swaps
+  // in. Re-render on document.fonts.ready to measure the real font. Guarded:
+  // file:// with no network never resolves fonts, and the first render already
+  // produced a readable diagram, so this is strictly additive.
+  function start(){
+    renderMer();
+    if(document.fonts&&document.fonts.ready&&document.fonts.ready.then){
+      document.fonts.ready.then(function(){renderMer();}).catch(function(){});
+    }
+  }
   if(document.readyState!=='loading')start();else document.addEventListener('DOMContentLoaded',start);
 })();
 // auto-inspector: comparison tables (table.inspect) — click a row, its fields
