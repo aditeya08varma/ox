@@ -23,7 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`ox doctor` now flags a recording whose session link disagrees with the recording itself** — the one state that silently breaks links already written into your commits and pull requests. Reported, never repaired automatically: which link is correct depends on what has already been shared, so doctor names the conflict and leaves the call to you.
 
+- **Four new plan visualizations, so a rendered plan reads like it was designed.** A pull-quote for the one sentence the plan turns on (the natural home for a decider's verbatim words from a team discussion), an honest progress pair that shows shipped beside not-built-yet instead of claiming delivery in prose, a risk register that puts every risk in one scannable row and hides the mechanism behind a click, and the SageOx wordmark lockup. All keyboard-operable and screen-reader-labeled.
+
 ### Fixed
+
+- **The prior art SageOx cites on your plan is now actually about your plan.** Relevance was biased by length: a long transcript that happened to mention each of your search terms somewhere could out-score a short summary genuinely about them, so unrelated sessions surfaced as 95%-confidence prior art and the enrichment looked broken. Scoring now measures how much a document is *about* your terms rather than how many times it happens to contain them — while still surfacing the large, densely on-topic plans that a naive density fix would have made permanently unfindable.
+
+- **Diagram labels no longer clip mid-word in rendered plans.** Diagrams were laid out before the page's webfont finished loading, so every node was sized for the wrong font and its label overflowed once the real one swapped in — a defect invisible until someone screenshotted the page. Plans now re-draw their diagrams when the font settles, and `ox plan lint` flags any render that can still hit the race.
 
 - **Every recording keeps one permanent session link, even when its upload has to be retried.** A retried or recovered upload could assign a second link to a session that already had one, so the references written into commit trailers, pull requests, and plans stopped resolving — and two copies of the same session could disagree about which one it was.
 
