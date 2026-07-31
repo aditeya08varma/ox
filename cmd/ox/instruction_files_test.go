@@ -593,6 +593,28 @@ func TestInstructionFileRegistry_AllSpecsHaveRequiredFields(t *testing.T) {
 	}
 }
 
+// TestInstructionFileRegistry_GooseSharesAgentsMd pins where the Goose marker
+// goes. Goose loads AGENTS.md BEFORE .goosehints, so marking AGENTS.md reaches
+// it first and a second .goosehints copy would only duplicate the instruction.
+// Goose must also carry no DetectFn — an AGENTS.md-sharing agent that gated on
+// detection would suppress the marker in repos where no Goose-specific file
+// exists, which is every repo, since Goose creates none.
+func TestInstructionFileRegistry_GooseSharesAgentsMd(t *testing.T) {
+	var goose *InstructionFileSpec
+	for i := range InstructionFileRegistry {
+		if InstructionFileRegistry[i].AgentType == agentGoose {
+			goose = &InstructionFileRegistry[i]
+			break
+		}
+	}
+
+	require.NotNil(t, goose, "Goose must be registered — it reads AGENTS.md natively")
+	assert.Equal(t, []string{"AGENTS.md"}, goose.ProjectFiles)
+	assert.Equal(t, markerFormatMarkdown, goose.MarkerFormat)
+	assert.Nil(t, goose.DetectFn, "Goose shares AGENTS.md; gating on detection would suppress the marker")
+	assert.False(t, goose.Creatable, "AGENTS.md is a primary file; Creatable would be redundant")
+}
+
 func TestInstructionFileRegistry_PrimaryFilesAreMarkdown(t *testing.T) {
 	// AGENTS.md and CLAUDE.md must use markdown format -- they support HTML comments
 	for _, spec := range InstructionFileRegistry {

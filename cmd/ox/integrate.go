@@ -76,8 +76,9 @@ var integrateCmd = &cobra.Command{
 Supported agents:
   Claude Code (default)    JSON hooks in ~/.claude/settings.json
 
-Other agents (Codex, Gemini) can be installed with their respective flags.
-Run 'ox init' to set up the project with appropriate guidance files.
+Other agents (Codex, Gemini, Amp, OpenCode, Pi) can be installed with their
+respective flags. Run 'ox init' to set up the project with appropriate
+guidance files.
 
 The integration ensures that 'ox agent prime' runs when an AI coding session starts.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -98,7 +99,8 @@ Other agents can be installed with their respective flags:
   --gemini    Gemini CLI hooks
   --codex     Codex CLI hooks
   --amp       Amp CLI integration (AGENTS.md marker)
-  --opencode  OpenCode plugin`,
+  --opencode  OpenCode plugin
+  --pi        Pi coding agent integration (AGENTS.md marker)`,
 	RunE: runIntegrateInstall,
 }
 

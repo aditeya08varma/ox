@@ -22,6 +22,7 @@ const (
 	agentOpenCode   = "opencode"
 	agentAmp        = "amp"
 	agentAider      = "aider"
+	agentGoose      = "goose"
 )
 
 // Marker format constants.
@@ -162,6 +163,16 @@ var InstructionFileRegistry = []InstructionFileSpec{
 	{
 		AgentType:    agentAider,
 		DisplayName:  "Aider",
+		ProjectFiles: []string{"AGENTS.md"},
+		MarkerFormat: markerFormatMarkdown,
+		DetectFn:     nil, // shares AGENTS.md
+	},
+	{
+		AgentType:   agentGoose,
+		DisplayName: "Goose",
+		// Goose loads AGENTS.md before .goosehints, hierarchically from the
+		// working directory up to the repo root. Marking AGENTS.md is enough;
+		// .goosehints would be a second copy of the same instruction.
 		ProjectFiles: []string{"AGENTS.md"},
 		MarkerFormat: markerFormatMarkdown,
 		DetectFn:     nil, // shares AGENTS.md

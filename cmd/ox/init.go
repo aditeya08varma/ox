@@ -1339,11 +1339,14 @@ ox init
 
 SageOx integrates with the AI coworkers developers already use:
 
-- **Claude Code** — Automatic via AGENTS.md hook
-- **Cursor** — Via .cursorrules integration
-- **Windsurf** — Via .windsurfrules integration
-- **OpenCode** — Direct ox CLI integration
+- **Claude Code, Codex, Gemini CLI, Droid** — Automatic via lifecycle hooks
+- **OpenCode, Amp** — Automatic via a plugin
+- **Pi, Aider, Goose** — Via the ` + "`ox agent prime`" + ` marker in their instruction file
+- **Cursor, Windsurf, Cline, Copilot, Kiro** — Via the marker in ` + "`.cursorrules`" + `, ` + "`.windsurfrules`" + `, and equivalents
 - **Any AI coworker** — Manual ` + "`ox agent prime`" + ` injection
+
+Sessions are recorded to the Ledger for every agent above that has an ox adapter.
+Run ` + "`ox status`" + ` to see which ones are wired up in this repo.
 
 ## Key Files
 

@@ -45,17 +45,42 @@ inherits it too. Context compounds instead of evaporating.
 `ox` is agent-agnostic. The same recorded context is primed into, and queryable
 from, whichever agent your team uses.
 
-| Agent | Prime context | Record sessions | Murmur (coordinate) | Query past work |
-|---|:---:|:---:|:---:|:---:|
-| **Claude Code** | ✅ | ✅ | ✅ | ✅ |
-| **Codex CLI** | ✅ | ✅ | ✅ | ✅ |
-| **Cursor** | ✅ | ✅ | ➖ | ✅ |
-| **Windsurf / Cline / Copilot / Aider** | ✅ | ➖ | ➖ | ✅ |
+| Agent | Prime context | Record sessions | What fires it |
+|---|:---:|:---:|---|
+| **Claude Code** | ✅ | ✅ | hooks — session, prompt, tool, and compaction |
+| **Codex CLI** | ✅ | ✅ | hooks — session, prompt, and tool |
+| **Gemini CLI** | ✅ | ✅ | hooks — tool and stop |
+| **Droid** | ✅ | ✅ | hooks — tool and stop |
+| **OpenCode** | ✅ | ✅ | plugin — session start |
+| **Amp** | ✅ | ✅ | plugin records; `AGENTS.md` primes |
+| **Pi** | ✅ | ✅ | `AGENTS.md` |
+| **Aider** | ✅ | ✅ | `CONVENTIONS.md` |
+| **Goose** | ✅ | ➖ | `AGENTS.md` |
+| Cursor · Windsurf · Cline · Copilot · Kiro | ✅ | ➖ | instruction file |
 
-✅ supported · ➖ planned. Claude Code is the primary, most-tested target.
+✅ shipped · ➖ planned. Claude Code is the primary, most-tested target; see
+[agent compatibility](docs/guides/agent-compatibility.md) for the per-agent detail.
 
-<sub>Agent names are trademarks of their respective owners; `ox` is compatible
-with, not affiliated with, them.</sub>
+`ox query`, `ox murmur`, and `ox status` are plain CLI commands. They work from
+any agent — including ones with no adapter — as long as `ox` is on `PATH`.
+
+### Orchestrators
+
+`ox` also detects the harness running your agents, and adapts what it tells them:
+
+- [**Block Buzz**](https://github.com/block/buzz) — spawns agents through its
+  `buzz-acp` ACP harness
+- [**Conductor**](https://conductor.build) · [**Gas City**](https://github.com/gastownhall/gascity)
+  · [**OpenClaw**](https://github.com/openclaw/openclaw)
+
+Detection is config-independent — `ox` walks the process ancestry rather than
+trusting an environment variable, so it works even when the harness sets nothing.
+Under Buzz, `ox agent prime` emits an extra directive: `buzz-acp` does not fire
+the agent lifecycle hooks that push whispers into a turn, so the agent is told to
+pull teammates' signals by hand instead of silently missing them.
+
+<sub>Agent and orchestrator names are trademarks of their respective owners; `ox`
+is compatible with, not affiliated with, them.</sub>
 
 ## Install
 
