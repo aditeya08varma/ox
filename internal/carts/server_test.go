@@ -187,6 +187,41 @@ func TestWaitForOwnServerOrWinner(t *testing.T) {
 	})
 }
 
+// A process that loses dolt's write-lock race must tear down only its own child.
+// The state files at that moment belong to the WINNER; deleting them orphans the
+// healthy server and sends every later invocation into another doomed startup.
+func TestKillChildLeavesPublishedStateIntact(t *testing.T) {
+	dir := t.TempDir()
+	winnerPID, winnerPort := 4242, 54321
+	writeState(t, dir, winnerPID, winnerPort)
+
+	// A real child to stand in for the dolt server we started and lost with.
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper process: %v", err)
+	}
+	pid := cmd.Process.Pid
+
+	killChild(cmd)
+
+	if processAlive(pid) {
+		t.Errorf("our child pid %d should have been reaped", pid)
+	}
+	assertFile(t, filepath.Join(dir, pidFileName), strconv.Itoa(winnerPID))
+	assertFile(t, filepath.Join(dir, portFileName), strconv.Itoa(winnerPort))
+}
+
+func assertFile(t *testing.T, path, want string) {
+	t.Helper()
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s (winner metadata must survive): %v", filepath.Base(path), err)
+	}
+	if string(got) != want {
+		t.Errorf("%s = %q, want %q", filepath.Base(path), got, want)
+	}
+}
+
 func writeState(t *testing.T, dir string, pid, port int) {
 	t.Helper()
 	mustWrite(t, filepath.Join(dir, pidFileName), strconv.Itoa(pid))

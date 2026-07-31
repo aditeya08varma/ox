@@ -104,17 +104,6 @@ func startServer(cartsDir string) (int, error) {
 	}
 	logFile.Close()
 
-	// reap tears down the process we spawned and any half-written state. It stays
-	// armed from here until BOTH state files are on disk: a ready server with
-	// incomplete metadata is worse than no server, because nothing can find it to
-	// reuse and every later call starts another contender for dolt's lock.
-	reap := func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-		_ = os.Remove(filepath.Join(cartsDir, pidFileName))
-		_ = os.Remove(filepath.Join(cartsDir, portFileName))
-	}
-
 	// Wait for readiness BEFORE recording state. Writing the files first let a
 	// starter that was about to lose dolt's write-lock race overwrite the
 	// metadata of the server that won it, permanently orphaning the healthy
@@ -127,25 +116,47 @@ func startServer(cartsDir string) (int, error) {
 	// healthy server, and hands back the winner's port instead of failing.
 	winner, err := waitForOwnServerOrWinner(cartsDir, port, 30*time.Second)
 	if err != nil {
-		reap()
+		// Nothing published yet, so there is no state of ours to unwind — only the
+		// child. Deleting state files here would delete someone else's.
+		killChild(cmd)
 		return 0, fmt.Errorf("server failed to start: %w", err)
 	}
 	if winner != 0 {
 		// A peer won the lock and published a ready server; ours never came up.
-		reap()
+		// Kill only our child — the state files on disk are the WINNER's, and
+		// removing them would orphan the healthy server and send every later
+		// invocation into another doomed startup.
+		killChild(cmd)
 		return winner, nil
 	}
 
-	if err := os.WriteFile(filepath.Join(cartsDir, pidFileName), []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
-		reap()
+	// From here the state files are ours, so a failed write must unwind both the
+	// child and whatever we already published: a ready server with incomplete
+	// metadata is worse than no server, because nothing can find it to reuse.
+	pidPath := filepath.Join(cartsDir, pidFileName)
+	portPath := filepath.Join(cartsDir, portFileName)
+
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+		killChild(cmd)
+		_ = os.Remove(pidPath) // may be partially written
 		return 0, fmt.Errorf("write %s: %w", pidFileName, err)
 	}
-	if err := os.WriteFile(filepath.Join(cartsDir, portFileName), []byte(strconv.Itoa(port)), 0o644); err != nil {
-		reap()
+	if err := os.WriteFile(portPath, []byte(strconv.Itoa(port)), 0o644); err != nil {
+		killChild(cmd)
+		_ = os.Remove(portPath)
+		_ = os.Remove(pidPath) // written by us moments ago; would name a dead process
 		return 0, fmt.Errorf("write %s: %w", portFileName, err)
 	}
 
 	return port, nil
+}
+
+// killChild terminates and reaps a dolt sql-server we spawned. It deliberately
+// touches no state files: at every call site the published metadata either
+// belongs to a peer or does not exist yet.
+func killChild(cmd *exec.Cmd) {
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
 }
 
 // waitForOwnServerOrWinner polls until either the server we started on ourPort
