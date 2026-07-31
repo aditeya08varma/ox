@@ -29,6 +29,18 @@ func checkSessionHealth(opts doctorOptions) []checkResult {
 		results = append(results, uploadRetryResult)
 	}
 
+	// transcripts stranded in the content store with no local copy (GH #710).
+	// Quiet on the overwhelmingly common healthy case — dehydration is the
+	// normal steady state, so only surface sessions that actually need
+	// their transcript and cannot get it.
+	// Only surface a real finding: a skipped result (no ledger, no sessions
+	// dir) has passed=false too, and including it would put a permanent
+	// "skipped" line in doctor output for every user without a ledger.
+	dehydratedResult := checkSessionDehydrated(opts.shouldFix(CheckSlugSessionDehydrated))
+	if !dehydratedResult.skipped && (!dehydratedResult.passed || dehydratedResult.warning) {
+		results = append(results, dehydratedResult)
+	}
+
 	// create session checks from internal/doctor package
 	checks := []doctor.Check{
 		doctor.NewSessionModeCheck(gitRoot),   // show effective mode and source
