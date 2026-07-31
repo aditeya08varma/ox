@@ -172,6 +172,7 @@ const (
 	CheckSlugSessionUncommitted = "session-uncommitted"
 	CheckSlugSessionOrphaned    = "session-orphaned"
 	CheckSlugSessionManifest    = "session-manifest"
+	CheckSlugSessionDehydrated  = "session-dehydrated"
 
 	// Authentication checks (credential health)
 	CheckSlugGitHubAuth          = "github-auth"
