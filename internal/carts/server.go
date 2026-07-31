@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -43,18 +42,12 @@ func runningServerPort(cartsDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// Check if process is alive
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return 0, err
-	}
-	// Signal 0 checks if the process exists. It must be syscall.Signal(0), not a
-	// nil os.Signal: os.Process.Signal type-asserts its argument to syscall.Signal,
-	// which nil fails, so a nil signal ALWAYS errored. That made reuse dead code —
-	// every invocation started another sql-server and all but the first died on
-	// dolt's exclusive write lock.
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		return 0, fmt.Errorf("server process %d not running: %w", pid, err)
+	// Liveness is platform-specific (see proc_unix.go / proc_windows.go). It was
+	// written here as proc.Signal(os.Signal(nil)), which always errors, so reuse
+	// was dead code — every invocation started another sql-server and all but the
+	// first died on dolt's exclusive write lock.
+	if !processAlive(pid) {
+		return 0, fmt.Errorf("server process %d not running", pid)
 	}
 
 	portData, err := os.ReadFile(filepath.Join(cartsDir, portFileName))
@@ -111,28 +104,72 @@ func startServer(cartsDir string) (int, error) {
 	}
 	logFile.Close()
 
+	// reap tears down the process we spawned and any half-written state. It stays
+	// armed from here until BOTH state files are on disk: a ready server with
+	// incomplete metadata is worse than no server, because nothing can find it to
+	// reuse and every later call starts another contender for dolt's lock.
+	reap := func() {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		_ = os.Remove(filepath.Join(cartsDir, pidFileName))
+		_ = os.Remove(filepath.Join(cartsDir, portFileName))
+	}
+
 	// Wait for readiness BEFORE recording state. Writing the files first let a
 	// starter that was about to lose dolt's write-lock race overwrite the
 	// metadata of the server that won it, permanently orphaning the healthy
 	// server: every later invocation read the loser's dead PID and started yet
 	// another doomed one.
-	if err := waitForServer("127.0.0.1", port, 30*time.Second); err != nil {
-		// Reap the process we spawned; otherwise a failed start leaves a
-		// process holding the lock that nothing has a PID file for.
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
+	//
+	// Losing that race is expected, not exceptional: dolt permits exactly one
+	// writer, so when two processes start concurrently one of them cannot come
+	// up. waitForOwnServerOrWinner therefore also watches for a peer recording a
+	// healthy server, and hands back the winner's port instead of failing.
+	winner, err := waitForOwnServerOrWinner(cartsDir, port, 30*time.Second)
+	if err != nil {
+		reap()
 		return 0, fmt.Errorf("server failed to start: %w", err)
 	}
+	if winner != 0 {
+		// A peer won the lock and published a ready server; ours never came up.
+		reap()
+		return winner, nil
+	}
 
-	// Write state files
 	if err := os.WriteFile(filepath.Join(cartsDir, pidFileName), []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
-		return 0, err
+		reap()
+		return 0, fmt.Errorf("write %s: %w", pidFileName, err)
 	}
 	if err := os.WriteFile(filepath.Join(cartsDir, portFileName), []byte(strconv.Itoa(port)), 0o644); err != nil {
-		return 0, err
+		reap()
+		return 0, fmt.Errorf("write %s: %w", portFileName, err)
 	}
 
 	return port, nil
+}
+
+// waitForOwnServerOrWinner polls until either the server we started on ourPort
+// accepts connections (returns 0, nil) or a concurrently-started peer publishes
+// a ready server (returns that peer's port, nil). It returns an error only if
+// neither happens before the timeout.
+//
+// Polling for the peer matters for latency as much as correctness: without it a
+// process that lost dolt's write-lock race blocks for the full timeout before
+// failing, even though a healthy server it could have used appeared seconds in.
+func waitForOwnServerOrWinner(cartsDir string, ourPort int, timeout time.Duration) (int, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if err := probeServer("127.0.0.1", ourPort); err == nil {
+			return 0, nil
+		}
+		// Ignore the error: a missing or stale peer record simply means no winner
+		// yet, which is the common case on the first iteration.
+		if peer, err := runningServerPort(cartsDir); err == nil && peer != ourPort {
+			return peer, nil
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return 0, fmt.Errorf("timeout waiting for dolt server on port %d", ourPort)
 }
 
 // ensureDoltInit ensures the dolt directory is initialized.
@@ -166,18 +203,29 @@ func allocateEphemeralPort(host string) (int, error) {
 	return port, nil
 }
 
+// probeServer is the liveness probe used by the reuse and readiness paths.
+// Indirected through a variable so tests can exercise the concurrency logic
+// without standing up a real dolt sql-server to satisfy a MySQL handshake.
+var probeServer = pingServer
+
+// pingServer reports whether a dolt sql-server accepts an authenticated
+// connection on host:port right now. Connects as root — dolt provisions no other
+// account, and the git author name is not a SQL user.
+func pingServer(host string, port int) error {
+	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(%s:%d)/", host, port))
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return db.Ping()
+}
+
 // waitForServer polls until the server accepts connections.
 func waitForServer(host string, port int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	dsn := fmt.Sprintf("root@tcp(%s:%d)/", host, port)
 	for time.Now().Before(deadline) {
-		db, err := sql.Open("mysql", dsn)
-		if err == nil {
-			if err := db.Ping(); err == nil {
-				db.Close()
-				return nil
-			}
-			db.Close()
+		if err := probeServer(host, port); err == nil {
+			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
