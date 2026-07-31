@@ -103,6 +103,10 @@ type Manager struct {
 	// ledger path for handler detection
 	ledgerPath string
 
+	// cross-process claim on this ledger's anti-entropy work. nil means not held;
+	// guarded by mu.
+	ledgerLease *ledgerLease
+
 	// project root (the actual working repo) for writing project-local agent
 	// tasks. Empty disables the task producer.
 	projectRoot string
@@ -198,6 +202,7 @@ func (m *Manager) Enqueue(item *WorkItem) bool {
 func (m *Manager) Start(ctx context.Context) {
 	doctorTicker := time.NewTicker(doctorInterval)
 	defer doctorTicker.Stop()
+	defer m.releaseLedgerAntiEntropy()
 
 	m.logger.Info("agent work manager started")
 
@@ -284,6 +289,17 @@ func (m *Manager) detectAndEnqueue(cfg *config.AgentWorkerConfig) {
 	m.runSessionCleanup()
 
 	if cfg == nil || !isEffectivelyEnabled(cfg) {
+		// Hand the lease back. A daemon that acquired it in an earlier cycle and
+		// then had its worker disabled would otherwise hold it until process exit,
+		// blocking every other daemon on this ledger from ever running detection.
+		m.releaseLedgerAntiEntropy()
+		return
+	}
+
+	// Only one process scans a given ledger. Without this, two daemons for the
+	// same repo each walked every session directory every 5 minutes and each
+	// enforced its own invocation ceiling, doubling both.
+	if !m.ownsLedgerAntiEntropy() {
 		return
 	}
 
@@ -329,6 +345,72 @@ func (m *Manager) detectAndEnqueue(cfg *config.AgentWorkerConfig) {
 				m.logger.Info("detected agent work", "type", item.Type, "dedup_key", item.DedupKey)
 			}
 		}
+
+		// one line per cycle, not one per rejected item
+		if rejected := m.queue.TakeRejected(); rejected > 0 {
+			m.logger.Info("detect backlog exceeds queue capacity",
+				"type", h.Type(),
+				"detected", len(items),
+				"rejected", rejected,
+				"max_depth", maxQueueDepth,
+			)
+		}
+	}
+}
+
+// ownsLedgerAntiEntropy reports whether this process holds the ledger's
+// anti-entropy lease, acquiring it if free. Retried every cycle rather than once
+// at startup so a daemon that loses the race still takes over when the owner
+// exits — the kernel drops the flock on process death.
+//
+// Fails open: if the lock cannot be evaluated (no ledger path, filesystem
+// error), anti-entropy runs. A ledger that stops self-healing is a worse outcome
+// than one scanned twice.
+func (m *Manager) ownsLedgerAntiEntropy() bool {
+	if m.ledgerPath == "" {
+		return true
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.ledgerLease != nil {
+		return true
+	}
+
+	lease, err := acquireLedgerLease(m.ledgerPath)
+	if err != nil {
+		m.logger.Warn("could not evaluate ledger anti-entropy lease, proceeding", "ledger", m.ledgerPath, "error", err)
+		return true
+	}
+	if lease == nil {
+		m.logger.Debug("another daemon owns anti-entropy for this ledger, skipping detection", "ledger", m.ledgerPath)
+		return false
+	}
+
+	m.ledgerLease = lease
+	m.logger.Info("acquired ledger anti-entropy lease", "ledger", m.ledgerPath)
+	return true
+}
+
+// releaseLedgerAntiEntropy drops the lease so another daemon can take over
+// without waiting for this process to die. Safe to call when no lease is held.
+//
+// The reference is cleared unconditionally, including when Release reports an
+// error: the fd is closed either way, so the kernel has already dropped the
+// flock. Retaining it for a retry would only let this Manager believe it still
+// owns a lease another process can now hold.
+func (m *Manager) releaseLedgerAntiEntropy() {
+	m.mu.Lock()
+	lease := m.ledgerLease
+	m.ledgerLease = nil
+	m.mu.Unlock()
+
+	if lease == nil {
+		return
+	}
+	if err := lease.Release(); err != nil {
+		m.logger.Warn("failed to release ledger anti-entropy lease", "error", err)
 	}
 }
 
