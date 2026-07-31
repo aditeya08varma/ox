@@ -578,3 +578,53 @@ func TestExcludeSelfPlan_UnreadableMetaKeepsTheHit(t *testing.T) {
 		t.Fatalf("got %d hits, want 2 — unprovable candidates must be kept", len(got))
 	}
 }
+
+// TestExcludeSelfPlan_StoredRelativePathIsNotReresolved is the regression for
+// canonicalizing a PERSISTED path against the enrichment working directory. A
+// stored relative path was spelled relative to whatever directory ran
+// `ox plan save`, and that directory is not recorded. Resolving it against the
+// current one names a different file entirely.
+//
+// Failure prevented: calling filepath.Abs on meta.SourcePlanPath. That silently
+// changes identity with the caller's cwd — worse than not matching, because it
+// could resolve onto an unrelated plan and exclude the wrong entry. Saves now
+// persist an absolute path; a legacy relative one is treated as unprovable, so
+// the hit is kept.
+func TestExcludeSelfPlan_StoredRelativePathIsNotReresolved(t *testing.T) {
+	ledger := t.TempDir()
+	legacy := writeLedgerPlan(t, ledger, "2026-07-30-legacy-relative", "docs/plan.md")
+	hits := []priorArtHit{{Score: 0.9, DocType: "plan", SourceID: legacy}}
+
+	// enriching from a directory where "docs/plan.md" happens to resolve to the
+	// live input path must NOT be mistaken for the same plan.
+	workdir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workdir, "docs"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	live := filepath.Join(workdir, "docs", "plan.md")
+
+	if got := excludeSelfPlan(hits, ledger, Input{Path: live}); len(got) != 1 {
+		t.Fatalf("a stored relative path was re-resolved against the current dir and matched: got %d hits, want 1", len(got))
+	}
+}
+
+// TestStoredVsLivePlanPath pins the asymmetry directly: the live input path is
+// relative to the running process and so resolves; a stored path must already
+// be absolute to count.
+func TestStoredVsLivePlanPath(t *testing.T) {
+	if got := storedPlanPath("docs/plan.md"); got != "" {
+		t.Errorf("storedPlanPath(relative) = %q, want \"\" (unprovable)", got)
+	}
+	if got := storedPlanPath("/abs/docs/plan.md"); got != "/abs/docs/plan.md" {
+		t.Errorf("storedPlanPath(absolute) = %q, want it kept", got)
+	}
+	if got := storedPlanPath(""); got != "" {
+		t.Errorf("storedPlanPath(empty) = %q, want \"\"", got)
+	}
+	if got := livePlanPath("docs/plan.md"); !filepath.IsAbs(got) {
+		t.Errorf("livePlanPath(relative) = %q, want it resolved against cwd", got)
+	}
+	if got := livePlanPath(""); got != "" {
+		t.Errorf("livePlanPath(empty) = %q, want \"\"", got)
+	}
+}

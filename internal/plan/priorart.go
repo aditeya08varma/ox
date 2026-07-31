@@ -210,15 +210,32 @@ func isPlanRef(ref string) bool {
 	return strings.Contains(ref, "data/plans/") || datedSlugRe.MatchString(ref)
 }
 
-// selfPlanIdentity is the source document a plan was saved from, canonicalized
-// for comparison. Empty means "no identity available" — callers must then leave
-// prior art alone rather than guess.
-func selfPlanIdentity(path string) string {
+// livePlanPath canonicalizes the path of the plan currently being enriched.
+// This one IS relative to the running process's working directory, so resolving
+// it with Abs is correct. Empty means "no identity available".
+func livePlanPath(path string) string {
 	if strings.TrimSpace(path) == "" {
 		return ""
 	}
 	if abs, err := filepath.Abs(path); err == nil {
 		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
+}
+
+// storedPlanPath canonicalizes a source path read back from a saved plan's
+// meta.json. Unlike livePlanPath it must NOT call Abs: a stored relative path
+// was spelled relative to the working directory of whoever ran `ox plan save`,
+// which we do not record. Re-resolving it against the CURRENT directory invents
+// a different file — so enriching the same plan from another directory would
+// silently stop recognizing its own ledger entry.
+//
+// Saves write an absolute path (see savePlanArtifacts), so this is about legacy
+// entries written before that. A relative one is unprovable, not wrong: return
+// "" so the caller keeps the hit rather than excluding the wrong plan.
+func storedPlanPath(path string) string {
+	if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+		return ""
 	}
 	return filepath.Clean(path)
 }
@@ -245,7 +262,7 @@ func selfPlanIdentity(path string) string {
 // source path is KEPT, and when the plan being enriched has no path of its own
 // (stdin, or a --topic consult) nothing is excluded at all.
 func excludeSelfPlan(hits []priorArtHit, ledgerPath string, in Input) []priorArtHit {
-	selfPath := selfPlanIdentity(in.Path)
+	selfPath := livePlanPath(in.Path)
 	if selfPath == "" || ledgerPath == "" {
 		return hits
 	}
@@ -277,7 +294,7 @@ func planSourcePath(plansDir, sourceID string) string {
 	if err != nil {
 		return ""
 	}
-	return selfPlanIdentity(meta.SourcePlanPath)
+	return storedPlanPath(meta.SourcePlanPath)
 }
 
 // rankHits filters raw ledger results below the threshold, sorts by score
