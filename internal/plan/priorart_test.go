@@ -2,6 +2,9 @@ package plan
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/sageox/ox/internal/ledgersearch"
@@ -401,39 +404,6 @@ func TestDetectorRegistered(t *testing.T) {
 	}
 }
 
-// TestExcludeSelfPlan_DropsOwnLedgerEntry is the regression for the enrich
-// self-match: once a plan is saved and re-enriched, its own ledger entry is a
-// guaranteed top hit and must not surface as "prior art". A different plan's
-// slug and a topical session must both survive.
-//
-// Mutation that turns this red: skip the excludeSelfPlan call in Detect.
-func TestExcludeSelfPlan_DropsOwnLedgerEntry(t *testing.T) {
-	self := "the-mcp-doctrine-plan-context-engineering"
-	hits := []priorArtHit{
-		{Score: 0.9, DocType: "plan", SourceID: "2026-07-30-" + self},                            // own entry — drop
-		{Score: 0.8, DocType: "plan", SourceID: "2026-07-12-some-other-plan"},                    // different plan — keep
-		{Score: 0.85, DocType: "session-transcript", SourceID: "2026-07-05T20-12-galexy-OxduHB"}, // session — keep
-	}
-	got := excludeSelfPlan(hits, self)
-	if len(got) != 2 {
-		t.Fatalf("got %d hits, want 2 (own plan dropped, other plan + session kept)", len(got))
-	}
-	for _, h := range got {
-		if h.SourceID == "2026-07-30-"+self {
-			t.Error("own ledger entry survived — self-match not excluded")
-		}
-	}
-}
-
-// TestExcludeSelfPlan_EmptySlugIsNoOp — a plan with no derivable slug must not
-// accidentally drop everything.
-func TestExcludeSelfPlan_EmptySlugIsNoOp(t *testing.T) {
-	hits := []priorArtHit{{Score: 0.9, DocType: "plan", SourceID: "2026-07-30-anything"}}
-	if got := excludeSelfPlan(hits, ""); len(got) != 1 {
-		t.Fatalf("empty slug dropped hits: got %d, want 1", len(got))
-	}
-}
-
 // TestPlanTopic_MatchesSavePathDerivation pins the invariant that makes
 // self-exclusion work at all: the slug the enricher excludes on must be the
 // slug the save path writes. PlanTopic is shared with the CLI's planTopic for
@@ -481,23 +451,130 @@ func TestPlanTopic_MatchesSavePathDerivation(t *testing.T) {
 	}
 }
 
-// TestExcludeSelfPlan_UsesTheTitleDerivedSlug closes the loop end-to-end: a
-// plan whose H1 is its real title must exclude the ledger entry saved under
-// that H1's slug. Under the Sections-walk derivation this test fails, because
-// the enricher would compute the H2's slug and leave the true self-match in.
-func TestExcludeSelfPlan_UsesTheTitleDerivedSlug(t *testing.T) {
-	in := Parse("# Conversation model update\n\n## 1. Context — Why Now\n\nprose.\n")
-	selfSlug := Slugify(PlanTopic(in))
+// writeLedgerPlan materializes a saved plan dir with the meta.json fields
+// self-exclusion reads. Returns the dated dir name (the ledgersearch SourceID).
+func writeLedgerPlan(t *testing.T, ledger, dirName, sourcePlanPath string) string {
+	t.Helper()
+	dir := filepath.Join(ledger, "data", "plans", dirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	body, err := json.Marshal(Meta{Slug: slugFromDirName(dirName), SourcePlanPath: sourcePlanPath})
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), body, 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	return dirName
+}
+
+// TestExcludeSelfPlan_DropsOwnLedgerEntry is the regression for the enrich
+// self-match: once a plan is saved and re-enriched, its own ledger entry is a
+// guaranteed top hit and must not surface as "prior art". A different plan and
+// a topical session must both survive.
+//
+// Mutation that turns this red: skip the excludeSelfPlan call in Detect.
+func TestExcludeSelfPlan_DropsOwnLedgerEntry(t *testing.T) {
+	ledger := t.TempDir()
+	selfSrc := filepath.Join(t.TempDir(), "plan.md")
+	own := writeLedgerPlan(t, ledger, "2026-07-30-the-mcp-doctrine", selfSrc)
+	other := writeLedgerPlan(t, ledger, "2026-07-12-some-other-plan", filepath.Join(t.TempDir(), "other.md"))
 
 	hits := []priorArtHit{
-		{Score: 0.9, DocType: "plan", SourceID: "2026-07-30-" + selfSlug},
-		{Score: 0.8, DocType: "plan", SourceID: "2026-07-29-some-other-plan"},
+		{Score: 0.9, DocType: "plan", SourceID: own},
+		{Score: 0.8, DocType: "plan", SourceID: other},
+		{Score: 0.85, DocType: "session-transcript", SourceID: "2026-07-05T20-12-galexy-OxduHB"},
 	}
-	got := excludeSelfPlan(hits, selfSlug)
+	got := excludeSelfPlan(hits, ledger, Input{Path: selfSrc})
+	if len(got) != 2 {
+		t.Fatalf("got %d hits, want 2 (own plan dropped, other plan + session kept)", len(got))
+	}
+	for _, h := range got {
+		if h.SourceID == own {
+			t.Error("own ledger entry survived — self-match not excluded")
+		}
+	}
+}
+
+// TestExcludeSelfPlan_KeepsIndependentPlansSharingATitle is the regression for
+// identifying a plan by its TITLE. Title is not identity: Title falls back to
+// the generic "Implementation Plan" for any document with no headings, so a
+// slug-based match made every untitled plan suppress every other untitled one,
+// and any two independent plans sharing a title hid each other. Those older
+// dated entries are distinct records and legitimate prior art.
+//
+// Mutation that turns this red: comparing Slugify(PlanTopic(in)) against the
+// candidate's date-stripped dir name instead of its recorded source path.
+func TestExcludeSelfPlan_KeepsIndependentPlansSharingATitle(t *testing.T) {
+	ledger := t.TempDir()
+	selfSrc := filepath.Join(t.TempDir(), "plan.md")
+	// identical slug, genuinely different source documents
+	own := writeLedgerPlan(t, ledger, "2026-07-30-implementation-plan", selfSrc)
+	older := writeLedgerPlan(t, ledger, "2026-06-01-implementation-plan", filepath.Join(t.TempDir(), "unrelated.md"))
+
+	hits := []priorArtHit{
+		{Score: 0.9, DocType: "plan", SourceID: own},
+		{Score: 0.8, DocType: "plan", SourceID: older},
+	}
+	got := excludeSelfPlan(hits, ledger, Input{Path: selfSrc})
 	if len(got) != 1 {
-		t.Fatalf("got %d hit(s), want 1 (own entry dropped, other plan kept)", len(got))
+		t.Fatalf("got %d hits, want 1 (only the plan's own entry dropped)", len(got))
 	}
-	if got[0].SourceID != "2026-07-29-some-other-plan" {
-		t.Errorf("wrong hit survived: %q", got[0].SourceID)
+	if got[0].SourceID != older {
+		t.Errorf("wrong hit survived: got %q, want the independent same-title plan %q", got[0].SourceID, older)
+	}
+}
+
+// TestExcludeSelfPlan_DropsEveryDatedSaveOfTheSamePlan covers why identity is
+// the source path rather than the exact dated directory: meta.CreatedAt is
+// stamped fresh on every save, so re-enriching tomorrow writes a NEW dated dir
+// while yesterday's copy of the same plan remains. Both are self-matches.
+func TestExcludeSelfPlan_DropsEveryDatedSaveOfTheSamePlan(t *testing.T) {
+	ledger := t.TempDir()
+	selfSrc := filepath.Join(t.TempDir(), "plan.md")
+	today := writeLedgerPlan(t, ledger, "2026-07-30-the-mcp-doctrine", selfSrc)
+	yesterday := writeLedgerPlan(t, ledger, "2026-07-29-the-mcp-doctrine", selfSrc)
+
+	hits := []priorArtHit{
+		{Score: 0.9, DocType: "plan", SourceID: today},
+		{Score: 0.85, DocType: "plan", SourceID: yesterday},
+	}
+	if got := excludeSelfPlan(hits, ledger, Input{Path: selfSrc}); len(got) != 0 {
+		t.Fatalf("got %d hits, want 0 — every dated save of the same plan is a self-match", len(got))
+	}
+}
+
+// TestExcludeSelfPlan_NoIdentityIsNoOp — stdin and --topic consults carry no
+// source path. With no identity to match on, exclusion must leave prior art
+// alone rather than fall back to guessing from the title.
+func TestExcludeSelfPlan_NoIdentityIsNoOp(t *testing.T) {
+	ledger := t.TempDir()
+	entry := writeLedgerPlan(t, ledger, "2026-07-30-anything", filepath.Join(t.TempDir(), "p.md"))
+	hits := []priorArtHit{{Score: 0.9, DocType: "plan", SourceID: entry}}
+
+	if got := excludeSelfPlan(hits, ledger, Input{}); len(got) != 1 {
+		t.Fatalf("no-path input dropped hits: got %d, want 1", len(got))
+	}
+	if got := excludeSelfPlan(hits, "", Input{Path: "/tmp/x.md"}); len(got) != 1 {
+		t.Fatalf("no-ledger dropped hits: got %d, want 1", len(got))
+	}
+}
+
+// TestExcludeSelfPlan_UnreadableMetaKeepsTheHit — a candidate we cannot prove
+// is the same plan (no meta, or no recorded source path) must survive. Failing
+// open here loses a self-match; failing closed would hide real prior art.
+func TestExcludeSelfPlan_UnreadableMetaKeepsTheHit(t *testing.T) {
+	ledger := t.TempDir()
+	selfSrc := filepath.Join(t.TempDir(), "plan.md")
+	noMeta := "2026-07-30-no-meta-here"
+	noSource := writeLedgerPlan(t, ledger, "2026-07-28-no-source-path", "")
+
+	hits := []priorArtHit{
+		{Score: 0.9, DocType: "plan", SourceID: noMeta},
+		{Score: 0.8, DocType: "plan", SourceID: noSource},
+	}
+	if got := excludeSelfPlan(hits, ledger, Input{Path: selfSrc}); len(got) != 2 {
+		t.Fatalf("got %d hits, want 2 — unprovable candidates must be kept", len(got))
 	}
 }

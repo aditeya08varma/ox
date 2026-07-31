@@ -2,12 +2,14 @@ package plan
 
 import (
 	"context"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/ledgersearch"
+	"github.com/sageox/ox/internal/paths"
 )
 
 // init self-registers the prior-art detector with the global registry so the
@@ -72,7 +74,7 @@ func (d *priorArtDetector) Detect(ctx context.Context, in Input, gitRoot string)
 		return nil, nil
 	}
 
-	hits := excludeSelfPlan(rankHits(results), Slugify(PlanTopic(in)))
+	hits := excludeSelfPlan(rankHits(results), ledgerPath, in)
 	if len(hits) == 0 {
 		return nil, nil
 	}
@@ -200,31 +202,82 @@ type priorArtHit struct {
 
 // datedSlugRe matches a ledger plan ref's date prefix, e.g.
 // "2026-07-30-the-mcp-doctrine-plan-context-engineering" — the shape ox plan
-// save writes. Stripping the prefix leaves the bare slug to compare.
+// save writes.
 var datedSlugRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-`)
+
+// isPlanRef reports whether a ledgersearch SourceID names a saved plan.
+func isPlanRef(ref string) bool {
+	return strings.Contains(ref, "data/plans/") || datedSlugRe.MatchString(ref)
+}
+
+// selfPlanIdentity is the source document a plan was saved from, canonicalized
+// for comparison. Empty means "no identity available" — callers must then leave
+// prior art alone rather than guess.
+func selfPlanIdentity(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
+}
 
 // excludeSelfPlan drops the plan-under-enrichment's OWN ledger entry from prior
 // art. Once a plan is saved and re-enriched, its own save is a guaranteed
 // top-scoring self-match (observed: it was the sole surviving hit after the
-// density-scoring fix). Conservative: only drops entries whose ref is a plan
-// (under data/plans/, or the dated-slug shape) matching THIS plan's slug —
-// never a session that merely mentions the topic, and never a DIFFERENT plan
-// (other plans are legitimate prior art).
-func excludeSelfPlan(hits []priorArtHit, selfSlug string) []priorArtHit {
-	if selfSlug == "" {
+// density-scoring fix).
+//
+// Identity is the SOURCE PLAN PATH recorded in each candidate's meta.json, not
+// the title. Title is not identity: Title falls back to the generic
+// "Implementation Plan" for any document without headings, so matching on the
+// derived slug would make every untitled plan suppress every other untitled
+// plan — and any two genuinely independent plans that happen to share a title
+// would hide each other. Those older dated entries are distinct records and
+// legitimate prior art.
+//
+// Matching on the path (rather than the exact dated directory) still catches
+// the case this exists for: meta.CreatedAt is stamped fresh on every save, so
+// re-enriching tomorrow writes a NEW dated directory while yesterday's copy of
+// the same plan remains — same source path, both correctly excluded.
+//
+// Conservative by construction: a candidate whose meta is missing or records no
+// source path is KEPT, and when the plan being enriched has no path of its own
+// (stdin, or a --topic consult) nothing is excluded at all.
+func excludeSelfPlan(hits []priorArtHit, ledgerPath string, in Input) []priorArtHit {
+	selfPath := selfPlanIdentity(in.Path)
+	if selfPath == "" || ledgerPath == "" {
 		return hits
 	}
+	plansDir := paths.LedgerPlansDir(ledgerPath)
 	out := hits[:0]
 	for _, h := range hits {
-		ref := h.SourceID
-		bare := datedSlugRe.ReplaceAllString(ref, "")
-		isPlanRef := strings.Contains(ref, "data/plans/") || datedSlugRe.MatchString(ref)
-		if isPlanRef && (bare == selfSlug || strings.Contains(ref, "data/plans/"+selfSlug)) {
+		if isPlanRef(h.SourceID) && planSourcePath(plansDir, h.SourceID) == selfPath {
 			continue
 		}
 		out = append(out, h)
 	}
 	return out
+}
+
+// planSourcePath reads a saved plan's recorded source document path. Returns ""
+// when the plan dir or its meta is unreadable, or the field was never set —
+// each of which means "cannot prove this is the same plan", so the caller keeps
+// the hit.
+func planSourcePath(plansDir, sourceID string) string {
+	dirName := sourceID
+	if i := strings.LastIndex(dirName, "data/plans/"); i >= 0 {
+		dirName = dirName[i+len("data/plans/"):]
+	}
+	dirName = strings.Trim(dirName, "/")
+	if dirName == "" || strings.Contains(dirName, "..") {
+		return ""
+	}
+	meta, err := readMeta(filepath.Join(plansDir, dirName))
+	if err != nil {
+		return ""
+	}
+	return selfPlanIdentity(meta.SourcePlanPath)
 }
 
 // rankHits filters raw ledger results below the threshold, sorts by score
