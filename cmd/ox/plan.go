@@ -268,7 +268,7 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		Slug:           slug,
 		Authors:        planAuthors(gitRoot),
 		CreatedAt:      time.Now().UTC(),
-		SourcePlanPath: in.Path,
+		SourcePlanPath: absSourcePlanPath(in.Path),
 		Primary:        primary,
 		Provenance:     prov,
 		Collaboration:  collab,
@@ -525,11 +525,24 @@ func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 // saved via --persist/--text, where no document exists yet (in.Raw is empty
 // and in.Sections carries only the synthetic pre-draft section — see
 // newTopicInput), so plan.Title would have nothing to derive from.
-func planTopic(in plan.Input) string {
-	if t := strings.TrimSpace(in.Topic); t != "" {
-		return t
+func planTopic(in plan.Input) string { return plan.PlanTopic(in) }
+
+// absSourcePlanPath canonicalizes the source document path recorded in a saved
+// plan's meta. It MUST be absolute: a relative spelling is only meaningful next
+// to the working directory it was typed in, which we don't record, so enrich
+// would later re-resolve it against a different directory and stop recognizing
+// the plan's own ledger entry (internal/plan: storedPlanPath). Falls back to the
+// raw value if the path can't be resolved — an unprovable identity is handled
+// conservatively downstream, never guessed at.
+func absSourcePlanPath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
 	}
-	return plan.Title(in)
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	return filepath.Clean(abs)
 }
 
 // planAuthors returns the capturing coworker's display name (privacy-safe, not

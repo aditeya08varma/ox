@@ -12,6 +12,21 @@
      renderers own the widget body; you own the surrounding layout, so the base
      components extend without any renderer change. -->
 
+<!-- CHOOSING BETWEEN PATTERNS — two rules that decide most of it.
+
+     Pair every diagram with the table that carries its exact values. A diagram
+     shows SHAPE; a table beside it carries the NUMBERS (fields, budgets,
+     thresholds, verdict cells). Never make one do the other's job — a diagram
+     crammed with values clips, and a table alone hides structure. The strongest
+     sections put them adjacent: a schema table beside the sequence diagram, a
+     channel table beside the delivery flowchart.
+
+     Vary the form section to section. Good textbooks alternate modes of
+     comprehension on purpose — a diagram for structure, a table for exact
+     values, a pull-quote for the sentence that must not be skimmed, a worked
+     example for feel. A plan is teaching a decision, so pace it the same way.
+     Two consecutive sections in the same form is a smell; three is a bug. -->
+
 ## sequence-diagram
 use: an ordered call/response path that crosses components, services, or async boundaries — when "in what order, how many round-trips" is the question.
 why: shows ordering and latency a flowchart can't; ≤4-5 participants keeps it legible.
@@ -420,4 +435,78 @@ param: {"title":"workflow history growth","x_label":"hours","y_label":"history e
 <!-- prefer the param renderer: ox plan viz render line-chart --data line.json
      ox scales both axes, projects each point to pixels, places the threshold, and draws the legend. -->
 <figure class="linec"><svg class="linec-svg" viewBox="0 0 300 224"><line class="linec-axis" x1="52" y1="14" x2="52" y2="190"/><line class="linec-axis" x1="52" y1="190" x2="288" y2="190"/><line class="linec-thresh" x1="52" y1="119.6" x2="288" y2="119.6" style="stroke:var(--amber)"/><polyline class="linec-series" points="52,190 288,14" style="stroke:var(--red)"/><polyline class="linec-series" points="52,190 126,120 126,181 199,120 199,181 273,120" style="stroke:var(--sage)" stroke-dasharray="5 3"/></svg><ul class="linec-leg"><li><span class="vsw" style="background:var(--red)"></span>before</li><li><span class="vsw" style="background:var(--sage)"></span>after</li></ul></figure>
+```
+
+## pull-quote
+use: a doctrine line, a decider's verbatim words from a Discussion, or the one sentence the whole plan turns on — surfaced as a visual beat between prose blocks.
+why: a load-bearing sentence set in a quote block is read; the same sentence inside a paragraph is skimmed past. Also the natural home for enrichment's Discussion snippets — quote the deciders, cited.
+```html
+<div class="quote">Nothing post-intent can influence the turn where the user didn't think to mention it — and that turn is the entire product.</div>
+<p class="sub">Ryan, 2026-07-30 Discussion with Milkana: <em>"I wanna dance on that edge — I think that's the point."</em></p>
+```
+```css
+.quote{border-left:3px solid var(--accent,#e0a56a);padding:6px 16px;margin:16px 0;font-size:16px;font-style:italic}
+```
+
+## status-pair
+use: work that is genuinely partial — a progress bar plus shipped-vs-not-built cards, side by side. Use whenever declaring anything "in flight"; never claim delivery with prose alone.
+why: an honest 15% bar and a two-column done/not-done grid kill the thin-red-line illusion faster than any caveat sentence; the reviewer sees the gap instead of reading past it.
+```html
+<div class="progress" role="progressbar" aria-label="Tasks completed"
+     aria-valuemin="0" aria-valuemax="20" aria-valuenow="3"><i style="width:15%"></i></div>
+<div class="grid2">
+  <div class="card"><h3>Shipped</h3><ul><li>records + two tools</li></ul></div>
+  <div class="card"><h3>Not built yet</h3><ul><li>the load-bearing mechanism</li></ul></div>
+</div>
+```
+```css
+.progress{height:10px;border-radius:6px;background:var(--panel2,#1b2327);overflow:hidden}
+.progress i{display:block;height:100%;background:var(--good,#7a8f78)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+```
+
+## wordmark
+use: the SageOx two-color wordmark, fixed bottom-left. The Go renderer injects this as part of the ox chrome; reach for this snippet only on a render that bypasses that path. REQUIRED whenever the plan carried SageOx enrichment (any badge or context item) — and omitted entirely when it did not, since there is nothing to credit.
+why: the lockup ("enriched by" + small mark — never the bare logo) is quiet provenance, and it LINKS: to the enriching team's console URL when known, else https://sageox.ai. Both theme variants inline so it renders from file:// and flips with the page theme.
+```html
+<a class="wm-corner" data-ox-wordmark href="https://sageox.ai" aria-label="enriched by SageOx"><span class="wm-label">enriched by</span><span class="wm wm-d"><svg xmlns="http://www.w3.org/2000/svg" viewBox="8 18 163 51" width="163" height="51"> <title>SageOx Wordmark (Dark, Transparent)</title> <path d="M22.89 55.67Q19.05 55.67 16.10 54.30Q13.15 52.94 11.47 50.34Q9.79 47.75 9.79 44.01V42.76H15.50V44.01Q15.50 47.32 17.51 48.95Q19.53 50.58 22.89 50.58Q26.30 50.58 28.03 49.19Q29.75 47.80 29.75 45.59Q29.75 44.10 28.94 43.17Q28.12 42.23 26.56 41.66Q25.00 41.08 22.79 40.55L21.35 40.26Q18.04 39.50 15.62 38.32Q13.19 37.14 11.90 35.27Q10.60 33.40 10.60 30.38Q10.60 27.35 12.04 25.19Q13.48 23.03 16.12 21.88Q18.76 20.73 22.31 20.73Q25.87 20.73 28.65 21.93Q31.43 23.13 33.04 25.53Q34.65 27.93 34.65 31.53V33.11H28.94V31.53Q28.94 29.46 28.12 28.22Q27.31 26.97 25.82 26.39Q24.33 25.82 22.31 25.82Q19.34 25.82 17.80 26.97Q16.27 28.12 16.27 30.23Q16.27 31.58 16.96 32.51Q17.66 33.45 19.03 34.05Q20.39 34.65 22.46 35.08L23.90 35.42Q27.35 36.18 29.95 37.36Q32.54 38.54 34.00 40.46Q35.47 42.38 35.47 45.45Q35.47 48.47 33.91 50.78Q32.35 53.08 29.54 54.38Q26.73 55.67 22.89 55.67ZM46.00 55.67Q43.50 55.67 41.49 54.78Q39.47 53.90 38.30 52.22Q37.12 50.54 37.12 48.09Q37.12 45.69 38.30 44.06Q39.47 42.42 41.54 41.58Q43.60 40.74 46.24 40.74H53.10V39.30Q53.10 37.43 51.95 36.26Q50.80 35.08 48.35 35.08Q45.95 35.08 44.73 36.21Q43.50 37.34 43.12 39.11L38.03 37.43Q38.61 35.56 39.88 34.02Q41.15 32.49 43.26 31.55Q45.38 30.62 48.45 30.62Q53.10 30.62 55.77 32.94Q58.43 35.27 58.43 39.69V49.00Q58.43 50.44 59.78 50.44H61.79V55.00H57.90Q56.18 55.00 55.07 54.14Q53.97 53.27 53.97 51.78V51.69H53.15Q52.86 52.36 52.14 53.32Q51.42 54.28 49.96 54.98Q48.50 55.67 46.00 55.67ZM46.91 51.16Q49.65 51.16 51.38 49.60Q53.10 48.04 53.10 45.40V44.92H46.58Q44.80 44.92 43.70 45.69Q42.59 46.46 42.59 47.94Q42.59 49.38 43.74 50.27Q44.90 51.16 46.91 51.16ZM62.18 43.24V42.52Q62.18 38.78 63.67 36.11Q65.15 33.45 67.65 32.03Q70.15 30.62 73.12 30.62Q76.48 30.62 78.23 31.82Q79.99 33.02 80.80 34.41H81.62V31.29H86.99V59.51Q86.99 61.86 85.65 63.23Q84.31 64.60 82.00 64.60H66.07V59.80H80.13Q81.52 59.80 81.52 58.36V51.50H80.71Q80.18 52.31 79.27 53.15Q78.35 53.99 76.87 54.57Q75.38 55.14 73.12 55.14Q70.15 55.14 67.65 53.73Q65.15 52.31 63.67 49.65Q62.18 46.98 62.18 43.24ZM74.66 50.30Q77.63 50.30 79.60 48.40Q81.57 46.50 81.57 43.10V42.62Q81.57 39.16 79.63 37.29Q77.68 35.42 74.66 35.42Q71.68 35.42 69.69 37.29Q67.70 39.16 67.70 42.62V43.10Q67.70 46.50 69.69 48.40Q71.68 50.30 74.66 50.30ZM101.78 55.67Q98.23 55.67 95.52 54.16Q92.81 52.65 91.30 49.89Q89.78 47.13 89.78 43.43V42.86Q89.78 39.11 91.27 36.38Q92.76 33.64 95.45 32.13Q98.14 30.62 101.64 30.62Q105.10 30.62 107.69 32.13Q110.28 33.64 111.72 36.38Q113.16 39.11 113.16 42.76V44.73H95.35Q95.45 47.51 97.32 49.19Q99.19 50.87 101.93 50.87Q104.62 50.87 105.91 49.70Q107.21 48.52 107.88 47.03L112.44 49.38Q111.77 50.68 110.50 52.14Q109.22 53.61 107.11 54.64Q105.00 55.67 101.78 55.67ZM95.40 40.55H107.54Q107.35 38.20 105.74 36.81Q104.14 35.42 101.59 35.42Q98.95 35.42 97.37 36.81Q95.78 38.20 95.40 40.55Z" fill="#c4d1c0"/> <path d="M130.62 55.50Q124.38 55.50 120.66 52.05Q116.94 48.60 116.94 42.14V34.26Q116.94 27.80 120.66 24.35Q124.38 20.90 130.62 20.90Q136.91 20.90 140.60 24.35Q144.30 27.80 144.30 34.26V42.14Q144.30 48.60 140.60 52.05Q136.91 55.50 130.62 55.50ZM130.62 50.06Q134.36 50.06 136.45 47.95Q138.54 45.84 138.54 42.24V34.16Q138.54 30.56 136.45 28.45Q134.36 26.34 130.62 26.34Q126.92 26.34 124.84 28.45Q122.75 30.56 122.75 34.16V42.24Q122.75 45.84 124.84 47.95Q126.92 50.06 130.62 50.06Z" fill="#7a8f78"/> <path d="M145.33 55.00L153.81 43.05L145.47 31.29H151.65L157.23 39.50H158.00L163.58 31.29H169.71L161.37 43.05L169.85 55.00H163.63L158.00 46.65H157.23L151.60 55.00Z" fill="#7a8f78"/> </svg></span><span class="wm wm-l"><svg xmlns="http://www.w3.org/2000/svg" viewBox="8 18 163 51" width="163" height="51"> <title>SageOx Wordmark (Light, Transparent)</title> <path d="M22.89 55.67Q19.05 55.67 16.10 54.30Q13.15 52.94 11.47 50.34Q9.79 47.75 9.79 44.01V42.76H15.50V44.01Q15.50 47.32 17.51 48.95Q19.53 50.58 22.89 50.58Q26.30 50.58 28.03 49.19Q29.75 47.80 29.75 45.59Q29.75 44.10 28.94 43.17Q28.12 42.23 26.56 41.66Q25.00 41.08 22.79 40.55L21.35 40.26Q18.04 39.50 15.62 38.32Q13.19 37.14 11.90 35.27Q10.60 33.40 10.60 30.38Q10.60 27.35 12.04 25.19Q13.48 23.03 16.12 21.88Q18.76 20.73 22.31 20.73Q25.87 20.73 28.65 21.93Q31.43 23.13 33.04 25.53Q34.65 27.93 34.65 31.53V33.11H28.94V31.53Q28.94 29.46 28.12 28.22Q27.31 26.97 25.82 26.39Q24.33 25.82 22.31 25.82Q19.34 25.82 17.80 26.97Q16.27 28.12 16.27 30.23Q16.27 31.58 16.96 32.51Q17.66 33.45 19.03 34.05Q20.39 34.65 22.46 35.08L23.90 35.42Q27.35 36.18 29.95 37.36Q32.54 38.54 34.00 40.46Q35.47 42.38 35.47 45.45Q35.47 48.47 33.91 50.78Q32.35 53.08 29.54 54.38Q26.73 55.67 22.89 55.67ZM46.00 55.67Q43.50 55.67 41.49 54.78Q39.47 53.90 38.30 52.22Q37.12 50.54 37.12 48.09Q37.12 45.69 38.30 44.06Q39.47 42.42 41.54 41.58Q43.60 40.74 46.24 40.74H53.10V39.30Q53.10 37.43 51.95 36.26Q50.80 35.08 48.35 35.08Q45.95 35.08 44.73 36.21Q43.50 37.34 43.12 39.11L38.03 37.43Q38.61 35.56 39.88 34.02Q41.15 32.49 43.26 31.55Q45.38 30.62 48.45 30.62Q53.10 30.62 55.77 32.94Q58.43 35.27 58.43 39.69V49.00Q58.43 50.44 59.78 50.44H61.79V55.00H57.90Q56.18 55.00 55.07 54.14Q53.97 53.27 53.97 51.78V51.69H53.15Q52.86 52.36 52.14 53.32Q51.42 54.28 49.96 54.98Q48.50 55.67 46.00 55.67ZM46.91 51.16Q49.65 51.16 51.38 49.60Q53.10 48.04 53.10 45.40V44.92H46.58Q44.80 44.92 43.70 45.69Q42.59 46.46 42.59 47.94Q42.59 49.38 43.74 50.27Q44.90 51.16 46.91 51.16ZM62.18 43.24V42.52Q62.18 38.78 63.67 36.11Q65.15 33.45 67.65 32.03Q70.15 30.62 73.12 30.62Q76.48 30.62 78.23 31.82Q79.99 33.02 80.80 34.41H81.62V31.29H86.99V59.51Q86.99 61.86 85.65 63.23Q84.31 64.60 82.00 64.60H66.07V59.80H80.13Q81.52 59.80 81.52 58.36V51.50H80.71Q80.18 52.31 79.27 53.15Q78.35 53.99 76.87 54.57Q75.38 55.14 73.12 55.14Q70.15 55.14 67.65 53.73Q65.15 52.31 63.67 49.65Q62.18 46.98 62.18 43.24ZM74.66 50.30Q77.63 50.30 79.60 48.40Q81.57 46.50 81.57 43.10V42.62Q81.57 39.16 79.63 37.29Q77.68 35.42 74.66 35.42Q71.68 35.42 69.69 37.29Q67.70 39.16 67.70 42.62V43.10Q67.70 46.50 69.69 48.40Q71.68 50.30 74.66 50.30ZM101.78 55.67Q98.23 55.67 95.52 54.16Q92.81 52.65 91.30 49.89Q89.78 47.13 89.78 43.43V42.86Q89.78 39.11 91.27 36.38Q92.76 33.64 95.45 32.13Q98.14 30.62 101.64 30.62Q105.10 30.62 107.69 32.13Q110.28 33.64 111.72 36.38Q113.16 39.11 113.16 42.76V44.73H95.35Q95.45 47.51 97.32 49.19Q99.19 50.87 101.93 50.87Q104.62 50.87 105.91 49.70Q107.21 48.52 107.88 47.03L112.44 49.38Q111.77 50.68 110.50 52.14Q109.22 53.61 107.11 54.64Q105.00 55.67 101.78 55.67ZM95.40 40.55H107.54Q107.35 38.20 105.74 36.81Q104.14 35.42 101.59 35.42Q98.95 35.42 97.37 36.81Q95.78 38.20 95.40 40.55Z" fill="#aebca7"/> <path d="M130.62 55.50Q124.38 55.50 120.66 52.05Q116.94 48.60 116.94 42.14V34.26Q116.94 27.80 120.66 24.35Q124.38 20.90 130.62 20.90Q136.91 20.90 140.60 24.35Q144.30 27.80 144.30 34.26V42.14Q144.30 48.60 140.60 52.05Q136.91 55.50 130.62 55.50ZM130.62 50.06Q134.36 50.06 136.45 47.95Q138.54 45.84 138.54 42.24V34.16Q138.54 30.56 136.45 28.45Q134.36 26.34 130.62 26.34Q126.92 26.34 124.84 28.45Q122.75 30.56 122.75 34.16V42.24Q122.75 45.84 124.84 47.95Q126.92 50.06 130.62 50.06Z" fill="#546a54"/> <path d="M145.33 55.00L153.81 43.05L145.47 31.29H151.65L157.23 39.50H158.00L163.58 31.29H169.71L161.37 43.05L169.85 55.00H163.63L158.00 46.65H157.23L151.60 55.00Z" fill="#546a54"/> </svg></span></a>
+```
+```css
+.wm-corner{position:fixed;left:14px;bottom:12px;z-index:40;opacity:.75}
+.wm-corner svg{width:96px;height:auto;display:block}
+.wm-l{display:none}
+html[data-theme="light"] .wm-d{display:none}
+html[data-theme="light"] .wm-l{display:inline}
+```
+
+## risk-register
+use: a plan's risk section — every risk scannable in one glance-row (severity dot · risk → one-line resolution · owner), with click-to-expand detail (mechanism · trigger · exit · fallback) per row. Replaces stacked risk cards, which bury the scan under detail.
+why: progressive disclosure for risks: the ten-minute reader scans four rows; the skeptic expands only the row they doubt. Severity is a dot, not a paragraph; triggers are events, never invented dates; owners are visible at the scan layer because an unowned risk is unresolved.
+```html
+<table class="riskreg">
+<tr><th></th><th>Risk → resolution</th><th>Owner</th></tr>
+<tr class="rrow" tabindex="0" role="button" aria-expanded="false" aria-controls="risk-1-det"><td class="sev"><span class="sevdot" style="background:var(--red,#ef4444)"></span><span class="vis-hidden">High severity</span></td>
+  <td><span class="chev" aria-hidden="true">▸</span><b>The risk, named plainly</b><br><span class="sub">One-line resolution — decisive, not a mitigation list.</span></td>
+  <td class="own">Owner</td></tr>
+<tr id="risk-1-det" class="det"><td colspan="3"><div class="detgrid">
+  <b>Mechanism</b><span>how, concretely</span>
+  <b>Trigger</b><span>the event (never an uncommitted date)</span>
+  <b>Exit</b><span>the measurable criterion</span>
+  <b>Fallback</b><span>what happens on failure — designed, not hoped</span>
+</div></td></tr>
+</table>
+```
+```css
+.riskreg tr.rrow{cursor:pointer}
+.riskreg td.sev{width:26px;text-align:center}
+.riskreg .sevdot{display:inline-block;width:9px;height:9px;border-radius:50%}
+.riskreg .chev{color:var(--accent,#e0a56a);margin-right:6px;display:inline-block;transition:transform .12s}
+.riskreg tr.open .chev{transform:rotate(90deg)}
+.riskreg tr.det{display:none}
+.riskreg tr.det.show{display:table-row}
+.detgrid{display:grid;grid-template-columns:88px 1fr;gap:4px 14px;font-size:13px;padding-top:10px}
+.vis-hidden{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+```
+```js
+document.querySelectorAll('.riskreg tr.rrow').forEach(r=>{const t=()=>{const open=!r.classList.contains('open');r.classList.toggle('open',open);r.setAttribute('aria-expanded',String(open));const d=r.nextElementSibling;if(d)d.classList.toggle('show',open);};r.addEventListener('click',t);r.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();t();}});});
 ```

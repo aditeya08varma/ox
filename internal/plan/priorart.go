@@ -2,11 +2,14 @@ package plan
 
 import (
 	"context"
+	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/sageox/ox/internal/ledgersearch"
+	"github.com/sageox/ox/internal/paths"
 )
 
 // init self-registers the prior-art detector with the global registry so the
@@ -71,7 +74,7 @@ func (d *priorArtDetector) Detect(ctx context.Context, in Input, gitRoot string)
 		return nil, nil
 	}
 
-	hits := rankHits(results)
+	hits := excludeSelfPlan(rankHits(results), ledgerPath, in)
 	if len(hits) == 0 {
 		return nil, nil
 	}
@@ -195,6 +198,103 @@ type priorArtHit struct {
 	Author   string
 	Date     string // YYYY-MM-DD if derivable, else ""
 	Text     string // ledgersearch snippet around the matched term (relevance)
+}
+
+// datedSlugRe matches a ledger plan ref's date prefix, e.g.
+// "2026-07-30-the-mcp-doctrine-plan-context-engineering" — the shape ox plan
+// save writes.
+var datedSlugRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}-`)
+
+// isPlanRef reports whether a ledgersearch SourceID names a saved plan.
+func isPlanRef(ref string) bool {
+	return strings.Contains(ref, "data/plans/") || datedSlugRe.MatchString(ref)
+}
+
+// livePlanPath canonicalizes the path of the plan currently being enriched.
+// This one IS relative to the running process's working directory, so resolving
+// it with Abs is correct. Empty means "no identity available".
+func livePlanPath(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return filepath.Clean(abs)
+	}
+	return filepath.Clean(path)
+}
+
+// storedPlanPath canonicalizes a source path read back from a saved plan's
+// meta.json. Unlike livePlanPath it must NOT call Abs: a stored relative path
+// was spelled relative to the working directory of whoever ran `ox plan save`,
+// which we do not record. Re-resolving it against the CURRENT directory invents
+// a different file — so enriching the same plan from another directory would
+// silently stop recognizing its own ledger entry.
+//
+// Saves write an absolute path (see savePlanArtifacts), so this is about legacy
+// entries written before that. A relative one is unprovable, not wrong: return
+// "" so the caller keeps the hit rather than excluding the wrong plan.
+func storedPlanPath(path string) string {
+	if strings.TrimSpace(path) == "" || !filepath.IsAbs(path) {
+		return ""
+	}
+	return filepath.Clean(path)
+}
+
+// excludeSelfPlan drops the plan-under-enrichment's OWN ledger entry from prior
+// art. Once a plan is saved and re-enriched, its own save is a guaranteed
+// top-scoring self-match (observed: it was the sole surviving hit after the
+// density-scoring fix).
+//
+// Identity is the SOURCE PLAN PATH recorded in each candidate's meta.json, not
+// the title. Title is not identity: Title falls back to the generic
+// "Implementation Plan" for any document without headings, so matching on the
+// derived slug would make every untitled plan suppress every other untitled
+// plan — and any two genuinely independent plans that happen to share a title
+// would hide each other. Those older dated entries are distinct records and
+// legitimate prior art.
+//
+// Matching on the path (rather than the exact dated directory) still catches
+// the case this exists for: meta.CreatedAt is stamped fresh on every save, so
+// re-enriching tomorrow writes a NEW dated directory while yesterday's copy of
+// the same plan remains — same source path, both correctly excluded.
+//
+// Conservative by construction: a candidate whose meta is missing or records no
+// source path is KEPT, and when the plan being enriched has no path of its own
+// (stdin, or a --topic consult) nothing is excluded at all.
+func excludeSelfPlan(hits []priorArtHit, ledgerPath string, in Input) []priorArtHit {
+	selfPath := livePlanPath(in.Path)
+	if selfPath == "" || ledgerPath == "" {
+		return hits
+	}
+	plansDir := paths.LedgerPlansDir(ledgerPath)
+	out := hits[:0]
+	for _, h := range hits {
+		if isPlanRef(h.SourceID) && planSourcePath(plansDir, h.SourceID) == selfPath {
+			continue
+		}
+		out = append(out, h)
+	}
+	return out
+}
+
+// planSourcePath reads a saved plan's recorded source document path. Returns ""
+// when the plan dir or its meta is unreadable, or the field was never set —
+// each of which means "cannot prove this is the same plan", so the caller keeps
+// the hit.
+func planSourcePath(plansDir, sourceID string) string {
+	dirName := sourceID
+	if i := strings.LastIndex(dirName, "data/plans/"); i >= 0 {
+		dirName = dirName[i+len("data/plans/"):]
+	}
+	dirName = strings.Trim(dirName, "/")
+	if dirName == "" || strings.Contains(dirName, "..") {
+		return ""
+	}
+	meta, err := readMeta(filepath.Join(plansDir, dirName))
+	if err != nil {
+		return ""
+	}
+	return storedPlanPath(meta.SourcePlanPath)
 }
 
 // rankHits filters raw ledger results below the threshold, sorts by score

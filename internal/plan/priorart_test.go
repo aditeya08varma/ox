@@ -2,6 +2,9 @@ package plan
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/sageox/ox/internal/ledgersearch"
@@ -398,5 +401,230 @@ func TestDetectorRegistered(t *testing.T) {
 	}
 	if found == 0 {
 		t.Fatal("prior-art detector not registered via init()")
+	}
+}
+
+// TestPlanTopic_MatchesSavePathDerivation pins the invariant that makes
+// self-exclusion work at all: the slug the enricher excludes on must be the
+// slug the save path writes. PlanTopic is shared with the CLI's planTopic for
+// exactly that reason, so it has to keep deriving the topic the same way —
+// explicit --topic wins, otherwise the document TITLE (H1-first).
+//
+// Failure prevented: re-deriving the topic by walking Sections for the first
+// heading. Parse splits on "## " only, so an H1 lives in the Heading==""
+// preamble section and such a walk cannot see it — the ox-1tjj.8 bug. That
+// breaks self-exclusion silently (the enricher computes a different slug than
+// the ledger dir, so the self-match survives) AND regresses plan titles.
+func TestPlanTopic_MatchesSavePathDerivation(t *testing.T) {
+	tests := []struct {
+		name string
+		in   Input
+		want string
+	}{
+		{
+			name: "H1 wins over a numbered context H2",
+			in:   Parse("# Conversation model update\n\n## 1. Context — Why Now\n\nprose.\n"),
+			want: "Conversation model update",
+		},
+		{
+			name: "H1 wins over a TL;DR H2",
+			in:   Parse("# ox plan — enriched plans\n\n## TL;DR\n\nShip it.\n"),
+			want: "ox plan — enriched plans",
+		},
+		{
+			name: "no H1 falls back to the first H2",
+			in:   Parse("preamble\n\n## First Section\n\nbody\n"),
+			want: "First Section",
+		},
+		{
+			name: "explicit topic short-circuits the document title",
+			in:   Input{Topic: "explicit consult topic", Raw: "# A Different Title\n\nbody\n"},
+			want: "explicit consult topic",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := PlanTopic(tc.in); got != tc.want {
+				t.Errorf("PlanTopic(...) = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// writeLedgerPlan materializes a saved plan dir with the meta.json fields
+// self-exclusion reads. Returns the dated dir name (the ledgersearch SourceID).
+func writeLedgerPlan(t *testing.T, ledger, dirName, sourcePlanPath string) string {
+	t.Helper()
+	dir := filepath.Join(ledger, "data", "plans", dirName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	body, err := json.Marshal(Meta{Slug: slugFromDirName(dirName), SourcePlanPath: sourcePlanPath})
+	if err != nil {
+		t.Fatalf("marshal meta: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), body, 0o644); err != nil {
+		t.Fatalf("write meta: %v", err)
+	}
+	return dirName
+}
+
+// TestExcludeSelfPlan_DropsOwnLedgerEntry is the regression for the enrich
+// self-match: once a plan is saved and re-enriched, its own ledger entry is a
+// guaranteed top hit and must not surface as "prior art". A different plan and
+// a topical session must both survive.
+//
+// Mutation that turns this red: skip the excludeSelfPlan call in Detect.
+func TestExcludeSelfPlan_DropsOwnLedgerEntry(t *testing.T) {
+	ledger := t.TempDir()
+	selfSrc := filepath.Join(t.TempDir(), "plan.md")
+	own := writeLedgerPlan(t, ledger, "2026-07-30-the-mcp-doctrine", selfSrc)
+	other := writeLedgerPlan(t, ledger, "2026-07-12-some-other-plan", filepath.Join(t.TempDir(), "other.md"))
+
+	hits := []priorArtHit{
+		{Score: 0.9, DocType: "plan", SourceID: own},
+		{Score: 0.8, DocType: "plan", SourceID: other},
+		{Score: 0.85, DocType: "session-transcript", SourceID: "2026-07-05T20-12-galexy-OxduHB"},
+	}
+	got := excludeSelfPlan(hits, ledger, Input{Path: selfSrc})
+	if len(got) != 2 {
+		t.Fatalf("got %d hits, want 2 (own plan dropped, other plan + session kept)", len(got))
+	}
+	for _, h := range got {
+		if h.SourceID == own {
+			t.Error("own ledger entry survived — self-match not excluded")
+		}
+	}
+}
+
+// TestExcludeSelfPlan_KeepsIndependentPlansSharingATitle is the regression for
+// identifying a plan by its TITLE. Title is not identity: Title falls back to
+// the generic "Implementation Plan" for any document with no headings, so a
+// slug-based match made every untitled plan suppress every other untitled one,
+// and any two independent plans sharing a title hid each other. Those older
+// dated entries are distinct records and legitimate prior art.
+//
+// Mutation that turns this red: comparing Slugify(PlanTopic(in)) against the
+// candidate's date-stripped dir name instead of its recorded source path.
+func TestExcludeSelfPlan_KeepsIndependentPlansSharingATitle(t *testing.T) {
+	ledger := t.TempDir()
+	selfSrc := filepath.Join(t.TempDir(), "plan.md")
+	// identical slug, genuinely different source documents
+	own := writeLedgerPlan(t, ledger, "2026-07-30-implementation-plan", selfSrc)
+	older := writeLedgerPlan(t, ledger, "2026-06-01-implementation-plan", filepath.Join(t.TempDir(), "unrelated.md"))
+
+	hits := []priorArtHit{
+		{Score: 0.9, DocType: "plan", SourceID: own},
+		{Score: 0.8, DocType: "plan", SourceID: older},
+	}
+	got := excludeSelfPlan(hits, ledger, Input{Path: selfSrc})
+	if len(got) != 1 {
+		t.Fatalf("got %d hits, want 1 (only the plan's own entry dropped)", len(got))
+	}
+	if got[0].SourceID != older {
+		t.Errorf("wrong hit survived: got %q, want the independent same-title plan %q", got[0].SourceID, older)
+	}
+}
+
+// TestExcludeSelfPlan_DropsEveryDatedSaveOfTheSamePlan covers why identity is
+// the source path rather than the exact dated directory: meta.CreatedAt is
+// stamped fresh on every save, so re-enriching tomorrow writes a NEW dated dir
+// while yesterday's copy of the same plan remains. Both are self-matches.
+func TestExcludeSelfPlan_DropsEveryDatedSaveOfTheSamePlan(t *testing.T) {
+	ledger := t.TempDir()
+	selfSrc := filepath.Join(t.TempDir(), "plan.md")
+	today := writeLedgerPlan(t, ledger, "2026-07-30-the-mcp-doctrine", selfSrc)
+	yesterday := writeLedgerPlan(t, ledger, "2026-07-29-the-mcp-doctrine", selfSrc)
+
+	hits := []priorArtHit{
+		{Score: 0.9, DocType: "plan", SourceID: today},
+		{Score: 0.85, DocType: "plan", SourceID: yesterday},
+	}
+	if got := excludeSelfPlan(hits, ledger, Input{Path: selfSrc}); len(got) != 0 {
+		t.Fatalf("got %d hits, want 0 — every dated save of the same plan is a self-match", len(got))
+	}
+}
+
+// TestExcludeSelfPlan_NoIdentityIsNoOp — stdin and --topic consults carry no
+// source path. With no identity to match on, exclusion must leave prior art
+// alone rather than fall back to guessing from the title.
+func TestExcludeSelfPlan_NoIdentityIsNoOp(t *testing.T) {
+	ledger := t.TempDir()
+	entry := writeLedgerPlan(t, ledger, "2026-07-30-anything", filepath.Join(t.TempDir(), "p.md"))
+	hits := []priorArtHit{{Score: 0.9, DocType: "plan", SourceID: entry}}
+
+	if got := excludeSelfPlan(hits, ledger, Input{}); len(got) != 1 {
+		t.Fatalf("no-path input dropped hits: got %d, want 1", len(got))
+	}
+	if got := excludeSelfPlan(hits, "", Input{Path: "/tmp/x.md"}); len(got) != 1 {
+		t.Fatalf("no-ledger dropped hits: got %d, want 1", len(got))
+	}
+}
+
+// TestExcludeSelfPlan_UnreadableMetaKeepsTheHit — a candidate we cannot prove
+// is the same plan (no meta, or no recorded source path) must survive. Failing
+// open here loses a self-match; failing closed would hide real prior art.
+func TestExcludeSelfPlan_UnreadableMetaKeepsTheHit(t *testing.T) {
+	ledger := t.TempDir()
+	selfSrc := filepath.Join(t.TempDir(), "plan.md")
+	noMeta := "2026-07-30-no-meta-here"
+	noSource := writeLedgerPlan(t, ledger, "2026-07-28-no-source-path", "")
+
+	hits := []priorArtHit{
+		{Score: 0.9, DocType: "plan", SourceID: noMeta},
+		{Score: 0.8, DocType: "plan", SourceID: noSource},
+	}
+	if got := excludeSelfPlan(hits, ledger, Input{Path: selfSrc}); len(got) != 2 {
+		t.Fatalf("got %d hits, want 2 — unprovable candidates must be kept", len(got))
+	}
+}
+
+// TestExcludeSelfPlan_StoredRelativePathIsNotReresolved is the regression for
+// canonicalizing a PERSISTED path against the enrichment working directory. A
+// stored relative path was spelled relative to whatever directory ran
+// `ox plan save`, and that directory is not recorded. Resolving it against the
+// current one names a different file entirely.
+//
+// Failure prevented: calling filepath.Abs on meta.SourcePlanPath. That silently
+// changes identity with the caller's cwd — worse than not matching, because it
+// could resolve onto an unrelated plan and exclude the wrong entry. Saves now
+// persist an absolute path; a legacy relative one is treated as unprovable, so
+// the hit is kept.
+func TestExcludeSelfPlan_StoredRelativePathIsNotReresolved(t *testing.T) {
+	ledger := t.TempDir()
+	legacy := writeLedgerPlan(t, ledger, "2026-07-30-legacy-relative", "docs/plan.md")
+	hits := []priorArtHit{{Score: 0.9, DocType: "plan", SourceID: legacy}}
+
+	// enriching from a directory where "docs/plan.md" happens to resolve to the
+	// live input path must NOT be mistaken for the same plan.
+	workdir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(workdir, "docs"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	live := filepath.Join(workdir, "docs", "plan.md")
+
+	if got := excludeSelfPlan(hits, ledger, Input{Path: live}); len(got) != 1 {
+		t.Fatalf("a stored relative path was re-resolved against the current dir and matched: got %d hits, want 1", len(got))
+	}
+}
+
+// TestStoredVsLivePlanPath pins the asymmetry directly: the live input path is
+// relative to the running process and so resolves; a stored path must already
+// be absolute to count.
+func TestStoredVsLivePlanPath(t *testing.T) {
+	if got := storedPlanPath("docs/plan.md"); got != "" {
+		t.Errorf("storedPlanPath(relative) = %q, want \"\" (unprovable)", got)
+	}
+	if got := storedPlanPath("/abs/docs/plan.md"); got != "/abs/docs/plan.md" {
+		t.Errorf("storedPlanPath(absolute) = %q, want it kept", got)
+	}
+	if got := storedPlanPath(""); got != "" {
+		t.Errorf("storedPlanPath(empty) = %q, want \"\"", got)
+	}
+	if got := livePlanPath("docs/plan.md"); !filepath.IsAbs(got) {
+		t.Errorf("livePlanPath(relative) = %q, want it resolved against cwd", got)
+	}
+	if got := livePlanPath(""); got != "" {
+		t.Errorf("livePlanPath(empty) = %q, want \"\"", got)
 	}
 }

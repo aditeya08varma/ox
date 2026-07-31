@@ -649,6 +649,24 @@ var slugStopWords = map[string]bool{
 	"and": true, "for": true, "in": true, "on": true, "with": true,
 }
 
+// PlanTopic returns the topic a plan is saved under: an explicit --topic wins,
+// otherwise the document's title. Shared with the CLI's planTopic so the slug
+// the enricher self-excludes on (priorart.go) cannot drift from the slug the
+// save path writes to the ledger — which is the whole point of it being one
+// function, so it MUST stay a thin wrapper over the save path's derivation.
+//
+// It delegates to Title rather than re-deriving: Title prefers the document's
+// H1 and only then falls back to the first H2. Walking Sections for the first
+// heading directly is the ox-1tjj.8 bug — Parse splits on "## " only, so an H1
+// lives in the Heading=="" preamble section and is invisible to that walk,
+// which saved "# Real Title" + "## 1. Context" under "1. Context".
+func PlanTopic(in Input) string {
+	if t := strings.TrimSpace(in.Topic); t != "" {
+		return t
+	}
+	return Title(in)
+}
+
 // Slugify derives a kebab-case slug from a topic/title. Lowercases, strips
 // punctuation, keeps the first slugWordCap meaningful words, then trims any
 // trailing stopword(s) — interior stopwords are left alone. An empty,
