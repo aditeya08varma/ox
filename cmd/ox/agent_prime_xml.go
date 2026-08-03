@@ -413,14 +413,29 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 			}
 			sb.WriteString("| Slug | Name | Topics | Mounted at |\n")
 			sb.WriteString("|------|------|--------|------------|\n")
+			anyPending := false
 			for _, b := range output.KB {
 				topics := strings.Join(b.Topics, ", ")
 				path := b.Path
 				if path == "" {
 					path = "(not mounted yet)"
+					anyPending = true
 				}
 				fmt.Fprintf(&sb, "| #%s | %s | %s | %s |\n",
 					escapeXML(b.Slug), escapeXML(b.Name), escapeXML(topics), escapeXML(path))
+			}
+			// The guidance above tells the agent to read AGENTS.md at the
+			// bubble's local path. That is a dead end for any row without a
+			// checkout, so explain it rather than let the agent discover a
+			// missing dir. Keyed on ANY pending row, not "none mounted" — in
+			// a mixed catalog the agent can just as easily pick the pending
+			// bubble, and one mounted sibling is no reason to drop the
+			// explanation. The commands stay listed either way: both are
+			// API-backed and work unmounted, and `ox kb describe` is exactly
+			// how you learn where a bubble will land once the clone finishes.
+			if anyPending {
+				sb.WriteString("Rows marked `(not mounted yet)` have no on-disk files — the daemon clones bubbles in the background. ")
+				sb.WriteString("`ox kb list` / `ox kb describe` work for them now; the files appear once the clone lands.\n")
 			}
 			sb.WriteString("</knowledge-bubbles>\n")
 			bk.charge(prime.BudgetSourceSageox)

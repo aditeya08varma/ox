@@ -477,6 +477,7 @@ func TestRenderKBDescribe_HumanOutput(t *testing.T) {
 		ViewerRole:     "member",
 		Manager:        "usr_admin",
 		LastActivityAt: "2026-07-27T10:00:00Z",
+		Steering:       "Focus on deploy tooling and incident retros",
 	}
 
 	var buf bytes.Buffer
@@ -494,6 +495,10 @@ func TestRenderKBDescribe_HumanOutput(t *testing.T) {
 		"active",
 		"member",
 		"usr_admin", // admin row (caller is not the admin)
+		// the curator steering prompt: how team conversations were
+		// synthesized into this bubble. `ox agent prime` tells AI coworkers
+		// to read it here, so a dropped row breaks that promise.
+		"Focus on deploy tooling and incident retros",
 		"2026-07-27T10:00:00Z",
 		"/local/kb/kb_01HXYZ",
 	} {
@@ -522,7 +527,7 @@ func TestRenderKBDescribe_EmptyOptionalRowsOmitted(t *testing.T) {
 	renderKBDescribe(&buf, bubble, "", "https://example.invalid")
 	got := buf.String()
 
-	for _, absent := range []string{"description:", "topics:", "last_activity:", "local_path:", "admin:"} {
+	for _, absent := range []string{"description:", "topics:", "steering:", "last_activity:", "local_path:", "admin:"} {
 		if strings.Contains(got, absent) {
 			t.Errorf("empty field %q must be omitted, got:\n%s", absent, got)
 		}
@@ -576,5 +581,113 @@ func TestKBDescribeCmd_RegistrationOnParent(t *testing.T) {
 		if !present {
 			t.Errorf("kb parent missing documented alias %q", alias)
 		}
+	}
+}
+
+// TestRenderKBDescribe_StripsTerminalControlSequences verifies every
+// server-provided field is sanitized before it reaches the terminal, not
+// just the one that prompted the fix.
+//
+// A knowledge bubble is untrusted, multi-author, server-stored content —
+// the premise of the whole KB feature. Without sanitizing, a hostile or
+// compromised bubble could repaint the screen, forge additional key/value
+// rows, retitle the window, or smuggle an OSC 52 clipboard write into a
+// user who merely ran a read-only `ox kb describe`.
+//
+// Failure prevented: a new row added to renderKBDescribe that passes raw
+// server text through, reopening the hole on a different field.
+func TestRenderKBDescribe_StripsTerminalControlSequences(t *testing.T) {
+	t.Parallel()
+
+	const esc = "\x1b"
+	bubble := &api.KB{
+		KBID:           "kb_evil" + esc + "[31m",
+		KBType:         api.KBTypeTeam,
+		Slug:           "platform" + esc + "[2J",
+		Name:           "Platform" + esc + "]0;pwned\x07",
+		Description:    "desc" + esc + "]52;c;ZXZpbA==\x07",
+		Topics:         []string{"infra" + esc + "[1m", "deploys"},
+		LifecycleState: "active",
+		ViewerRole:     "member",
+		Manager:        "usr" + esc + "[0m",
+		LastActivityAt: "2026-07-27T10:00:00Z",
+		Steering:       "steer" + esc + "]8;;https://evil.example\x07link\x1b]8;;\x07",
+	}
+
+	var buf bytes.Buffer
+	renderKBDescribe(&buf, bubble, "/local/kb/kb_evil", "https://example.invalid")
+	got := buf.String()
+
+	// The renderer applies its own lipgloss styling to KEYS, so the output
+	// legitimately contains escapes. Assert on the VALUES instead: none of
+	// the injected payloads may survive anywhere in the output.
+	for _, payload := range []string{"]0;pwned", "]52;c;", "]8;;https://evil.example", "[2J"} {
+		if strings.Contains(got, payload) {
+			t.Errorf("control payload %q survived rendering:\n%q", payload, got)
+		}
+	}
+
+	// ...and the printable text around them must still render.
+	for _, want := range []string{"kb_evil", "platform", "Platform", "desc", "infra", "steer", "link"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("printable text %q was lost during sanitization:\n%q", want, got)
+		}
+	}
+}
+
+// TestRenderKBDescribe_MultilineValueStaysInsideItsRow verifies a
+// multi-line untrusted value renders as indented continuation lines under
+// its own row rather than escaping to column zero.
+//
+// Steering prompts are multi-line in practice. A continuation at column
+// zero visually reads as a new key/value row or a standalone instruction —
+// which is how untrusted bubble text forges output it was never given.
+//
+// Failure prevented: reverting the row helper to a single Fprintf, where
+// only the first line gets the label and indent.
+func TestRenderKBDescribe_MultilineValueStaysInsideItsRow(t *testing.T) {
+	t.Parallel()
+
+	bubble := &api.KB{
+		KBID:     "kb_multi",
+		KBType:   api.KBTypeTeam,
+		Slug:     "platform",
+		Steering: "first line\nsecond line\n\nlocal_path:      /etc/passwd",
+	}
+
+	var buf bytes.Buffer
+	renderKBDescribe(&buf, bubble, "/real/path", "https://example.invalid")
+
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, "  ") {
+			t.Errorf("every rendered line must be indented inside its row, got %q\nfull:\n%s", line, buf.String())
+		}
+	}
+
+	got := buf.String()
+	// all three substantive lines survive...
+	for _, want := range []string{"first line", "second line", "/etc/passwd"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("multiline content %q was lost:\n%s", want, got)
+		}
+	}
+	// ...but the forged text never occupies the KEY column. Real rows put
+	// their key at columns 2-18; a continuation is pushed past that into
+	// the value column, so it cannot be read as a key/value row of its own.
+	for _, line := range strings.Split(got, "\n") {
+		if !strings.Contains(line, "/etc/passwd") {
+			continue
+		}
+		keyCol := line[:min(len(line), 2+kbRowKeyWidth)]
+		if strings.TrimSpace(keyCol) != "" {
+			t.Errorf("forged content reached the key column: %q", line)
+		}
+	}
+	// the real local_path row is still present and correct.
+	if !strings.Contains(got, "/real/path") {
+		t.Errorf("genuine local_path row missing:\n%s", got)
 	}
 }
