@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/gitserver"
+	"github.com/sageox/ox/internal/manifest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -66,7 +67,7 @@ func TestTwoPhaseClone_BasicTeamContext(t *testing.T) {
 	})
 
 	dest := filepath.Join(t.TempDir(), "clone-basic")
-	result, err := gitserver.TwoPhaseClone(context.Background(), cloneURL, dest)
+	result, err := gitserver.TwoPhaseClone(context.Background(), cloneURL, dest, manifest.RepoKindTeamContext)
 	require.NoError(t, err)
 
 	// root file materialized via /* pattern
@@ -109,7 +110,7 @@ func TestTwoPhaseClone_PullRebaseAfterClone(t *testing.T) {
 	})
 
 	dest := filepath.Join(t.TempDir(), "clone-pull")
-	_, err := gitserver.TwoPhaseClone(context.Background(), cloneURL, dest)
+	_, err := gitserver.TwoPhaseClone(context.Background(), cloneURL, dest, manifest.RepoKindTeamContext)
 	require.NoError(t, err)
 
 	gitConfig(t, dest)
@@ -141,7 +142,7 @@ func TestTwoPhaseClone_NoManifest_FallsBack(t *testing.T) {
 	})
 
 	dest := filepath.Join(t.TempDir(), "clone-no-manifest")
-	result, err := gitserver.TwoPhaseClone(context.Background(), cloneURL, dest)
+	result, err := gitserver.TwoPhaseClone(context.Background(), cloneURL, dest, manifest.RepoKindTeamContext)
 	require.NoError(t, err)
 
 	require.NotNil(t, result.ManifestConfig)
@@ -167,7 +168,7 @@ func TestTwoPhaseClone_LFSConfigStripped(t *testing.T) {
 	})
 
 	dest := filepath.Join(t.TempDir(), "clone-lfs")
-	_, err := gitserver.TwoPhaseClone(context.Background(), cloneURL, dest)
+	_, err := gitserver.TwoPhaseClone(context.Background(), cloneURL, dest, manifest.RepoKindTeamContext)
 	require.NoError(t, err)
 
 	gitConfigPath := filepath.Join(dest, ".git", "config")

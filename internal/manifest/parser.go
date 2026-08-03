@@ -164,7 +164,7 @@ func Parse(r io.Reader) (*ManifestConfig, error) {
 func ParseFile(path string, kind RepoKind) *ManifestConfig {
 	f, err := os.Open(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, os.ErrNotExist) {
 			slog.Warn("manifest: file not found, using fallback", "path", path, "kind", string(kind))
 		} else {
 			slog.Warn("manifest: cannot open file, using fallback", "path", path, "kind", string(kind), "error", err)

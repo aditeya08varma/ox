@@ -40,6 +40,21 @@ func TestFallbackConfigFor_TeamContext(t *testing.T) {
 		"team-context fallback must not include the bubble knowledge/ tree")
 }
 
+// A RepoKind with no case in fallbackIncludesFor must panic, not silently
+// degrade to some default set. Silent degradation is the exact mechanism of
+// the bug this file fixes — the next kind added without a case would inherit
+// the wrong tree and, as before, announce it only in a log line.
+func TestFallbackConfigFor_UnknownKindPanics(t *testing.T) {
+	t.Parallel()
+	for _, kind := range []RepoKind{"", "ledger", "TEAM_CONTEXT"} {
+		t.Run(string(kind), func(t *testing.T) {
+			t.Parallel()
+			assert.Panics(t, func() { FallbackConfigFor(kind) },
+				"unrecognized kind %q must panic rather than fall back to a guess", kind)
+		})
+	}
+}
+
 func TestFallbackConfigFor_ReturnsFreshCopy(t *testing.T) {
 	t.Parallel()
 	for _, kind := range []RepoKind{RepoKindKB, RepoKindTeamContext} {
