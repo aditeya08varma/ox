@@ -321,10 +321,10 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 	} else {
 		// read manifest before pull to get auto-resolve prefixes. The
 		// manifest is already on disk from clone (TwoPhaseClone materializes
-		// .sageox/ in phase 1). If missing/unparseable, ParseFile returns
-		// FallbackConfig which already includes DefaultResolveRules.
+		// .sageox/ in phase 1). If missing/unparseable, ParseFile returns the
+		// kb fallback config, which already includes DefaultResolveRules.
 		manifestPath := filepath.Join(target, ".sageox", "sync.manifest")
-		mCfg := manifest.ParseFile(manifestPath)
+		mCfg := manifest.ParseFile(manifestPath, manifest.RepoKindKB)
 
 		// existing clone — pull via the shared managed-repo pipeline so we
 		// reuse fetch dedup, lock-file cleanup, kb merge=union pre-flight,
@@ -365,7 +365,7 @@ func (s *SyncScheduler) reconcileBubble(ctx context.Context, b api.KB) {
 		// they're only on disk now. Without this re-parse + reapply, kb
 		// would silently drift from team-context sync behavior, which
 		// reapplies sparse on every pull.
-		postPullCfg := manifest.ParseFile(manifestPath)
+		postPullCfg := manifest.ParseFile(manifestPath, manifest.RepoKindKB)
 		_ = applySparseFromManifest(ctx, target, postPullCfg, s.logger)
 	}
 
@@ -417,7 +417,7 @@ func (s *SyncScheduler) cloneBubble(ctx context.Context, b api.KB, target string
 	cloneCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	if _, err := gitserver.TwoPhaseClone(cloneCtx, cloneURL, target); err != nil {
+	if _, err := gitserver.TwoPhaseClone(cloneCtx, cloneURL, target, manifest.RepoKindKB); err != nil {
 		return fmt.Errorf("kb two-phase clone failed: %w", err)
 	}
 

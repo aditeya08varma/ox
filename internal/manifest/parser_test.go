@@ -176,8 +176,8 @@ gc_interval_days 14`,
 
 func TestParseFile(t *testing.T) {
 	t.Run("missing file returns fallback with resolve rules", func(t *testing.T) {
-		cfg := ParseFile("/nonexistent/path/sync.manifest")
-		fb := FallbackConfig()
+		cfg := ParseFile("/nonexistent/path/sync.manifest", RepoKindTeamContext)
+		fb := FallbackConfigFor(RepoKindTeamContext)
 		assertStringSliceMatch(t, "includes", cfg.Includes, fb.Includes)
 		if len(cfg.ResolveRules) == 0 {
 			t.Error("fallback config should include default resolve rules")
@@ -193,7 +193,7 @@ func TestParseFile(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		cfg := ParseFile(path)
+		cfg := ParseFile(path, RepoKindTeamContext)
 		if cfg.Version != 1 {
 			t.Errorf("version = %d, want 1", cfg.Version)
 		}
@@ -209,8 +209,8 @@ func TestParseFile(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		cfg := ParseFile(path)
-		fb := FallbackConfig()
+		cfg := ParseFile(path, RepoKindTeamContext)
+		fb := FallbackConfigFor(RepoKindTeamContext)
 		assertStringSliceMatch(t, "includes", cfg.Includes, fb.Includes)
 	})
 
@@ -221,8 +221,8 @@ func TestParseFile(t *testing.T) {
 			t.Fatal(err)
 		}
 
-		cfg := ParseFile(path)
-		fb := FallbackConfig()
+		cfg := ParseFile(path, RepoKindTeamContext)
+		fb := FallbackConfigFor(RepoKindTeamContext)
 		assertStringSliceMatch(t, "includes", cfg.Includes, fb.Includes)
 	})
 }
@@ -240,8 +240,8 @@ func TestComputeSparseSet(t *testing.T) {
 				Includes: []string{".sageox/", "memory/", "data/"},
 				Denies:   []string{"data/"},
 			},
-			want:     []string{"/*", "!/*/", ".sageox/", "memory/"},
-			wantNone: []string{"data/"},
+			want:     []string{"/*", "!/*/", "/.sageox/", "/memory/"},
+			wantNone: []string{"/data/", "data/"},
 		},
 		{
 			name: "deny parent blocks child include",
@@ -250,14 +250,14 @@ func TestComputeSparseSet(t *testing.T) {
 				Denies:   []string{"data/"},
 			},
 			want:     []string{"/*", "!/*/"},
-			wantNone: []string{"data/slack/"},
+			wantNone: []string{"/data/slack/", "data/slack/"},
 		},
 		{
 			name: "no denies passes all includes",
 			cfg: &ManifestConfig{
 				Includes: []string{".sageox/", "SOUL.md", "memory/"},
 			},
-			want: []string{"/*", "!/*/", ".sageox/", "SOUL.md", "memory/"},
+			want: []string{"/*", "!/*/", "/.sageox/", "/SOUL.md", "/memory/"},
 		},
 		{
 			name: "nil config",
@@ -271,7 +271,7 @@ func TestComputeSparseSet(t *testing.T) {
 				Denies:   []string{"data/secrets/"},
 			},
 			want:     []string{"/*", "!/*/"},
-			wantNone: []string{"data/"},
+			wantNone: []string{"/data/", "data/"},
 		},
 		{
 			name: "exact file deny blocks matching include",
@@ -279,8 +279,8 @@ func TestComputeSparseSet(t *testing.T) {
 				Includes: []string{"README.md", ".sageox/"},
 				Denies:   []string{"README.md"},
 			},
-			want:     []string{"/*", "!/*/", ".sageox/"},
-			wantNone: []string{"README.md"},
+			want:     []string{"/*", "!/*/", "/.sageox/"},
+			wantNone: []string{"/README.md", "README.md"},
 		},
 	}
 
@@ -301,7 +301,7 @@ func TestComputeSparseSet(t *testing.T) {
 }
 
 func TestFallbackConfig(t *testing.T) {
-	cfg := FallbackConfig()
+	cfg := FallbackConfigFor(RepoKindTeamContext)
 
 	if cfg.Version != SupportedVersion {
 		t.Errorf("version = %d, want %d", cfg.Version, SupportedVersion)
@@ -320,7 +320,7 @@ func TestFallbackConfig(t *testing.T) {
 
 	// verify it returns a copy
 	cfg.Includes[0] = "modified"
-	cfg2 := FallbackConfig()
+	cfg2 := FallbackConfigFor(RepoKindTeamContext)
 	if cfg2.Includes[0] == "modified" {
 		t.Error("FallbackConfig should return a fresh copy")
 	}
