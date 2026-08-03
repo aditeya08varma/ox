@@ -2,6 +2,7 @@ package carts
 
 import (
 	"errors"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -219,6 +220,45 @@ func assertFile(t *testing.T, path, want string) {
 	}
 	if string(got) != want {
 		t.Errorf("%s = %q, want %q", filepath.Base(path), got, want)
+	}
+}
+
+// A probe must fail fast against a socket that accepts the connection but never
+// completes the MySQL handshake. Without DSN/context timeouts the Ping blocks
+// indefinitely, blowing past every caller's deadline — and since
+// runningServerPort budgets 2s, it would hang every ox carts invocation.
+func TestPingServerTimesOutOnSilentPeer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	// Accept and then say nothing, holding the connection open.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				<-done
+				conn.Close()
+			}()
+		}
+	}()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+	start := time.Now()
+	if err := pingServer("127.0.0.1", port); err == nil {
+		t.Fatal("expected an error probing a peer that never completes the handshake")
+	}
+	// Generous ceiling: the point is that it returns at all, promptly, rather
+	// than blocking until some caller's much larger deadline expires.
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Errorf("probe took %v; expected it to give up near %v", elapsed, probeTimeout)
 	}
 }
 

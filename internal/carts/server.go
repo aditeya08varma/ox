@@ -1,6 +1,7 @@
 package carts
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"net"
@@ -219,16 +220,31 @@ func allocateEphemeralPort(host string) (int, error) {
 // without standing up a real dolt sql-server to satisfy a MySQL handshake.
 var probeServer = pingServer
 
+// probeTimeout bounds a single liveness probe. Every caller polls on a deadline,
+// so an unbounded Ping against a peer that accepts the TCP connection but never
+// completes the MySQL handshake would block past that deadline — and in
+// runningServerPort, which budgets 2s, would hang every ox carts invocation.
+// 1s is generous for a loopback handshake and keeps deadline overshoot bounded.
+const probeTimeout = time.Second
+
 // pingServer reports whether a dolt sql-server accepts an authenticated
 // connection on host:port right now. Connects as root — dolt provisions no other
 // account, and the git author name is not a SQL user.
 func pingServer(host string, port int) error {
-	db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(%s:%d)/", host, port))
+	dsn := fmt.Sprintf("root@tcp(%s:%d)/?timeout=%s&readTimeout=%s&writeTimeout=%s",
+		host, port, probeTimeout, probeTimeout, probeTimeout)
+	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	return db.Ping()
+
+	// Bound the whole probe, not just the socket operations: the driver's
+	// timeouts cover dial/read/write individually, while a context deadline caps
+	// the call itself including any retry inside database/sql.
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	defer cancel()
+	return db.PingContext(ctx)
 }
 
 // waitForServer polls until the server accepts connections.
