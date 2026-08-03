@@ -255,10 +255,19 @@ func TestPingServerTimesOutOnSilentPeer(t *testing.T) {
 	if err := pingServer("127.0.0.1", port); err == nil {
 		t.Fatal("expected an error probing a peer that never completes the handshake")
 	}
-	// Generous ceiling: the point is that it returns at all, promptly, rather
-	// than blocking until some caller's much larger deadline expires.
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Errorf("probe took %v; expected it to give up near %v", elapsed, probeTimeout)
+	elapsed := time.Since(start)
+
+	// The ceiling is probeTimeout plus scheduling slack, NOT an arbitrary large
+	// number: the probe runs on runningServerPort's reuseProbeBudget, so a
+	// regression that merely slowed the probe to just under a loose ceiling would
+	// still blow that budget and stall every carts command.
+	ceiling := probeTimeout + 750*time.Millisecond
+	if ceiling >= reuseProbeBudget {
+		t.Fatalf("test ceiling %v must stay below the reuse budget %v", ceiling, reuseProbeBudget)
+	}
+	if elapsed > ceiling {
+		t.Errorf("probe took %v; expected it to give up near %v (ceiling %v, reuse budget %v)",
+			elapsed, probeTimeout, ceiling, reuseProbeBudget)
 	}
 }
 

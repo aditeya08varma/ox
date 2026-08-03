@@ -63,7 +63,7 @@ func runningServerPort(cartsDir string) (int, error) {
 	// A live PID is not proof the server is ours — the OS recycles PIDs, so a
 	// stale file can name an unrelated process. Confirm something is actually
 	// serving on the recorded port before handing it back.
-	if err := waitForServer("127.0.0.1", port, 2*time.Second); err != nil {
+	if err := waitForServer("127.0.0.1", port, reuseProbeBudget); err != nil {
 		return 0, fmt.Errorf("server process %d is not serving port %d: %w", pid, port, err)
 	}
 	return port, nil
@@ -226,6 +226,12 @@ var probeServer = pingServer
 // runningServerPort, which budgets 2s, would hang every ox carts invocation.
 // 1s is generous for a loopback handshake and keeps deadline overshoot bounded.
 const probeTimeout = time.Second
+
+// reuseProbeBudget caps how long runningServerPort spends confirming a recorded
+// server is really serving. It sits on the fast path of every carts command, so
+// it must stay comfortably above probeTimeout (one probe has to fit) and low
+// enough that a dead record costs a short pause rather than a visible stall.
+const reuseProbeBudget = 2 * time.Second
 
 // pingServer reports whether a dolt sql-server accepts an authenticated
 // connection on host:port right now. Connects as root — dolt provisions no other
