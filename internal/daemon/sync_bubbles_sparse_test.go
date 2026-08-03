@@ -104,3 +104,105 @@ func TestSyncBubbles_Pull_ReappliesSparseFromManifest(t *testing.T) {
 	assert.FileExists(t, filepath.Join(target, "also", "bar.md"),
 		"also/ was added to the manifest after clone — must materialize on next sync (the fix)")
 }
+
+// TestSyncBubbles_UnparseableManifest_MaterializesKnowledgeTree verifies that
+// a bubble whose sync.manifest declares nothing still gets a bubble-shaped
+// checkout — knowledge/ present, team-context paths absent — on clone AND
+// after a pull reapplies sparse.
+//
+// This reproduces the production failure: the server seeds new bubbles with a
+// comment-only manifest ("# managed by SageOx KB watchman"), which has no
+// `version` directive, so ParseFile falls back. Before the fix the fallback
+// was the team-context include set for every repo kind, so knowledge/ was
+// never in the sparse set and the entire curated tree stayed on disk-invisible
+// skip-worktree entries.
+//
+// The class of failure under test is "manifest unusable → checkout silently
+// takes the wrong repo's shape", so the fixture uses the real seeded content
+// rather than an empty file, and asserts both directions: the bubble tree
+// appears, and no team-context tree leaks in.
+//
+// Failure prevented: bubbles sync "successfully" for weeks while every
+// knowledge document is missing from disk, with only a slog.Warn to show it.
+func TestSyncBubbles_UnparseableManifest_MaterializesKnowledgeTree(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real git operations + two sync passes")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+	kbTestEnv(t)
+	s, _ := kbTestScheduler(t)
+
+	bareDir, workDir := initBareRepo(t, "kbfallback")
+
+	// verbatim manifest the server seeds into a new bubble: a comment, no
+	// version directive, no includes. Parse rejects it and ParseFile falls back.
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, ".sageox"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, ".sageox", "sync.manifest"),
+		[]byte("# managed by SageOx KB watchman\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, ".sageox", "kb.yaml"),
+		[]byte("schema_version: 1\nkb_type: custom\n"), 0o644))
+
+	// bubble shape: root AGENTS.md + a curated knowledge/ tree. knowledge/agents.md
+	// is deliberately included — under the old bare "AGENTS.md" sparse pattern it
+	// was the ONE knowledge file that materialized (gitignore patterns without a
+	// slash match at any depth), which made a total failure look partial.
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte("root\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, "knowledge"), 0o755))
+	knowledgeFiles := []string{"MANIFEST.md", "agents.md", "architecture.md", "operations.md"}
+	for _, name := range knowledgeFiles {
+		require.NoError(t, os.WriteFile(filepath.Join(workDir, "knowledge", name), []byte(name+"\n"), 0o644))
+	}
+	// a team-context-shaped path that must NOT be pulled into a bubble checkout
+	require.NoError(t, os.MkdirAll(filepath.Join(workDir, "discussions"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "discussions", "leak.md"), []byte("leak\n"), 0o644))
+
+	require.NoError(t, exec.Command("git", "-C", workDir, "add", ".").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "commit", "-m", "seed bubble with comment-only manifest").Run())
+	require.NoError(t, exec.Command("git", "-C", workDir, "push", "origin", "HEAD:main").Run())
+
+	bubble := api.KB{
+		KBID:    "kb_fallback_shape",
+		KBType:  api.KBTypeTeam,
+		Slug:    "fallback-shape",
+		RepoURL: "file://" + bareDir,
+	}
+	s.SetKBBubbleListerFactory(func(_, _ string) KBBubbleLister {
+		return &fakeKBLister{bubbles: []api.KB{bubble}}
+	})
+
+	// --- clone pass ---
+	s.syncBubbles(context.Background())
+	target := paths.KBDir(endpoint.Get(), bubble.KBID)
+	require.DirExists(t, filepath.Join(target, ".git"), "first sync must clone the bubble")
+
+	assertBubbleShape := func(t *testing.T, stage string) {
+		t.Helper()
+		for _, name := range knowledgeFiles {
+			assert.FileExists(t, filepath.Join(target, "knowledge", name),
+				"%s: knowledge/%s must materialize from the kb fallback include set", stage, name)
+		}
+		assert.FileExists(t, filepath.Join(target, ".sageox", "sync.manifest"),
+			"%s: .sageox/ must stay in the sparse set or the next pull cannot re-read the manifest", stage)
+		assert.FileExists(t, filepath.Join(target, "AGENTS.md"), "%s: root AGENTS.md must materialize", stage)
+
+		_, err := os.Stat(filepath.Join(target, "discussions", "leak.md"))
+		assert.True(t, os.IsNotExist(err),
+			"%s: discussions/ is team-context-only and must not leak into a bubble checkout", stage)
+	}
+
+	assertBubbleShape(t, "after clone")
+
+	// --- pull pass: sparse is recomputed from the same unparseable manifest on
+	// every pull, so a wrong fallback would re-hide knowledge/ here even if the
+	// clone happened to get it right. ---
+	fetchHead := filepath.Join(target, ".git", "FETCH_HEAD")
+	if info, err := os.Stat(fetchHead); err == nil {
+		past := info.ModTime().Add(-10 * time.Minute)
+		_ = os.Chtimes(fetchHead, past, past)
+	}
+	s.syncBubbles(context.Background())
+
+	assertBubbleShape(t, "after pull")
+}

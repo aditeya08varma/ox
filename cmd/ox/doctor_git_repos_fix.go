@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/manifest"
 	"github.com/sageox/ox/internal/paths"
 )
 
@@ -604,7 +605,7 @@ func cloneViaDaemon(cloneURL, targetPath, repoType, endpointURL string) error {
 		if creds == nil {
 			return fmt.Errorf("direct clone failed: %w", gitserver.ErrNoCredentials)
 		}
-		result, err := gitserver.TwoPhaseClone(ctx, cloneURL, targetPath)
+		result, err := gitserver.TwoPhaseClone(ctx, cloneURL, targetPath, manifest.RepoKindTeamContext)
 		if err != nil {
 			return fmt.Errorf("direct clone failed: %w", err)
 		}

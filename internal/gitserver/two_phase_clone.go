@@ -30,13 +30,18 @@ type TwoPhaseCloneResult struct {
 // applies to every production code path because none of them flip the var.
 var TestAllowFileTransport bool
 
-// TwoPhaseClone performs a two-phase partial clone for team context repos.
+// TwoPhaseClone performs a two-phase partial clone for a manifest-driven
+// repo — team contexts and knowledge bubbles both use it.
 //
 // Phase 1: Clone with --filter=blob:none --depth=1 --sparse --no-checkout,
 // materialize only .sageox/ to read the manifest.
 //
 // Phase 2: Read manifest, compute sparse set, apply sparse checkout to
 // materialize only allowed paths. Unshallow for pull --rebase compatibility.
+//
+// kind selects the fallback include set for phase 2 when the repo's manifest
+// is missing or unparseable. It must match the repo being cloned: a bubble
+// cloned as RepoKindTeamContext gets a checkout with no knowledge/ tree.
 //
 // This function is used by both the daemon (normal path) and the CLI
 // (doctor fallback when daemon unavailable).
@@ -55,7 +60,7 @@ var TestAllowFileTransport bool
 //     1. SparseCheckoutDirectories uses --no-cone mode (ox uses file-level patterns)
 //     2. go-git network performance vs native git for clone
 //     3. credential injection (URL-embedded tokens) works correctly
-func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseCloneResult, error) {
+func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string, kind manifest.RepoKind) (*TwoPhaseCloneResult, error) {
 	// phase 1: minimal clone — trees only, no blobs.
 	// Set cmd.Dir to the parent of repoPath so git doesn't fail with
 	// "Unable to read current working directory" when the daemon's CWD
@@ -106,28 +111,13 @@ func TwoPhaseClone(ctx context.Context, cloneURL, repoPath string) (*TwoPhaseClo
 
 	// phase 2: read manifest and materialize declared paths
 	manifestPath := filepath.Join(repoPath, ".sageox", "sync.manifest")
-	cfg := manifest.ParseFile(manifestPath)
+	cfg := manifest.ParseFile(manifestPath, kind)
 
 	sparsePaths := manifest.ComputeSparseSet(cfg)
 	if len(sparsePaths) == 0 {
-		sparsePaths = []string{".sageox/"}
+		sparsePaths = []string{"/.sageox/"}
 	}
-
-	// ensure .sageox/ is always in the sparse set.
-	// MUST be appended (not prepended) because ComputeSparseSet returns
-	// patterns like ["/*", "!/*/", ...] where !/*/  excludes all root dirs.
-	// In --no-cone mode (gitignore semantics), later patterns override earlier
-	// ones, so .sageox/ must come AFTER !/*/ to re-include it.
-	hasSageox := false
-	for _, p := range sparsePaths {
-		if p == ".sageox/" || p == ".sageox" {
-			hasSageox = true
-			break
-		}
-	}
-	if !hasSageox {
-		sparsePaths = append(sparsePaths, ".sageox/")
-	}
+	sparsePaths = manifest.EnsureSageoxInclude(sparsePaths)
 
 	args := append([]string{"sparse-checkout", "set", "--no-cone"}, sparsePaths...)
 	if _, err := gitutil.RunGit(ctx, repoPath, args...); err != nil {

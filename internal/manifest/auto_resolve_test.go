@@ -90,7 +90,7 @@ func TestDefaultResolveRules_CoversDataDir(t *testing.T) {
 
 func TestFallbackConfig_IncludesDefaultResolveRules(t *testing.T) {
 	t.Parallel()
-	cfg := FallbackConfig()
+	cfg := FallbackConfigFor(RepoKindTeamContext)
 	assert.Equal(t, DefaultResolveRules, cfg.ResolveRules)
 }
 

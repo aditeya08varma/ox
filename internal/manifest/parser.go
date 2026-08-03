@@ -155,29 +155,33 @@ func Parse(r io.Reader) (*ManifestConfig, error) {
 }
 
 // ParseFile parses a manifest from a file path. On any error (missing
-// file, parse error, unknown version), it returns the fallback config
-// and logs a warning.
-func ParseFile(path string) *ManifestConfig {
+// file, parse error, unknown version), it returns the fallback config for
+// kind and logs a warning.
+//
+// kind is required and must match the repo being parsed. Falling back to the
+// wrong kind's include set is silent and total — the checkout simply omits an
+// entire tree — so every warning below names the kind it fell back to.
+func ParseFile(path string, kind RepoKind) *ManifestConfig {
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			slog.Warn("manifest: file not found, using fallback", "path", path)
+			slog.Warn("manifest: file not found, using fallback", "path", path, "kind", string(kind))
 		} else {
-			slog.Warn("manifest: cannot open file, using fallback", "path", path, "error", err)
+			slog.Warn("manifest: cannot open file, using fallback", "path", path, "kind", string(kind), "error", err)
 		}
-		return FallbackConfig()
+		return FallbackConfigFor(kind)
 	}
 	defer f.Close()
 
 	cfg, err := Parse(f)
 	if err != nil {
-		slog.Warn("manifest: parse failed, using fallback", "path", path, "error", err)
-		return FallbackConfig()
+		slog.Warn("manifest: parse failed, using fallback", "path", path, "kind", string(kind), "error", err)
+		return FallbackConfigFor(kind)
 	}
 
 	if len(cfg.Includes) == 0 {
-		slog.Warn("manifest: no include directives, using fallback", "path", path)
-		return FallbackConfig()
+		slog.Warn("manifest: no include directives, using fallback", "path", path, "kind", string(kind))
+		return FallbackConfigFor(kind)
 	}
 
 	return cfg
@@ -190,6 +194,10 @@ func ParseFile(path string) *ManifestConfig {
 // (like .gitattributes) without pulling in root-level directories. Specific
 // directories from includes are then re-added. This ensures root-level
 // control files are materialized in sparse-checkout --no-cone mode.
+//
+// Every include is root-anchored on the way out (see anchorPattern) so a
+// manifest entry names exactly one path in the repo, never a same-named path
+// nested somewhere else.
 func ComputeSparseSet(cfg *ManifestConfig) []string {
 	if cfg == nil {
 		return nil
@@ -219,11 +227,50 @@ func ComputeSparseSet(cfg *ManifestConfig) []string {
 			}
 		}
 		if !denied {
-			result = append(result, inc)
+			result = append(result, anchorPattern(inc))
 		}
 	}
 
 	return result
+}
+
+// anchorPattern pins a manifest include to the repo root.
+//
+// --no-cone sparse-checkout uses gitignore matching semantics, where a
+// pattern whose only slash is trailing (or which has no slash at all) matches
+// at ANY depth. So a bare "AGENTS.md" also matched knowledge/agents.md — on a
+// case-insensitive filesystem, no less — leaking a single file out of an
+// otherwise-excluded directory and making a total sparse failure look partial.
+//
+// A leading "/" makes the pattern relative to the repo root. Patterns with an
+// interior slash are already root-relative under the same rules, so anchoring
+// them is a semantic no-op; we still normalize for a uniform sparse file.
+func anchorPattern(p string) string {
+	if p == "" || strings.HasPrefix(p, "/") {
+		return p
+	}
+	return "/" + p
+}
+
+// EnsureSageoxInclude appends the control-plane ".sageox/" pattern to paths
+// unless some form of it is already present.
+//
+// .sageox/ holds kb.yaml and sync.manifest itself. Dropping it from the
+// sparse set hides the manifest, so the next pull's sparse reapply has
+// nothing to read and the checkout can never recover on its own. Clone and
+// doctor-repair both need this guarantee, so it lives here rather than being
+// re-implemented at each call site.
+func EnsureSageoxInclude(paths []string) []string {
+	for _, p := range paths {
+		switch p {
+		case ".sageox", ".sageox/", "/.sageox", "/.sageox/":
+			return paths
+		}
+	}
+	// appended, never prepended: ComputeSparseSet emits "!/*/" to drop all
+	// root-level directories, and in --no-cone mode later patterns override
+	// earlier ones, so .sageox/ must come after it to be re-included.
+	return append(paths, "/.sageox/")
 }
 
 // pathOverlaps returns true if a and b overlap: same path, or one is a

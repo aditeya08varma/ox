@@ -1,8 +1,32 @@
 package manifest
 
-// fallbackIncludes is the hardcoded sparse set used when the manifest
-// is missing or unparseable.
-var fallbackIncludes = []string{
+import "log/slog"
+
+// RepoKind identifies which kind of ox-synced repo a manifest belongs to.
+//
+// It selects the fallback include set used when .sageox/sync.manifest is
+// missing or unparseable. Team contexts and knowledge bubbles have different
+// on-disk shapes, so a single shared fallback silently checks out the wrong
+// tree for one of them — which is exactly what happened to bubbles: they
+// inherited the team-context set and never materialized knowledge/.
+//
+// Callers must pass a kind explicitly. There is deliberately no "default"
+// repo kind: an unset value is a plumbing bug, not a supported input.
+type RepoKind string
+
+const (
+	// RepoKindTeamContext is a team-context repo — SOUL.md, docs/,
+	// discussions/, coworkers/, and the team memory tree.
+	RepoKindTeamContext RepoKind = "team_context"
+
+	// RepoKindKB is a knowledge bubble — control-plane metadata plus the
+	// curated knowledge/ tree the curator writes.
+	RepoKindKB RepoKind = "kb"
+)
+
+// teamContextFallbackIncludes is the hardcoded sparse set for team-context
+// repos when the manifest is missing or unparseable.
+var teamContextFallbackIncludes = []string{
 	".sageox/",
 	"SOUL.md",
 	"TEAM.md",
@@ -15,12 +39,40 @@ var fallbackIncludes = []string{
 	"agent-context/",
 }
 
-// FallbackConfig returns a ManifestConfig with hardcoded control-plane
-// paths and sensible defaults. Used when .sageox/sync.manifest is
+// kbFallbackIncludes is the hardcoded sparse set for knowledge bubbles.
+//
+// Deliberately narrow: a bubble is control-plane metadata (.sageox/), its
+// agent-facing entry point (AGENTS.md), and the curated knowledge/ tree.
+// Nothing from the team-context shape belongs here.
+var kbFallbackIncludes = []string{
+	".sageox/",
+	"AGENTS.md",
+	"knowledge/",
+}
+
+// fallbackIncludesFor returns the include set for kind. An unrecognized kind
+// is a plumbing bug — we log loudly and fall back to the team-context set
+// rather than checking out nothing.
+func fallbackIncludesFor(kind RepoKind) []string {
+	switch kind {
+	case RepoKindKB:
+		return kbFallbackIncludes
+	case RepoKindTeamContext:
+		return teamContextFallbackIncludes
+	default:
+		slog.Warn("manifest: unknown repo kind, using team-context fallback includes",
+			"kind", string(kind))
+		return teamContextFallbackIncludes
+	}
+}
+
+// FallbackConfigFor returns a ManifestConfig with the hardcoded include set
+// for kind plus sensible defaults. Used when .sageox/sync.manifest is
 // missing, unparseable, or has an unknown version.
-func FallbackConfig() *ManifestConfig {
-	includes := make([]string, len(fallbackIncludes))
-	copy(includes, fallbackIncludes)
+func FallbackConfigFor(kind RepoKind) *ManifestConfig {
+	src := fallbackIncludesFor(kind)
+	includes := make([]string, len(src))
+	copy(includes, src)
 
 	rules := make([]ResolveRule, len(DefaultResolveRules))
 	copy(rules, DefaultResolveRules)

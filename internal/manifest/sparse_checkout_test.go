@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,9 +19,9 @@ func TestComputeSparseSet_DenyDataExcludesData(t *testing.T) {
 
 	result := ComputeSparseSet(cfg)
 
-	assert.Contains(t, result, "memory/")
-	assert.Contains(t, result, ".sageox/")
-	assert.NotContains(t, result, "data/")
+	assert.Contains(t, result, "/memory/")
+	assert.Contains(t, result, "/.sageox/")
+	assert.NotContains(t, result, "/data/")
 }
 
 func TestComputeSparseSet_IncludesRootFiles(t *testing.T) {
@@ -51,20 +52,22 @@ func TestComputeSparseSet_DenyDataBlocksDataSubdirs(t *testing.T) {
 }
 
 func TestComputeSparseSet_FallbackConfigExcludesData(t *testing.T) {
-	cfg := FallbackConfig()
+	cfg := FallbackConfigFor(RepoKindTeamContext)
 	result := ComputeSparseSet(cfg)
 
 	for _, path := range result {
-		assert.NotEqual(t, "data/", path, "fallback sparse set should not include data/")
+		// patterns are root-anchored ("/data/"), so compare on the unanchored form
+		bare := strings.TrimPrefix(path, "/")
+		assert.NotEqual(t, "data/", bare, "fallback sparse set should not include data/")
 		assert.False(t,
-			len(path) > 5 && path[:5] == "data/",
+			strings.HasPrefix(bare, "data/"),
 			"fallback sparse set should not include data/ subdirectories, got: %s", path,
 		)
 	}
 
 	// verify known fallback paths are present
-	assert.Contains(t, result, "memory/")
-	assert.Contains(t, result, ".sageox/")
+	assert.Contains(t, result, "/memory/")
+	assert.Contains(t, result, "/.sageox/")
 }
 
 // gitEnv returns environment variables that provide git identity
@@ -206,4 +209,49 @@ func TestSparseCheckout_FreshCloneExcludesData(t *testing.T) {
 	// root-level files should be present via /* pattern
 	_, err = os.Stat(filepath.Join(cloneDir, ".gitattributes"))
 	assert.NoError(t, err, ".gitattributes should exist in sparse clone (root-level files included)")
+}
+
+// TestSparseCheckout_BareFilePatternDoesNotLeakNestedMatches drives real git
+// to prove the root-anchoring fix, rather than only asserting on the pattern
+// string that ComputeSparseSet emits.
+//
+// gitignore semantics (which --no-cone sparse-checkout uses) make a pattern
+// with no interior slash match at ANY depth. An include of "AGENTS.md" for the
+// repo's root entry point therefore also matched knowledge/agents.md, pulling
+// one file out of a directory that was otherwise entirely excluded. On macOS
+// core.ignorecase=true widened it further to any case variant.
+//
+// The class of failure is "a root-level manifest entry silently materializes
+// same-named files nested elsewhere", so this covers the exact-case nested
+// match, the case-variant nested match, and confirms the intended root file
+// still lands.
+//
+// Failure prevented: a sparse set that is wrong for an entire directory looks
+// partially correct, hiding the real breakage during triage.
+func TestSparseCheckout_BareFilePatternDoesNotLeakNestedMatches(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+
+	dir := t.TempDir()
+	initGitRepo(t, dir, map[string]string{
+		"AGENTS.md":            "root entry point",
+		"knowledge/agents.md":  "nested, case-variant",
+		"knowledge/AGENTS.md":  "nested, exact case",
+		"knowledge/quality.md": "nested, unrelated name",
+		".sageox/kb.yaml":      "kb_type: custom\n",
+	})
+
+	// manifest includes the root file but NOT knowledge/
+	sparseSet := ComputeSparseSet(&ManifestConfig{Includes: []string{".sageox/", "AGENTS.md"}})
+	runGit(t, dir, append([]string{"sparse-checkout", "set", "--no-cone"}, sparseSet...)...)
+
+	assert.FileExists(t, filepath.Join(dir, "AGENTS.md"),
+		"the root AGENTS.md is what the manifest actually asked for")
+
+	for _, leaked := range []string{"knowledge/agents.md", "knowledge/AGENTS.md", "knowledge/quality.md"} {
+		_, err := os.Stat(filepath.Join(dir, filepath.FromSlash(leaked)))
+		assert.True(t, os.IsNotExist(err),
+			"%s must not materialize: knowledge/ is not in the include set", leaked)
+	}
 }

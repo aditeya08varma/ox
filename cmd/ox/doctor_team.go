@@ -483,24 +483,13 @@ func checkTeamSparseCheckout(fix bool) checkResult {
 // with root-level file patterns included.
 func repairTeamSparseCheckout(tcPath string) error {
 	manifestPath := filepath.Join(tcPath, ".sageox", "sync.manifest")
-	cfg := manifest.ParseFile(manifestPath)
+	cfg := manifest.ParseFile(manifestPath, manifest.RepoKindTeamContext)
 
 	sparsePaths := manifest.ComputeSparseSet(cfg)
 	if len(sparsePaths) == 0 {
 		return fmt.Errorf("no sparse paths computed from manifest")
 	}
-
-	// ensure .sageox/ is always in the sparse set
-	hasSageox := false
-	for _, p := range sparsePaths {
-		if p == ".sageox/" || p == ".sageox" {
-			hasSageox = true
-			break
-		}
-	}
-	if !hasSageox {
-		sparsePaths = append([]string{".sageox/"}, sparsePaths...)
-	}
+	sparsePaths = manifest.EnsureSageoxInclude(sparsePaths)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

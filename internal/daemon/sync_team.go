@@ -400,9 +400,10 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 
 	// read manifest before pull to get auto-resolve prefixes. The manifest
 	// is already on disk from the previous clone/pull. If missing, ParseFile
-	// returns FallbackConfig which includes DefaultResolveRules.
+	// returns the team-context fallback config, which includes
+	// DefaultResolveRules.
 	manifestPath := filepath.Join(path, ".sageox", "sync.manifest")
-	mCfg := manifest.ParseFile(manifestPath)
+	mCfg := manifest.ParseFile(manifestPath, manifest.RepoKindTeamContext)
 
 	result := s.pullManagedRepo(ctx, ManagedRepoPullOpts{
 		RepoPath:           path,
@@ -485,7 +486,7 @@ func (s *SyncScheduler) pullTeamContext(ctx context.Context, path string) error 
 // SyncIntervalMin. Thin wrapper over applySparseFromManifest (sync_sparse.go)
 // so kb sync and team-context sync share the same sparse application logic.
 func (s *SyncScheduler) applySparseCheckout(ctx context.Context, tcPath string) *manifest.ManifestConfig {
-	cfg := manifest.ParseFile(filepath.Join(tcPath, ".sageox", "sync.manifest"))
+	cfg := manifest.ParseFile(filepath.Join(tcPath, ".sageox", "sync.manifest"), manifest.RepoKindTeamContext)
 	_ = applySparseFromManifest(ctx, tcPath, cfg, s.logger)
 	return cfg
 }
@@ -497,7 +498,7 @@ func (s *SyncScheduler) twoPhaseClone(ctx context.Context, cloneURL, repoPath st
 		_ = progress.WriteStage("materializing", "Reading manifest and materializing files...")
 	}
 
-	result, err := gitserver.TwoPhaseClone(ctx, cloneURL, repoPath)
+	result, err := gitserver.TwoPhaseClone(ctx, cloneURL, repoPath, manifest.RepoKindTeamContext)
 	if err != nil {
 		return nil, err
 	}
