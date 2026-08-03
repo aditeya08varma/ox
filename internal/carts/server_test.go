@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -18,7 +19,7 @@ func stubProbe(t *testing.T, healthy ...int) {
 	t.Helper()
 	original := probeServer
 	t.Cleanup(func() { probeServer = original })
-	probeServer = func(_ string, port int) error {
+	probeServer = func(_ string, port int, _ time.Duration) error {
 		for _, h := range healthy {
 			if h == port {
 				return nil
@@ -104,16 +105,26 @@ func TestRunningServerPortRejections(t *testing.T) {
 			},
 		},
 		{
-			name: "pid file is not a number",
+			name: "state file is not valid json",
 			setup: func(t *testing.T, dir string) {
-				mustWrite(t, filepath.Join(dir, pidFileName), "not-a-pid")
-				mustWrite(t, filepath.Join(dir, portFileName), "1")
+				mustWrite(t, filepath.Join(dir, stateFileName), "{not json")
 			},
 		},
 		{
-			name: "port file is missing",
+			name: "state record is missing the port",
 			setup: func(t *testing.T, dir string) {
-				mustWrite(t, filepath.Join(dir, pidFileName), strconv.Itoa(os.Getpid()))
+				// The split-state a mid-write crash used to leave behind.
+				mustWrite(t, filepath.Join(dir, stateFileName),
+					`{"pid":`+strconv.Itoa(os.Getpid())+`}`)
+			},
+		},
+		{
+			name: "only the legacy pid/port pair is present",
+			setup: func(t *testing.T, dir string) {
+				// Written by an older ox build; unreadable to the current format, so
+				// the caller must start fresh rather than trust it.
+				mustWrite(t, filepath.Join(dir, legacyPIDFileName), strconv.Itoa(os.Getpid()))
+				mustWrite(t, filepath.Join(dir, legacyPortFileName), "12345")
 			},
 		},
 	}
@@ -208,18 +219,95 @@ func TestKillChildLeavesPublishedStateIntact(t *testing.T) {
 	if processAlive(pid) {
 		t.Errorf("our child pid %d should have been reaped", pid)
 	}
-	assertFile(t, filepath.Join(dir, pidFileName), strconv.Itoa(winnerPID))
-	assertFile(t, filepath.Join(dir, portFileName), strconv.Itoa(winnerPort))
+	st, err := readServerState(dir)
+	if err != nil {
+		t.Fatalf("winner metadata must survive: %v", err)
+	}
+	if st.PID != winnerPID || st.Port != winnerPort {
+		t.Errorf("winner record = %+v, want pid=%d port=%d", st, winnerPID, winnerPort)
+	}
 }
 
-func assertFile(t *testing.T, path, want string) {
-	t.Helper()
-	got, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s (winner metadata must survive): %v", filepath.Base(path), err)
+// PID and port must publish as ONE record. They used to be two sequential
+// writes, and a crash between them left a live dolt child with a PID recorded
+// and no port — a state runningServerPort rejects, so every retry spawned
+// another child while the original kept dolt's lock. A crash can't be simulated
+// directly, so assert the properties that make it survivable: the record is
+// never partially visible, and a legacy half-state is rejected rather than
+// half-trusted.
+func TestServerStatePublishesAtomically(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("no record before publish", func(t *testing.T) {
+		if _, err := readServerState(dir); err == nil {
+			t.Fatal("expected an error before anything is published")
+		}
+	})
+
+	t.Run("record is complete after publish", func(t *testing.T) {
+		if err := writeServerState(dir, serverState{PID: 111, Port: 222}); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		st, err := readServerState(dir)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if st.PID != 111 || st.Port != 222 {
+			t.Errorf("got %+v, want pid=111 port=222", st)
+		}
+	})
+
+	t.Run("no temp files are left behind", func(t *testing.T) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			t.Fatalf("readdir: %v", err)
+		}
+		for _, e := range entries {
+			if strings.Contains(e.Name(), ".tmp") {
+				t.Errorf("leftover temp file %q would accumulate on every start", e.Name())
+			}
+		}
+	})
+
+	t.Run("publishing clears the legacy pair", func(t *testing.T) {
+		mustWrite(t, filepath.Join(dir, legacyPIDFileName), "999")
+		mustWrite(t, filepath.Join(dir, legacyPortFileName), "888")
+		if err := writeServerState(dir, serverState{PID: 333, Port: 444}); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		for _, name := range []string{legacyPIDFileName, legacyPortFileName} {
+			if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+				t.Errorf("%s should have been removed; a stale pair outlives the record", name)
+			}
+		}
+	})
+}
+
+// reuseProbeBudget must be a HARD bound. waitForServer previously checked the
+// deadline only before starting a probe, so a probe beginning just under the
+// limit could still run a full probeTimeout and overshoot — on the fast path of
+// every carts command.
+func TestWaitForServerHonoursBudgetAsHardDeadline(t *testing.T) {
+	// Probe that always fails, but only after consuming everything it was given —
+	// the worst case for a caller whose budget is nearly spent.
+	original := probeServer
+	t.Cleanup(func() { probeServer = original })
+	probeServer = func(_ string, _ int, timeout time.Duration) error {
+		time.Sleep(timeout)
+		return errors.New("still not serving")
 	}
-	if string(got) != want {
-		t.Errorf("%s = %q, want %q", filepath.Base(path), got, want)
+
+	start := time.Now()
+	if err := waitForServer("127.0.0.1", freePort(t), reuseProbeBudget); err == nil {
+		t.Fatal("expected a timeout error")
+	}
+	elapsed := time.Since(start)
+
+	// Slack covers scheduling only; the point is that overshoot is bounded by
+	// jitter rather than by a whole extra probeTimeout.
+	if ceiling := reuseProbeBudget + 500*time.Millisecond; elapsed > ceiling {
+		t.Errorf("waitForServer took %v, exceeding its %v budget (ceiling %v)",
+			elapsed, reuseProbeBudget, ceiling)
 	}
 }
 
@@ -252,7 +340,7 @@ func TestPingServerTimesOutOnSilentPeer(t *testing.T) {
 
 	port := ln.Addr().(*net.TCPAddr).Port
 	start := time.Now()
-	if err := pingServer("127.0.0.1", port); err == nil {
+	if err := pingServer("127.0.0.1", port, probeTimeout); err == nil {
 		t.Fatal("expected an error probing a peer that never completes the handshake")
 	}
 	elapsed := time.Since(start)
@@ -273,8 +361,9 @@ func TestPingServerTimesOutOnSilentPeer(t *testing.T) {
 
 func writeState(t *testing.T, dir string, pid, port int) {
 	t.Helper()
-	mustWrite(t, filepath.Join(dir, pidFileName), strconv.Itoa(pid))
-	mustWrite(t, filepath.Join(dir, portFileName), strconv.Itoa(port))
+	if err := writeServerState(dir, serverState{PID: pid, Port: port}); err != nil {
+		t.Fatalf("write server state: %v", err)
+	}
 }
 
 func mustWrite(t *testing.T, path, content string) {

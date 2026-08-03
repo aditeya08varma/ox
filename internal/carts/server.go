@@ -3,22 +3,100 @@ package carts
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 )
 
 const (
-	pidFileName  = "dolt-server.pid"
-	portFileName = "dolt-server.port"
+	// stateFileName holds the running server's PID and port as ONE record.
+	//
+	// These were two files, written in sequence. A crash between the writes
+	// bypasses any in-process cleanup and leaves a live dolt child with a PID
+	// recorded and no port: runningServerPort rejects that, so every later call
+	// starts another child, waits out the full startup timeout, and gives up —
+	// while the original child still holds dolt's exclusive lock. Publishing one
+	// record via atomic rename makes the state either wholly absent or wholly
+	// valid, so a crash costs a restart rather than a permanent wedge.
+	stateFileName = "dolt-server.json"
+
+	// Legacy single-value files, removed on publish. Older ox builds wrote these;
+	// leaving them behind would strand a real server behind unreadable metadata.
+	legacyPIDFileName  = "dolt-server.pid"
+	legacyPortFileName = "dolt-server.port"
 )
+
+// serverState is the published record of a running dolt sql-server.
+type serverState struct {
+	PID  int `json:"pid"`
+	Port int `json:"port"`
+}
+
+// readServerState loads the published record, if any.
+func readServerState(cartsDir string) (serverState, error) {
+	var st serverState
+	data, err := os.ReadFile(filepath.Join(cartsDir, stateFileName))
+	if err != nil {
+		return st, err
+	}
+	if err := json.Unmarshal(data, &st); err != nil {
+		return st, fmt.Errorf("parse %s: %w", stateFileName, err)
+	}
+	if st.PID <= 0 || st.Port <= 0 {
+		return st, fmt.Errorf("%s: incomplete record (pid=%d port=%d)", stateFileName, st.PID, st.Port)
+	}
+	return st, nil
+}
+
+// writeServerState publishes the record atomically: write a temp file in the
+// same directory, then rename over the target. Readers see either the old record
+// or the new one, never a partial write.
+func writeServerState(cartsDir string, st serverState) error {
+	data, err := json.Marshal(st)
+	if err != nil {
+		return fmt.Errorf("marshal server state: %w", err)
+	}
+	tmp, err := os.CreateTemp(cartsDir, stateFileName+".tmp*")
+	if err != nil {
+		return fmt.Errorf("create temp state file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once the rename succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp state file: %w", err)
+	}
+	// Durability before the rename: without the sync a crash can leave the
+	// renamed file present but empty, which is the split-state this avoids.
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temp state file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp state file: %w", err)
+	}
+	if err := os.Rename(tmpName, filepath.Join(cartsDir, stateFileName)); err != nil {
+		return fmt.Errorf("publish %s: %w", stateFileName, err)
+	}
+
+	// Best-effort: a stale legacy pair would otherwise outlive this record.
+	_ = os.Remove(filepath.Join(cartsDir, legacyPIDFileName))
+	_ = os.Remove(filepath.Join(cartsDir, legacyPortFileName))
+	return nil
+}
+
+// removeServerState clears the published record.
+func removeServerState(cartsDir string) {
+	_ = os.Remove(filepath.Join(cartsDir, stateFileName))
+}
 
 // EnsureServer ensures a dolt sql-server is running for the carts database.
 // If a server is already running (PID file exists and process alive), it returns the port.
@@ -35,11 +113,7 @@ func EnsureServer(cartsDir string) (int, error) {
 
 // runningServerPort returns the port of a running server, or error if not running.
 func runningServerPort(cartsDir string) (int, error) {
-	pidData, err := os.ReadFile(filepath.Join(cartsDir, pidFileName))
-	if err != nil {
-		return 0, err
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	st, err := readServerState(cartsDir)
 	if err != nil {
 		return 0, err
 	}
@@ -47,26 +121,17 @@ func runningServerPort(cartsDir string) (int, error) {
 	// written here as proc.Signal(os.Signal(nil)), which always errors, so reuse
 	// was dead code — every invocation started another sql-server and all but the
 	// first died on dolt's exclusive write lock.
-	if !processAlive(pid) {
-		return 0, fmt.Errorf("server process %d not running", pid)
-	}
-
-	portData, err := os.ReadFile(filepath.Join(cartsDir, portFileName))
-	if err != nil {
-		return 0, err
-	}
-	port, err := strconv.Atoi(strings.TrimSpace(string(portData)))
-	if err != nil {
-		return 0, err
+	if !processAlive(st.PID) {
+		return 0, fmt.Errorf("server process %d not running", st.PID)
 	}
 
 	// A live PID is not proof the server is ours — the OS recycles PIDs, so a
-	// stale file can name an unrelated process. Confirm something is actually
+	// stale record can name an unrelated process. Confirm something is actually
 	// serving on the recorded port before handing it back.
-	if err := waitForServer("127.0.0.1", port, reuseProbeBudget); err != nil {
-		return 0, fmt.Errorf("server process %d is not serving port %d: %w", pid, port, err)
+	if err := waitForServer("127.0.0.1", st.Port, reuseProbeBudget); err != nil {
+		return 0, fmt.Errorf("server process %d is not serving port %d: %w", st.PID, st.Port, err)
 	}
-	return port, nil
+	return st.Port, nil
 }
 
 // startServer starts a dolt sql-server on an ephemeral port.
@@ -131,22 +196,11 @@ func startServer(cartsDir string) (int, error) {
 		return winner, nil
 	}
 
-	// From here the state files are ours, so a failed write must unwind both the
-	// child and whatever we already published: a ready server with incomplete
-	// metadata is worse than no server, because nothing can find it to reuse.
-	pidPath := filepath.Join(cartsDir, pidFileName)
-	portPath := filepath.Join(cartsDir, portFileName)
-
-	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
+	// From here the record is ours. It publishes in one atomic rename, so a
+	// failure leaves nothing half-written to clean up — only the child to unwind.
+	if err := writeServerState(cartsDir, serverState{PID: cmd.Process.Pid, Port: port}); err != nil {
 		killChild(cmd)
-		_ = os.Remove(pidPath) // may be partially written
-		return 0, fmt.Errorf("write %s: %w", pidFileName, err)
-	}
-	if err := os.WriteFile(portPath, []byte(strconv.Itoa(port)), 0o644); err != nil {
-		killChild(cmd)
-		_ = os.Remove(portPath)
-		_ = os.Remove(pidPath) // written by us moments ago; would name a dead process
-		return 0, fmt.Errorf("write %s: %w", portFileName, err)
+		return 0, fmt.Errorf("publish server state: %w", err)
 	}
 
 	return port, nil
@@ -171,7 +225,7 @@ func killChild(cmd *exec.Cmd) {
 func waitForOwnServerOrWinner(cartsDir string, ourPort int, timeout time.Duration) (int, error) {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		if err := probeServer("127.0.0.1", ourPort); err == nil {
+		if err := probeServer("127.0.0.1", ourPort, remainingProbe(deadline)); err == nil {
 			return 0, nil
 		}
 		// Ignore the error: a missing or stale peer record simply means no winner
@@ -218,6 +272,10 @@ func allocateEphemeralPort(host string) (int, error) {
 // probeServer is the liveness probe used by the reuse and readiness paths.
 // Indirected through a variable so tests can exercise the concurrency logic
 // without standing up a real dolt sql-server to satisfy a MySQL handshake.
+//
+// It takes an explicit timeout rather than always using probeTimeout so callers
+// can hand it whatever remains of THEIR budget: a probe started just before a
+// deadline must not run past it.
 var probeServer = pingServer
 
 // probeTimeout bounds a single liveness probe. Every caller polls on a deadline,
@@ -236,9 +294,9 @@ const reuseProbeBudget = 2 * time.Second
 // pingServer reports whether a dolt sql-server accepts an authenticated
 // connection on host:port right now. Connects as root — dolt provisions no other
 // account, and the git author name is not a SQL user.
-func pingServer(host string, port int) error {
+func pingServer(host string, port int, timeout time.Duration) error {
 	dsn := fmt.Sprintf("root@tcp(%s:%d)/?timeout=%s&readTimeout=%s&writeTimeout=%s",
-		host, port, probeTimeout, probeTimeout, probeTimeout)
+		host, port, timeout, timeout, timeout)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return err
@@ -248,17 +306,39 @@ func pingServer(host string, port int) error {
 	// Bound the whole probe, not just the socket operations: the driver's
 	// timeouts cover dial/read/write individually, while a context deadline caps
 	// the call itself including any retry inside database/sql.
-	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	return db.PingContext(ctx)
 }
 
-// waitForServer polls until the server accepts connections.
+// remainingProbe returns how long a probe started now may run without
+// overshooting deadline, capped at probeTimeout. It never returns a positive
+// value below a floor that would guarantee a spurious failure; callers stop
+// probing once the budget is spent.
+func remainingProbe(deadline time.Time) time.Duration {
+	remaining := time.Until(deadline)
+	if remaining > probeTimeout {
+		return probeTimeout
+	}
+	return remaining
+}
+
+// waitForServer polls until the server accepts connections, or the timeout is
+// spent. The timeout is a HARD bound: each probe is given only what remains, so
+// a probe starting near the end cannot extend the caller's budget by its own.
 func waitForServer(host string, port int, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if err := probeServer(host, port); err == nil {
+	for {
+		remaining := remainingProbe(deadline)
+		if remaining <= 0 {
+			break
+		}
+		if err := probeServer(host, port, remaining); err == nil {
 			return nil
+		}
+		// Don't sleep past the deadline — that would burn budget doing nothing.
+		if time.Until(deadline) <= 0 {
+			break
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
@@ -267,21 +347,15 @@ func waitForServer(host string, port int, timeout time.Duration) error {
 
 // StopServer stops a running dolt server for the given carts directory.
 func StopServer(cartsDir string) error {
-	pidData, err := os.ReadFile(filepath.Join(cartsDir, pidFileName))
+	st, err := readServerState(cartsDir)
 	if err != nil {
 		return nil // no server running
 	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
-	if err != nil {
-		return nil
-	}
-	proc, err := os.FindProcess(pid)
+	proc, err := os.FindProcess(st.PID)
 	if err != nil {
 		return nil
 	}
 	_ = proc.Signal(os.Interrupt)
-	// Clean up state files
-	os.Remove(filepath.Join(cartsDir, pidFileName))
-	os.Remove(filepath.Join(cartsDir, portFileName))
+	removeServerState(cartsDir)
 	return nil
 }
