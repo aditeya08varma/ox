@@ -311,14 +311,23 @@ func pingServer(host string, port int, timeout time.Duration) error {
 	return db.PingContext(ctx)
 }
 
+// minProbeWindow is the least time in which a loopback TCP connect plus MySQL
+// handshake can plausibly finish. A probe granted less than this would report a
+// perfectly healthy server as dead purely from scheduling jitter, so the budget
+// is treated as spent instead.
+const minProbeWindow = 50 * time.Millisecond
+
 // remainingProbe returns how long a probe started now may run without
 // overshooting deadline, capped at probeTimeout. It never returns a positive
-// value below a floor that would guarantee a spurious failure; callers stop
-// probing once the budget is spent.
+// value below minProbeWindow — a sliver of budget yields a false negative rather
+// than an answer — so callers stop probing once the budget is effectively spent.
 func remainingProbe(deadline time.Time) time.Duration {
 	remaining := time.Until(deadline)
 	if remaining > probeTimeout {
 		return probeTimeout
+	}
+	if remaining < minProbeWindow {
+		return 0
 	}
 	return remaining
 }

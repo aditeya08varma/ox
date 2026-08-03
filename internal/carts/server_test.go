@@ -283,6 +283,39 @@ func TestServerStatePublishesAtomically(t *testing.T) {
 	})
 }
 
+// remainingProbe must honour both bounds it documents: capped at probeTimeout
+// above, and never a positive sliver below minProbeWindow — a probe granted a
+// few milliseconds fails a healthy server on jitter alone.
+func TestRemainingProbe(t *testing.T) {
+	tests := []struct {
+		name  string
+		until time.Duration
+		want  time.Duration
+	}{
+		{name: "far from deadline is capped at probeTimeout", until: time.Hour, want: probeTimeout},
+		{name: "past deadline yields no budget", until: -time.Second, want: 0},
+		{name: "sliver below the floor yields no budget", until: minProbeWindow / 2, want: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := remainingProbe(time.Now().Add(tt.until))
+			if got != tt.want {
+				t.Errorf("remainingProbe = %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("never returns a positive value below the floor", func(t *testing.T) {
+		// Sweep the boundary; any positive result under the floor is the bug.
+		for d := -minProbeWindow; d <= 2*minProbeWindow; d += minProbeWindow / 10 {
+			got := remainingProbe(time.Now().Add(d))
+			if got > 0 && got < minProbeWindow {
+				t.Fatalf("remainingProbe returned %v for a %v window: below the %v floor", got, d, minProbeWindow)
+			}
+		}
+	})
+}
+
 // reuseProbeBudget must be a HARD bound. waitForServer previously checked the
 // deadline only before starting a probe, so a probe beginning just under the
 // limit could still run a full probeTimeout and overshoot — on the fast path of
