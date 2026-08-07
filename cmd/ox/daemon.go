@@ -18,6 +18,7 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/useragent"
 	"github.com/sageox/ox/internal/version"
 	"github.com/spf13/cobra"
 )
@@ -37,6 +38,13 @@ var daemonStartCmd = &cobra.Command{
 	Use:   "start",
 	Short: "Start the background daemon",
 	Long:  "Starts the SageOx daemon in the background for automatic ledger sync.",
+	// With --foreground this invocation IS the daemon: it blocks until the
+	// daemon exits, which can be days later. Without it, the command spawns a
+	// child and returns in milliseconds. Only the former is a service, and
+	// only the former must be kept out of command-latency instrumentation.
+	Annotations: map[string]string{
+		cli.AnnotationLongRunning: "flag:foreground",
+	},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		foreground, _ := cmd.Flags().GetBool("foreground")
 
@@ -348,6 +356,13 @@ func init() {
 
 // runDaemonForeground runs the daemon in the foreground.
 func runDaemonForeground(ledgerPath string) error {
+	// This process IS the daemon from here on. Mark it before anything can
+	// issue a request, so every outbound call — whatever client builds it —
+	// identifies as background traffic. The server keys its "exclude daemon
+	// polling from human CLI activity" rule off this User-Agent, so a request
+	// that escapes with the interactive UA is silently counted as a human.
+	useragent.SetDaemonMode()
+
 	cfg := daemon.DefaultConfig()
 	cfg.LedgerPath = ledgerPath
 	cfg.ProjectRoot = findGitRoot() // required for team context syncing
