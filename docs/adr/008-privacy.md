@@ -345,6 +345,63 @@ ox --offline review
 
 ---
 
+### 6. Auth Session Metadata
+
+`ox login` sends a **device label** — `user@host`, e.g. `ryan@laptop` —
+with the device-flow token exchange. It is stored against the PAT and shown
+in `/settings/security` so a user can tell their laptop from their
+devcontainer from their CI runner when deciding which session to revoke.
+
+**This is deliberately outside the "What We NEVER Collect" rule above**, and
+the distinction is the scope of that rule, not an exception to it:
+
+| | Telemetry (§1) | Device label |
+|---|---|---|
+| Audience | SageOx, aggregated across users | The user, on their own account page |
+| Purpose | Product analytics | Identifying a credential to revoke |
+| Identity | Deliberately anonymous | Already authenticated — the server knows who |
+| Risk of a machine id | **Correlates an anonymous user's sessions** | Low; identity is already established, so it adds no linkability |
+
+A stable machine identifier is banned in telemetry precisely because it
+de-anonymizes an otherwise anonymous stream. That hazard does not exist for
+metadata attached to a credential the user is knowingly creating, stored on
+their own account, and displayed back to them. Every comparable product
+(GitHub, Google, 1Password, Slack) ships this, because the alternative is a
+device list of indistinguishable rows and no safe way to revoke one.
+
+**Be precise about what it contains.** The label is `user@host`, where `user`
+is the **local OS account name**. So it identifies the machine *and* the
+account on it — which for a single-user laptop is a person. It is not
+anonymous, and this section does not claim otherwise.
+
+What makes that acceptable here, and not in telemetry, is that the request is
+already authenticated: the server knows exactly who is logging in before the
+label arrives. The label therefore reveals nothing about *identity* it did not
+already have; it only adds *which device*. The residual disclosure is the local
+account name itself — e.g. that `r.snodgrass` rather than `ryan` is the account
+on this host — which is why the opt-out exists and why the hostname is reduced
+to its first DNS label.
+
+**Opt-out**, per principle 4:
+
+```bash
+SAGEOX_NO_DEVICE_LABEL=1 ox login
+```
+
+The field is `omitempty`, so opting out makes the request byte-identical to
+what ox sent before device labels existed.
+
+**Data minimization applied:**
+- Only the first DNS label of the hostname (`laptop`, not
+  `laptop.corp.internal`) — the domain identifies an employer far more than
+  it identifies a machine.
+- The OS account name, not a git-config or profile name.
+- Allowlisted to `[A-Za-z0-9._-]`, truncated to 32 (user) + 63 (host).
+- Never the local machine id from `internal/signature` — that value is an
+  HMAC key, and transmitting it would leak a local secret.
+
+---
+
 ## Privacy Summary Matrix
 
 | Feature | Data Transmitted | Opt-out Method |
@@ -354,3 +411,4 @@ ox --offline review
 | Guidance sync | None (download only) | `--offline` flag |
 | Prompt delivery | None (download only) | `--offline` flag |
 | Version check | ox version, OS | `ox config set check_updates false` |
+| Device label (`ox login`) | `user@host` — local OS account + short hostname, shown only to that user | `SAGEOX_NO_DEVICE_LABEL=1` |
