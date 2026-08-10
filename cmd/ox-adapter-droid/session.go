@@ -1,7 +1,9 @@
 // session.go handles Factory Droid session reading, parsing, and discovery.
 //
-// Droid stores sessions as JSONL in ~/.factory/projects/<project-slug>/<uuid>.jsonl.
-// Each JSONL line has a top-level "type" field:
+// Droid stores sessions as JSONL in ~/.factory/sessions/<project-slug>/<uuid>.jsonl
+// (confirmed against a real droid 0.126.0 install; NOT ~/.factory/projects/,
+// which does not exist on a real machine). Each JSONL line has a top-level
+// "type" field:
 //   - "session_start": first line, contains session metadata (id, title, cwd)
 //   - "message": all subsequent lines, wraps a nested "message" object with
 //     role (user/assistant) and content (array of blocks: text, thinking,
@@ -9,8 +11,12 @@
 //
 // Companion metadata lives in <uuid>.settings.json alongside the JSONL file.
 //
-// The project slug algorithm is not publicly documented, so we scan all project
-// directories and match on the session_start entry's "cwd" field.
+// The project slug is a "-"-joined form of the cwd (e.g. cwd
+// "/Users/dev/project" -> slug "-Users-dev-project"), confirmed by inspecting
+// real session_start.cwd values against their containing directory names. The
+// algorithm is not documented by Factory, so this adapter does not reconstruct
+// it: it scans project directories and matches on the session_start entry's
+// "cwd" field, which is robust even if the slug scheme changes.
 //
 // Format reference: https://docs.factory.ai
 package main
@@ -135,58 +141,38 @@ func readSessionFile(path string) ([]adapterprotocol.RawEntry, *adapterprotocol.
 	return entries, meta, nil
 }
 
+// readFromOffset resumes a droid transcript at a byte offset using the shared
+// JSONL tail reader (pkg/adapterruntime.TailJSONL). The hand-rolled version
+// this replaced advanced the offset to the file's current size on every call,
+// which acknowledges bytes that were never parsed: droid writes its transcript
+// incrementally, so the final line read mid-write is frequently partial, and
+// advancing past it silently drops the rest of that turn once droid finishes
+// writing it. TailJSONL stops at the last complete newline instead.
 func readFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
-	f, err := os.Open(path)
+	return adapterruntime.TailJSONL(path, offset, parseLine)
+}
+
+// droidSessionsDir returns the base sessions directory for Droid. It is a
+// function (not an inlined join) so tests can exercise the real lookup path
+// against a fixture tree via t.Setenv("HOME", ...) instead of only testing
+// helpers like projectDirMatchesRepo in isolation — the gap that let this
+// adapter ship pointed at a directory ("projects") Droid never wrote.
+func droidSessionsDir() (string, error) {
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return nil, offset, fmt.Errorf("failed to open session file: %w", err)
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
 	}
-	defer f.Close()
-
-	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
-			return nil, offset, fmt.Errorf("failed to seek: %w", err)
-		}
-	}
-
-	var entries []adapterprotocol.RawEntry
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		parsed, err := parseLine(line)
-		if err != nil {
-			continue
-		}
-		entries = append(entries, parsed...)
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, offset, fmt.Errorf("error reading session file: %w", err)
-	}
-
-	newOffset := offset
-	if info, err := f.Stat(); err == nil {
-		newOffset = info.Size()
-	}
-
-	return entries, newOffset, nil
+	return filepath.Join(home, ".factory", "sessions"), nil
 }
 
 // findSessionFile locates a Droid session file for the given repo.
 // Since the project slug algorithm is undocumented, we scan all project
 // directories and match on the session_start cwd field.
 func findSessionFile(repoRoot, agentID, since, agentSessionID string) (string, int64, error) {
-	home, err := os.UserHomeDir()
+	projectsDir, err := droidSessionsDir()
 	if err != nil {
-		return "", 0, fmt.Errorf("cannot determine home directory: %w", err)
+		return "", 0, err
 	}
-
-	projectsDir := filepath.Join(home, ".factory", "projects")
 
 	// direct lookup via session UUID across all project dirs
 	if agentSessionID != "" {
@@ -482,6 +468,13 @@ func parseAssistantMessage(raw *droidEntry) ([]adapterprotocol.RawEntry, error) 
 			if block.Content != "" {
 				entries = append(entries, adapterruntime.ToolResultEntry(ts, block.Content, block.IsError))
 			}
+		case "thinking":
+			// Reasoning is deliberately never recorded, for any agent — it is
+			// where a model quotes its own system prompt back, and a Ledger is
+			// shared with teammates. This case exists so the drop is a decision
+			// rather than a block type nobody happened to handle: droidBlock
+			// parses Thinking, so the next reader of this switch would
+			// reasonably assume it was an oversight.
 		}
 	}
 

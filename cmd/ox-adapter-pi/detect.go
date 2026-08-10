@@ -2,6 +2,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -56,21 +58,87 @@ func handleDiagnose(p adapterprotocol.DiagnoseParams) (*adapterprotocol.Diagnose
 
 	if p.RepoRoot != "" {
 		agentsPath := filepath.Join(p.RepoRoot, "AGENTS.md")
-		if data, err := os.ReadFile(agentsPath); err == nil {
+		// a missing AGENTS.md is a missing hook, not a reason to stay quiet —
+		// install-hooks creates the file
+		data, err := os.ReadFile(agentsPath)
+		switch {
+		case err == nil && piBlockAlreadyPresent(string(data)):
 			// accept either the current or legacy Pi marker — a pre-#527
 			// install is still considered "installed" for diagnosis purposes
-			if !piBlockAlreadyPresent(string(data)) {
-				issues = append(issues, adapterprotocol.DiagnoseIssue{
-					Slug:     "pi:hooks-missing",
-					Severity: "warning",
-					Title:    "Pi hooks not installed",
-					Detail:   "AGENTS.md does not contain ox prime marker.",
-					Fix:      "ox-adapter-pi install-hooks --repo-root " + p.RepoRoot + " --scope project",
-					FixSafe:  true,
-				})
+		case err == nil, errors.Is(err, os.ErrNotExist):
+			// the file is readable and just lacks the marker, or doesn't
+			// exist yet — both are repairable by writing/appending the
+			// block, which install-hooks does safely and idempotently.
+			detail := "AGENTS.md does not contain ox prime marker."
+			if err != nil {
+				detail = "AGENTS.md not found at " + agentsPath + "."
 			}
+			issues = append(issues, adapterprotocol.DiagnoseIssue{
+				Slug:     "pi:hooks-missing",
+				Severity: "warning",
+				Title:    "Pi hooks not installed",
+				Detail:   detail,
+				Fix:      "ox integrate install --pi",
+				// "ox" is the only allowlisted argv[0] for the doctor
+				// auto-fix path (ox-adapter-pi itself is rejected by
+				// adapterFixArgvAllowlist), so route through the in-process
+				// `ox integrate install --pi` command rather than the
+				// external adapter binary.
+				FixArgv: []string{"ox", "integrate", "install", "--pi"},
+				FixSafe: true,
+			})
+		default:
+			// anything else (permission denied, a symlink loop, an I/O
+			// error) means we can't even tell whether the marker is
+			// present, let alone safely write over it — surface this as
+			// unreadable rather than silently offering an auto-fix that
+			// might clobber content we never verified.
+			issues = append(issues, adapterprotocol.DiagnoseIssue{
+				Slug:     "pi:agents-md-unreadable",
+				Severity: "error",
+				Title:    "AGENTS.md could not be read",
+				Detail:   fmt.Sprintf("%s: %v — check file permissions and ownership.", agentsPath, err),
+				FixSafe:  false,
+			})
 		}
 	}
 
+	if detail := checkTranscriptFormat(p.RepoRoot); detail != "" {
+		// a reader that silently yields zero entries looks identical to an
+		// idle session; say so instead
+		issues = append(issues, adapterprotocol.DiagnoseIssue{
+			Slug:     "pi:format-unsupported",
+			Severity: "error",
+			Title:    "Pi transcript format is not supported",
+			Detail:   detail,
+		})
+	}
+
 	return &adapterprotocol.DiagnoseResult{OK: len(issues) == 0, Issues: issues}, nil
+}
+
+// checkTranscriptFormat reports a mismatch between the newest transcript's
+// session-header version and what parsePiLine understands.
+func checkTranscriptFormat(repoRoot string) string {
+	path, err := findPiSession(repoRoot, "", "", "")
+	if err != nil {
+		return "" // no transcripts yet — nothing to judge
+	}
+
+	meta := extractPiMetadata(path)
+	if meta == nil || meta.AgentVersion == "" {
+		return ""
+	}
+
+	var version int
+	if _, err := fmt.Sscanf(meta.AgentVersion, "pi-v%d", &version); err != nil {
+		return ""
+	}
+	if piSupportedVersions[version] {
+		return ""
+	}
+
+	return fmt.Sprintf(
+		"%s is session format version %d; this adapter reads version 3. Sessions will record as empty until the reader is updated.",
+		path, version)
 }

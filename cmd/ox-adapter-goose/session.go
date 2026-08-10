@@ -73,10 +73,33 @@ type gooseToolCallBody struct {
 }
 
 // gooseToolResp mirrors gooseToolCall for the response side.
+//
+// Value's shape varies: for MCP-style tool results it is a
+// gooseToolResultValue object; for simpler built-in tools it can be a bare
+// JSON scalar. It stays json.RawMessage here and is parsed on demand in
+// toolResponseFields, which tries the structured shape first and falls back
+// to treating Value as an opaque blob.
 type gooseToolResp struct {
 	Status string          `json:"status"`
 	Value  json.RawMessage `json:"value"`
 	Error  string          `json:"error"`
+}
+
+// gooseToolResultValue is the nested envelope Goose puts inside
+// toolResult.value for MCP-style tool responses. Its isError is the real
+// failure signal: Goose keeps the outer toolResult.status as "success" even
+// when the underlying command failed, so status alone cannot be trusted.
+type gooseToolResultValue struct {
+	Content []gooseTextBlock `json:"content"`
+	IsError bool             `json:"isError"`
+}
+
+// gooseTextBlock is one element of gooseToolResultValue.Content. Only the
+// text type contributes to the human-readable tool output; other content
+// block types (e.g. images) are not represented here and are skipped.
+type gooseTextBlock struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
 }
 
 // --- database helpers ---
@@ -214,14 +237,14 @@ func handleRead(p adapterprotocol.ReadParams) (*adapterprotocol.ReadResult, erro
 	}
 	defer func() { _ = db.Close() }()
 
-	entries, _, err := readMessages(db, sessionID, 0)
+	entries, _, skipped, err := readMessagesWithStats(db, sessionID, 0)
 	if err != nil {
 		return nil, err
 	}
 
 	meta, _ := readMetadata(db, sessionID)
 
-	return &adapterprotocol.ReadResult{Entries: entries, Metadata: meta}, nil
+	return &adapterprotocol.ReadResult{Entries: entries, Metadata: meta, Skipped: skipped}, nil
 }
 
 func handleReadMetadata(p adapterprotocol.ReadParams) (*adapterprotocol.ReadMetadataResult, error) {
@@ -308,25 +331,36 @@ func handleCapturePrior(p adapterprotocol.CapturePriorParams) (*adapterprotocol.
 // row inserted between the SELECT and a separate MAX(id) query would not be in
 // entries, yet the watermark would move past it — that turn would be dropped
 // from the Ledger permanently.
+// readMessages is readMessagesWithStats without the skip count, for the many
+// callers that do not need it.
 func readMessages(db *sql.DB, sessionID string, afterID int64) ([]adapterprotocol.RawEntry, int64, error) {
+	entries, lastID, _, err := readMessagesWithStats(db, sessionID, afterID)
+	return entries, lastID, err
+}
+
+// readMessagesWithStats also reports how many source blocks were understood and
+// deliberately not emitted, so a session that records nothing can be told apart
+// from a parser that matches nothing.
+func readMessagesWithStats(db *sql.DB, sessionID string, afterID int64) ([]adapterprotocol.RawEntry, int64, int, error) {
 	rows, err := db.Query(
 		"SELECT id, role, content_json, created_timestamp FROM messages WHERE session_id = ? AND id > ? ORDER BY id ASC",
 		sessionID, afterID,
 	)
 	if err != nil {
-		return nil, afterID, fmt.Errorf("query messages: %w", err)
+		return nil, afterID, 0, fmt.Errorf("query messages: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
 	var entries []adapterprotocol.RawEntry
 	lastID := afterID
+	skipped := 0
 
 	for rows.Next() {
 		var rowID, createdTS int64
 		var role, contentJSON string
 
 		if err := rows.Scan(&rowID, &role, &contentJSON, &createdTS); err != nil {
-			return nil, afterID, fmt.Errorf("scan message row for session %s: %w", sessionID, err)
+			return nil, afterID, 0, fmt.Errorf("scan message row for session %s: %w", sessionID, err)
 		}
 
 		// Goose migrated from Unix seconds to milliseconds; detect by magnitude.
@@ -336,14 +370,16 @@ func readMessages(db *sql.DB, sessionID string, afterID int64) ([]adapterprotoco
 		} else {
 			ts = time.Unix(createdTS, 0).UTC()
 		}
-		entries = append(entries, parseContentBlocks(role, contentJSON, ts)...)
+		parsed, dropped := parseContentBlocks(role, contentJSON, ts)
+		entries = append(entries, parsed...)
+		skipped += dropped
 		lastID = rowID
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, afterID, err
+		return nil, afterID, 0, err
 	}
-	return entries, lastID, nil
+	return entries, lastID, skipped, nil
 }
 
 // readMetadata extracts the model from the session row. Goose stores it as a
@@ -385,28 +421,32 @@ func readMetadata(db *sql.DB, sessionID string) (*adapterprotocol.SessionMetadat
 
 // parseContentBlocks converts one Goose message's content_json into ox entries.
 // A single message can yield several entries (text plus tool calls).
-func parseContentBlocks(role, contentJSON string, ts time.Time) []adapterprotocol.RawEntry {
+func parseContentBlocks(role, contentJSON string, ts time.Time) ([]adapterprotocol.RawEntry, int) {
 	var blocks []gooseBlock
 	if err := json.Unmarshal([]byte(contentJSON), &blocks); err != nil {
 		// Malformed or unexpected shape: keep the turn rather than dropping it.
 		if role == "user" || role == "assistant" {
-			return []adapterprotocol.RawEntry{makeEntry(role, ts, contentJSON)}
+			return []adapterprotocol.RawEntry{makeEntry(role, ts, contentJSON)}, 0
 		}
-		return nil
+		return nil, 0
 	}
 
 	var entries []adapterprotocol.RawEntry
+	skipped := 0
 
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			if b.Text != "" {
-				entries = append(entries, makeEntry(role, ts, b.Text))
+			if b.Text == "" {
+				skipped++
+				continue
 			}
+			entries = append(entries, makeEntry(role, ts, b.Text))
 
 		case "toolRequest":
 			name, args := toolRequestFields(b)
 			if name == "" {
+				skipped++
 				continue
 			}
 			entries = append(entries, adapterruntime.ToolUseWithID(ts, name, args, b.ID))
@@ -416,20 +456,31 @@ func parseContentBlocks(role, contentJSON string, ts time.Time) []adapterprotoco
 				// No payload — a renamed or missing field in a future Goose
 				// version. Emitting an entry here would produce empty output
 				// with no CallID, uncorrelatable to its request.
+				skipped++
 				continue
 			}
 			content, isErr := toolResponseFields(b)
 			entries = append(entries, adapterruntime.ToolResultWithID(ts, content, isErr, b.ID))
 
 		case "thinking":
-			// Reasoning content — not user-visible, and not part of the record.
+			// Reasoning content is deliberately never recorded, for any agent.
+			// It is where a model quotes its own system prompt back, and a
+			// Ledger is shared with teammates. Counted, not emitted.
+			skipped++
 
 		case "image":
 			// Binary payload; nothing useful to put in a text transcript.
+			skipped++
+
+		default:
+			// a block type this adapter does not model — count it so a future
+			// Goose format change shows up as a rising skip count rather than
+			// a quietly shrinking transcript
+			skipped++
 		}
 	}
 
-	return entries
+	return entries, skipped
 }
 
 // toolRequestFields pulls the tool name and arguments out of the status/value
@@ -442,12 +493,32 @@ func toolRequestFields(b gooseBlock) (name, args string) {
 	return b.ToolCall.Value.Name, string(b.ToolCall.Value.Arguments)
 }
 
-// toolResponseFields returns the response body and whether it represents a
-// failure. Goose marks failure with a non-"success" status.
+// toolResponseFields returns the human-readable response text and whether it
+// represents a failure.
+//
+// value.isError is the authoritative failure signal: in every observed real
+// failed-command response, Goose leaves the outer toolResult.status as
+// "success" and nests the actual failure at toolResult.value.isError instead.
+// The outer status is only consulted as a fallback, for responses whose value
+// is absent, `null`, does not parse as the structured envelope (e.g. a bare
+// JSON scalar from a simpler built-in tool), or parses as an object carrying
+// neither "content" nor "isError" — none of those are the envelope, and
+// treating them as one would silently read a failed call as isError:false.
 func toolResponseFields(b gooseBlock) (content string, isError bool) {
 	if b.ToolResp == nil {
 		return "", false
 	}
+
+	if v, ok := parseGooseToolResultValue(b.ToolResp.Value); ok {
+		text := joinTextBlocks(v.Content)
+		if text == "" {
+			// No extractable text (e.g. a content-less or non-text
+			// payload) — preserve the raw JSON rather than lose it.
+			text = string(b.ToolResp.Value)
+		}
+		return text, v.IsError
+	}
+
 	if b.ToolResp.Status != "" && b.ToolResp.Status != "success" {
 		if b.ToolResp.Error != "" {
 			return b.ToolResp.Error, true
@@ -455,6 +526,55 @@ func toolResponseFields(b gooseBlock) (content string, isError bool) {
 		return string(b.ToolResp.Value), true
 	}
 	return string(b.ToolResp.Value), false
+}
+
+// parseGooseToolResultValue reports whether raw is genuinely the structured
+// envelope Goose writes for MCP-style tool responses — a JSON object
+// carrying at least a "content" or "isError" key.
+//
+// json.Unmarshal into a struct succeeds without error for `null` and for any
+// object missing all of the struct's fields, in both cases leaving the
+// struct at its zero value (IsError: false). Treating that success as "is
+// the envelope" is the bug: a `null` value or a non-envelope object would be
+// read as a successful response even when the outer toolResult carries a
+// real failure. Requiring at least one recognized key before trusting the
+// unmarshal is what makes the envelope check authoritative only when the
+// envelope is actually present.
+func parseGooseToolResultValue(raw json.RawMessage) (gooseToolResultValue, bool) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return gooseToolResultValue{}, false
+	}
+
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return gooseToolResultValue{}, false
+	}
+	if _, hasContent := probe["content"]; !hasContent {
+		if _, hasIsError := probe["isError"]; !hasIsError {
+			return gooseToolResultValue{}, false
+		}
+	}
+
+	var v gooseToolResultValue
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return gooseToolResultValue{}, false
+	}
+	return v, true
+}
+
+// joinTextBlocks concatenates the text of every "text"-typed content block,
+// in order. Goose sometimes splits one response into several blocks (e.g. a
+// command's output plus a separate truncation notice); joining preserves
+// both rather than keeping only the first.
+func joinTextBlocks(blocks []gooseTextBlock) string {
+	var texts []string
+	for _, blk := range blocks {
+		if blk.Type == "text" && blk.Text != "" {
+			texts = append(texts, blk.Text)
+		}
+	}
+	return strings.Join(texts, "\n\n")
 }
 
 func makeEntry(role string, ts time.Time, content string) adapterprotocol.RawEntry {

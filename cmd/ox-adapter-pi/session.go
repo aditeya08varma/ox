@@ -22,19 +22,45 @@ type sessionCandidate struct {
 	modTime time.Time
 }
 
-type piEntry struct {
-	Type      string `json:"type"`
-	Timestamp string `json:"timestamp,omitempty"`
-	Content   string `json:"content,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Input     string `json:"input,omitempty"`
-	CallID    string `json:"call_id,omitempty"`
-	IsError   bool   `json:"is_error,omitempty"`
-	Model     string `json:"model,omitempty"`
-	Version   int    `json:"version,omitempty"`
-	ID        string `json:"id,omitempty"`
-	CWD       string `json:"cwd,omitempty"`
+// piRecord is one line of a Pi transcript. Pi writes a small set of record
+// types; only "message" carries conversation content.
+//
+//	{"type":"session","version":3,"id":…,"cwd":…}
+//	{"type":"model_change","provider":"anthropic","modelId":…}
+//	{"type":"thinking_level_change","thinkingLevel":"medium"}
+//	{"type":"message","timestamp":…,"message":{…}}
+type piRecord struct {
+	Type      string     `json:"type"`
+	Timestamp string     `json:"timestamp,omitempty"`
+	Version   int        `json:"version,omitempty"` // session header
+	ModelID   string     `json:"modelId,omitempty"` // model_change
+	Provider  string     `json:"provider,omitempty"`
+	Message   *piMessage `json:"message,omitempty"`
 }
+
+// piMessage is the nested message envelope. Tool results arrive as their own
+// message with role "toolResult" rather than as a block inside a turn.
+type piMessage struct {
+	Role       string    `json:"role"` // user | assistant | toolResult
+	Content    []piBlock `json:"content"`
+	ToolCallID string    `json:"toolCallId,omitempty"`
+	ToolName   string    `json:"toolName,omitempty"`
+	IsError    bool      `json:"isError,omitempty"`
+}
+
+// piBlock is one content block within a message.
+type piBlock struct {
+	Type      string          `json:"type"` // text | thinking | toolCall
+	Text      string          `json:"text,omitempty"`
+	Thinking  string          `json:"thinking,omitempty"`
+	ID        string          `json:"id,omitempty"`   // toolCall
+	Name      string          `json:"name,omitempty"` // toolCall
+	Arguments json.RawMessage `json:"arguments,omitempty"`
+}
+
+// piSupportedVersions are the session-header versions this parser understands.
+// Anything else is reported by diagnose rather than silently read as empty.
+var piSupportedVersions = map[int]bool{3: true}
 
 // --- session reading ---
 
@@ -75,10 +101,7 @@ func readPiFile(path string) ([]adapterprotocol.RawEntry, error) {
 		if len(line) == 0 {
 			continue
 		}
-		parsed := parsePiLine(line)
-		if parsed != nil {
-			entries = append(entries, *parsed)
-		}
+		entries = append(entries, parsePiLine(line)...)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -88,45 +111,18 @@ func readPiFile(path string) ([]adapterprotocol.RawEntry, error) {
 	return entries, nil
 }
 
+// readPiFromOffset resumes a Pi transcript at a byte offset using the shared
+// JSONL tail reader (pkg/adapterruntime.TailJSONL). The hand-rolled version
+// this replaced advanced the offset to the file's current size on every
+// call, which acknowledges bytes that were never parsed: Pi writes its
+// transcript incrementally, so the final line read mid-write is frequently
+// partial, and advancing past it silently drops the rest of that turn once
+// Pi finishes writing it. TailJSONL stops at the last complete newline
+// instead.
 func readPiFromOffset(path string, offset int64) ([]adapterprotocol.RawEntry, int64, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, offset, fmt.Errorf("failed to open session file: %w", err)
-	}
-	defer f.Close()
-
-	if offset > 0 {
-		if _, err := f.Seek(offset, 0); err != nil {
-			return nil, offset, fmt.Errorf("failed to seek: %w", err)
-		}
-	}
-
-	var entries []adapterprotocol.RawEntry
-	scanner := bufio.NewScanner(f)
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, 10*1024*1024)
-
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		parsed := parsePiLine(line)
-		if parsed != nil {
-			entries = append(entries, *parsed)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return entries, offset, fmt.Errorf("error reading session file: %w", err)
-	}
-
-	newOffset := offset
-	if info, err := f.Stat(); err == nil {
-		newOffset = info.Size()
-	}
-
-	return entries, newOffset, nil
+	return adapterruntime.TailJSONL(path, offset, func(line []byte) ([]adapterprotocol.RawEntry, error) {
+		return parsePiLine(line), nil
+	})
 }
 
 func parseTS(s string) time.Time {
@@ -134,46 +130,67 @@ func parseTS(s string) time.Time {
 	return t
 }
 
-func parsePiLine(line []byte) *adapterprotocol.RawEntry {
-	var raw piEntry
-	if err := json.Unmarshal(line, &raw); err != nil {
+// parsePiLine converts one transcript line into ox entries. A single assistant
+// message can hold text and several tool calls, so this returns a slice.
+func parsePiLine(line []byte) []adapterprotocol.RawEntry {
+	var rec piRecord
+	if err := json.Unmarshal(line, &rec); err != nil {
+		return nil
+	}
+	if rec.Type != "message" || rec.Message == nil {
 		return nil
 	}
 
-	ts := parseTS(raw.Timestamp)
+	ts := parseTS(rec.Timestamp)
+	msg := rec.Message
 
-	switch raw.Type {
-	case "user":
-		if raw.Content == "" {
-			return nil
+	if msg.Role == "toolResult" {
+		return []adapterprotocol.RawEntry{
+			adapterruntime.ToolResultWithID(ts, blockText(msg.Content), msg.IsError, msg.ToolCallID),
 		}
-		e := adapterruntime.UserEntry(ts, raw.Content)
-		return &e
-
-	case "assistant":
-		if raw.Content == "" {
-			return nil
-		}
-		e := adapterruntime.AssistantEntry(ts, raw.Content)
-		return &e
-
-	case "tool_call":
-		e := adapterruntime.ToolUseWithID(ts, raw.Name, raw.Input, raw.CallID)
-		return &e
-
-	case "tool_result":
-		e := adapterruntime.ToolResultWithID(ts, raw.Content, raw.IsError, raw.CallID)
-		return &e
-
-	case "system":
-		if raw.Content == "" {
-			return nil
-		}
-		e := adapterruntime.SystemEntry(ts, raw.Content)
-		return &e
 	}
 
-	return nil
+	var entries []adapterprotocol.RawEntry
+	for _, b := range msg.Content {
+		switch b.Type {
+		case "text":
+			if b.Text == "" {
+				continue
+			}
+			entries = append(entries, makePiEntry(msg.Role, ts, b.Text))
+
+		case "toolCall":
+			entries = append(entries, adapterruntime.ToolUseWithID(ts, b.Name, string(b.Arguments), b.ID))
+
+		case "thinking":
+			// reasoning content — not user-visible, skip
+		}
+	}
+
+	return entries
+}
+
+// blockText concatenates the text blocks of a message, which is how Pi
+// represents a tool's output.
+func blockText(blocks []piBlock) string {
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func makePiEntry(role string, ts time.Time, content string) adapterprotocol.RawEntry {
+	switch role {
+	case "user":
+		return adapterruntime.UserEntry(ts, content)
+	case "system":
+		return adapterruntime.SystemEntry(ts, content)
+	default:
+		return adapterruntime.AssistantEntry(ts, content)
+	}
 }
 
 // --- session discovery ---
@@ -204,15 +221,30 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 		if err := adapterruntime.ValidateSessionID(agentSessionID); err != nil {
 			return "", err
 		}
-		// search across all subdirectories for this session ID
-		subdirs, _ := os.ReadDir(baseDir)
-		for _, d := range subdirs {
-			if !d.IsDir() {
-				continue
-			}
-			direct := filepath.Join(baseDir, d.Name(), agentSessionID+".jsonl")
+
+		if repoRoot != "" {
+			// Same project-scoping rule as the fallback search below: a
+			// project-scoped query must never reach into another project's
+			// directory, even when the caller also supplies a session ID.
+			// Ledgers are shared with teammates, so returning another
+			// repo's session here would upload its conversation into the
+			// wrong Ledger.
+			direct := filepath.Join(baseDir, cwdToDirName(repoRoot), agentSessionID+".jsonl")
 			if _, err := os.Stat(direct); err == nil {
 				return direct, nil
+			}
+		} else {
+			// unscoped query: search across all subdirectories for this
+			// session ID
+			subdirs, _ := os.ReadDir(baseDir)
+			for _, d := range subdirs {
+				if !d.IsDir() {
+					continue
+				}
+				direct := filepath.Join(baseDir, d.Name(), agentSessionID+".jsonl")
+				if _, err := os.Stat(direct); err == nil {
+					return direct, nil
+				}
 			}
 		}
 	}
@@ -224,17 +256,20 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 		}
 	}
 
-	// if repoRoot is provided, look in the specific project subdirectory first
+	// A project-scoped query (repoRoot set) is confined to that project's own
+	// directory — never falling back to "newest session anywhere" — because
+	// Ledgers are per-repo and shared with teammates; attributing another
+	// project's transcript to this repo would leak its conversation content
+	// into the wrong Ledger. Only a genuinely unscoped query (repoRoot == "")
+	// searches every subdirectory.
 	var searchDirs []string
 	if repoRoot != "" {
 		projectDir := filepath.Join(baseDir, cwdToDirName(repoRoot))
-		if info, err := os.Stat(projectDir); err == nil && info.IsDir() {
-			searchDirs = append(searchDirs, projectDir)
+		if info, err := os.Stat(projectDir); err != nil || !info.IsDir() {
+			return "", fmt.Errorf("no pi sessions found for %s", repoRoot)
 		}
-	}
-
-	// fall back to searching all subdirectories
-	if len(searchDirs) == 0 {
+		searchDirs = append(searchDirs, projectDir)
+	} else {
 		subdirs, err := os.ReadDir(baseDir)
 		if err != nil {
 			return "", fmt.Errorf("failed to read sessions dir: %w", err)
@@ -271,6 +306,9 @@ func findPiSession(repoRoot, agentID, since, agentSessionID string) (string, err
 	}
 
 	if len(candidates) == 0 {
+		if repoRoot != "" {
+			return "", fmt.Errorf("no pi sessions found for %s", repoRoot)
+		}
 		return "", fmt.Errorf("no pi sessions found")
 	}
 
@@ -320,20 +358,27 @@ func extractPiMetadata(path string) *adapterprotocol.SessionMetadata {
 	buf := make([]byte, 0, 64*1024)
 	scanner.Buffer(buf, 10*1024*1024)
 
+	// the session header and the initial model_change both precede the first
+	// message, so stop once the conversation starts
 	for scanner.Scan() {
-		var raw piEntry
-		if err := json.Unmarshal(scanner.Bytes(), &raw); err != nil {
+		var rec piRecord
+		if err := json.Unmarshal(scanner.Bytes(), &rec); err != nil {
 			continue
 		}
-		// session header contains version info
-		if raw.Type == "session" {
-			if raw.Version > 0 {
-				meta.AgentVersion = fmt.Sprintf("pi-v%d", raw.Version)
+		switch rec.Type {
+		case "session":
+			if rec.Version > 0 {
+				meta.AgentVersion = fmt.Sprintf("pi-v%d", rec.Version)
 			}
-			if raw.Model != "" {
-				meta.Model = raw.Model
+		case "model_change":
+			if rec.ModelID != "" {
+				meta.Model = rec.ModelID
 			}
-			break
+		case "message":
+			if meta.AgentVersion == "" && meta.Model == "" {
+				return nil
+			}
+			return meta
 		}
 	}
 
