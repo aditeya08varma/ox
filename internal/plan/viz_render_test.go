@@ -80,10 +80,10 @@ func TestRenderViz_CostWaterfallSingleColor(t *testing.T) {
 		t.Fatalf("RenderViz: %v", err)
 	}
 	if strings.Contains(out, "var(--sage)") || strings.Contains(out, "var(--teal)") {
-		t.Errorf("cost bars should be one color (copper), not a palette rotation: %s", out)
+		t.Errorf("cost bars should be one color (gold), not a palette rotation: %s", out)
 	}
-	if strings.Count(out, "var(--copper)") != 3 {
-		t.Errorf("expected all 3 bars copper, got: %s", out)
+	if strings.Count(out, "var(--gold)") != 3 {
+		t.Errorf("expected all 3 bars gold, got: %s", out)
 	}
 }
 

@@ -3,8 +3,11 @@
 // re-render, OS-preference default + persistence, sticky section jumps
 // (plans with >3 sections), and scroll-spy TOC.
 (function(){
-  var darkVars={background:'#111411',primaryColor:'#171b17',primaryTextColor:'#e8ede7',primaryBorderColor:'#252c24',lineColor:'#6f7a6d',secondaryColor:'#141814',tertiaryColor:'#121612',fontFamily:'Inter, sans-serif',fontSize:'13px',actorBkg:'#171b17',actorBorder:'#252c24',actorTextColor:'#e8ede7',noteBkgColor:'#241803',noteTextColor:'#f7d8a0',noteBorderColor:'#f59e0b'};
-  var lightVars={background:'#ffffff',primaryColor:'#f5f8f4',primaryTextColor:'#16201c',primaryBorderColor:'#d8e0d8',lineColor:'#6c7a72',secondaryColor:'#eef4ee',tertiaryColor:'#eef7f5',fontFamily:'Inter, sans-serif',fontSize:'13px',actorBkg:'#f5f8f4',actorBorder:'#d8e0d8',actorTextColor:'#16201c',noteBkgColor:'#fdf2dc',noteTextColor:'#6b4a0c',noteBorderColor:'#b4730c'};
+  // Mermaid gets the same sageox-design tokens as the page around it — a diagram
+  // on its own palette is the loudest way for an embedded plan to look pasted in.
+  // Mirror :root / [data-theme=light] in scaffold.css when either moves.
+  var darkVars={background:'#111411',primaryColor:'#171b17',primaryTextColor:'#f4f2ef',primaryBorderColor:'#212620',lineColor:'#8c8e7e',secondaryColor:'#141814',tertiaryColor:'#121612',fontFamily:'Inter, sans-serif',fontSize:'13px',actorBkg:'#171b17',actorBorder:'#212620',actorTextColor:'#f4f2ef',noteBkgColor:'#241d08',noteTextColor:'#dfc06a',noteBorderColor:'#d9b654'};
+  var lightVars={background:'#f7f5f2',primaryColor:'#f2f0ec',primaryTextColor:'#161812',primaryBorderColor:'#e5e2df',lineColor:'#6b6d60',secondaryColor:'#ebe8e5',tertiaryColor:'#f4f2ef',fontFamily:'Inter, sans-serif',fontSize:'13px',actorBkg:'#f2f0ec',actorBorder:'#e5e2df',actorTextColor:'#161812',noteBkgColor:'#fbf4e3',noteTextColor:'#644f1e',noteBorderColor:'#836726'};
   var nodes=[].slice.call(document.querySelectorAll('.mermaid'));
   var srcs=nodes.map(function(n){return n.textContent;});
   function renderMer(){

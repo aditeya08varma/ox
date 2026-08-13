@@ -249,7 +249,7 @@ func parsePlanFacts(in Input) planFacts {
 }
 
 // structureStats projects the facts into hero chips, using the fixed semantic
-// hue map (sage=shipped/good · copper=gate · amber=hold · red=risk).
+// hue map (sage=shipped/good · gold=gate · amber=hold · red=risk).
 func structureStats(f planFacts) []statChip {
 	var out []statChip
 	add := func(n int, singular, plural, class string) {
@@ -263,7 +263,7 @@ func structureStats(f planFacts) []statChip {
 		out = append(out, statChip{Value: fmt.Sprintf("%d", n), Label: label, Class: class})
 	}
 	add(len(f.Tracks), "track", "tracks", "neutral")
-	add(f.Gates, "gate", "gates", "copper")
+	add(f.Gates, "gate", "gates", "gold")
 	add(f.Shipped, "shipped", "shipped", "sage")
 	add(f.Holds, "human hold", "human holds", "amber")
 	add(f.Risks, "risk", "risks", "red")

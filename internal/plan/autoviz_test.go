@@ -204,14 +204,28 @@ func contrast(a, b string) float64 {
 // corrected text tokens clear WCAG AA (4.5:1) on the surfaces they sit on —
 // including the chrome's own near-opaque surfaces on white AND #0b0d0b hosts.
 func TestContrastTokens(t *testing.T) {
+	// Values mirror the :root / [data-theme=light] blocks in assets/scaffold.css.
+	// When a token moves there, move it here — this gate is the only thing that
+	// catches a design-token swap that quietly drops text below AA.
 	cases := []struct{ name, fg, bg string }{
-		{"dark faint on panel2 (BUG1 fix)", "#7b857a", "#171b17"},
-		{"dark faint on canvas", "#7b857a", "#0b0d0b"},
-		{"light amber on canvas (BUG2 fix)", "#9a620a", "#eef2ee"},
-		{"light copper on canvas (BUG3 fix)", "#9f5c38", "#eef2ee"},
-		{"light violet on canvas", "#755acb", "#eef2ee"},
-		{"chrome ink on chrome dark surface", "#e8ede7", "#111411"},
-		{"chrome light ink on chrome light surface", "#16201c", "#ffffff"},
+		{"dark faint on panel2 (BUG1 fix)", "#8c8e7e", "#171b17"},
+		{"dark faint on canvas", "#8c8e7e", "#0b0d0b"},
+		{"dark dim on canvas", "#b7b6a3", "#0b0d0b"},
+		{"dark sage on canvas", "#99c693", "#0b0d0b"},
+		{"light amber on canvas (BUG2 fix)", "#644f1e", "#ffffff"},
+		{"light gold on canvas (BUG3 fix)", "#836726", "#ffffff"},
+		{"light violet on canvas", "#6d5c86", "#ffffff"},
+		{"light red on canvas", "#9f4838", "#ffffff"},
+		{"light teal on canvas", "#586f80", "#ffffff"},
+		{"light sage on canvas", "#3d643b", "#ffffff"},
+		{"light faint on canvas", "#6b6d60", "#ffffff"},
+		// The muted/subtle text stops are calibrated against the page sheet; the
+		// inner cream panels are darker, so re-verify there rather than assume.
+		{"light faint on panel", "#6b6d60", "#f7f5f2"},
+		{"light faint on panel2", "#6b6d60", "#f2f0ec"},
+		{"light dim on panel2", "#4a4d42", "#f2f0ec"},
+		{"chrome ink on chrome dark surface", "#f4f2ef", "#111411"},
+		{"chrome light ink on chrome light surface", "#161812", "#f7f5f2"},
 	}
 	for _, tc := range cases {
 		if got := contrast(tc.fg, tc.bg); got < 4.5 {

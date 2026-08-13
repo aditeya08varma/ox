@@ -97,9 +97,9 @@ use: phases, rollout, or relative-effort sequencing across workstreams (NOT cale
 why: lanes + bars show what runs when and in parallel; the robust default for "when, in what order, how long". Add a labeled gate (◆) for the milestone that matters, a bottom axis of phase columns, and a one-line caption stating the unit — that's what turns a bar chart into an at-a-glance build plan. For a comparison, give each scenario its own lane and use a `.mark` for a point event (↺ reset, ✂ kill, → continues) and an `.anno` for a one-line per-lane caption.
 ```html
 <div class="swim">
-  <div class="lane"><span class="lane-name">Foundation</span><div class="track"><span class="bar" style="left:0;width:18%;background:var(--copper)">measure</span><span class="bar" style="left:20%;width:14%;background:var(--sage)">fix pool</span></div></div>
+  <div class="lane"><span class="lane-name">Foundation</span><div class="track"><span class="bar" style="left:0;width:18%;background:var(--gold)">measure</span><span class="bar" style="left:20%;width:14%;background:var(--sage)">fix pool</span></div></div>
   <div class="lane"><span class="lane-name">Claim &lt;1s</span><div class="track"><span class="bar" style="left:38%;width:18%;background:var(--teal)">pre-warm</span><span class="bar" style="left:58%;width:16%;background:var(--teal)">paint</span><span class="bar" style="left:76%;width:18%;background:var(--teal)">partials</span></div></div>
-  <div class="lane"><span class="lane-name">Scale</span><div class="track"><span class="bar" style="left:38%;width:18%;background:var(--copper)">cost dials</span><span class="bar" style="left:58%;width:16%;background:var(--copper)">deep pool</span><span class="bar" style="left:76%;width:18%;background:var(--copper)">multi-replica</span></div></div>
+  <div class="lane"><span class="lane-name">Scale</span><div class="track"><span class="bar" style="left:38%;width:18%;background:var(--gold)">cost dials</span><span class="bar" style="left:58%;width:16%;background:var(--gold)">deep pool</span><span class="bar" style="left:76%;width:18%;background:var(--gold)">multi-replica</span></div></div>
   <div class="lane axis"><span class="lane-name"></span><div class="track"><span class="tick" style="left:9%">measure</span><span class="tick" style="left:27%">pool fixed</span><span class="tick" style="left:47%">claim &lt;1s ◆</span><span class="tick" style="left:66%">deep pool</span><span class="tick" style="left:85%">100k scale</span></div></div>
 </div>
 <p class="dim">Relative effort, not calendar. ◆ = the gate where the goal becomes meetable.</p>
@@ -347,7 +347,7 @@ why: a stacked/segmented bar with a running total shows where the cost concentra
 param: {"unit":"$/hr","items":[{"name":"topic detector","value":0.036},{"name":"refresher","value":0.001}]}
 ```html
 <!-- generate with: ox plan viz render cost-waterfall --data cost.json -->
-<div class="barc"><div class="bar-row"><span class="bl">topic detector</span><span class="bt"><span class="bf" style="width:97%;background:var(--copper)"></span></span><span class="bv">$0.036</span></div></div>
+<div class="barc"><div class="bar-row"><span class="bl">topic detector</span><span class="bt"><span class="bf" style="width:97%;background:var(--gold)"></span></span><span class="bv">$0.036</span></div></div>
 ```
 
 ## decision-grid
@@ -380,7 +380,7 @@ param: {"title":"test outcomes","unit":"","slices":[{"label":"pass","value":182,
 ## radar
 use: compare a few options across multiple criteria — score each alternative on the same axes to see the shape of its strengths.
 why: overlaid polygons make "which option is strong where" a single shape comparison instead of a table scan; ≤3 series and a per-series line dash keep it legible without relying on color.
-param: {"title":"approach fit","axes":["speed","safety","cost","reuse"],"max":5,"series":[{"label":"native","values":[4,5,2,3],"color":"sage"},{"label":"hybrid","values":[3,4,4,5],"color":"copper"}]}
+param: {"title":"approach fit","axes":["speed","safety","cost","reuse"],"max":5,"series":[{"label":"native","values":[4,5,2,3],"color":"sage"},{"label":"hybrid","values":[3,4,4,5],"color":"gold"}]}
 ```html
 <!-- prefer the param renderer: ox plan viz render radar --data radar.json
      ox computes each axis spoke angle + the per-series polygon points. -->
@@ -390,7 +390,7 @@ param: {"title":"approach fit","axes":["speed","safety","cost","reuse"],"max":5,
 ## quadrant
 use: a two-axis tradeoff scatter — impact vs effort, value vs risk — placing each item in a quadrant so the act-now corner is obvious.
 why: a 2×2 turns "which to do first" into spatial position; the top-corner items pop without reading a single number, and labels keep it readable in grayscale.
-param: {"title":"what to build first","x_label":"effort","y_label":"impact","points":[{"label":"donut","x":2,"y":8,"color":"sage"},{"label":"sankey","x":8,"y":6,"color":"copper"}]}
+param: {"title":"what to build first","x_label":"effort","y_label":"impact","points":[{"label":"donut","x":2,"y":8,"color":"sage"},{"label":"sankey","x":8,"y":6,"color":"gold"}]}
 ```html
 <!-- prefer the param renderer: ox plan viz render quadrant --data quad.json
      ox normalizes x/y to the plot box and splits the 2×2 at the midlines. -->
@@ -400,7 +400,7 @@ param: {"title":"what to build first","x_label":"effort","y_label":"impact","poi
 ## treemap
 use: a proportional hierarchy where area encodes size — code by package, spend by category, storage by bucket. Size at a glance.
 why: a squarified treemap encodes magnitude as area (the dominant block IS the dominant cost) far denser than a bar list; a legend carries exact sizes so slivers stay readable.
-param: {"title":"repo by package","unit":"KB","items":[{"label":"internal/plan","size":120,"color":"sage"},{"label":"cmd/ox","size":80,"color":"copper"},{"label":"internal/lfs","size":40,"color":"teal"}]}
+param: {"title":"repo by package","unit":"KB","items":[{"label":"internal/plan","size":120,"color":"sage"},{"label":"cmd/ox","size":80,"color":"gold"},{"label":"internal/lfs","size":40,"color":"teal"}]}
 ```html
 <!-- prefer the param renderer: ox plan viz render treemap --data tmap.json
      ox runs the squarified layout so each cell's AREA is proportional to size. -->
@@ -410,7 +410,7 @@ param: {"title":"repo by package","unit":"KB","items":[{"label":"internal/plan",
 ## sankey
 use: flow magnitude across stages — where tokens, cost, traffic, or users move and split between steps. Conserved quantity, staged.
 why: ribbon width encodes the magnitude flowing along each path, so the dominant route and the leaks read instantly; a node-and-arrow flowchart shows topology but hides the amounts.
-param: {"title":"token budget","unit":"tok","nodes":[{"name":"prompt","color":"sage"},{"name":"tools","color":"copper"},{"name":"output","color":"teal"}],"links":[{"from":"prompt","to":"tools","value":1200},{"from":"prompt","to":"output","value":800},{"from":"tools","to":"output","value":1000}]}
+param: {"title":"token budget","unit":"tok","nodes":[{"name":"prompt","color":"sage"},{"name":"tools","color":"gold"},{"name":"output","color":"teal"}],"links":[{"from":"prompt","to":"tools","value":1200},{"from":"prompt","to":"output","value":800},{"from":"tools","to":"output","value":1000}]}
 ```html
 <!-- prefer the param renderer: ox plan viz render sankey --data sankey.json
      ox layers the DAG, sizes nodes by max(in,out), and sets ribbon width ∝ value. -->
@@ -445,7 +445,7 @@ why: a load-bearing sentence set in a quote block is read; the same sentence ins
 <p class="sub">Ryan, 2026-07-30 Discussion with Milkana: <em>"I wanna dance on that edge — I think that's the point."</em></p>
 ```
 ```css
-.quote{border-left:3px solid var(--accent,#e0a56a);padding:6px 16px;margin:16px 0;font-size:16px;font-style:italic}
+.quote{border-left:3px solid var(--gold,#d9b654);padding:6px 16px;margin:16px 0;font-size:16px;font-style:italic}
 ```
 
 ## status-pair
@@ -461,7 +461,7 @@ why: an honest 15% bar and a two-column done/not-done grid kill the thin-red-lin
 ```
 ```css
 .progress{height:10px;border-radius:6px;background:var(--panel2,#1b2327);overflow:hidden}
-.progress i{display:block;height:100%;background:var(--good,#7a8f78)}
+.progress i{display:block;height:100%;background:var(--sage,#99c693)}
 .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
 ```
 
@@ -485,7 +485,7 @@ why: progressive disclosure for risks: the ten-minute reader scans four rows; th
 ```html
 <table class="riskreg">
 <tr><th></th><th>Risk → resolution</th><th>Owner</th></tr>
-<tr class="rrow" tabindex="0" role="button" aria-expanded="false" aria-controls="risk-1-det"><td class="sev"><span class="sevdot" style="background:var(--red,#ef4444)"></span><span class="vis-hidden">High severity</span></td>
+<tr class="rrow" tabindex="0" role="button" aria-expanded="false" aria-controls="risk-1-det"><td class="sev"><span class="sevdot" style="background:var(--red,#d77e6c)"></span><span class="vis-hidden">High severity</span></td>
   <td><span class="chev" aria-hidden="true">▸</span><b>The risk, named plainly</b><br><span class="sub">One-line resolution — decisive, not a mitigation list.</span></td>
   <td class="own">Owner</td></tr>
 <tr id="risk-1-det" class="det"><td colspan="3"><div class="detgrid">
@@ -500,7 +500,7 @@ why: progressive disclosure for risks: the ten-minute reader scans four rows; th
 .riskreg tr.rrow{cursor:pointer}
 .riskreg td.sev{width:26px;text-align:center}
 .riskreg .sevdot{display:inline-block;width:9px;height:9px;border-radius:50%}
-.riskreg .chev{color:var(--accent,#e0a56a);margin-right:6px;display:inline-block;transition:transform .12s}
+.riskreg .chev{color:var(--gold,#d9b654);margin-right:6px;display:inline-block;transition:transform .12s}
 .riskreg tr.open .chev{transform:rotate(90deg)}
 .riskreg tr.det{display:none}
 .riskreg tr.det.show{display:table-row}

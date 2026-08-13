@@ -75,7 +75,7 @@ func RenderViz(pattern string, data []byte) (string, error) {
 // vizColors is the whitelist of semantic color names a caller may reference;
 // anything else falls back to sage so a typo can't inject arbitrary CSS.
 var vizColors = map[string]string{
-	"sage": "--sage", "copper": "--copper", "amber": "--amber",
+	"sage": "--sage", "gold": "--gold", "amber": "--amber",
 	"red": "--red", "teal": "--teal", "slate": "--slate", "violet": "--violet",
 }
 
@@ -181,7 +181,7 @@ func renderCostWaterfall(data []byte) (string, error) {
 			Label string  `json:"label"`
 			Value float64 `json:"value"`
 			Color string  `json:"color"`
-		}{Label: it.Name, Value: it.Value, Color: "copper"})
+		}{Label: it.Name, Value: it.Value, Color: "gold"})
 	}
 	bc.Title = "Total " + fmtUnit(d.Unit, total)
 	bcBytes, _ := json.Marshal(bc)
