@@ -13,19 +13,28 @@ When you produce an implementation plan for non-trivial work — multi-file, arc
 | When | Command | What it returns |
 |---|---|---|
 | While drafting | `ox plan enrich` | JSON: collisions (including teammates currently murmuring these files), prior art, expert routing, per-section `diagram_hints`, and a decision-first `guidance` line |
-| When presenting | `ox plan render` (add `--open` only per the `plan.open` policy — see below) | A self-contained HTML page with the enrichment baked in, saved to the ledger with attribution |
+| When presenting | Author `plan.html`, then `ox plan save --file plan.html` and `ox plan render --file plan.html` (add `--open` only per the `plan.open` policy — see below) | The authored visual page preserved as the plan of record, with SageOx chrome injected and markdown derived |
 
 Run `ox plan enrich` **while you draft**, not after — fold its output into the plan before the human ever sees it. Plans that ignore recent team context (an open PR touching the same files, a teammate's murmur, a prior decision) get re-litigated in review, which costs more human time than the enrichment call ever could.
 
-## Why `ox plan render`, even if you have your own HTML-plan skill
+## Why the authored HTML must be the plan of record
 
-Many agents ship a generic or self-rolled HTML-plan renderer. Run `ox plan render` anyway — SageOx cannot modify a third-party skill, so this is the one place prime has to make the case explicitly:
+For material work, author a purpose-built visual `plan.html`; then pass that page through ox:
 
-- Only `ox plan render` bakes in SageOx team context: prior art, collisions, expert routing, knowledge bubbles, team memory.
-- Only `ox plan render` saves the plan to the ledger with attribution, so teammates can find it later (`ox plan list`).
-- A self-rolled render, however polished, is a **context-blind orphan** — it looks like a plan but carries none of the information that would have changed a reviewer's mind, and the team never sees it again after the conversation ends.
+- `ox plan save --file plan.html` records the authored page as canonical (`primary=html`) and derives `plan.md` for terminal/search use.
+- `ox plan render --file plan.html` injects prior art, collisions, expert routing, knowledge bubbles, team memory, attribution, and the review loop without rewriting the authored page.
+- `ox plan review <slug>` reopens that same visual argument; it must never regenerate a generic page from the derived markdown.
 
-If you want your own visual style, that's fine — but still run `ox plan render` for the ledger write and team-context injection, and treat your own renderer as a display layer on top, not a replacement.
+Never use the rejected legacy `--plan + --html` pair. It creates two candidate
+sources of truth and historically allowed review to discard the authored page.
+
+## Two readers, two layers
+
+The visible page is a decision surface: conclusion, trade-offs, biggest risk,
+and one meaningful hero visualization. Put exact file edits, rollout mechanics,
+and gotchas in one closed `<details><summary>Implementation notes</summary>` at
+the end. This preserves implementation depth without turning the approver's
+first ten minutes into a wall of text.
 
 **Opening the render is gated by the `plan.open` config** (`never` / `ask` / `always`, default `ask`) — never add `--open` unconditionally:
 
@@ -39,7 +48,9 @@ If you want your own visual style, that's fine — but still run `ox plan render
 ox plan lint <slug> [--strict]
 ```
 
-Checks the rendered page for SageOx attribution and the self-contained-HTML invariant (no external asset dependencies, so it still opens correctly from the ledger months later).
+Checks the rendered page for SageOx attribution, meaningful-visual realization,
+collapsed implementation depth on material plans, and self-contained-HTML
+invariants. Decorative OX SVG chrome does not satisfy the visualization check.
 
 ## The review loop (human opt-in)
 
@@ -57,7 +68,7 @@ On the human's yes, this launches an in-browser review: they mark up the rendere
 
 ## Authoring aids
 
-Use `ox viz suggest "<what needs explaining>"` for architecture and flow diagrams, sparklines, dependency graphs, swimlanes, Tufte-style tables, and device mockups. The catalog works in plans, docs, PRs, reports, and design notes. `ox plan render` auto-styles a TL;DR block, a Risks section, and verdict cells from conventional markdown structure — you don't need to hand-roll these.
+Use `ox viz suggest "<what needs explaining>"` for architecture and flow diagrams, sparklines, dependency graphs, swimlanes, Tufte-style tables, and device mockups. The catalog works in plans, docs, PRs, reports, and design notes. The generic markdown renderer is a quick-path approximation for small, low-stakes plans; a material plan gets authored HTML.
 
 ## Tier-aware guidance
 

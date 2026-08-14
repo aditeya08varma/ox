@@ -12,7 +12,9 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/agenttask"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/spf13/cobra"
 )
 
 // newTestReviewServer wires the live handler against a temp plan dir (no ledger
@@ -41,6 +43,106 @@ func reviewPOST(t *testing.T, url, token, body string) int {
 	}
 	resp.Body.Close()
 	return resp.StatusCode
+}
+
+// TestRenderSavedReviewPage_PreservesLegacyAuthoredHTML guards the regression
+// where --no-serve and live review replaced a purpose-built architecture page
+// with the generic markdown template because old metadata omitted primary=html.
+func TestRenderSavedReviewPage_PreservesLegacyAuthoredHTML(t *testing.T) {
+	dir := t.TempDir()
+	authored := `<!doctype html><html><head><title>Attest map</title></head><body><div id="authored-system-map" class="hero-map">visual flow</div><details><summary>Implementation notes</summary><p>files</p></details></body></html>`
+	if err := os.WriteFile(filepath.Join(dir, "plan.html"), []byte(authored), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"topic":"Attest map","slug":"attest-map"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := renderSavedReviewPage("", "attest-map", dir, plan.Parse("# Attest map\n\nprose fallback"), plan.Result{}, nil, plan.RenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte(`id="authored-system-map"`)) {
+		t.Fatal("review discarded the legacy authored system map")
+	}
+	if bytes.Contains(out, []byte(`<div class="brand">OX · PLAN</div>`)) {
+		t.Fatal("review regenerated the markdown template instead of preserving authored HTML")
+	}
+}
+
+func TestRenderSavedReviewPage_RegeneratesKnownMarkdownProjection(t *testing.T) {
+	dir := t.TempDir()
+	generated := `<!doctype html><html><body><div class="brand">OX · PLAN</div><div class="eyebrow">SageOx · enriched plan</div><div id="stale">old projection</div></body></html>`
+	if err := os.WriteFile(filepath.Join(dir, "plan.html"), []byte(generated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"topic":"Quick plan","slug":"quick-plan"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := renderSavedReviewPage("", "quick-plan", dir, plan.Parse("# Quick plan\n\n## Current\nFresh markdown projection."), plan.Result{}, nil, plan.RenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out, []byte(`id="stale"`)) || !bytes.Contains(out, []byte("Fresh markdown projection")) {
+		t.Fatal("a known generated render must be refreshed from canonical markdown")
+	}
+}
+
+func TestRenderSavedReviewPage_PreservesProvenanceSessionLink(t *testing.T) {
+	projectRoot := createInitializedProjectWithConfig(t, &config.ProjectConfig{Endpoint: "https://sageox.example"})
+	sessionID := "ses_01890a5d-ac96-774b-bcce-b302099a8057"
+	for _, tc := range []struct {
+		name     string
+		authored string
+		primary  string
+	}{
+		{name: "authored", authored: `<!doctype html><html><body><div class="hero-map">System topology</div></body></html>`, primary: plan.PrimaryHTML},
+		{name: "markdown primary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.authored != "" {
+				if err := os.WriteFile(filepath.Join(dir, "plan.html"), []byte(tc.authored), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			meta := fmt.Sprintf(`{"topic":"Saved","slug":"saved","primary":%q,"provenance":{"session_id":%q}}`, tc.primary, sessionID)
+			if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out, err := renderSavedReviewPage(projectRoot, "saved", dir, plan.Parse("# Saved\n\nFallback plan."), plan.Result{}, nil, plan.RenderOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(out, []byte("https://sageox.example/c/"+sessionID)) {
+				t.Fatal("saved review page lost its provenance conversation link")
+			}
+		})
+	}
+}
+
+func TestRunPlanRenderSavedHTML_PreservesProvenanceSessionLink(t *testing.T) {
+	projectRoot := createInitializedProjectWithConfig(t, &config.ProjectConfig{Endpoint: "https://sageox.example"})
+	planDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(planDir, "plan.html"), []byte(`<!doctype html><html><body><div class="hero-map">System topology</div></body></html>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(t.TempDir(), "render.html")
+	sessionID := "ses_01890a5d-ac96-774b-bcce-b302099a8057"
+	cmd := &cobra.Command{}
+	if err := runPlanRenderSavedHTML(cmd, projectRoot, "legacy-plan", plan.PlanInfo{Dir: planDir}, plan.Result{}, plan.Meta{
+		Provenance: &plan.Provenance{SessionID: sessionID},
+	}, outputPath, false, false); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rendered, []byte("https://sageox.example/c/"+sessionID)) {
+		t.Fatal("saved authored plan lost its provenance conversation link")
+	}
 }
 
 // TestReviewLoop_ServesAllowlistedCompanions verifies the /companions/ route:
