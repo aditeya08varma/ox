@@ -56,7 +56,10 @@ sageox-design token.
   --sage:#99c693; --gold:#d9b654; --amber:#c6a23c; --red:#d77e6c; --teal:#97aebd;
 }
 html[data-theme="light"]{
-  --bg:#f4f2ef; --panel:#f7f5f2; --panel2:#f2f0ec; --hair:#e5e2df; --hair2:#ebe8e5;
+  /* The page sheet is pure white — a plan is one big content card, the same
+     object the app renders its cards as. Inner surfaces step DOWN into cream
+     rather than up, inverting dark mode. */
+  --bg:#ffffff; --panel:#f7f5f2; --panel2:#f2f0ec; --hair:#e5e2df; --hair2:#ebe8e5;
   --ink:#161812; --dim:#4a4d42; --faint:#6b6d60;
   --sage:#3d643b; --gold:#836726; --amber:#644f1e; --red:#9f4838; --teal:#586f80;
 }

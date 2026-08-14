@@ -117,7 +117,7 @@ html[data-theme="light"] .ico-l{display:inline}
    the positive verdict cell so it doesn't double as "expert". */
 .ox-sig-collision{color:var(--amber)}
 .ox-sig-prior-art{color:var(--teal)}
-.ox-sig-expert-routing{color:var(--violet)}
+.ox-sig-expert-routing{color:var(--gold)}
 /* TL;DR hero callout — the decision-first lede */
 .tldr{position:relative;background:linear-gradient(135deg,var(--grad-a),var(--grad-b));border:1px solid var(--hair);border-left:3px solid #5b605a;border-radius:10px;padding:16px 18px 16px 20px;margin:14px 0 8px;box-shadow:var(--shadow)}
 .tldr-tag{display:inline-block;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;letter-spacing:.14em;color:var(--dim);text-transform:uppercase;margin-bottom:6px}
@@ -128,7 +128,7 @@ html[data-theme="light"] .ico-l{display:inline}
 .ox-chip{display:flex;align-items:baseline;gap:8px;font-size:13px;color:var(--dim);background:var(--panel2);border:1px solid var(--hair2);border-left:2px solid var(--hair);border-radius:7px;padding:7px 11px}
 .ox-chip.ox-sig-collision{border-left-color:var(--amber)}
 .ox-chip.ox-sig-prior-art{border-left-color:var(--teal)}
-.ox-chip.ox-sig-expert-routing{border-left-color:var(--violet)}
+.ox-chip.ox-sig-expert-routing{border-left-color:var(--gold)}
 .ox-chip strong{color:var(--ink)}
 .ox-chip .src{color:var(--teal);font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:.8em}
 .ox-marker.sm{width:22px;height:22px;padding:3px;border-radius:5px;flex:0 0 auto;align-self:center}
@@ -167,7 +167,7 @@ main>section[id^="sec-"]{scroll-margin-top:72px}
 td.v-good{color:var(--sage-bright);font-weight:600}
 td.v-warn{color:var(--amber);font-weight:600}
 td.v-bad{color:var(--red);font-weight:600}
-/* --- Visualization catalog primitives (see `ox plan viz`) --- */
+/* --- Visualization catalog primitives (see `ox viz`) --- */
 /* swimlane timeline */
 .swim{display:flex;flex-direction:column;gap:6px;margin:14px 0}
 .swim .lane{display:grid;grid-template-columns:120px 1fr;align-items:center;gap:10px}
@@ -214,10 +214,10 @@ html[data-theme="light"] ul.ftree .chg{border:1px solid var(--hair)}
    bare .device is a generic frame; .device.ios adds iPhone-class chrome (notch +
    home indicator); .device-statusbar / -titlebar / -sheet / -actions / -row
    compose common screens (a list, a share sheet, a notification). Author the
-   screen CONTENT inline — ox renders it verbatim. See `ox plan viz device-mockup`. */
+   screen CONTENT inline — ox renders it verbatim. See `ox viz device-mockup`. */
 .device{max-width:300px;margin:14px 0;background:#111411;border:1px solid var(--hair);border-radius:16px;padding:10px;box-shadow:var(--shadow)}
-.device-screen{position:relative;background:#11171a;border:1px solid var(--hair2);border-radius:10px;padding:18px 16px;color:#e6edf0}
-.device-screen .dim{color:#9fb0b6;font-size:13px;margin:.3em 0 0}
+.device-screen{position:relative;background:#171b17;border:1px solid var(--hair2);border-radius:10px;padding:18px 16px;color:#f4f2ef}
+.device-screen .dim{color:#b7b6a3;font-size:13px;margin:.3em 0 0}
 /* a mockup beside its caption — the wrapper opts out of the prose measure */
 .device-row-wrap{display:flex;gap:22px;align-items:flex-start;flex-wrap:wrap;margin:14px 0}
 .device-row-wrap .device{margin:0}.device-row-wrap .cap{flex:1;min-width:220px;font-size:13.5px;color:var(--dim)}
@@ -230,22 +230,22 @@ html[data-theme="light"] ul.ftree .chg{border:1px solid var(--hair)}
 .device-statusbar{display:flex;justify-content:space-between;align-items:center;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:#cfd9dd;margin:-6px 0 12px}
 .device-statusbar .sb-r{letter-spacing:.06em}
 /* app title bar (back chevron / title / trailing action) */
-.device-titlebar{display:flex;align-items:center;gap:8px;font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:15px;color:#e6edf0;padding-bottom:10px;margin-bottom:10px;border-bottom:1px solid #222c30}
+.device-titlebar{display:flex;align-items:center;gap:8px;font-family:Inter,system-ui,sans-serif;font-weight:600;font-size:15px;color:#f4f2ef;padding-bottom:10px;margin-bottom:10px;border-bottom:1px solid #1d221d}
 .device-titlebar .tb-action{margin-left:auto;color:#7aaa77;font-size:13px;font-weight:500}
 /* iOS-style share / action sheet pinned to the bottom of the screen */
 .device-sheet{background:#1b2327;border:1px solid #2a3439;border-radius:16px 16px 10px 10px;padding:14px 12px;margin:16px -8px -22px}
-.device-sheet .sheet-title{font-family:"Space Grotesk",sans-serif;font-weight:600;font-size:13px;color:#e6edf0;margin-bottom:10px}
+.device-sheet .sheet-title{font-family:Inter,system-ui,sans-serif;font-weight:600;font-size:13px;color:#f4f2ef;margin-bottom:10px}
 /* horizontal row of share targets / actions */
 .device-actions{display:flex;gap:14px;overflow:hidden}
-.device-action{display:flex;flex-direction:column;align-items:center;gap:5px;font-size:9.5px;color:#9fb0b6;width:54px;flex:none}
+.device-action{display:flex;flex-direction:column;align-items:center;gap:5px;font-size:9.5px;color:#b7b6a3;width:54px;flex:none}
 .device-action .da-ic{width:48px;height:48px;border-radius:13px;background:#2a3439;display:flex;align-items:center;justify-content:center;font-size:20px}
 /* the SageOx destination is the single highlighted one (one accent per view) */
-.device-action.ox{color:#e6edf0;font-weight:600}
+.device-action.ox{color:#f4f2ef;font-weight:600}
 .device-action.ox .da-ic{background:linear-gradient(150deg,#7aaa77,#4e7d4c);color:#111411;box-shadow:0 0 0 2px #d9b654}
 /* generic list row inside a screen */
-.device-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #222c30;font-size:13px}
+.device-row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid #1d221d;font-size:13px}
 .device-row .dr-ic{width:30px;height:30px;border-radius:8px;background:#263035;display:flex;align-items:center;justify-content:center;font-size:15px;flex:none}
-.device-row .dr-sub{display:block;color:#9fb0b6;font-size:11px;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
+.device-row .dr-sub{display:block;color:#b7b6a3;font-size:11px;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace}
 /* bar chart / cost waterfall */
 .barc{margin:14px 0}
 .barc figcaption{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
@@ -257,7 +257,7 @@ html[data-theme="light"] ul.ftree .chg{border:1px solid var(--hair)}
 /* stat cards */
 .statrow{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:14px 0}
 .stat{background:var(--panel);border:1px solid var(--hair2);border-left:3px solid var(--hair);border-radius:9px;padding:12px 14px}
-.stat .sv{font-family:"Space Grotesk",sans-serif;font-size:26px;font-weight:600;line-height:1}
+.stat .sv{font-family:Inter,system-ui,sans-serif;font-size:26px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}
 .stat .sl{font-size:12px;color:var(--dim);margin-top:4px}
 .stat .sd{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11.5px;margin-top:6px}
 .stat.good{border-left-color:var(--sage)}.stat.good .sd{color:var(--sage-bright)}
@@ -463,7 +463,7 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .donut figcaption,.radar figcaption,.quad figcaption,.tmap figcaption,.sankey figcaption,.chord figcaption,.linec figcaption{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--dim);margin-bottom:8px}
 .donut-body{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
 .donut-svg{width:140px;height:140px;flex:none}
-.donut-ctr{fill:var(--ink);font-family:"Space Grotesk",sans-serif;font-size:18px;font-weight:600}
+.donut-ctr{fill:var(--ink);font-family:Inter,system-ui,sans-serif;font-size:18px;font-weight:600}
 .donut-leg,.radar-leg{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px;min-width:150px}
 .donut-leg li{display:flex;align-items:center;font-size:13px}
 .donut-lab{color:var(--ink)}
@@ -504,7 +504,7 @@ body.rev-on [data-rev],body.rev-on section[id]:hover,body.rev-on li:hover,body.r
 .tmap-svg{width:100%;max-width:460px;height:auto;border-radius:8px;overflow:hidden}
 .tmap-cell rect{stroke:var(--bg);stroke-width:1.5;transition:filter .14s}
 .tmap-cell:hover rect{filter:brightness(1.12)}
-.tmap-lab{fill:var(--ink);font-family:"Space Grotesk",sans-serif;font-size:11px;font-weight:600;pointer-events:none}
+.tmap-lab{fill:var(--ink);font-family:Inter,system-ui,sans-serif;font-size:11px;font-weight:600;pointer-events:none}
 .tmap-val{fill:var(--ink);opacity:.78;font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9.5px;pointer-events:none}
 .tmap-leg{list-style:none;margin:10px 0 0;padding:0;display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:4px 14px}
 .tmap-leg li{display:flex;align-items:center;font-size:12.5px}
@@ -543,10 +543,10 @@ body.rev-offline .rev-bar .rev-submit,body.rev-offline .rev-bar .rev-approve{opa
    blocker, expert view=gold — same one-meaning-per-hue map as above. */
 .ox-sig-aligns{color:var(--sage)}
 .ox-sig-conflicts{color:var(--red)}
-.ox-sig-expert-perspective{color:var(--violet)}
+.ox-sig-expert-perspective{color:var(--gold)}
 .ox-chip.ox-sig-aligns{border-left-color:var(--sage)}
 .ox-chip.ox-sig-conflicts{border-left-color:var(--red)}
-.ox-chip.ox-sig-expert-perspective{border-left-color:var(--violet)}
+.ox-chip.ox-sig-expert-perspective{border-left-color:var(--gold)}
 /* Alignment strip — surfaced context bundle inside the enrichment panel */
 .ox-ctx{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 12px;margin-top:9px;font-size:12.5px;color:var(--dim)}
 .ox-ctx-cap{font-family:"Spline Sans Mono",ui-monospace,SFMono-Regular,Menlo,monospace;font-size:9.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--faint)}

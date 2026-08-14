@@ -107,7 +107,7 @@ These are what make this an *enriched* plan, not just a pretty one. The human mu
 
 > **`N aligns` · `M conflicts` · `K collisions` · `E expert routes`**
 
-Use the SageOx semantic colors: sage for aligns, red for conflicts, amber for collisions/active-work, copper for expert routes. Each count is a chip; clicking/anchoring it can jump to the first section carrying that badge. This is the "should I even keep reading" glance.
+Use the SageOx semantic colors: sage for aligns, red for conflicts, amber for collisions/active-work, gold for expert routes. Each count is a chip; clicking/anchoring it can jump to the first section carrying that badge. This is the "should I even keep reading" glance.
 
 **2. Per-section badge rail.** Every plan section renders its badges in a right-aligned rail (or a row directly under the H2). A badge shows: an icon/dot, the type label, a **provenance chip** (see below), and a **source link** when `source_url`/`ref` is present. Collapse multiple badges of the same type into a count chip that expands.
 
@@ -115,8 +115,8 @@ Use the SageOx semantic colors: sage for aligns, red for conflicts, amber for co
 
 | `kind` | Chip label | Semantic color |
 |---|---|---|
-| `adr` | `ADR` | copper |
-| `decision` | `decision` | copper |
+| `adr` | `ADR` | gold |
+| `decision` | `decision` | gold |
 | `discussion` | `team context` | sage |
 | `session` | `ledger · session` | teal |
 | `commit` | `commit` | teal |
@@ -153,11 +153,11 @@ That blob fails every respect-the-reader test: lore before action, three distinc
 
 - **The marker.** Each SageOx signal renders as a small, recognizable **SageOx glyph** sitting in the margin gutter (or inline) right next to the plan element it concerns — a heading, a file ref, a step. It is the visual tell that "SageOx has something to say *here*," the way a code-review comment dot marks a line.
   - **Canonical mark = the SageOx avatar** (`https://avatars.githubusercontent.com/u/224450799?s=200&v=4`). **Base64-inline it as a `data:image/png;base64,…` URI at render time** (fetch once during rendering, embed the bytes) — the page is self-contained and must render from `file://` with **no runtime network**, so a live remote `<img src>` is banned. Keep it small (a ~28px avatar at `s=64` is plenty; don't inline a giant blob).
-  - **Offline fallback:** if the avatar can't be fetched at render time, draw an **inline-SVG `ox` monogram** (rounded square, sage/copper, themeable via `currentColor`) instead. Never block the render on the network.
+  - **Offline fallback:** if the avatar can't be fetched at render time, draw an **inline-SVG `ox` monogram** (rounded square, sage/gold, themeable via `currentColor`) instead. Never block the render on the network.
   - The marker is a real `<button aria-label="SageOx insight">` so it is focusable and screen-reader-named, with a faint ring/badge so it reads as interactive.
 - **Rollover reveals the insight.** Hover OR keyboard-focus OR click-to-pin opens the same popover mechanics as 2a. One marker = one signal = one popover. Inside, **action first**:
   - **Headline (one line, imperative when there's an action):** e.g. *"Rebase before editing `platformio.ini` — contended on PR ryan/flash-dev."* Not *"Collisions: platformio.ini + … contended."*
-  - **Severity color** by signal: collision/active-work → amber; conflict or an explicit "do NOT use" → red; prior-art/session → teal; expert route → copper; alignment → sage.
+  - **Severity color** by signal: collision/active-work → amber; conflict or an explicit "do NOT use" → red; prior-art/session → teal; expert route → gold; alignment → sage.
   - **Every reference resolves.** A bare `scribe-jbf00` is noise — render it as a link (to the PR/issue/ADR `source_url`) or as the runnable `ox session view <ref>` for a session. An ID with no resolution is degraded to "consult `<name>`", never shown raw.
   - **Provenance chip + author/when** from 2a.
   - **Synthesize the "so what," drop the lore.** State what the signal means *for this plan* and what to do; don't recite ownership trivia. Expand or link domain abbreviations (BDD, SDL, `X-Device-ID`) — a busy reviewer should not have to decode jargon.
@@ -229,13 +229,13 @@ One **hero diagram near the top** captures the whole shape. Add a second diagram
 
 **Implementation appendix — renders the CLI's two-layer authoring contract** (the decision-layer-up-top / implementer-detail-at-bottom rule itself comes from `ox plan enrich --json`'s `guidance` field, surfaced at prime as `<plan-enrichment-guidance>` — don't restate the rule here, just its HTML shape). In the page: the implementation layer — exact `file:line` steps, code snippets, edit order, gotchas — goes in ONE `<details>` **"Implementation notes"** block at the BOTTOM, collapsed by default and de-emphasized (dim, mono, smaller). If the plan has a scroll-spy TOC, mark the appendix entry distinctly (or omit it) so it never competes with the decision sections.
 
-**User-facing mockups — show how the feature is exposed.** If the plan changes anything the user sees or hears, include a visual of the resulting UI state honoring the project's design system — don't describe it in prose. The renderer ships a **device-mockup primitive**: `<div class="device ios">` (iPhone-class frame — notch + home indicator) composed from `.device-statusbar`, `.device-titlebar`, `.device-row`, and an iOS share/action sheet (`.device-sheet` + `.device-actions` + `.device-action`, with `.ox` marking the single highlighted destination — one accent per view); run `ox plan viz device-mockup` for the snippet. The screen stays dark in both themes. For a net-new or multi-state flow, recommend the `/design-mockup` skill rather than hand-rolling many states. Always state which design-system rules the mockup honors. Annotate behavior in user-facing language, never with implementation detail (write "a subtle chime plays", not a source filename).
+**User-facing mockups — show how the feature is exposed.** If the plan changes anything the user sees or hears, include a visual of the resulting UI state honoring the project's design system — don't describe it in prose. The renderer ships a **device-mockup primitive**: `<div class="device ios">` (iPhone-class frame — notch + home indicator) composed from `.device-statusbar`, `.device-titlebar`, `.device-row`, and an iOS share/action sheet (`.device-sheet` + `.device-actions` + `.device-action`, with `.ox` marking the single highlighted destination — one accent per view); run `ox viz device-mockup` for the snippet. The screen stays dark in both themes. For a net-new or multi-state flow, recommend the `/design-mockup` skill rather than hand-rolling many states. Always state which design-system rules the mockup honors. Annotate behavior in user-facing language, never with implementation detail (write "a subtle chime plays", not a source filename).
 
 **Typography & layout.**
-- Font stack (Google Fonts): **Space Grotesk** for display headings (h1/h2), **Inter** for body, **JetBrains Mono** for code, file refs, eyebrows, badges, and small labels. No serif headings.
+- Font stack (Google Fonts): **Hedvig Letters Serif** for display headings (h1/h2), **Inter** for body, **Spline Sans Mono** for code, file refs, eyebrows, badges, and small labels. Hedvig ships weight **400 only** — asking for 600/700 synthesizes a fake bold.
 - 15–16px body; line-height ~1.6; max content width ~1000–1040px, centered.
-- Confident heading scale: h1 ~42px / 700 / tracking -0.035em; h2 ~24px / 600 / -0.02em with a hairline trailing rule; h3 ~15px uppercase, copper, +0.06em. Mono eyebrow above h1.
-- **SageOx palette** (dark default): bg `#0f1416`, panel `#151b1e`/`#1b2327`, hairline `#2a3439`, ink `#e6edf0`, dim `#9fb0b6`, sage `#7a8f78` (primary/good/aligns), copper `#e0a56a` (one accent / expert routes), amber `#f59e0b` (warning / collisions), red `#ef4444` (blocker / conflicts), teal `#14b8a6` (file refs / capability). Max ~1 copper accent per section. Map badge colors to these semantics so the alignment strip and rail are palette-faithful.
+- Heading scale: h1 ~30px / 400 / tracking -0.005em; h2 ~22px / 400 with a hairline trailing rule; h3 ~14px uppercase Inter, faint, +0.03em. Mono eyebrow above h1. Presence comes from size and letterform, never weight.
+- **SageOx palette** (dark default): bg `#0b0d0b`, panel `#111411`/`#171b17`, hairline `#212620`, ink `#f4f2ef`, dim `#b7b6a3`, sage `#99c693` (primary/good/aligns), gold `#d9b654` (expert routes — copper is RETIRED per DDR-010), amber `#c6a23c` (warning / collisions), red `#d77e6c` (blocker / conflicts), teal `#97aebd` (file refs / capability). Light mode inverts to a white sheet on warm cream: bg `#ffffff`, panel `#f7f5f2`/`#f2f0ec`, hairline `#e5e2df`, ink `#161812`, and every accent drops two stops deeper for AA on the sheet. Map badge colors to these semantics so the alignment strip and rail are palette-faithful. The full contract is `docs/specs/plan-authoring-html.md`.
 - Generous whitespace. Cards (`border:1px hairline; radius:10px`) for parallel items. Multi-column grids collapse to one column under ~760px.
 
 **Light & dark mode.** Ship both. Default to `prefers-color-scheme`; add a small fixed sun/moon toggle persisting to `localStorage`. Drive everything off CSS custom properties (a dark `:root` plus an `html[data-theme="light"]` override; route gradient endpoints through `--grad-*` variables). **Mermaid's theme is fixed at init**, so the toggle MUST re-render diagrams: capture each `.mermaid` source on load, and on theme change reset `data-processed`, restore source, `mermaid.initialize` with the matching `themeVariables` (a dark set + a light set), and `mermaid.run({nodes})`. Inline device mockups stay dark in both modes — only the surrounding panel/page flips. **Badges must stay legible in both themes** — define their fills/outlines via the same CSS variables.
@@ -272,7 +272,7 @@ One **hero diagram near the top** captures the whole shape. Add a second diagram
    - Does it **stand on its own** — is every file/ID/symbol/PR given enough context to matter, with no bare references?
    - Do the visuals **compress** understanding (replace prose) or just decorate?
    - Are SageOx insights **anchored OX markers with action-first popovers**, never a prose blob?
-   - **Craft:** does a user-facing change show a **mockup** (the `.device.ios` primitive / `ox plan viz device-mockup`), and is every diagram ox suggested actually **drawn**? `ox plan render` surfaces these as `plan-craft [...]` advisories for any agent (Claude, Codex, …) — treat each as a review item, not a suggestion to skip.
+   - **Craft:** does a user-facing change show a **mockup** (the `.device.ios` primitive / `ox viz device-mockup`), and is every diagram ox suggested actually **drawn**? `ox plan render` surfaces these as `plan-craft [...]` advisories for any agent (Claude, Codex, …) — treat each as a review item, not a suggestion to skip.
    Revise until the architect signs off that a busy principal would get full value in ten minutes. Cut anything that fails the contract.
 7. Merge your judgment badges into the `ox plan enrich --json` annotations and persist with `ox plan save --plan ... --annotations <merged.json> --html <render.html>`.
 8. Open the HTML and report the path.
