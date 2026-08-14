@@ -57,7 +57,7 @@ func TestResolveNoProviders(t *testing.T) {
 func TestEnvProviderUnset(t *testing.T) {
 	os.Unsetenv("FEATURE_MEMORY")
 	os.Unsetenv("FEATURE_TUI")
-	t.Setenv("FEATURE_ATTEST", "")
+	os.Unsetenv("FEATURE_ATTEST")
 
 	f := flags.Resolve(context.Background(), flags.EnvProvider{})
 	// unset env vars should not change defaults
@@ -69,15 +69,6 @@ func TestEnvProviderUnset(t *testing.T) {
 	}
 	if f.AttestEnabled {
 		t.Error("AttestEnabled should remain false when FEATURE_ATTEST unset")
-	}
-}
-
-func TestEnvProviderEnablesAttest(t *testing.T) {
-	t.Setenv("FEATURE_ATTEST", "yes")
-
-	f := flags.Resolve(context.Background(), flags.EnvProvider{})
-	if !f.AttestEnabled {
-		t.Error("AttestEnabled should be true when FEATURE_ATTEST=yes")
 	}
 }
 
@@ -96,6 +87,15 @@ func TestEnvProviderEnablesFeature(t *testing.T) {
 	f := flags.Resolve(context.Background(), flags.EnvProvider{})
 	if !f.TUIEnabled {
 		t.Error("TUIEnabled should be true when FEATURE_TUI=true")
+	}
+}
+
+func TestEnvProviderEnablesAttest(t *testing.T) {
+	t.Setenv("FEATURE_ATTEST", "yes")
+
+	f := flags.Resolve(context.Background(), flags.EnvProvider{})
+	if !f.AttestEnabled {
+		t.Error("AttestEnabled should be true when FEATURE_ATTEST=yes")
 	}
 }
 
