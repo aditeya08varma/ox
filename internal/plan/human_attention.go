@@ -19,6 +19,15 @@ var visualClassTokens = map[string]struct{}{
 	"mock-shell": {}, "delete-map": {}, "flow-map": {}, "layer-stack": {},
 }
 
+// semanticVisualClassTokens are authored containers whose CSS gives their
+// content visual structure. Unlike generated renderer classes, an empty or
+// hidden container is not evidence of an explanatory visual.
+var semanticVisualClassTokens = map[string]struct{}{
+	"hero-map": {}, "runtime-map": {}, "system-map": {}, "architecture-map": {},
+	"sequence": {}, "timeline": {}, "states": {}, "access-map": {},
+	"mock-shell": {}, "delete-map": {}, "flow-map": {}, "layer-stack": {},
+}
+
 var decorativeClassTokens = map[string]struct{}{
 	"ox-marker": {}, "ox-ico": {}, "toc-brand": {}, "wm": {},
 }
@@ -33,24 +42,44 @@ func meaningfulVisualPresent(src string) bool {
 	if err != nil {
 		return false
 	}
-	var walk func(*xhtml.Node, bool) bool
-	walk = func(n *xhtml.Node, decorativeAncestor bool) bool {
+	var walk func(*xhtml.Node, bool, bool) bool
+	walk = func(n *xhtml.Node, decorativeAncestor, hiddenAncestor bool) bool {
 		classes := classTokens(n)
 		decorative := decorativeAncestor || hasAnyClass(classes, decorativeClassTokens) || hasAttr(n, "data-ox-wordmark")
-		if !decorative && hasAnyClass(classes, visualClassTokens) {
+		hidden := hiddenAncestor || visuallyHidden(n)
+		if !decorative && !hidden && hasAnyClass(classes, visualClassTokens) &&
+			(!hasAnyClass(classes, semanticVisualClassTokens) || meaningfulSemanticVisual(n)) {
 			return true
 		}
-		if !decorative && n.Type == xhtml.ElementNode && n.Data == "svg" && visibleExplanatorySVG(n) {
+		if !decorative && !hidden && n.Type == xhtml.ElementNode && n.Data == "svg" && visibleExplanatorySVG(n) {
 			return true
 		}
 		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			if walk(c, decorative) {
+			if walk(c, decorative, hidden) {
 				return true
 			}
 		}
 		return false
 	}
-	return walk(doc, false)
+	return walk(doc, false, false)
+}
+
+func meaningfulSemanticVisual(n *xhtml.Node) bool {
+	if strings.TrimSpace(textContent(n)) != "" {
+		return true
+	}
+	return attrVal(n, "role") == "img" && strings.TrimSpace(attrVal(n, "aria-label")) != ""
+}
+
+func visuallyHidden(n *xhtml.Node) bool {
+	if n.Type != xhtml.ElementNode {
+		return false
+	}
+	if hasAttr(n, "hidden") || hasAttr(n, "inert") || strings.EqualFold(attrVal(n, "aria-hidden"), "true") {
+		return true
+	}
+	style := strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "").Replace(strings.ToLower(attrVal(n, "style")))
+	return strings.Contains(style, "display:none") || strings.Contains(style, "visibility:hidden") || strings.Contains(style, "content-visibility:hidden")
 }
 
 func visibleExplanatorySVG(n *xhtml.Node) bool {

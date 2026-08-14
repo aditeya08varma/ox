@@ -889,7 +889,7 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 			return fmt.Errorf("read authored plan %q: %w", slug, readErr)
 		}
 		if authored || meta.Primary == plan.PrimaryHTML {
-			return runPlanRenderSavedHTML(cmd, gitRoot, slug, info, res, outPath, open, artifact)
+			return runPlanRenderSavedHTML(cmd, gitRoot, slug, info, res, meta, outPath, open, artifact)
 		}
 	}
 	in := plan.Parse(planMD)
@@ -922,7 +922,7 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 // runPlanRenderSavedHTML serves a saved authored plan: explicit HTML-primary
 // pages plus legacy authored pages that predate the primary metadata stamp.
 // Chrome is injected fresh, or the bytes are emitted verbatim in artifact mode.
-func runPlanRenderSavedHTML(cmd *cobra.Command, gitRoot, slug string, info plan.PlanInfo, res plan.Result, outPath string, open, artifact bool) error {
+func runPlanRenderSavedHTML(cmd *cobra.Command, gitRoot, slug string, info plan.PlanInfo, res plan.Result, meta plan.Meta, outPath string, open, artifact bool) error {
 	path, _, isPointer, exists := plan.PlanHTMLPath(info.Dir)
 	if !exists {
 		return fmt.Errorf("HTML-primary plan %q has no plan.html in %s", slug, info.Dir)
@@ -940,11 +940,16 @@ func runPlanRenderSavedHTML(cmd *cobra.Command, gitRoot, slug string, info plan.
 		return nil
 	}
 	review, _ := plan.AssembleReview(info.Dir)
-	injected := plan.InjectChrome(authored, plan.BuildChromeData(res, plan.RenderOptions{
+	opts := plan.RenderOptions{
 		Slug:        slug,
 		Review:      review,
 		PriorArtURL: priorArtURLResolver(gitRoot),
-	}))
+	}
+	if meta.Provenance != nil && meta.Provenance.SessionID != "" {
+		cfg, _ := config.LoadProjectConfig(gitRoot)
+		opts.SessionURL = buildConversationURL(cfg, meta.Provenance.SessionID)
+	}
+	injected := plan.InjectChrome(authored, plan.BuildChromeData(res, opts))
 	// savedDir stays "" so the emitted bytes (WITH chrome) are what opens — the
 	// stored plan.html is the authored page and has no chrome by design.
 	emitRenderedHTML(cmd, injected, "", outPath, open, slug, savedCompanionFiles(info.Dir))

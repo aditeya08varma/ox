@@ -113,7 +113,7 @@ func TestAnyVizPresent_CoversRenderers(t *testing.T) {
 		"partition-map":           `<div class="pmapv">`,
 		"donut (svg)":             `<svg class="donut">`,
 		"device mockup":           `<div class="device">`,
-		"authored system map":     `<div class="hero-map">`,
+		"authored system map":     `<div class="hero-map">System topology</div>`,
 		"accessible authored SVG": `<svg role="img" aria-label="Architecture">`,
 	}
 	for name, html := range present {
@@ -126,6 +126,33 @@ func TestAnyVizPresent_CoversRenderers(t *testing.T) {
 	}
 	if anyVizPresent(`<svg width="0" height="0" aria-hidden="true"><defs><symbol id="ox"></symbol></defs></svg><button class="ox-marker"><svg aria-hidden="true"></svg></button>`) {
 		t.Error("decorative OX chrome must not satisfy the diagram requirement")
+	}
+}
+
+func TestAnyVizPresent_RejectsEmptyOrHiddenSemanticContainers(t *testing.T) {
+	for name, html := range map[string]string{
+		"empty":        `<div class="hero-map"></div>`,
+		"aria hidden":  `<div class="hero-map" aria-hidden="true">System topology</div>`,
+		"hidden":       `<div class="hero-map" hidden>System topology</div>`,
+		"inert":        `<div class="hero-map" inert>System topology</div>`,
+		"display none": `<div class="hero-map" style="display: none">System topology</div>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if anyVizPresent(html) {
+				t.Fatalf("semantic container %q must not satisfy the hero-visual requirement", name)
+			}
+		})
+	}
+
+	for name, html := range map[string]string{
+		"visible content":  `<div class="hero-map">System topology</div>`,
+		"accessible image": `<div class="hero-map" role="img" aria-label="System topology"></div>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !anyVizPresent(html) {
+				t.Fatalf("semantic container %q must satisfy the hero-visual requirement", name)
+			}
+		})
 	}
 }
 

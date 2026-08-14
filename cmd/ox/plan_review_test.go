@@ -12,7 +12,9 @@ import (
 	"testing"
 
 	"github.com/sageox/ox/internal/agenttask"
+	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/plan"
+	"github.com/spf13/cobra"
 )
 
 // newTestReviewServer wires the live handler against a temp plan dir (no ledger
@@ -84,6 +86,29 @@ func TestRenderSavedReviewPage_RegeneratesKnownMarkdownProjection(t *testing.T) 
 	}
 	if bytes.Contains(out, []byte(`id="stale"`)) || !bytes.Contains(out, []byte("Fresh markdown projection")) {
 		t.Fatal("a known generated render must be refreshed from canonical markdown")
+	}
+}
+
+func TestRunPlanRenderSavedHTML_PreservesProvenanceSessionLink(t *testing.T) {
+	projectRoot := createInitializedProjectWithConfig(t, &config.ProjectConfig{Endpoint: "https://sageox.example"})
+	planDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(planDir, "plan.html"), []byte(`<!doctype html><html><body><div class="hero-map">System topology</div></body></html>`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(t.TempDir(), "render.html")
+	sessionID := "ses_01890a5d-ac96-774b-bcce-b302099a8057"
+	cmd := &cobra.Command{}
+	if err := runPlanRenderSavedHTML(cmd, projectRoot, "legacy-plan", plan.PlanInfo{Dir: planDir}, plan.Result{}, plan.Meta{
+		Provenance: &plan.Provenance{SessionID: sessionID},
+	}, outputPath, false, false); err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(rendered, []byte("https://sageox.example/c/"+sessionID)) {
+		t.Fatal("saved authored plan lost its provenance conversation link")
 	}
 }
 
