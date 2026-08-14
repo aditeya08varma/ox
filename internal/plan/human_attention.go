@@ -1,6 +1,7 @@
 package plan
 
 import (
+	"regexp"
 	"strings"
 
 	xhtml "golang.org/x/net/html"
@@ -32,6 +33,8 @@ var decorativeClassTokens = map[string]struct{}{
 	"ox-marker": {}, "ox-ico": {}, "toc-brand": {}, "wm": {},
 }
 
+var stylesheetRuleRe = regexp.MustCompile(`(?s)([^{}]+)\{([^{}]*)\}`)
+
 // meaningfulVisualPresent recognizes an explanatory visual while ignoring the
 // hidden OX symbol sprite, wordmarks, and marker icons injected as chrome. A raw
 // <svg> is intentionally insufficient: authored diagrams need an accessible
@@ -42,11 +45,12 @@ func meaningfulVisualPresent(src string) bool {
 	if err != nil {
 		return false
 	}
+	hidingSelectors := stylesheetHidingSelectors(doc)
 	var walk func(*xhtml.Node, bool, bool) bool
 	walk = func(n *xhtml.Node, decorativeAncestor, hiddenAncestor bool) bool {
 		classes := classTokens(n)
 		decorative := decorativeAncestor || hasAnyClass(classes, decorativeClassTokens) || hasAttr(n, "data-ox-wordmark")
-		hidden := hiddenAncestor || visuallyHidden(n)
+		hidden := hiddenAncestor || visuallyHidden(n) || stylesheetHidesNode(n, hidingSelectors)
 		if !decorative && !hidden && hasAnyClass(classes, visualClassTokens) &&
 			(!hasAnyClass(classes, semanticVisualClassTokens) || meaningfulSemanticVisual(n)) {
 			return true
@@ -80,6 +84,103 @@ func visuallyHidden(n *xhtml.Node) bool {
 	}
 	style := strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "").Replace(strings.ToLower(attrVal(n, "style")))
 	return strings.Contains(style, "display:none") || strings.Contains(style, "visibility:hidden") || strings.Contains(style, "content-visibility:hidden")
+}
+
+func stylesheetHidingSelectors(doc *xhtml.Node) []string {
+	var selectors []string
+	var walk func(*xhtml.Node)
+	walk = func(n *xhtml.Node) {
+		if n.Type == xhtml.ElementNode && n.Data == "style" {
+			for _, match := range stylesheetRuleRe.FindAllStringSubmatch(textContent(n), -1) {
+				if !hidesByDeclaration(match[2]) {
+					continue
+				}
+				for _, selector := range strings.Split(match[1], ",") {
+					if selector = strings.TrimSpace(selector); selector != "" {
+						selectors = append(selectors, selector)
+					}
+				}
+			}
+		}
+		for c := n.FirstChild; c != nil; c = c.NextSibling {
+			walk(c)
+		}
+	}
+	walk(doc)
+	return selectors
+}
+
+func hidesByDeclaration(declarations string) bool {
+	compact := strings.NewReplacer(" ", "", "\t", "", "\n", "", "\r", "").Replace(strings.ToLower(declarations))
+	return strings.Contains(compact, "display:none") || strings.Contains(compact, "visibility:hidden") || strings.Contains(compact, "content-visibility:hidden")
+}
+
+func stylesheetHidesNode(n *xhtml.Node, selectors []string) bool {
+	for _, selector := range selectors {
+		if simpleSelectorMatches(n, selector) {
+			return true
+		}
+	}
+	return false
+}
+
+// simpleSelectorMatches supports a selector's final compound, which is the
+// element directly affected by its declaration. It intentionally ignores
+// pseudo-classes and attribute selectors: neither proves a static page hides
+// the hero, so the lint remains conservative outside its bounded CSS model.
+func simpleSelectorMatches(n *xhtml.Node, selector string) bool {
+	selector = strings.TrimSpace(selector)
+	if selector == "" || strings.HasPrefix(selector, "@") {
+		return false
+	}
+	if i := strings.LastIndexAny(selector, " \t\n\r>+~"); i >= 0 {
+		selector = selector[i+1:]
+	}
+	if selector == "" || strings.ContainsAny(selector, ":[") {
+		return false
+	}
+	classes := classTokens(n)
+	for i := 0; i < len(selector); {
+		switch selector[i] {
+		case '.':
+			j := i + 1
+			for j < len(selector) && cssIdentifierByte(selector[j]) {
+				j++
+			}
+			if j == i+1 {
+				return false
+			}
+			if _, ok := classes[selector[i+1:j]]; !ok {
+				return false
+			}
+			i = j
+		case '#':
+			j := i + 1
+			for j < len(selector) && cssIdentifierByte(selector[j]) {
+				j++
+			}
+			if j == i+1 || attrVal(n, "id") != selector[i+1:j] {
+				return false
+			}
+			i = j
+		case '*':
+			i++
+		default:
+			j := i
+			for j < len(selector) && cssIdentifierByte(selector[j]) {
+				j++
+			}
+			if j == i || n.Data != selector[i:j] {
+				return false
+			}
+			i = j
+		}
+	}
+	return true
+}
+
+func cssIdentifierByte(b byte) bool {
+	return b == '-' || b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
 }
 
 func visibleExplanatorySVG(n *xhtml.Node) bool {

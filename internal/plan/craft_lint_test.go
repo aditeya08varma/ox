@@ -136,6 +136,7 @@ func TestAnyVizPresent_RejectsEmptyOrHiddenSemanticContainers(t *testing.T) {
 		"hidden":       `<div class="hero-map" hidden>System topology</div>`,
 		"inert":        `<div class="hero-map" inert>System topology</div>`,
 		"display none": `<div class="hero-map" style="display: none">System topology</div>`,
+		"stylesheet":   `<style>.hero-map { display: none }</style><div class="hero-map">System topology</div>`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			if anyVizPresent(html) {

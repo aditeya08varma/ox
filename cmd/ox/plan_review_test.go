@@ -89,6 +89,39 @@ func TestRenderSavedReviewPage_RegeneratesKnownMarkdownProjection(t *testing.T) 
 	}
 }
 
+func TestRenderSavedReviewPage_PreservesProvenanceSessionLink(t *testing.T) {
+	projectRoot := createInitializedProjectWithConfig(t, &config.ProjectConfig{Endpoint: "https://sageox.example"})
+	sessionID := "ses_01890a5d-ac96-774b-bcce-b302099a8057"
+	for _, tc := range []struct {
+		name     string
+		authored string
+		primary  string
+	}{
+		{name: "authored", authored: `<!doctype html><html><body><div class="hero-map">System topology</div></body></html>`, primary: plan.PrimaryHTML},
+		{name: "markdown primary"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.authored != "" {
+				if err := os.WriteFile(filepath.Join(dir, "plan.html"), []byte(tc.authored), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			meta := fmt.Sprintf(`{"topic":"Saved","slug":"saved","primary":%q,"provenance":{"session_id":%q}}`, tc.primary, sessionID)
+			if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(meta), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out, err := renderSavedReviewPage(projectRoot, "saved", dir, plan.Parse("# Saved\n\nFallback plan."), plan.Result{}, nil, plan.RenderOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(out, []byte("https://sageox.example/c/"+sessionID)) {
+				t.Fatal("saved review page lost its provenance conversation link")
+			}
+		})
+	}
+}
+
 func TestRunPlanRenderSavedHTML_PreservesProvenanceSessionLink(t *testing.T) {
 	projectRoot := createInitializedProjectWithConfig(t, &config.ProjectConfig{Endpoint: "https://sageox.example"})
 	planDir := t.TempDir()

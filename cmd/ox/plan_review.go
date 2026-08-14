@@ -481,6 +481,10 @@ func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res pla
 	opts.PriorArtURL = priorArtURLResolver(gitRoot)
 	meta, metaErr := plan.LoadMeta(planDir)
 	if metaErr == nil {
+		if meta.Provenance != nil && meta.Provenance.SessionID != "" {
+			cfg, _ := config.LoadProjectConfig(gitRoot)
+			opts.SessionURL = buildConversationURL(cfg, meta.Provenance.SessionID)
+		}
 		authored, ok, readErr := readStoredAuthoredPlanHTML(planDir, meta)
 		if readErr == nil && ok {
 			return plan.InjectChrome(authored, plan.BuildChromeData(res, opts)), nil
