@@ -465,34 +465,32 @@ func renderLive(gitRoot, slug, base, token string) ([]byte, error) {
 		return nil, err
 	}
 	review, _ := plan.AssembleReview(info.Dir)
-	meta, merr := plan.LoadMeta(info.Dir)
-
-	// HTML-primary plan: serve the AUTHORED page with the ox chrome injected
-	// live (enrichment overlay + review layer wired to this server). Falls
-	// through to the generated render only if the authored page is unreadable
-	// (LFS pointer, missing file) — the review loop must still function.
-	if merr == nil && meta.Primary == plan.PrimaryHTML {
-		if path, _, isPointer, exists := plan.PlanHTMLPath(info.Dir); exists && !isPointer {
-			if authored, rerr := os.ReadFile(path); rerr == nil {
-				return plan.InjectChrome(authored, plan.BuildChromeData(res, plan.RenderOptions{
-					Slug: slug, Review: review, ReviewEndpoint: base, ReviewToken: token,
-					PriorArtURL: priorArtURLResolver(gitRoot),
-				})), nil
-			}
-		}
-		cli.PrintHint("authored plan.html unavailable (LFS pointer or unreadable) — serving the generated render of the derived markdown")
-	}
-
 	in := plan.Parse(planMD)
-	var companionNames []string
-	if merr == nil {
-		companionNames = meta.Companions
-	}
-	return plan.RenderHTMLOpts(in, res, plan.RenderOptions{
+	return renderSavedReviewPage(gitRoot, slug, info.Dir, in, res, review, plan.RenderOptions{
 		Slug: slug, Review: review, ReviewEndpoint: base, ReviewToken: token,
 		PriorArtURL: priorArtURLResolver(gitRoot),
-		Companions:  plan.CompanionRefs(companionNames),
 	})
+}
+
+// renderSavedReviewPage is the one artifact-selection path for live and static
+// review. It preserves legacy authored HTML that old --plan + --html saves did
+// not mark primary, while continuing to regenerate known markdown projections.
+func renderSavedReviewPage(gitRoot, slug, planDir string, in plan.Input, res plan.Result, review []plan.MergedItem, opts plan.RenderOptions) ([]byte, error) {
+	opts.Slug = slug
+	opts.Review = review
+	opts.PriorArtURL = priorArtURLResolver(gitRoot)
+	meta, metaErr := plan.LoadMeta(planDir)
+	if metaErr == nil {
+		authored, ok, readErr := readStoredAuthoredPlanHTML(planDir, meta)
+		if readErr == nil && ok {
+			return plan.InjectChrome(authored, plan.BuildChromeData(res, opts)), nil
+		}
+		if meta.Primary == plan.PrimaryHTML {
+			cli.PrintHint("authored plan.html unavailable (LFS pointer or unreadable) — serving the generated render of the derived markdown")
+		}
+		opts.Companions = plan.CompanionRefs(meta.Companions)
+	}
+	return plan.RenderHTMLOpts(in, res, opts)
 }
 
 func anchorFromBody(body []byte) (string, error) {
@@ -583,11 +581,7 @@ func (b *broadcaster) broadcast() {
 // environments with no browser/server.
 func reviewStaticFallback(cmd *cobra.Command, gitRoot, slug, planDir string, in plan.Input, res plan.Result, review []plan.MergedItem) error {
 	companions := savedCompanionFiles(planDir)
-	var companionNames []string
-	for _, c := range companions {
-		companionNames = append(companionNames, c.Name)
-	}
-	html, err := plan.RenderHTMLOpts(in, res, plan.RenderOptions{Slug: slug, Review: review, PriorArtURL: priorArtURLResolver(gitRoot), Companions: plan.CompanionRefs(companionNames)})
+	html, err := renderSavedReviewPage(gitRoot, slug, planDir, in, res, review, plan.RenderOptions{})
 	if err != nil {
 		return fmt.Errorf("render plan: %w", err)
 	}

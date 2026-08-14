@@ -30,8 +30,7 @@ func planNudgeProject(t *testing.T) string {
 }
 
 // planNudgeProjectWithSaveOff mirrors planNudgeProject but sets plan.save=false
-// in the project config — for the one test proving the background render is
-// skipped when there is no ledger capture to render into.
+// so the nudge's independence from draft capture remains covered.
 func planNudgeProjectWithSaveOff(t *testing.T) string {
 	t.Helper()
 	projectRoot := t.TempDir()
@@ -69,28 +68,16 @@ func planExitCtx(projectRoot, planText string) *HookContext {
 	}
 }
 
-// stubPlanSubprocesses swaps runPlanEnrichment / runPlanRenderNoOpen for the
-// duration of the calling test (restored via t.Cleanup), and returns a
-// counter that increments on every runPlanRenderNoOpen call — so a test can
-// assert whether the background render was attempted at all, independent of
-// spawning a real `ox` subprocess (os.Executable() inside `go test` resolves
-// to the compiled TEST binary, not the real CLI — see runPlanEnrichment's doc).
-func stubPlanSubprocesses(t *testing.T, enrich func(string) (planJSONResult, bool)) *int {
+// stubPlanEnrichment replaces the only plan-exit subprocess. There is
+// intentionally no render stub: the hook must never turn the markdown draft
+// into a generic HTML page in the background.
+func stubPlanEnrichment(t *testing.T, enrich func(string) (planJSONResult, bool)) {
 	t.Helper()
 	origEnrich := runPlanEnrichment
-	origRender := runPlanRenderNoOpen
 	t.Cleanup(func() {
 		runPlanEnrichment = origEnrich
-		runPlanRenderNoOpen = origRender
 	})
-
-	renderCalls := 0
 	runPlanEnrichment = enrich
-	runPlanRenderNoOpen = func(string) bool {
-		renderCalls++
-		return true
-	}
-	return &renderCalls
 }
 
 // --- A. Plan text extraction from ExitPlanMode tool_input ---
@@ -203,7 +190,7 @@ func TestFormatPlanNudgeLine_NonTrivialOnly(t *testing.T) {
 
 		line := formatPlanNudgeLine(res, config.PlanOpenAsk)
 		assert.Contains(t, line, "7 steps")
-		assert.NotContains(t, line, "file", "files below threshold must not be named")
+		assert.NotContains(t, line, "1 file", "the below-threshold file count must not be named")
 		assert.Contains(t, line, "SageOx team-context-optimized plan")
 		assert.NotContains(t, line, "\n")
 		assertNudgeNeverAutoOpensBrowser(t, line)
@@ -324,22 +311,6 @@ func TestFormatPlanNudgeLine_OpenPolicy(t *testing.T) {
 
 // --- B3. Subprocess arg shape (structural, not just runtime, guarantees) ---
 
-// TestPlanRenderArgs_NeverOpensBrowser guards the render step's args at the
-// slice level — planRenderArgs must never include --open or -o/--output. This
-// is stronger than a runtime check: because runPlanRenderNoOpen builds its
-// command exclusively from planRenderArgs(), this test proves BY CONSTRUCTION
-// that the hook's background render cannot open a browser, independent of
-// anything formatPlanNudgeLine's wording claims.
-func TestPlanRenderArgs_NeverOpensBrowser(t *testing.T) {
-	args := planRenderArgs()
-	assert.Equal(t, []string{"plan", "render"}, args, "no slug/flags — the fresh/stdin render path, matching the plan text already on hand")
-	for _, a := range args {
-		assert.NotEqual(t, "--open", a)
-		assert.NotEqual(t, "-o", a)
-		assert.NotEqual(t, "--output", a)
-	}
-}
-
 // TestPlanEnrichArgs_Shape guards the enrichment step's args: --persist must
 // stay (durability — a draft lands on the ledger the moment plan mode exits)
 // and --json must stay (the hook parses stdout as planJSONResult).
@@ -360,18 +331,12 @@ func TestPlanNudgeThresholds_MatchPlanPackage(t *testing.T) {
 
 // --- B4. handlePlanExit end-to-end (stubbed subprocess seams) ---
 //
-// runPlanEnrichment / runPlanRenderNoOpen are package-level vars specifically
-// so these tests can drive the full decision path — trivial / material /
-// non-trivial × render / no-render × plan.html mode — without spawning a real
-// `ox` subprocess.
+// runPlanEnrichment is a package-level var so these tests can drive the full
+// trivial/material/non-trivial decision path without spawning the real CLI.
 
-// TestHandlePlanExit_Material_BackgroundRendersAndNudges verifies the earned
-// aggression path: a Material plan (real team-context signals) triggers
-// exactly one background render call (no --open) AND stashes a nudge that
-// gates opening behind AskUserQuestion. Failure prevented: a material plan's
-// SageOx-enriched view never gets materialized, so the human only ever sees a
-// hand-authored plan and the signals silently drop on the floor.
-func TestHandlePlanExit_Material_BackgroundRendersAndNudges(t *testing.T) {
+// TestHandlePlanExit_Material_NudgesTowardCanonicalAuthoredHTML verifies the
+// hook preserves the draft, then steers to a single authored visual page.
+func TestHandlePlanExit_Material_NudgesTowardCanonicalAuthoredHTML(t *testing.T) {
 	projectRoot := planNudgeProject(t)
 	isolatePlanConfigEnv(t)
 	agentID := "OxplanMaterial"
@@ -380,12 +345,10 @@ func TestHandlePlanExit_Material_BackgroundRendersAndNudges(t *testing.T) {
 	res.Signals.Collisions = 2
 	res.Signals.PriorArt = 1
 	res.Signals.Material = true
-	renderCalls := stubPlanSubprocesses(t, func(string) (planJSONResult, bool) { return res, true })
+	stubPlanEnrichment(t, func(string) (planJSONResult, bool) { return res, true })
 
 	planText := "# Refactor auth\n- touch internal/auth/session.go"
 	handlePlanExit(planExitCtx(projectRoot, planText), agentID)
-
-	assert.Equal(t, 1, *renderCalls, "material plan must trigger exactly one background render")
 
 	var buf bytes.Buffer
 	emitPlanNudge(&buf, projectRoot, agentID)
@@ -393,14 +356,13 @@ func TestHandlePlanExit_Material_BackgroundRendersAndNudges(t *testing.T) {
 	assert.Contains(t, got, "<system-reminder>")
 	assert.Contains(t, got, "AskUserQuestion")
 	assert.Contains(t, got, "2 collisions")
+	assert.Contains(t, got, "ox plan save --file plan.html")
+	assert.Contains(t, got, "Implementation notes")
 	assertNudgeNeverAutoOpensBrowser(t, got)
 }
 
-// TestHandlePlanExit_NonTrivialOnly_NudgesWithoutRender verifies the earned
-// gate on the render step specifically: a structurally-substantial plan with
-// NO team-context signals still gets nudged (kept behavior) but must NOT
-// trigger the background render — that aggression is reserved for Material,
-// where real signals earned it (ox-mj0s).
+// TestHandlePlanExit_NonTrivialOnly_NudgesWithoutRender verifies a substantial
+// greenfield plan still gets the authored-HTML nudge even without team signals.
 func TestHandlePlanExit_NonTrivialOnly_NudgesWithoutRender(t *testing.T) {
 	projectRoot := planNudgeProject(t)
 	isolatePlanConfigEnv(t)
@@ -410,11 +372,9 @@ func TestHandlePlanExit_NonTrivialOnly_NudgesWithoutRender(t *testing.T) {
 	res.Signals.NonTrivial = true
 	res.Signals.Files = 7
 	res.Signals.Steps = 6
-	renderCalls := stubPlanSubprocesses(t, func(string) (planJSONResult, bool) { return res, true })
+	stubPlanEnrichment(t, func(string) (planJSONResult, bool) { return res, true })
 
 	handlePlanExit(planExitCtx(projectRoot, "# Big greenfield plan\nstep one\nstep two"), agentID)
-
-	assert.Equal(t, 0, *renderCalls, "non-trivial-only plans must not trigger the background render")
 
 	var buf bytes.Buffer
 	emitPlanNudge(&buf, projectRoot, agentID)
@@ -434,11 +394,9 @@ func TestHandlePlanExit_Trivial_NoNudgeNoRender(t *testing.T) {
 	agentID := "OxplanTrivial"
 
 	var res planJSONResult // all zero — trivial
-	renderCalls := stubPlanSubprocesses(t, func(string) (planJSONResult, bool) { return res, true })
+	stubPlanEnrichment(t, func(string) (planJSONResult, bool) { return res, true })
 
 	handlePlanExit(planExitCtx(projectRoot, "# Tiny plan\nfix a typo"), agentID)
-
-	assert.Equal(t, 0, *renderCalls, "trivial plan must not trigger the background render")
 
 	var buf bytes.Buffer
 	emitPlanNudge(&buf, projectRoot, agentID)
@@ -446,8 +404,7 @@ func TestHandlePlanExit_Trivial_NoNudgeNoRender(t *testing.T) {
 }
 
 // TestHandlePlanExit_PlanHTMLOff_NoNudgeNoRender verifies plan.html=off keeps
-// its documented meaning ("never render, never nudge") even for a Material
-// plan that would otherwise earn the background render.
+// its documented meaning ("never render, never nudge") for a Material plan.
 func TestHandlePlanExit_PlanHTMLOff_NoNudgeNoRender(t *testing.T) {
 	projectRoot := planNudgeProject(t)
 	isolatePlanConfigEnv(t)
@@ -457,11 +414,9 @@ func TestHandlePlanExit_PlanHTMLOff_NoNudgeNoRender(t *testing.T) {
 	var res planJSONResult
 	res.Signals.Collisions = 3
 	res.Signals.Material = true
-	renderCalls := stubPlanSubprocesses(t, func(string) (planJSONResult, bool) { return res, true })
+	stubPlanEnrichment(t, func(string) (planJSONResult, bool) { return res, true })
 
 	handlePlanExit(planExitCtx(projectRoot, "# Material but silenced\ntouches shared code"), agentID)
-
-	assert.Equal(t, 0, *renderCalls, "plan.html=off must suppress the render, even for a material plan")
 
 	var buf bytes.Buffer
 	emitPlanNudge(&buf, projectRoot, agentID)
@@ -481,11 +436,9 @@ func TestHandlePlanExit_PlanSaveOff_SkipsRenderStillNudges(t *testing.T) {
 	var res planJSONResult
 	res.Signals.ExpertRoutes = 1
 	res.Signals.Material = true
-	renderCalls := stubPlanSubprocesses(t, func(string) (planJSONResult, bool) { return res, true })
+	stubPlanEnrichment(t, func(string) (planJSONResult, bool) { return res, true })
 
 	handlePlanExit(planExitCtx(projectRoot, "# Material, capture off\ntouches shared code"), agentID)
-
-	assert.Equal(t, 0, *renderCalls, "plan.save=false must skip the render attempt (nothing to render into)")
 
 	var buf bytes.Buffer
 	emitPlanNudge(&buf, projectRoot, agentID)

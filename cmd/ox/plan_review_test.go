@@ -43,6 +43,50 @@ func reviewPOST(t *testing.T, url, token, body string) int {
 	return resp.StatusCode
 }
 
+// TestRenderSavedReviewPage_PreservesLegacyAuthoredHTML guards the regression
+// where --no-serve and live review replaced a purpose-built architecture page
+// with the generic markdown template because old metadata omitted primary=html.
+func TestRenderSavedReviewPage_PreservesLegacyAuthoredHTML(t *testing.T) {
+	dir := t.TempDir()
+	authored := `<!doctype html><html><head><title>Attest map</title></head><body><div id="authored-system-map" class="hero-map">visual flow</div><details><summary>Implementation notes</summary><p>files</p></details></body></html>`
+	if err := os.WriteFile(filepath.Join(dir, "plan.html"), []byte(authored), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"topic":"Attest map","slug":"attest-map"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := renderSavedReviewPage("", "attest-map", dir, plan.Parse("# Attest map\n\nprose fallback"), plan.Result{}, nil, plan.RenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(out, []byte(`id="authored-system-map"`)) {
+		t.Fatal("review discarded the legacy authored system map")
+	}
+	if bytes.Contains(out, []byte(`<div class="brand">OX · PLAN</div>`)) {
+		t.Fatal("review regenerated the markdown template instead of preserving authored HTML")
+	}
+}
+
+func TestRenderSavedReviewPage_RegeneratesKnownMarkdownProjection(t *testing.T) {
+	dir := t.TempDir()
+	generated := `<!doctype html><html><body><div class="brand">OX · PLAN</div><div class="eyebrow">SageOx · enriched plan</div><div id="stale">old projection</div></body></html>`
+	if err := os.WriteFile(filepath.Join(dir, "plan.html"), []byte(generated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "meta.json"), []byte(`{"topic":"Quick plan","slug":"quick-plan"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := renderSavedReviewPage("", "quick-plan", dir, plan.Parse("# Quick plan\n\n## Current\nFresh markdown projection."), plan.Result{}, nil, plan.RenderOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(out, []byte(`id="stale"`)) || !bytes.Contains(out, []byte("Fresh markdown projection")) {
+		t.Fatal("a known generated render must be refreshed from canonical markdown")
+	}
+}
+
 // TestReviewLoop_ServesAllowlistedCompanions verifies the /companions/ route:
 // a companion listed in meta.json is served byte-for-byte, while an unlisted
 // file in the same subdir and any non-basename path 404 — the allowlist is

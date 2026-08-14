@@ -194,10 +194,12 @@ PREFERRED — HTML as the plan of record:
 Quick plans:
   --file <plan.md>     markdown-primary; annotations optional (self-enriches)
 
-Legacy skill path:
+Legacy markdown-only path:
   --plan        the plan markdown (with --annotations, required together)
   --annotations a MERGED annotations.json (deterministic + judgment badges)
-  --html        optional pre-rendered HTML; size-gated plain-git-vs-LFS
+
+The former --plan + --html dual-source path is rejected because it could lose
+the authored visual page during review. Use --file plan.html instead.
 
 This command never makes an LLM/network call — enrichment is deterministic and
 local. It always saves, independent of the plan.save config.`,
@@ -209,8 +211,10 @@ local. It always saves, independent of the plan.save config.`,
 var planLintCmd = &cobra.Command{
 	Use:    "lint <slug>",
 	Hidden: true, // agent/CI tier: quality gate; taught via prime + CI docs, not human help
-	Short:  "Check a saved plan's HTML render for SageOx attribution + self-contained invariants",
-	Long: `Lint a saved plan's rendered HTML against the html-plan attribution contract:
+	Short:  "Check a saved plan's HTML for human-attention, attribution, and portability",
+	Long: `Lint a saved plan's rendered HTML against the plan authoring contract:
+material plans need a meaningful hero visual plus one closed Implementation
+notes appendix; decorative OX chrome does not count as explanatory visualization.
 when the plan carried SageOx enrichment the render must credit it (footer line +
 an anchored OX marker), an un-enriched plan must not overclaim, and the SageOx
 mark must be self-contained (no live remote avatar). Advisory by default; pass
@@ -372,11 +376,10 @@ func collabCount(c *plan.CollabSignals, field string) int {
 	return 0
 }
 
-// runPlanSave persists a fully-enriched plan to the ledger from a plan markdown
-// file, a MERGED annotations.json (deterministic + judgment badges), and an
-// optional pre-rendered HTML file. This is the explicit full-plan persist path
-// the html-plan skill calls — it always saves (no auto-save config gate) and never
-// renders HTML here (the skill already produced it).
+// runPlanSave persists either the preferred single plan-of-record file or the
+// legacy markdown + annotations pair. The old --plan + --html dual-source path
+// is rejected: it could store authored HTML without marking it canonical, so a
+// later review silently replaced the visual plan with a markdown projection.
 func runPlanSave(cmd *cobra.Command) error {
 	planPath, _ := cmd.Flags().GetString("plan")
 	annPath, _ := cmd.Flags().GetString("annotations")
@@ -388,6 +391,9 @@ func runPlanSave(cmd *cobra.Command) error {
 	// optional-annotations relaxation.
 	if filePath, _ := cmd.Flags().GetString("file"); filePath != "" {
 		return runPlanSaveFile(cmd, filePath, annPath)
+	}
+	if htmlPath != "" {
+		return fmt.Errorf("--plan + --html creates competing plan-of-record surfaces and can cause review to discard the authored visualization; save HTML as canonical with `ox plan save --file <plan.html> [--annotations <annotations.json>]` and put exact files, edits, and gotchas in a closed <details><summary>Implementation notes</summary> appendix")
 	}
 
 	if planPath == "" {
@@ -414,48 +420,18 @@ func runPlanSave(cmd *cobra.Command) error {
 		return fmt.Errorf("parse annotations %q: %w", annPath, err)
 	}
 
-	// Optional pre-rendered HTML. store.Save applies the size-gated
-	// plain-git-vs-LFS rule; we never render here.
-	var html []byte
-	if htmlPath != "" {
-		html, err = os.ReadFile(htmlPath)
-		if err != nil {
-			return fmt.Errorf("read html %q: %w", htmlPath, err)
-		}
-	}
-
 	// The skill path always persists (no plan.save gate) and reuses the shared
 	// provenance/collaboration + read-merge + commit path so the hook's draft
 	// and the skill's full save converge on the same dated-slug dir.
 	gitRoot := findGitRoot()
-	dir := savePlanWithProvenance(gitRoot, in, result, html)
+	dir := savePlanWithProvenance(gitRoot, in, result, nil)
 	if dir == "" {
 		return fmt.Errorf("save plan: no ledger configured for %q or write failed", gitRoot)
 	}
 
-	slog.Info("plan_saved", "dir", dir, "html", htmlPath != "", "annotations", len(result.Annotations))
+	slog.Info("plan_saved", "dir", dir, "html", false, "annotations", len(result.Annotations))
 	fmt.Fprintf(cmd.OutOrStdout(), "Saved plan to ledger: %s\n", dir)
 
-	// Branding guarantee: every render the skill saves is checked for the
-	// earned-and-conditional SageOx attribution. Warn-only — a missing credit
-	// must never block the save (fail-open). Run `ox plan lint <slug>` to recheck.
-	for _, f := range plan.LintRender(html, result) {
-		cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
-	}
-	// Session-link guarantee: an agent-authored render saved from a live
-	// recording should link back to its /c/ conversation page.
-	//
-	// Gated on planSessionLink, NOT on the stamped provenance. Provenance
-	// records the session for the ledger even when no link belongs in the page
-	// (attribution disabled, project not linked), so gating on it warns "the
-	// render carries no /c/ link" about renders that were never meant to carry
-	// one. planSessionLink is the same resolution that produced the URL, so the
-	// gate and the stamp cannot disagree.
-	if sessionID, _ := planSessionLink(gitRoot); sessionID != "" {
-		for _, f := range plan.LintSessionLink(html, sessionID) {
-			cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
-		}
-	}
 	return nil
 }
 
@@ -497,6 +473,10 @@ func runPlanSaveFile(cmd *cobra.Command, filePath, annPath string) error {
 		}
 		slog.Info("plan_saved", "dir", dir, "primary", "html", "annotations", len(result.Annotations))
 		fmt.Fprintf(out, "Saved HTML-primary plan to ledger: %s\n", dir)
+		checked := plan.InjectChrome(data, plan.BuildChromeData(result, plan.RenderOptions{Slug: filepath.Base(dir)}))
+		for _, f := range append(plan.LintRender(checked, result), plan.LintCraft(result, data)...) {
+			cli.PrintHint(fmt.Sprintf("plan-lint [%s]: %s", f.Rule, f.Message))
+		}
 		cli.PrintHint("plan.md was DERIVED from the page (regenerated on save — never hand-edit it). Open the live review loop: `ox plan review " + filepath.Base(dir) + "`.")
 		return nil
 	}
@@ -540,11 +520,21 @@ func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 		return fmt.Errorf("read plan html %q: %w", path, err)
 	}
 
-	findings := plan.LintRender(html, res)
+	meta, metaErr := plan.LoadMeta(info.Dir)
+	lintHTML := html
+	if metaErr == nil && plan.ShouldUseStoredHTML(meta, html) {
+		opts := plan.RenderOptions{Slug: slug}
+		if meta.Provenance != nil && meta.Provenance.SessionID != "" {
+			cfg, _ := config.LoadProjectConfig(gitRoot)
+			opts.SessionURL = buildConversationURL(cfg, meta.Provenance.SessionID)
+		}
+		lintHTML = plan.InjectChrome(html, plan.BuildChromeData(res, opts))
+	}
+	findings := append(plan.LintRender(lintHTML, res), plan.LintCraft(res, html)...)
 	sessionChecked := false
-	if meta, metaErr := plan.LoadMeta(info.Dir); metaErr == nil && meta.Provenance != nil && meta.Provenance.SessionID != "" {
+	if metaErr == nil && meta.Provenance != nil && meta.Provenance.SessionID != "" {
 		sessionChecked = true
-		findings = append(findings, plan.LintSessionLink(html, meta.Provenance.SessionID)...)
+		findings = append(findings, plan.LintSessionLink(lintHTML, meta.Provenance.SessionID)...)
 	}
 	if len(findings) == 0 {
 		// Absence of a check is not a pass. For three months this printed the
@@ -562,7 +552,7 @@ func runPlanLint(cmd *cobra.Command, slug string, strict bool) error {
 		fmt.Fprintf(out, "%s [%s] %s\n", cli.StyleWarning.Render("!"), f.Rule, f.Message)
 	}
 	if strict {
-		return fmt.Errorf("%d branding lint finding(s)", len(findings))
+		return fmt.Errorf("%d plan lint finding(s)", len(findings))
 	}
 	return nil
 }
@@ -656,7 +646,7 @@ func writePlanHuman(cmd *cobra.Command, result plan.Result, savedDir string) err
 		if s.Material {
 			lead = "Material signals found."
 		}
-		fmt.Fprintf(&b, "\n%s Render a SageOx team-context-optimized plan with `ox plan render --open`, then start a live review loop with `ox plan review <slug>` — the human marks it up in the browser and the AI coworker receives it in-turn via `ox plan review await <slug>`, addressing each item live. `await` BLOCKS for feedback, so the coworker should confirm with the user before entering that loop (or use a short --timeout and poll).\n", lead)
+		fmt.Fprintf(&b, "\n%s Author a visual `plan.html`, save it as canonical with `ox plan save --file plan.html`, and present it with `ox plan render --file plan.html --open`; keep exact edits in a closed Implementation notes appendix. Then start a live review loop with `ox plan review <slug>` — the human marks it up in the browser and the AI coworker receives it in-turn via `ox plan review await <slug>`, addressing each item live. `await` BLOCKS for feedback, so the coworker should confirm with the user before entering that loop (or use a short --timeout and poll).\n", lead)
 	}
 
 	fmt.Fprint(out, b.String())
@@ -890,10 +880,17 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 	if err != nil {
 		return fmt.Errorf("load plan %q: %w", slug, err)
 	}
-	// HTML-primary plan: serve the AUTHORED page (chrome injected; verbatim in
-	// artifact mode) — never re-render it through the markdown template.
-	if meta, merr := plan.LoadMeta(info.Dir); merr == nil && meta.Primary == plan.PrimaryHTML {
-		return runPlanRenderSavedHTML(cmd, gitRoot, slug, info, res, outPath, open, artifact)
+	// Authored plans include explicit HTML-primary saves plus legacy pages that
+	// predate the primary metadata stamp. Never re-render either through the
+	// markdown template.
+	if meta, merr := plan.LoadMeta(info.Dir); merr == nil {
+		_, authored, readErr := readStoredAuthoredPlanHTML(info.Dir, meta)
+		if readErr != nil {
+			return fmt.Errorf("read authored plan %q: %w", slug, readErr)
+		}
+		if authored || meta.Primary == plan.PrimaryHTML {
+			return runPlanRenderSavedHTML(cmd, gitRoot, slug, info, res, outPath, open, artifact)
+		}
 	}
 	in := plan.Parse(planMD)
 	review, _ := plan.AssembleReview(info.Dir)
@@ -922,9 +919,9 @@ func runPlanRenderSaved(cmd *cobra.Command, slug, outPath string, open, artifact
 	return nil
 }
 
-// runPlanRenderSavedHTML serves a saved HTML-primary plan: the authored
-// plan.html bytes with the ox chrome injected fresh (current enrichment +
-// review state), or VERBATIM in artifact mode. It never re-persists.
+// runPlanRenderSavedHTML serves a saved authored plan: explicit HTML-primary
+// pages plus legacy authored pages that predate the primary metadata stamp.
+// Chrome is injected fresh, or the bytes are emitted verbatim in artifact mode.
 func runPlanRenderSavedHTML(cmd *cobra.Command, gitRoot, slug string, info plan.PlanInfo, res plan.Result, outPath string, open, artifact bool) error {
 	path, _, isPointer, exists := plan.PlanHTMLPath(info.Dir)
 	if !exists {
@@ -952,6 +949,21 @@ func runPlanRenderSavedHTML(cmd *cobra.Command, gitRoot, slug string, info plan.
 	// stored plan.html is the authored page and has no chrome by design.
 	emitRenderedHTML(cmd, injected, "", outPath, open, slug, savedCompanionFiles(info.Dir))
 	return nil
+}
+
+// readStoredAuthoredPlanHTML separates authored pages from markdown-renderer
+// projections. Review/render callers share this compatibility seam so live,
+// static, and exported views cannot disagree about the canonical artifact.
+func readStoredAuthoredPlanHTML(planDir string, meta plan.Meta) ([]byte, bool, error) {
+	path, _, isPointer, exists := plan.PlanHTMLPath(planDir)
+	if !exists || isPointer {
+		return nil, false, nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false, err
+	}
+	return b, plan.ShouldUseStoredHTML(meta, b), nil
 }
 
 // savedCompanionFiles lists a saved plan's bundled companions (meta.json
@@ -1309,9 +1321,9 @@ func init() {
 	planSaveCmd.Flags().String("file", "", "the plan of record: an authored self-contained .html page (preferred; saved as canonical, markdown derived) or a .md quick plan; annotations optional (ox self-enriches)")
 	planSaveCmd.Flags().String("plan", "", "legacy: plan markdown file (with --annotations; prefer --file)")
 	planSaveCmd.Flags().String("annotations", "", "merged annotations.json: enrich badges + AI-coworker judgment badges (required with --plan; optional with --file, which self-enriches)")
-	planSaveCmd.Flags().String("html", "", "optional pre-rendered HTML; size-gated plain-git-vs-LFS on save")
+	planSaveCmd.Flags().String("html", "", "deprecated and rejected: save authored HTML canonically with --file plan.html")
 
-	planLintCmd.Flags().Bool("strict", false, "exit non-zero when the render has attribution findings (for CI / golden checks)")
+	planLintCmd.Flags().Bool("strict", false, "exit non-zero on attribution, visual-craft, progressive-disclosure, or self-contained findings")
 
 	// lifecycle verbs: thin sugar over plan.AppendPlanEvent (internal/plan/lifecycle.go).
 	planApproveCmd.Flags().Bool("json", false, `emit {"changed":...,"status":...} as JSON`)

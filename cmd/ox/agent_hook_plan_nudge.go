@@ -36,15 +36,11 @@ import (
 // not on PATH, no signals, write failure) leaves the existing hook behavior
 // completely untouched. The nudge is purely additive.
 //
-// Aggression (ox-mj0s): a MATERIAL plan — real team-context signals, not just
-// structural size — earns an automatic background render (`ox plan render`,
-// no --open) so the enriched HTML already exists the moment the nudge is
-// delivered. The nudge itself is a directive, not a suggestion — but the one
-// thing it may NEVER do is tell the agent to open a browser unconditionally.
-// Opening always routes through the AskUserQuestion tool and proceeds only on
-// an explicit yes (ox-mj0s's CRITICAL correction: devs would be furious if ox
-// opened a browser without permission). Rendering is cheap and invisible;
-// opening is outward-facing and needs consent. See
+// A material plan is never auto-rendered from its markdown draft. Doing so
+// creates a generic prose page before the authored visual plan exists and gives
+// the ledger two plausible surfaces. The hook persists markdown for durability,
+// then nudges the coworker to author one canonical plan.html. Opening still
+// routes through AskUserQuestion and proceeds only on an explicit yes. See
 // TestFormatPlanNudgeLine_NeverAutoOpensBrowser for the regression guard.
 
 const (
@@ -70,9 +66,9 @@ const (
 	nonTrivialMinFilesHook = 2
 	nonTrivialMinStepsHook = 5
 
-	// planSubprocessTimeout caps EACH plan-exit subprocess call (enrichment and,
-	// on a Material plan, the background render). Both may synchronously commit
-	// and push a draft to the ledger (the chosen durability model), so this is
+	// planSubprocessTimeout caps the plan-exit enrichment call. It may
+	// synchronously commit and push a draft to the ledger (the chosen durability
+	// model), so this is
 	// sized to absorb a network push, not just local computation. The hard kill
 	// is a safety ceiling: if a push wedges, the local commit still stands and
 	// the next push / `ox doctor` carries it — the agent is never hung.
@@ -105,12 +101,11 @@ type planJSONResult struct {
 // `ox plan enrich --json --persist` and, if the signals are material OR the
 // plan is structurally non-trivial, stashes a one-line nudge for the next
 // UserPromptSubmit to deliver. On a MATERIAL plan it also renders the SageOx
-// HTML in the background first (no --open — see runPlanRenderNoOpen): the
-// earned-aggression half of ox-mj0s, so the artifact is ready the instant a
-// human says yes to the nudge's ask. The nudge itself never instructs an
-// unconditional browser-open; opening always waits on an explicit yes via
-// AskUserQuestion. The whole recommendation is gated by plan.html (off ==>
-// never render, never nudge). Fail-open throughout.
+// plan. It deliberately does not render that markdown: a material plan needs an
+// authored visual page, not an automatically generated prose projection. The
+// nudge never instructs an unconditional browser-open; opening waits on an
+// explicit yes via AskUserQuestion. The recommendation is gated by plan.html
+// (off => never nudge). Fail-open throughout.
 func handlePlanExit(ctx *HookContext, agentID string) {
 	if ctx == nil || ctx.Input == nil || agentID == "" {
 		return
@@ -149,19 +144,6 @@ func handlePlanExit(ctx *HookContext, agentID string) {
 		return
 	}
 
-	// Earned aggression (ox-mj0s): a MATERIAL plan — real team-context signals,
-	// not just structural size — gets its HTML rendered right now, in the
-	// background, with no --open. This is cheap and invisible: the artifact is
-	// simply ready the instant the human answers yes to the nudge's ask. A
-	// NonTrivial-only plan has not earned this; the render stays a suggested
-	// next step rather than an automatic one. Also gated on plan.save: with
-	// capture off there is no ledger to render into, so attempting it would
-	// only burn a subprocess on a guaranteed no-op (see runPlanRenderFresh).
-	rendered := false
-	if res.Signals.Material && config.PlanSave(ctx.ProjectRoot) {
-		rendered = runPlanRenderNoOpen(planText)
-	}
-
 	nudge := formatPlanNudgeLine(res, config.PlanOpen(ctx.ProjectRoot))
 	if err := stashPlanNudge(ctx.ProjectRoot, agentID, nudge); err != nil {
 		slog.Debug("hook: plan-exit stash failed", "error", err)
@@ -173,8 +155,7 @@ func handlePlanExit(ctx *HookContext, agentID string) {
 		"prior_art", res.Signals.PriorArt,
 		"expert_routes", res.Signals.ExpertRoutes,
 		"files", res.Signals.Files,
-		"steps", res.Signals.Steps,
-		"rendered", rendered)
+		"steps", res.Signals.Steps)
 }
 
 // extractExitPlanText pulls the plan markdown out of ExitPlanMode tool_input.
@@ -197,13 +178,10 @@ func extractExitPlanText(rawBytes []byte) string {
 	return ti.Plan
 }
 
-// planEnrichArgs / planRenderArgs name the exact `ox` subcommand args for each
-// plan-exit subprocess step, as their own small tested functions rather than
-// inline slice literals at each call site. That makes "the render step never
-// passes --open" a structural, independently-checkable guarantee — see
-// TestPlanRenderArgs_NeverOpensBrowser — not just a claim in a comment.
+// planEnrichArgs names the exact plan-exit subprocess args as a small tested
+// function. There is intentionally no render counterpart: auto-rendering the
+// markdown draft would create the generic page this hook is meant to prevent.
 func planEnrichArgs() []string { return []string{"plan", "enrich", "--json", "--persist"} }
-func planRenderArgs() []string { return []string{"plan", "render"} }
 
 // runPlanSubprocess execs `ox <args...>` with planText piped on stdin — the
 // shared plumbing for every plan-exit hook step (enrichment, rendering).
@@ -261,26 +239,6 @@ var runPlanEnrichment = func(planText string) (planJSONResult, bool) {
 	return res, true
 }
 
-// runPlanRenderNoOpen shells out to `ox plan render` (no --open) to
-// materialize the plan's SageOx-enriched HTML into the ledger — the
-// earned-aggression half of ox-mj0s: on a Material plan the artifact is ready
-// in the background, invisibly, the instant a human says yes to the nudge's
-// ask. planRenderArgs() never includes --open or -o/--output, so this call
-// cannot open a browser by construction, not merely by convention. It reuses
-// the exact `ox plan render` command a human would run by hand, feeding the
-// same plan text already extracted for enrichment — the same idempotent,
-// read-merge-by-slug write path already exercised by manual use
-// (internal/plan/store.go's Save + MutatePlanMeta), so this second render
-// after enrich --persist safely converges on the same dated-slug ledger
-// directory instead of duplicating it, and a failed push there is a logged
-// warning, not a hook error.
-//
-// Exposed as a variable so tests can stub it — see runPlanEnrichment.
-var runPlanRenderNoOpen = func(planText string) bool {
-	_, ok := runPlanSubprocess(planText, planRenderArgs()...)
-	return ok
-}
-
 // planReviewAskClause is the shared ask-before-open tail for both nudge
 // paths below. It is the ONLY place either path names a browser-opening
 // command (`ox plan render --open`, the `ox plan review` loop — which itself
@@ -290,18 +248,18 @@ var runPlanRenderNoOpen = func(planText string) bool {
 // TestFormatPlanNudgeLine_NeverAutoOpensBrowser, the regression guard for
 // ox-mj0s's CRITICAL correction (devs would be furious if ox opened a browser
 // without permission).
-const planReviewAskClause = ` Ask the user via AskUserQuestion ("Review this plan in your browser?") before opening anything — offer "Yes, open" / "No" / "Always open from now on" / "Never ask again", and if they pick one of the last two run ` + "`ox config set plan.open always`" + ` (or ` + "`never`" + `) so the choice sticks. Only on an explicit yes, render it as a SageOx team-context-optimized plan (HTML) with ` + "`ox plan render --open`" + `, or start the live review loop with ` + "`ox plan review <slug>`" + ` so they mark it up in-browser and you receive their feedback in-turn via ` + "`ox plan review await <slug>`" + ` — it BLOCKS for feedback, so confirm with the user before entering it.`
+const planReviewAskClause = ` Ask the user via AskUserQuestion ("Review this plan in your browser?") before opening anything — offer "Yes, open" / "No" / "Always open from now on" / "Never ask again", and if they pick one of the last two run ` + "`ox config set plan.open always`" + ` (or ` + "`never`" + `) so the choice sticks. Only on an explicit yes, author a visual ` + "`plan.html`" + ` with one closed Implementation notes appendix, save it canonically with ` + "`ox plan save --file plan.html`" + `, then open the SageOx team-context-optimized plan with ` + "`ox plan render --open --file plan.html`" + ` or start ` + "`ox plan review <slug>`" + ` so they mark it up in-browser and you receive feedback via ` + "`ox plan review await <slug>`" + ` — it BLOCKS, so confirm before entering it.`
 
 // planReviewAlwaysClause is the tail used when the user has explicitly set
 // plan.open=always. This is the ONLY sanctioned path where the nudge instructs
 // an open WITHOUT a preceding AskUserQuestion — the consent lives in the
 // persisted config choice the user made earlier, not in a per-plan prompt.
-const planReviewAlwaysClause = ` You've set plan.open=always, so open it directly (no need to ask): render it as a SageOx team-context-optimized plan (HTML) with ` + "`ox plan render --open <slug>`" + `, or start the live review loop with ` + "`ox plan review <slug>`" + ` — it BLOCKS for feedback, so let the user know before entering it. To stop auto-opening, run ` + "`ox config set plan.open ask`" + `.`
+const planReviewAlwaysClause = ` You've set plan.open=always, so author the visual ` + "`plan.html`" + `, save it canonically with ` + "`ox plan save --file plan.html`" + `, and open it directly (no need to ask) with ` + "`ox plan render --open --file plan.html`" + `, or start ` + "`ox plan review <slug>`" + ` — it BLOCKS for feedback, so let the user know before entering it. To stop auto-opening, run ` + "`ox config set plan.open ask`" + `.`
 
 // planReviewNeverClause is the tail used when the user has set plan.open=never.
 // It never prompts to open and never instructs an open — it only records that
 // the plan is available, framing any open as a user-initiated choice.
-const planReviewNeverClause = ` You've set plan.open=never, so do NOT prompt to open or open a browser. The enriched plan is saved to the ledger; the user can open it themselves any time with ` + "`ox plan render --open <slug>`" + ` (` + "`ox plan list`" + ` shows the slug), or re-enable prompting with ` + "`ox config set plan.open ask`" + `.`
+const planReviewNeverClause = ` You've set plan.open=never, so do NOT prompt to open or open a browser. The markdown draft is saved to the ledger; do not auto-render it. The user can request an authored visual page later (` + "`ox plan list`" + ` shows the slug), or re-enable prompting with ` + "`ox config set plan.open ask`" + `.`
 
 // planOpenClause returns the open-policy tail for the nudge. Default (unknown or
 // "ask") keeps the ask-before-open behavior — the safe default that never
@@ -319,11 +277,9 @@ func planOpenClause(policy string) string {
 
 // formatPlanNudgeLine builds the concise one-line nudge. Single line, no
 // multi-line noise (grepability invariant). When team-context signals fired it
-// leads with the cost of skipping the render — the specific signals a
-// hand-authored plan drops; when the plan fired only on structural
-// non-triviality it leads with the plan's scope instead. Both paths end on the
-// same ask-gated tail (planReviewAskClause) — see its doc for why that sharing
-// matters.
+// leads with the team signals the canonical visual page must preserve; when
+// only structural non-triviality fired it leads with scope instead. Both paths
+// end on the same ask-gated tail (planReviewAskClause).
 func formatPlanNudgeLine(res planJSONResult, openPolicy string) string {
 	tail := planOpenClause(openPolicy)
 
@@ -338,8 +294,8 @@ func formatPlanNudgeLine(res planJSONResult, openPolicy string) string {
 		parts = append(parts, pluralize(res.Signals.ExpertRoutes, "expert route", "expert routes"))
 	}
 	if detail := strings.Join(parts, " + "); detail != "" {
-		// Material path: lead with what a hand-authored plan would drop.
-		return fmt.Sprintf("Your plan touches %s. A hand-authored plan drops all of that and the team never sees it.%s", detail, tail)
+		// Material path: lead with why the canonical authored-page flow matters.
+		return fmt.Sprintf("Your plan touches %s. Preserve those signals in one canonical visual page instead of auto-generating a prose projection.%s", detail, tail)
 	}
 
 	// NonTrivial-only path: no team-context signals fired, but the plan is

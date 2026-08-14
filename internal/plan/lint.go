@@ -295,19 +295,13 @@ func LintSessionLink(htmlBytes []byte, sessionID string) []Finding {
 }
 
 // craftDeviceRe detects whether the rendered page carries a device mockup. The
-// diagram side is the broader "any visual present" predicate (vizPresenceRe).
+// diagram side is the broader "meaningful visual present" predicate.
 var craftDeviceRe = regexp.MustCompile(`class="device`)
 
-// vizPresenceRe matches ANY visual the plan renderer can emit: a Mermaid or
-// swimlane diagram, an inline SVG chart (donut/radar/line/treemap/sankey/chord/
-// sparkline all emit <svg), or a hand-authored viz container. Defined in ONE place
-// and drift-guarded by TestAnyVizPresent_CoversRenderers, so a renderer whose
-// output it can't see fails CI rather than silently re-opening the missing-diagram
-// false-positive — nagging a plan that DID visualize, just not in Mermaid.
-var vizPresenceRe = regexp.MustCompile(`<svg|class="(?:mermaid|swim|barc|linec|riskm|statrow|ftree|heat|multiples|spark|ba|pbar-fig|pmapv|donut|radar|quad|tmap|sankey|chord|device)`)
-
-// anyVizPresent reports whether the rendered page drew at least one visual.
-func anyVizPresent(html string) bool { return vizPresenceRe.MatchString(html) }
+// anyVizPresent reports whether the rendered page drew at least one meaningful
+// visual. Parsing, rather than matching any <svg>, matters because every ox page
+// carries decorative SVG chrome that must not satisfy the diagram requirement.
+func anyVizPresent(html string) bool { return meaningfulVisualPresent(html) }
 
 // CraftReport is the realization side of the design-craft check: how many craft
 // expectations enrich produced (a diagram suggested, a user-facing surface
@@ -337,18 +331,26 @@ func CraftRealization(res Result, htmlBytes []byte) CraftReport {
 	h := string(htmlBytes)
 	hasViz := anyVizPresent(h)
 
-	// ox suggested a diagram somewhere — realized if the page drew any visual.
-	if len(res.DiagramHints) > 0 {
+	// Every material plan needs a visual decision surface. A plan-specific hint
+	// makes the message more precise, but absence of a hint is not permission to
+	// ship a prose wall: the author chooses the fitting topology/comparison/state
+	// form from the shared catalog.
+	if len(res.DiagramHints) > 0 || res.Signals.Material || res.Signals.NonTrivial {
 		rep.Emitted++
 		if hasViz {
 			rep.Realized++
-		} else {
+		} else if len(res.DiagramHints) > 0 {
 			d := res.DiagramHints[0]
 			rep.Gaps = append(rep.Gaps, Finding{
 				Rule: "craft.missing-diagram",
 				Message: fmt.Sprintf(
 					`ox suggested a %s for "%s" (%s) but the plan drew no diagram or chart — a hero visual makes the shape readable in seconds (see `+"`ox viz`"+`)`,
 					d.SuggestedType, d.Section, d.Reason),
+			})
+		} else {
+			rep.Gaps = append(rep.Gaps, Finding{
+				Rule:    "craft.missing-hero-visual",
+				Message: "material plan drew no meaningful hero visualization — show the system topology, sequence, state, or comparison that the decision depends on; decorative OX icons and wordmarks do not count",
 			})
 		}
 	}
@@ -365,6 +367,21 @@ func CraftRealization(res Result, htmlBytes []byte) CraftReport {
 				Message: fmt.Sprintf(
 					`"%s" changes a user-facing surface but the plan has no mockup — show the resulting UI state inline (`+"`ox viz device-mockup`"+`), don't describe it in prose`,
 					res.MockupSection),
+			})
+		}
+	}
+
+	// A material plan serves two readers. The visual decision layer is for the
+	// approver; exact edits and gotchas remain available to the implementer in a
+	// single collapsed appendix instead of competing for first-scan attention.
+	if res.Signals.Material || res.Signals.NonTrivial {
+		rep.Emitted++
+		if hasImplementationDisclosure(h) {
+			rep.Realized++
+		} else {
+			rep.Gaps = append(rep.Gaps, Finding{
+				Rule:    "craft.missing-progressive-disclosure",
+				Message: `material plan has no closed <details><summary>Implementation notes</summary> appendix — keep the visual decision layer scannable and relocate exact files, edits, and gotchas into that collapsed drill-down`,
 			})
 		}
 	}

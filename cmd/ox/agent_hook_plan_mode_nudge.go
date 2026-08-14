@@ -240,27 +240,28 @@ func emitPlanHint(w io.Writer, projectRoot, agentID string, rawBytes []byte) {
 	slog.Info("hook: plan hint emitted", "agent_id", agentID, "trigger", trigger)
 }
 
-// planModeHintLine is the in-draft steer for plan mode: enrich (JSON) WHILE
-// drafting, render (the SageOx team-context-optimized plan) when presenting.
+// planModeHintLine is the in-draft steer: enrich while drafting, then keep the
+// authored HTML as the single source when presenting a material plan.
 func planModeHintLine() string {
 	return strings.Join([]string{
 		"Plan mode — run `ox plan enrich --json` WHILE you draft so the plan reflects team context",
-		"(collisions, prior art, expert routing) BEFORE you present it; then offer it as a",
-		"SageOx team-context-optimized plan via `ox plan render --open`. The render owns the SageOx",
-		"footer credit and OX-icon markers — don't hand-author your own.",
+		"(collisions, prior art, expert routing) BEFORE you present it. For material work author a visual",
+		"`plan.html`, save it canonically with `ox plan save --file plan.html`, then offer",
+		"a SageOx team-context-optimized plan via `ox plan render --open --file plan.html`; ox preserves the page and owns SageOx chrome.",
 	}, " ")
 }
 
 // htmlPlanHintLine is the steer for when the user asks to render an HTML plan
-// outside plan mode: lead with the renderer, push rich cognition-first visuals
-// via the viz catalog, warn off the orphan render.
+// outside plan mode: lead with canonical authored HTML and cognition-first
+// visuals, then pass that page through ox for context and review chrome.
 func htmlPlanHintLine() string {
 	return strings.Join([]string{
-		"Rendering an HTML plan? Use `ox plan render --open` (run `ox plan enrich --json` first) — only it folds in",
-		"SageOx team context (collisions, prior art, expert routing) and saves to the ledger. Lean into the",
+		"Rendering an HTML plan? Run `ox plan enrich --json`, author the visual `plan.html`, save it as the single",
+		"source with `ox plan save --file plan.html`, then use `ox plan render --open --file plan.html` to inject",
+		"SageOx team context without replacing the page. Lean into the",
 		"`ox viz` catalog: rich, interactive HTML+JS visuals — dependency explorers, charts, swimlane timelines,",
 		"Tufte tables — that surface the critical decisions and tradeoffs and cut the reviewer's cognitive load,",
-		"rather than burying them in prose. A hand-rolled render is a context-blind orphan; don't author the SageOx credit — the render owns it.",
+		"with one closed Implementation notes appendix for file-level depth. Never use legacy `--plan + --html`.",
 	}, " ")
 }
 

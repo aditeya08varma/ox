@@ -164,15 +164,14 @@ func TestBuildGuidance_FoldsInHints(t *testing.T) {
 }
 
 // TestBuildGuidance_LeadsWithEvidence verifies the guidance LEADS with the
-// plan-specific team-context counts when signals fired (so the agent sees what a
-// self-authored render would drop), and falls back to the generic capability line
-// when nothing fired.
+// plan-specific team-context counts when signals fired, then keeps the authored
+// page as the single ledger source instead of offering a competing renderer.
 // Failure prevented: the render call is buried under a generic pitch and agents
 // emit a context-blind markdown/skill orphan instead of `ox plan render`.
 func TestBuildGuidance_LeadsWithEvidence(t *testing.T) {
 	in := Parse("## Plan\n\nTouches internal/auth and cmd/ox.\n")
 	g := buildGuidance(in, SignalSummary{Collisions: 9, ExpertRoutes: 2}, nil, nil, "")
-	for _, want := range []string{"9 file", "2 expert route", "drops all of it"} {
+	for _, want := range []string{"9 file", "2 expert route", "single source", "without replacing"} {
 		if !strings.Contains(g, want) {
 			t.Errorf("evidence-led guidance missing %q: %s", want, g)
 		}
@@ -187,8 +186,8 @@ func TestBuildGuidance_LeadsWithEvidence(t *testing.T) {
 	if !strings.Contains(g2, "ledger") {
 		t.Errorf("generic guidance should still name the ledger benefit: %s", g2)
 	}
-	if strings.Contains(g2, "drops all of it") {
-		t.Errorf("no-signal guidance must not claim specific dropped signals: %s", g2)
+	if strings.Contains(g2, "This plan touches") {
+		t.Errorf("no-signal guidance must not claim specific team signals: %s", g2)
 	}
 }
 
