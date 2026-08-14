@@ -1,6 +1,9 @@
 package plan
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // --- Design-craft realization check (cross-agent belt-and-suspenders) ---
 //
@@ -95,21 +98,23 @@ func TestCraftRealization_FailOpen(t *testing.T) {
 // added to scaffold.css / viz_render*.go.
 func TestAnyVizPresent_CoversRenderers(t *testing.T) {
 	present := map[string]string{
-		"mermaid":       `<pre class="mermaid">x</pre>`,
-		"swimlane":      `<div class="swim">`,
-		"bar":           `<figure class="barc">`,
-		"line (svg)":    `<figure class="linec"><svg></svg>`,
-		"risk-matrix":   `<table class="riskm">`,
-		"stat-cards":    `<div class="statrow">`,
-		"file-impact":   `<ul class="ftree">`,
-		"heatmap":       `<table class="heat">`,
-		"multiples":     `<div class="multiples">`,
-		"sparkline":     `<svg class="spark">`,
-		"before-after":  `<div class="ba">`,
-		"partition-bar": `<figure class="pbar-fig">`,
-		"partition-map": `<div class="pmapv">`,
-		"donut (svg)":   `<svg class="donut">`,
-		"device mockup": `<div class="device">`,
+		"mermaid":                 `<pre class="mermaid">x</pre>`,
+		"swimlane":                `<div class="swim">`,
+		"bar":                     `<figure class="barc">`,
+		"line (svg)":              `<figure class="linec"><svg></svg>`,
+		"risk-matrix":             `<table class="riskm">`,
+		"stat-cards":              `<div class="statrow">`,
+		"file-impact":             `<ul class="ftree">`,
+		"heatmap":                 `<table class="heat">`,
+		"multiples":               `<div class="multiples">`,
+		"sparkline":               `<svg class="spark">`,
+		"before-after":            `<div class="ba">`,
+		"partition-bar":           `<figure class="pbar-fig">`,
+		"partition-map":           `<div class="pmapv">`,
+		"donut (svg)":             `<svg class="donut">`,
+		"device mockup":           `<div class="device">`,
+		"authored system map":     `<div class="hero-map">System topology</div>`,
+		"accessible authored SVG": `<svg role="img" aria-label="Architecture">`,
 	}
 	for name, html := range present {
 		if !anyVizPresent(html) {
@@ -118,5 +123,83 @@ func TestAnyVizPresent_CoversRenderers(t *testing.T) {
 	}
 	if anyVizPresent(`<html><body><h2>Plan</h2><p>all prose, no visual</p></body></html>`) {
 		t.Error("anyVizPresent matched a prose-only page")
+	}
+	if anyVizPresent(`<svg width="0" height="0" aria-hidden="true"><defs><symbol id="ox"></symbol></defs></svg><button class="ox-marker"><svg aria-hidden="true"></svg></button>`) {
+		t.Error("decorative OX chrome must not satisfy the diagram requirement")
+	}
+}
+
+func TestAnyVizPresent_RejectsEmptyOrHiddenSemanticContainers(t *testing.T) {
+	for name, html := range map[string]string{
+		"empty":        `<div class="hero-map"></div>`,
+		"aria hidden":  `<div class="hero-map" aria-hidden="true">System topology</div>`,
+		"hidden":       `<div class="hero-map" hidden>System topology</div>`,
+		"inert":        `<div class="hero-map" inert>System topology</div>`,
+		"display none": `<div class="hero-map" style="display: none">System topology</div>`,
+		"stylesheet":   `<style>.hero-map { display: none }</style><div class="hero-map">System topology</div>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if anyVizPresent(html) {
+				t.Fatalf("semantic container %q must not satisfy the hero-visual requirement", name)
+			}
+		})
+	}
+
+	for name, html := range map[string]string{
+		"visible content":  `<div class="hero-map">System topology</div>`,
+		"accessible image": `<div class="hero-map" role="img" aria-label="System topology"></div>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if !anyVizPresent(html) {
+				t.Fatalf("semantic container %q must satisfy the hero-visual requirement", name)
+			}
+		})
+	}
+}
+
+func TestAnyVizPresent_GenericRendererChromeIsNotAVisualization(t *testing.T) {
+	in := Parse("# Plan\n\n## Approach\nProse only.\n")
+	out, err := RenderHTML(in, Result{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `<svg width="0" height="0"`) {
+		t.Fatal("fixture no longer carries the decorative OX sprite that caused the false positive")
+	}
+	if anyVizPresent(string(out)) {
+		t.Fatal("generic renderer chrome must not masquerade as an explanatory visualization")
+	}
+}
+
+// TestCraftRealization_ProgressiveDisclosure pins the two-reader contract: a
+// substantial plan needs implementer depth, but that depth must not become the
+// approver's initial wall of text.
+func TestCraftRealization_ProgressiveDisclosure(t *testing.T) {
+	res := Result{Signals: SignalSummary{NonTrivial: true}}
+	visualOnly := []byte(`<html><body><div class="hero-map">architecture</div><h2>Files</h2><p>many details</p></body></html>`)
+	if !hasRule(LintCraft(res, visualOnly), "craft.missing-progressive-disclosure") {
+		t.Fatal("a material visual page without collapsed implementation depth must be flagged")
+	}
+
+	withDepth := []byte(`<html><body><div class="hero-map">architecture</div><details><summary>Implementation notes</summary><p>Exact files and gotchas.</p></details></body></html>`)
+	if hasRule(LintCraft(res, withDepth), "craft.missing-progressive-disclosure") {
+		t.Fatal("closed Implementation notes must satisfy progressive disclosure")
+	}
+
+	openDepth := []byte(`<details open><summary>Implementation notes</summary><p>Still overloads the first scan.</p></details>`)
+	if !hasRule(LintCraft(res, openDepth), "craft.missing-progressive-disclosure") {
+		t.Fatal("an initially open appendix must not satisfy progressive disclosure")
+	}
+}
+
+func TestCraftRealization_MaterialPlanNeedsHeroVisual(t *testing.T) {
+	res := Result{Signals: SignalSummary{Material: true}}
+	withDepthOnly := []byte(`<details><summary>Implementation notes</summary><p>Exact edits.</p></details>`)
+	if !hasRule(LintCraft(res, withDepthOnly), "craft.missing-hero-visual") {
+		t.Fatal("a material prose-only plan must be flagged even when no diagram hint fired")
+	}
+	withVisual := []byte(`<svg role="img" aria-label="Runtime architecture"></svg><details><summary>Implementation notes</summary><p>Exact edits.</p></details>`)
+	if hasRule(LintCraft(res, withVisual), "craft.missing-hero-visual") {
+		t.Fatal("an accessible authored hero visual must satisfy the material-plan requirement")
 	}
 }

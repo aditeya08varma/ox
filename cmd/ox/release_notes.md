@@ -7,57 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
+## [0.13.0] - 2026-08-11
 
-- **`ox viz` gives every AI coworker an editorial diagram catalog for any artifact** — ask `ox viz suggest "<what needs explaining>"` for a deterministic local match, pull one accessible recipe with `ox viz <id>`, render existing data-driven fragments, and lint authored SVG for portability and visual craft. Eight MIT-licensed patterns adapted from Cathryn Lavery's Diagram Design—architecture, flowchart, data flow, layer stack, sequence, state machine, timeline, and loop—ship in SageOx's light/dark token system. Plans still understand the hidden `ox plan viz` compatibility route, while priming now encourages the catalog in docs, PRs, reports, and design notes too.
+Plans get a full lifecycle and a genuinely better reviewing experience — and priming just got ~87% cheaper.
 
-- **Your session link works while the session is still running** — an AI coworker puts `SageOx-Session: https://<endpoint>/c/<id>` in the pull request it opens, but until now that link pointed at nothing until the session ended. A correctly wired setup was indistinguishable from a broken one, at exactly the moment you were most likely to check. ox now publishes a placeholder for the session a couple of turns in, so the link resolves right away and shows the session in progress. The placeholder carries **no conversation content whatsoever** — only the session id, which agent is running, and a turn counter that ticks up so you can see recording is alive. It is replaced by the real recording when the session ends. `ox session status` gained `draft_state` and the conversation URL, so if a link ever doesn't resolve you can tell whether the placeholder published or failed instead of guessing. Turn it off with `ox config set session.draft off`.
+### New
 
-- **Aborting a session now removes its published placeholder too** — `/ox-session-abort` previously only discarded local data. It now also removes the placeholder from the Ledger, so the session stops being advertised to teammates, and it tells you plainly what remains: no conversation content was ever published, but the placeholder's identity record stays in git history like any other commit. A session that exists *only* as a stranded placeholder — because the agent crashed, or an earlier abort couldn't reach the remote — is now abortable too, and `ox doctor` finds and retracts placeholders whose recording is long gone.
-
-- **`ox invite` brings teammates aboard without leaving the terminal** — `ox invite alice@acme.com,bob@acme.com` invites several people at once, defaults to this repo's team, and takes `--team` and `--role`. Each address gets its own line in the result, so one typo never hides everyone else's outcome.
-
-- **See and cancel invitations you've already sent** — `ox invite --list` shows who's still outstanding and when each invitation runs out, and `ox invite --cancel <invite id>` withdraws one.
-
-- **Goose now has Silver-tier AI coworker support** — sessions record to the Ledger and team context primes automatically, the same as Claude Code or Codex. Goose stores its transcripts in SQLite rather than files, so the new adapter reads them directly and correlates each session to the right repo by the working directory Goose actually recorded — no guessing at "the most recent session." Hooks install as an [Open Plugins](https://open-plugins.com/agent-builders/components/hooks) plugin directory (`.agents/plugins/sageox/`), a first for ox: every other agent takes a single settings file. ox installs seven of Goose's eleven hook events; the four it skips are strict subsets of the tool hooks and would double the per-tool-call cost for no new signal, while `PostToolUseFailure` **is** installed because Goose fires `PostToolUse` only on success — without it a failed turn stays invisible until the next success. One honest caveat: Goose has no compaction event, so team context primed at session start is lost when Goose compacts, and ox cannot work around that.
-
-- **`ox recap` — the concrete answer to "what value am I getting from SageOx?"** — a personalized, receipts-not-vibes report that points at the specific team knowledge which reached your work, in prose, never a vanity dashboard. It answers on two axes: the **temporal** one that a team of one gets on day one (your own recorded sessions are now searchable memory you can reload instead of re-explaining your codebase; decisions you captured resurface instead of being re-litigated; plans SageOx enriched flagged collisions with your own open work before you wrote code), and the **social** one a team adds on top (the Constitution, glossary, and team discussions that reached your sessions, quoted by name with the session as the receipt). Every claim carries a receipt — an artifact path, a session name, a plan slug, a commit SHA — and the report never invents time-saved or dollar figures. When value is still ramping it says so plainly and prescribes the two or three moves that start generating it. Called by an AI coworker it emits a JSON evidence bundle plus guidance to narrate the prose; in a bare terminal it prints an honest summary. Read-only, offline, no LLM in the CLI.
-
-### Changed
-
-- **Priming is dramatically cheaper on re-prime without losing any steering** — `ox agent prime` is called repeatedly in a session (start, after compaction, after `/clear`), and each call used to re-inject the full ~4,460-token preamble. A returning re-prime within the same context window now emits only what changed (new murmurs, new sessions, ledger status) and skips the static instructions the agent already holds — roughly 590 tokens instead of 4,460. The full preamble is still delivered in full on the first prime and on every `/clear` or `/compact` (the exact moments the agent's context was wiped), guarded by a required-directive conformance test so no steering guidance can be silently dropped. The three longest guidance blocks were also tightened to keep their command and trigger while moving the rationale to `ox guide`, and prime now records its own injected-token cost so the budget is measurable.
-
-- **`ox plan` HTML render is offered far more assertively — and never opens a browser without your say-so** — when a plan touches real team context (collisions with open work, prior art, expert routes), leaving plan mode now renders the SageOx team-context-optimized HTML in the background immediately, so the artifact is ready the instant you want it, and the nudge leads with what a hand-authored plan would drop. Opening the browser always waits on an explicit yes via a question to you first — a structural guarantee, not a convention. Trivial plans stay silent so the prompt is never noise.
+- **Plan lifecycle tracking** — `ox plan work/approve/realized/abandon/supersede`, visible in `ox plan list`.
+- **Session links work the moment a session starts** — no more waiting until it ends for the PR link to resolve.
+- **`ox invite`** — invite, list, and cancel teammate invitations from the terminal.
+- **Goose support** — sessions record and team context primes automatically, Silver tier.
+- **`ox viz`** — an editorial diagram catalog for any AI coworker, any artifact.
+- **Device labels on login** — e.g. `ryan@laptop`, so you can tell your machines apart and revoke the right one.
 
 ### Improved
 
-- **Plans are written for the reader who approves them.** Every AI coworker now drafts a plan with the decision up top — the shape, the tradeoffs, and the risk you need to approve it in ten minutes — and moves the exact files, edits, and gotchas into an "Implementation notes" section at the end, for the coworker that builds it. The rendered plan collapses that detail into an appendix you never have to open, so a ten-minute review actually takes ten minutes.
-
-- **`ox doctor` now flags a recording whose session link disagrees with the recording itself** — the one state that silently breaks links already written into your commits and pull requests. Reported, never repaired automatically: which link is correct depends on what has already been shared, so doctor names the conflict and leaves the call to you.
-
-- **Four new plan visualizations, so a rendered plan reads like it was designed.** A pull-quote for the one sentence the plan turns on (the natural home for a decider's verbatim words from a team discussion), an honest progress pair that shows shipped beside not-built-yet instead of claiming delivery in prose, a risk register that puts every risk in one scannable row and hides the mechanism behind a click, and the SageOx wordmark lockup. All keyboard-operable and screen-reader-labeled.
+- **Re-priming is ~87% cheaper** — repeat `ox agent prime` calls send only what changed.
+- **Plans lead with the decision** — details move to an appendix, so review takes minutes, not hours.
+- **Rendered plans are dramatically richer** — continuous scroll, swimlanes, 4 new visualizations, bundled companion files.
+- **`ox doctor` catches broken session links** before they cost you a PR full of dead references.
 
 ### Fixed
 
-- **Plans you save outside a detected AI coworker session are attributed properly now** — `ox plan` stamped the author, the repo, and the live session onto a saved plan only when it could detect an agent id. None of those three facts come from the agent, but a single early return threw all of them away together, so most saved plans landed anonymous and session-less — and because the repair pass matches on session name, a plan that lost its session that way could never get it back. Attribution now resolves independently of agent detection (falling back through OAuth identity, then git config, then OS username), the live session is found by workspace when there's no agent id, and the plan-to-session reverse link records against the same session the forward link names instead of re-deriving its own. Saving a plan also tells the server immediately, so a new or revised plan shows up in the console right away rather than at the next sweep.
-
-- **A plan we genuinely can't attribute now says so, instead of signing itself "Anonymous"** — the identity resolver never fails; when nothing at all is available it returns a placeholder name. Writing that into the plan would have made an unattributable plan look identical to an attributed one, and made "how many plans have an author?" answer 100% forever regardless of the truth. An unresolved author is now simply left blank, and a save that could resolve neither an author nor a session says so in the terminal with the two commands that fix it.
-
-- **Recording a plan can no longer disturb the session it belongs to** — the plan-to-session link is written by re-reading the session's live state immediately before updating it. Previously it wrote back a copy taken moments earlier, which could revive a session you had just stopped (leaving a recording that never ends and blocks the next one from starting) and could silently undo whatever the session had recorded in the meantime — including, because sessions sync to your team, for everyone else.
-
-- **`ox plan lint` stops reporting a clean bill of health it never checked** — the session-link check is skipped when a plan has no session recorded, but the command still printed the green "attribution OK" line, so a plan that had lost its attribution looked verified. It now says plainly which checks ran. Relatedly, saving a plan no longer warns about a missing session link on renders that were never supposed to carry one.
-
-- **A ledger stuck on a detached HEAD no longer quietly loses weeks of sessions.** If a rebase left your ledger detached, ox kept committing sessions onto commits that no branch and no remote could reach. They existed in exactly one place, they were never pushed, and they never appeared on sageox.ai — one real ledger sat that way for about six weeks before a teammate happened to notice sessions had stopped showing up. Doctor saw only "detached HEAD" and offered no repair, and the automatic recovery correctly refused to abort (aborting there would have stranded a partial replay), so every path looked at the problem and reasonably did nothing. `ox doctor` now counts commits that exist only on HEAD and, with `--fix`, gives them a `rescue-wedge-<timestamp>` branch **before** anything can move HEAD — verified after the fact, and never garbage-collected in the same run. Creating that branch only adds a ref, so it happens even in an unattended or AI-coworker run; actually clearing a wedged rebase is destructive and still waits for a person at a terminal.
-
-- **Four `ox doctor` checks that were registered but never ran now run.** The Ledger Git Health category kept two sources of truth — the registry, and a hand-written call list inside doctor — and they had drifted apart. Tracked `.rej` artifacts, committed local-only cache files, sparse-checkout drift, and legacy session IDs were all detectable and repairable when invoked by slug directly, which is exactly why nobody noticed the default `ox doctor` path skipped them: the code existed, worked, and was unreachable. The category is now driven from the registry, and a test fails the build if a registered check ever falls out of it again.
-
-- **The prior art SageOx cites on your plan is now actually about your plan.** Relevance was biased by length: a long transcript that happened to mention each of your search terms somewhere could out-score a short summary genuinely about them, so unrelated sessions surfaced as 95%-confidence prior art and the enrichment looked broken. Scoring now measures how much a document is *about* your terms rather than how many times it happens to contain them — while still surfacing the large, densely on-topic plans that a naive density fix would have made permanently unfindable.
-
-- **Diagram labels no longer clip mid-word in rendered plans.** Diagrams were laid out before the page's webfont finished loading, so every node was sized for the wrong font and its label overflowed once the real one swapped in — a defect invisible until someone screenshotted the page. Plans now re-draw their diagrams when the font settles, and `ox plan lint` flags any render that can still hit the race.
-
-- **Every recording keeps one permanent session link, even when its upload has to be retried.** A retried or recovered upload could assign a second link to a session that already had one, so the references written into commit trailers, pull requests, and plans stopped resolving — and two copies of the same session could disagree about which one it was.
-
-- **Ledger sync no longer stalls on machines that sign git commits.** If your git config requires a passphrase to sign, sync could stop partway with no terminal available to answer the prompt, leaving work stranded locally.
+- **Session recording is reliable across all 7 supported coding agents** — Gemini, Codex, OpenCode, Goose, Droid, Amp, Pi.
+- **Ledger sync no longer gets permanently stuck** — on conflicting rebases, stale locks, detached HEAD, or signing prompts.
+- **Session links and recordings survive retries** and background sync without corruption.
+- **Four `ox doctor` checks that silently never ran, now run.**
+- **Plans are attributed correctly** — author, repo, and session link, even without a detected agent id.
+- **Prior art is actually relevant now** — and diagrams no longer clip labels.
+- **`ox init` stages everything it writes** and stops touching your root `.gitignore`.
+- **`ox daemon start --foreground` actually takes over** instead of silently doing nothing.
 
 ## [0.12.0] - 2026-07-18
 

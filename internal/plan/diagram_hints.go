@@ -387,12 +387,9 @@ func computeMockupExpectation(in Input) string {
 // the 259-line skill spec — and folds in the plan-specific diagram hints so the
 // agent gets concrete direction. Returns "" for a plan with no sections.
 //
-// It LEADS with the plan-specific team-context evidence (sig) the agent is already
-// holding: only `ox plan render` surfaces those signals and saves the plan to the
-// ledger — a self-authored HTML render (the agent's own skill, which ox can't see
-// or control, and there may be several) structurally cannot. Specific evidence the
-// agent can verify beats a generic pitch, and wins on a capability competitors
-// lack rather than trying to out-style them.
+// It LEADS with the plan-specific team-context evidence (sig) the agent is
+// already holding, then names the single-source flow: author HTML, save that
+// file as canonical, and let ox inject context without replacing the page.
 func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []VizHint, mockup string) string {
 	if len(in.Sections) == 0 {
 		return ""
@@ -402,7 +399,7 @@ func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []
 		b.WriteString(lead)
 		b.WriteString(" ")
 	} else {
-		b.WriteString("Render with `ox plan render --open` (self-contained, cross-agent): it folds in team context and saves the plan to the ledger where teammates find it — a self-authored HTML render does neither. ")
+		b.WriteString("For material work, author a purpose-built `plan.html`, save it canonically to the ledger with `ox plan save --file plan.html`, then present it through `ox plan render --file plan.html --open`: ox preserves the authored page while injecting team context and review chrome. ")
 	}
 	b.WriteString("Author in two layers for two readers. ")
 	b.WriteString("TOP — the decision layer, for the human approving in ~10 min: lead with the conclusion, the key tradeoffs, and the biggest risk; keep every file/ID/PR framed enough to stand on its own; let one hero diagram and a few tables replace prose rather than decorate it; no file:line minutiae. ")
@@ -437,8 +434,8 @@ func buildGuidance(in Input, sig SignalSummary, hints []DiagramHint, vizHints []
 }
 
 // guidanceLead frames the render call with the SPECIFIC team-context evidence the
-// plan triggered, so the agent reaches for `ox plan render` because it can see what
-// a self-authored render would silently drop — not because we asserted authority.
+// plan triggered, so the agent preserves the authored page while gaining the
+// context and ledger surfaces rather than creating competing artifacts.
 // Returns "" when no team-context signal fired (the caller falls back to the
 // generic capability line).
 func guidanceLead(sig SignalSummary) string {
@@ -456,7 +453,7 @@ func guidanceLead(sig SignalSummary) string {
 		return ""
 	}
 	return "This plan touches " + joinAnd(parts) +
-		" — `ox plan render --open` is the only renderer that surfaces them and saves the plan to the ledger; a self-authored HTML render drops all of it."
+		" — author `plan.html`, save it to the ledger as the single source with `ox plan save --file plan.html`, then use `ox plan render --file plan.html --open` to inject those signals without replacing the visual page."
 }
 
 func plural(n int) string {

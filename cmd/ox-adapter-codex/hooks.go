@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
@@ -70,9 +71,11 @@ func handleInstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.InstallH
 		return nil, err
 	}
 
-	// enable the codex_hooks feature flag
-	if err := ensureFeatureFlag(p.RepoRoot, p.Scope); err != nil {
-		return nil, fmt.Errorf("hooks.json written but failed to enable feature flag: %w", err)
+	// Codex hooks are stable and enabled by default. Clean up the legacy
+	// codex_hooks alias that older ox versions installed, but never create or
+	// change the current features.hooks setting.
+	if _, err := removeLegacyFeatureFlag(p.RepoRoot, p.Scope); err != nil {
+		return nil, fmt.Errorf("hooks.json written but failed to remove legacy feature flag: %w", err)
 	}
 
 	return &adapterprotocol.InstallHooksResponse{
@@ -148,11 +151,6 @@ func handleUninstallHooks(p adapterprotocol.HookParams) (*adapterprotocol.Uninst
 
 	if !changed {
 		return &adapterprotocol.UninstallHooksResponse{Uninstalled: true}, nil
-	}
-
-	// remove feature flag if no ox hooks remain
-	if len(hooksMap) == 0 {
-		_ = removeFeatureFlag(p.RepoRoot, p.Scope)
 	}
 
 	// if file is now empty, remove it
@@ -310,87 +308,196 @@ func isOxCommand(cmd string) bool {
 	return strings.Contains(cmd, "ox agent hook") || strings.Contains(cmd, "ox agent prime")
 }
 
-// --- config.toml feature flag ---
+// --- config.toml legacy feature migration ---
 
-func ensureFeatureFlag(repoRoot, scope string) error {
-	path := resolveConfigPath(repoRoot, scope)
+var legacyFeatureFlagAssignment = regexp.MustCompile(`^codex_hooks\s*=\s*(?:true|false)\s*(?:#.*)?$`)
 
-	var config map[string]any
-	if data, err := os.ReadFile(path); err == nil && len(data) > 0 {
-		if err := toml.Unmarshal(data, &config); err != nil {
-			return fmt.Errorf("failed to parse %s: %w", path, err)
-		}
-	}
-	if config == nil {
-		config = make(map[string]any)
-	}
-
-	features, ok := config["features"].(map[string]any)
-	if !ok {
-		features = make(map[string]any)
-	}
-
-	if features["codex_hooks"] == true {
-		return nil
-	}
-
-	features["codex_hooks"] = true
-	config["features"] = features
-
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
-	}
-
-	data, err := toml.Marshal(config)
-	if err != nil {
-		return fmt.Errorf("failed to marshal config: %w", err)
-	}
-
-	perm := os.FileMode(0644)
-	if scope == "user" {
-		perm = 0600
-	}
-	return os.WriteFile(path, data, perm)
-}
-
-func removeFeatureFlag(repoRoot, scope string) error {
+// removeLegacyFeatureFlag removes only the single-line legacy assignment that
+// older SageOx versions wrote under [features]. It never creates config.toml,
+// re-marshals the user's TOML, or changes an explicit features.hooks choice.
+func removeLegacyFeatureFlag(repoRoot, scope string) (bool, error) {
 	path := resolveConfigPath(repoRoot, scope)
 
 	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
 	if err != nil {
-		return nil
+		return false, err
+	}
+	if len(data) == 0 {
+		return false, nil
 	}
 
+	legacyFeatureFlag, err := hasLegacyFeatureFlagInConfig(data)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+	if !legacyFeatureFlag {
+		return false, nil
+	}
+
+	out, changed := removeLegacyFeatureFlagAssignment(data)
+	if !changed {
+		// Only the [features] assignment produced by older SageOx installers
+		// is safe to edit automatically. Do not rewrite other TOML encodings.
+		return false, nil
+	}
+	return true, os.WriteFile(path, out, 0o600)
+}
+
+func hasLegacyFeatureFlag(repoRoot, scope string) (bool, error) {
+	path := resolveConfigPath(repoRoot, scope)
+
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) || len(data) == 0 {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+
+	legacyFeatureFlag, err := hasLegacyFeatureFlagInConfig(data)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse %s: %w", path, err)
+	}
+	if !legacyFeatureFlag {
+		return false, nil
+	}
+
+	_, removable := removeLegacyFeatureFlagAssignment(data)
+	return removable, nil
+}
+
+func hasLegacyFeatureFlagInConfig(data []byte) (bool, error) {
 	var config map[string]any
 	if err := toml.Unmarshal(data, &config); err != nil {
-		return nil
+		return false, err
 	}
-
 	features, ok := config["features"].(map[string]any)
 	if !ok {
-		return nil
+		return false, nil
 	}
 
-	delete(features, "codex_hooks")
-	if len(features) == 0 {
-		delete(config, "features")
-	} else {
-		config["features"] = features
+	_, ok = features["codex_hooks"]
+	return ok, nil
+}
+
+// removeLegacyFeatureFlagAssignment strips only the old SageOx-generated
+// codex_hooks boolean from a plain [features] table. It preserves every other
+// byte in config.toml, including comments, whitespace, quote choices, and
+// unrelated tables.
+func removeLegacyFeatureFlagAssignment(data []byte) ([]byte, bool) {
+	lines := strings.SplitAfter(string(data), "\n")
+	var out strings.Builder
+	out.Grow(len(data))
+	inFeaturesTable := false
+	multilineDelimiter := ""
+	changed := false
+
+	for _, line := range lines {
+		if multilineDelimiter != "" {
+			if countUnescapedMultilineDelimiters(line, multilineDelimiter)%2 == 1 {
+				multilineDelimiter = ""
+			}
+			out.WriteString(line)
+			continue
+		}
+
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "[") {
+			header := strings.TrimSpace(strings.SplitN(trimmed, "#", 2)[0])
+			inFeaturesTable = header == "[features]"
+		}
+		if inFeaturesTable && legacyFeatureFlagAssignment.MatchString(trimmed) {
+			changed = true
+			continue
+		}
+		out.WriteString(line)
+
+		if delimiter := multilineStringDelimiter(line); delimiter != "" &&
+			countUnescapedMultilineDelimiters(line, delimiter)%2 == 1 {
+			multilineDelimiter = delimiter
+		}
 	}
 
-	if len(config) == 0 {
-		return os.Remove(path)
-	}
+	return []byte(out.String()), changed
+}
 
-	out, err := toml.Marshal(config)
-	if err != nil {
-		return err
+// multilineStringDelimiter returns the delimiter for a TOML multiline value
+// that starts on line. A delimiter must immediately follow the assignment's
+// equals sign, which avoids interpreting comments and ordinary strings as
+// multiline TOML content.
+func multilineStringDelimiter(line string) string {
+	value, ok := tomlAssignmentValue(line)
+	if !ok {
+		return ""
 	}
+	switch {
+	case strings.HasPrefix(value, `"""`):
+		return `"""`
+	case strings.HasPrefix(value, `'''`):
+		return `'''`
+	default:
+		return ""
+	}
+}
 
-	perm := os.FileMode(0644)
-	if scope == "user" {
-		perm = 0600
+// tomlAssignmentValue returns the value portion of a single-line TOML
+// assignment. It skips quoted key content, so an equals sign in a quoted key
+// cannot prevent multiline-string detection.
+func tomlAssignmentValue(line string) (string, bool) {
+	var quote byte
+	escaped := false
+	for index := 0; index < len(line); index++ {
+		char := line[index]
+		if quote != 0 {
+			if quote == '"' && char == '\\' && !escaped {
+				escaped = true
+				continue
+			}
+			if char == quote && !escaped {
+				quote = 0
+			}
+			escaped = false
+			continue
+		}
+
+		switch char {
+		case '#':
+			return "", false
+		case '"', '\'':
+			quote = char
+		case '=':
+			return strings.TrimSpace(line[index+1:]), true
+		}
 	}
-	return os.WriteFile(path, out, perm)
+	return "", false
+}
+
+// countUnescapedMultilineDelimiters counts a delimiter's occurrences in one
+// physical line. TOML basic strings can escape quote characters; literal
+// strings cannot. An odd count toggles the multiline-string state.
+func countUnescapedMultilineDelimiters(line, delimiter string) int {
+	count := 0
+	for index := 0; index <= len(line)-len(delimiter); {
+		next := strings.Index(line[index:], delimiter)
+		if next == -1 {
+			break
+		}
+		position := index + next
+		if delimiter != `"""` || !hasOddBackslashPrefix(line, position) {
+			count++
+		}
+		index = position + len(delimiter)
+	}
+	return count
+}
+
+func hasOddBackslashPrefix(s string, position int) bool {
+	backslashes := 0
+	for index := position - 1; index >= 0 && s[index] == '\\'; index-- {
+		backslashes++
+	}
+	return backslashes%2 == 1
 }

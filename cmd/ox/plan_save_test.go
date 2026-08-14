@@ -20,6 +20,7 @@ func newPlanSaveTestCmd() *cobra.Command {
 	cmd.Flags().String("plan", "", "")
 	cmd.Flags().String("annotations", "", "")
 	cmd.Flags().String("html", "", "")
+	cmd.Flags().String("file", "", "")
 	return cmd
 }
 
@@ -32,6 +33,24 @@ func runPlanSaveWith(t *testing.T, args ...string) (string, error) {
 	cmd.SetArgs(args)
 	err := cmd.Execute()
 	return out.String(), err
+}
+
+// TestPlanSave_RejectsDualSourceHTML prevents the exact data-model ambiguity
+// that made review discard an authored system map and regenerate a prose wall.
+func TestPlanSave_RejectsDualSourceHTML(t *testing.T) {
+	_, err := runPlanSaveWith(t,
+		"--plan", "plan.md",
+		"--annotations", "annotations.json",
+		"--html", "plan.html",
+	)
+	if err == nil {
+		t.Fatal("legacy --plan + --html must be rejected")
+	}
+	for _, want := range []string{"competing plan-of-record", "ox plan save --file <plan.html>", "Implementation notes"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error missing %q: %v", want, err)
+		}
+	}
 }
 
 // TestPlanSave_RequiresPlanAndAnnotations verifies the cmd-level guards fire

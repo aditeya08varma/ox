@@ -82,6 +82,21 @@ successor. Do not introduce a second brand hue.
 ramps' mid stops are *fill* values — sage-700 lands at 4.31:1 and warning-600 at
 3.16:1 as text on cream, both under WCAG AA. The values above are the corrected
 text-safe ones.
+## The human-attention contract
+
+A material plan has two readers and therefore two layers:
+
+1. **Decision surface (visible immediately):** conclusion, biggest risk,
+   trade-offs, and one meaningful hero visualization that explains the system's
+   topology, sequence, state, or comparison. Decorative icons and wordmarks do
+   not count as a visualization.
+2. **Implementation depth (collapsed initially):** exactly one closed
+   `<details><summary>Implementation notes</summary>...</details>` appendix at
+   the end with exact files, edits, rollout mechanics, and gotchas.
+
+Do not average the two audiences into a long document. Keep the depth, but move
+it behind native progressive disclosure so the approver's first scan stays
+visual and the implementing AI coworker still has precise instructions.
 
 ## The minimal authoring contract
 
@@ -140,7 +155,7 @@ plan.html --open`) → `ox plan review <slug>` for the live loop.
 
 ## The markdown quick path (still supported)
 
-`ox plan render --file plan.md` and `ox plan save --plan ...` remain — **for
+`ox plan render --file plan.md` and `ox plan save --file plan.md` remain — **for
 quick, low-stakes plans only**. The markdown renderer auto-renders:
 
 | Markdown input | Auto-rendered as |
