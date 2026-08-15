@@ -63,7 +63,9 @@ flowchart LR
 
 Cursor (`stream-cursor.json`, session cache dir, 0600, atomic temp+rename) records the last
 fully-published wire `seq`, the last published entry seq, the byte offset into `raw.jsonl`,
-and the file's **generation identity** (header `eid` + a rewrite-generation counter). On
+a compact **wire-seq journal** (`seq` ↔ kind + `entry_seq`, contiguous runs collapsed to
+ranges — the mapping amendments need to replay under original seqs), and the file's
+**generation identity** (header `eid` + a rewrite-generation counter). On
 open, if the identity does not match the file (a sanctioned rewrite happened), the cursor
 resets to a safe replay point and replayed content is published as an **amendment** (bumped
 `revision`, below) — never as silently-skipped or mid-record bytes. Safe to lose entirely:
@@ -115,9 +117,14 @@ server applies caps at projection time):
   `revision` and are dropped.
 - A **higher `revision` for an existing `seq` is an amendment, not a duplicate**: it
   supersedes the prior revision as a superseding revision with lineage (ADR-057 v3 revision
-  machinery, exactly as ADR-087 D9 prescribes for late-delivery re-finalization). This is
-  how post-stop replays work: cursor-generation reset (rewritten `raw.jsonl`, e.g. a
-  post-stop redact) and late-drain amendments re-publish with `revision+1`.
+  machinery, exactly as ADR-087 D9 prescribes for late-delivery re-finalization). An
+  amendment is only an amendment **at the original wire `seq`** — to make that possible
+  across rewrites, the cursor durably journals the wire-seq assignment (`seq` ↔ kind +
+  `entry_seq`). A post-rewrite replay re-publishes each **previously delivered** frame under
+  its **original wire `seq`** at `revision+1` (so the redacted content supersedes the stale
+  revision rather than landing beside it); content that had **not** been delivered before
+  the rewrite takes fresh seqs at `revision 0` as normal. Late-drain resends of undelivered
+  frames are not amendments — same seq, same revision, dedup handles them.
 - Amendments never resurrect purged content: deletion/erasure tombstones win over any
   revision (server-enforced; publisher drops its backlog on a tombstone response).
 - Consumers strict-decode per the ontology convention (ADR-076 chunks are fail-loud): any
@@ -169,15 +176,19 @@ while paused. The session spine's rule is **fail-closed: paused means no content
 3. Publishes `lifecycle` frames: `pause` with `suspended_from_entry_seq`, `resume` with
    `resumed_at_entry_seq` — the skeleton record that entries `[from, at)` were withheld by
    consent, referenced in entry-seq space.
-4. **Atomic publication fence (the linearization point).** Pause activation persists the
-   effective `suspended_from_entry_seq` to the pause marker *before* it returns to the user
-   (existing atomic temp+rename). The publisher treats that persisted value as a fence it
-   re-reads **immediately before every socket write** — after framing, after fragmentation,
-   last check before bytes leave the process. Any in-flight frame whose `entry_seq` is at or
-   past the fence is discarded pre-send (its allocated wire `seq` is reused by the next
-   frame, preserving density — wire seqs are assigned at send-commit time, not at read
-   time). This closes the read-before-pause/send-after-pause race: an entry read while
-   active can never be transmitted after the pause landed.
+4. **Atomic publication fence (the linearization point), evaluated per FRAME.** Pause
+   activation persists the effective `suspended_from_entry_seq` to the pause marker *before*
+   it returns to the user (existing atomic temp+rename). The publisher re-reads that fence
+   **once per frame, immediately before the frame's FIRST fragment is written** — the
+   send-commit point. The decision is frame-atomic: a frame whose `entry_seq` is at or past
+   the fence is discarded whole (its wire `seq` is reused by the next frame — wire seqs are
+   assigned at send-commit, not read time); a frame that passes the fence sends **all** of
+   its fragments, even if a pause lands mid-frame. Frames are never torn — fragments of one
+   frame are never split across a discard, so partial content can never reach the relay.
+   This is still fail-closed: the fence's meaning is range membership (`entry_seq` inside a
+   suspended range never lands), not wall-clock ordering — an entry recorded before the
+   pause boundary is publishable by definition, and an entry at/past it can never be
+   transmitted regardless of when it was read.
 
 Distinct from redaction: a secret-redacted entry (inline redactor) still flows as a normal
 `turn` with scrubbed `content`. A fully-suppressed turn, if ox ever adds one, follows the
@@ -225,8 +236,13 @@ only ever name genuinely undelivered frames.
   idempotently (keyed on the delivered seq set), superseding derived artifacts with lineage.
   Amendment MUST respect deletion tombstones — a purged conversation is never resurrected,
   and the publisher drops its backlog on a tombstone response.
-- Continuing work later is a **new `ses_`/source-session bound to the same `cnv_`** (one
-  level up), never a reopened stream.
+- Continuing work later is a **new source-session with its own `ses_` id and therefore its
+  own `cnv_` twin** — never a reopened stream, and never a foreign `cnv_` binding: the
+  `ses_ ↔ cnv_` prefix swap must stay bijective and lossless (the ontology's 1:N deferral
+  rule), so a continuation cannot publish under a prior session's conversation id. Linking
+  the continuation to the earlier conversation as one logical thread is a **server-side
+  association**, deferred to the platform's independently-minted-`cnv_` (1:N) work — ADR-087
+  D9's "same conversation, one level up" lands there, not in this producer's identity rules.
 
 ## Transport
 
@@ -323,7 +339,10 @@ every step around publish/cursor-write, no loss, dedup on `(conversation_id, seq
 revision)`); **pause-fence race test** (entries enqueued pre-pause must never reach the twin
 post-pause — exercise the read-then-pause-then-send interleaving deliberately); **rewrite
 generation test** (rewrite `raw.jsonl` under a draining cursor, assert reset + `revision+1`
-amendment replay, never a mid-record resume); **abort test** (backlog dropped, only
+amendment replay **under the original wire seqs** — the stale revision superseded, never a
+duplicate beside it, never a mid-record resume); **mid-frame pause test** (pause landing
+between fragments of a large frame: the frame completes whole, the next suspended frame is
+discarded whole — no torn frames at the twin); **abort test** (backlog dropped, only
 `close{finalize_reason:"abort"}` arrives, twin marks tombstone, late frames dropped); pause
 fail-closed test; flag-off test (zero network, zero stream files). Deferred until mono locks
 the consumer: 5-way relay fault matrix, full golden wire suite, staging-relay integration.
