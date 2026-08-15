@@ -1000,7 +1000,11 @@ func renderLineChart(data []byte) (string, error) {
 		if dd := dashes[si%len(dashes)]; dd != "" {
 			dash = ` stroke-dasharray="` + dd + `"`
 		}
-		fmt.Fprintf(&b, `<polyline class="linec-series" points="%s" style="stroke:%s"%s/>`, strings.Join(pts, " "), col, dash)
+		// SVG's default fill is black. State fill="none" on the element rather
+		// than relying on surrounding CSS: fragments are frequently embedded in
+		// a document with unrelated SVG rules, and a filled polyline becomes a
+		// misleading closed polygon.
+		fmt.Fprintf(&b, `<polyline class="linec-series" points="%s" fill="none" style="stroke:%s"%s/>`, strings.Join(pts, " "), col, dash)
 		for _, p := range s.Points {
 			ptx, pty := px(p.X), py(p.Y)
 			if s.Marker {

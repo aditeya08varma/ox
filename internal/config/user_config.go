@@ -354,6 +354,10 @@ type UserConfig struct {
 	// Pointer so an absent block is distinguishable from explicit zero-values.
 	Plan *PlanConfig `yaml:"plan,omitempty"`
 
+	// PRVisuals holds the user-level `pr_visuals.*` settings for rich GitHub
+	// pull-request visuals. Pointer preserves inheritance from repo/team.
+	PRVisuals *PRVisualsConfig `yaml:"pr_visuals,omitempty"`
+
 	// Ephemeral is the persisted user preference for ephemeral mode (no
 	// daemon, no local ledger clone, HTTP-only reads). Pointer so we can
 	// distinguish unset (nil) from explicit false. When non-nil, the value

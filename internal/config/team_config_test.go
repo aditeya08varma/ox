@@ -39,6 +39,26 @@ session_notification = "heads up"
 	assert.Equal(t, "heads up", cfg.SessionNotification)
 }
 
+func TestTeamConfig_PRVisualsRoundTrip(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	rich := false
+	theme := PRVisualsThemeDark
+	require.NoError(t, SaveTeamConfig(tmpDir, &TeamConfig{PRVisuals: &PRVisualsConfig{
+		Rich:  &rich,
+		Theme: &theme,
+	}}))
+
+	cfg, err := LoadTeamConfig(tmpDir)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.NotNil(t, cfg.PRVisuals)
+	require.NotNil(t, cfg.PRVisuals.Rich)
+	require.NotNil(t, cfg.PRVisuals.Theme)
+	assert.False(t, *cfg.PRVisuals.Rich)
+	assert.Equal(t, PRVisualsThemeDark, *cfg.PRVisuals.Theme)
+}
+
 // TestLoadTeamConfig_SilentlyDropsStrayTimezoneKey verifies that an older
 // team config.toml carrying a top-level `timezone` key still loads cleanly
 // after the field was removed from TeamConfig during the team-timezone revert.

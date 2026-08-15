@@ -712,7 +712,15 @@ func writePlanEnrichmentGuidance(sb *strings.Builder, agentType string) {
 // vocabulary, independent of whether it uses SageOx enriched plans.
 func writeVisualizationGuidance(sb *strings.Builder) {
 	sb.WriteString("\n<visualization-guidance>\n")
-	sb.WriteString("When architecture, flow, state, sequence, comparison, chronology, or quantitative shape would explain the work faster than prose, consult `ox viz suggest \"<what needs explaining>\"`. The catalog is for every artifact — plans, docs, PRs, reports, and design notes. Pull one recipe with `ox viz <id>`, render data-driven fragments with `ox viz render`, and check authored SVG/HTML with `ox viz lint`.\n")
+	sb.WriteString("Before a material PR description, run `ox viz pr`: no visual if prose answers it; GitHub-safe Mermaid for a 2–5-node flow; rich only for a reviewer question Mermaid cannot answer. For a known question, run `ox viz pr --intent \"<question>\" --json`.\n")
+	projectRoot := findGitRoot()
+	if config.PRVisualsRich(projectRoot) {
+		theme := config.PRVisualsTheme(projectRoot)
+		fmt.Fprintf(sb, "For simple source-adjacent flow use GitHub-safe Mermaid; for comparison/layout use a labeled rich visual in the %s theme. Export its 2x PNG to .context/pr-visuals/ (never commit it), inspect it, then attach it in GitHub's PR editor with alt text and one conclusion. Keep PR visuals unbranded: no SageOx wordmark, footer credit, or logo; labels and connectors must not collide. `ox viz pr` has the export details.\n", theme)
+	} else {
+		sb.WriteString("Generated PNG/SVG PR images are disabled; the ox viz catalog and `ox viz suggest` remain available. For PR text, use GitHub-safe Mermaid only when it helps; enable image generation with `ox config set pr_visuals.rich on`.\n")
+	}
+	sb.WriteString("For architecture, flow, state, sequence, comparison, chronology, or quantitative shape, use `ox viz suggest \"<intent>\"`; the catalog serves plans, docs, PRs, reports, and design notes. Pull `ox viz <id>`; only `ox-render` recipes support `ox viz render`; check SVG/HTML with `ox viz lint`.\n")
 	sb.WriteString("</visualization-guidance>\n")
 }
 

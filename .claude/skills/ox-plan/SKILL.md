@@ -19,7 +19,7 @@ description: >-
   (signals.material, guidance) plus the user's confirmation / the `plan.html`
   config setting — not by this skill.
 ---
-<!-- ox-hash: f3bdfe9c157b ver: 0.12.0 -->
+<!-- ox-hash: cce2611c9d4a ver: 0.13.0 -->
 
 <!-- Keep behavioral "when to render" guidance lean — that belongs in the
      `ox plan` JSON output (signals.material, guidance) and in the
@@ -129,7 +129,7 @@ The **ox chrome** — enrichment overlay, footer credit, review loop — is inje
 
 ## The quick path (markdown, low-stakes only)
 
-For a **small, low-stakes plan** where an authored page isn't worth the effort, markdown-first remains: author the plan markdown, then `ox plan save --plan <md> [--annotations ...]` and `ox plan render --file plan.md`. The renderer now auto-renders tabs (>3 H2 sections), a TL;DR hero, `:::compare`/`:::` side-by-side panes, ` ```html-interactive ` passthrough fences, and auto-visualizations (gated-track tables → swimlanes; comparison tables → a click-to-inspect field inspector). It approximates; a material plan gets an authored page. Apply the GitHub-strict Mermaid rules from CLAUDE.md to any ` ```mermaid ` fences, and treat `plan-diagram [...]` advisories as fixes, not suggestions.
+For a **small, low-stakes plan** where an authored page isn't worth the effort, markdown-first remains: author the plan markdown, then `ox plan save --file plan.md [--annotations ...]` and `ox plan render --file plan.md`. The renderer auto-renders tabs (>3 H2 sections), a TL;DR hero, `:::compare`/`:::` side-by-side panes, ` ```html-interactive ` passthrough fences, and auto-visualizations (gated-track tables → swimlanes; comparison tables → a click-to-inspect field inspector). It approximates; a material plan gets an authored page. Never use the rejected legacy `--plan + --html` pair: competing sources can cause review to discard the authored visualization. Apply the GitHub-strict Mermaid rules from CLAUDE.md to any ` ```mermaid ` fences, and treat `plan-diagram [...]` advisories as fixes, not suggestions.
 
 ---
 

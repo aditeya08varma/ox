@@ -651,7 +651,7 @@ func TestOutputAgentPrimeXML_VisualizationGuidanceIsArtifactNeutral(t *testing.T
 		t.Fatal("prime output is missing visualization-guidance")
 	}
 	block := xml[start:end]
-	for _, want := range []string{"ox viz suggest", "ox viz render", "ox viz lint", "docs", "PRs", "reports"} {
+	for _, want := range []string{"Before a material PR description", "ox viz suggest", "ox viz render", "ox viz lint", "ox viz pr", "--intent", "GitHub-safe Mermaid", ".context/pr-visuals/", "Keep PR visuals unbranded", "no SageOx wordmark", "footer credit", "docs", "PRs", "reports"} {
 		if !strings.Contains(block, want) {
 			t.Errorf("visualization guidance missing %q: %s", want, block)
 		}

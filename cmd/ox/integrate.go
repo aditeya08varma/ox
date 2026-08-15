@@ -93,11 +93,12 @@ var integrateInstallCmd = &cobra.Command{
 	Long: `Install SageOx hooks for AI coworkers.
 
 Default: Claude Code (adds hooks to ~/.claude/settings.json).
-Use --user to add guidance to ~/.claude/CLAUDE.md for ALL projects.
+Use --user to add guidance to ~/.claude/CLAUDE.md for ALL projects, including
+repositories that have not run ox init.
 
 Other agents can be installed with their respective flags:
   --gemini    Gemini CLI hooks
-  --codex     Codex CLI hooks
+  --codex     Codex CLI hooks (use with --user for every repository)
   --amp       Amp CLI integration (AGENTS.md marker)
   --opencode  OpenCode plugin
   --pi        Pi coding agent integration (AGENTS.md marker)`,

@@ -178,4 +178,5 @@ var additiveSkills = map[string]string{
 	"ox-skill-manager": "native Agent Skills lifecycle guidance; the deterministic installer and ownership rules live in ox CLI code rather than this playbook",
 	"ox-attest-goal":   "opt-in Attest BDD authoring playbook; it sharpens customer-journey judgment without becoming a portable product requirement",
 	"ox-attest-create": "opt-in Attest evidence-recording playbook; the attestation CLI remains usable without the Claude-specific skill",
+	"ox-viz":           "additive Layer-2 ergonomics; its deterministic floor is the visualization-guidance entry and the live ox viz pr output, so it is not a separate conformance surface",
 }

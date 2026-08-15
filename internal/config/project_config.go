@@ -151,6 +151,9 @@ type ProjectConfig struct {
 	// Pointer so an absent block is distinguishable from explicit zero-values.
 	Plan *PlanConfig `json:"plan,omitempty" yaml:"plan,omitempty"`
 
+	// PRVisuals holds repository defaults for rich GitHub pull-request visuals.
+	PRVisuals *PRVisualsConfig `json:"pr_visuals,omitempty" yaml:"pr_visuals,omitempty"`
+
 	// Decision holds the `decision.*` settings namespace for `ox decision`
 	// (where this repo's Decision Records live). Pointer so an absent block
 	// falls through to the documented default discovery dirs.
