@@ -26,12 +26,17 @@ func TestEditorialSVGPatternsEmbedInBothPlanThemes(t *testing.T) {
 				t.Fatal(err)
 			}
 			html := string(out)
+			// These literals are the scaffold's own surface tokens — the point is
+			// that BOTH theme blocks reach the embedded recipe, not the specific
+			// hexes. When assets/scaffold.css moves a token, move it here too;
+			// light --panel is dust-50 (the cream panel under the white sheet),
+			// not the pure white it was before the design-token pass.
 			for _, want := range []string{
 				`data-ox-viz="` + id + `"`,
 				`:root{`,
 				`--panel:#111411`,
 				`html[data-theme="light"]`,
-				`--panel:#fff`,
+				`--panel:#f7f5f2`,
 				`var(--panel,`,
 			} {
 				if !strings.Contains(html, want) {

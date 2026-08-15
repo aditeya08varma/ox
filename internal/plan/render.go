@@ -157,7 +157,7 @@ type reviewSummary struct {
 type statChip struct {
 	Value string
 	Label string
-	Class string // neutral | copper | amber | red | teal
+	Class string // neutral | gold | amber | red | teal
 	Href  string // scroll-jump target ("" = inert)
 }
 

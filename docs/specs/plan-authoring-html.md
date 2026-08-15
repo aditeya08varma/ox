@@ -35,13 +35,53 @@ page that set the standard for what a plan can feel like:
   lights up, a docked explainer updates.
 - **Animated timelines** with toggles.
 - **Side-by-side comparison panes** and **verdict cards**.
-- **Design-system dark palette**: canvas `#0b0d0b`, surface `#111411`, accent
-  `#99c693`, Inter + Spline Sans Mono.
 - **Self-contained single file** — inline CSS/JS, no external dependencies.
 
 A plan page that merely reformats prose has missed the point; the page should do
 work a document cannot.
 
+## The design register (not optional)
+
+An authored page is embedded in the SageOx web app (`/repo/…/plans/…` frames it
+in an iframe) and read beside every other SageOx surface. It has to be the same
+colour temperature as they are — warm green-black dark, warm cream light, warm
+mid-grey text — or it reads as a foreign object no matter how good its content
+is. Copy this block verbatim rather than picking hexes by eye; every value is a
+sageox-design token.
+
+```css
+:root{
+  --bg:#0b0d0b; --panel:#111411; --panel2:#171b17; --hair:#212620; --hair2:#1d221d;
+  --ink:#f4f2ef; --dim:#b7b6a3; --faint:#8c8e7e;
+  --sage:#99c693; --gold:#d9b654; --amber:#c6a23c; --red:#d77e6c; --teal:#97aebd;
+}
+html[data-theme="light"]{
+  /* The page sheet is pure white — a plan is one big content card, the same
+     object the app renders its cards as. Inner surfaces step DOWN into cream
+     rather than up, inverting dark mode. */
+  --bg:#ffffff; --panel:#f7f5f2; --panel2:#f2f0ec; --hair:#e5e2df; --hair2:#ebe8e5;
+  --ink:#161812; --dim:#4a4d42; --faint:#6b6d60;
+  --sage:#3d643b; --gold:#836726; --amber:#644f1e; --red:#9f4838; --teal:#586f80;
+}
+```
+
+**Type — three families, no fourth.** Headings are **Hedvig Letters Serif**,
+body is **Inter**, code/IDs/timestamps are **Spline Sans Mono**. Hedvig ships
+weight **400 only**; requesting 600 or 700 synthesizes a fake bold, so heading
+presence comes from size and letterform. A geometric sans on the headings (Space
+Grotesk, Poppins, and friends) is the single fastest way to make a page look
+like a generic dev-tool doc instead of a SageOx one.
+
+**Colour carries one meaning each**, and never carries it alone — every hue is
+paired with a label or glyph: sage = aligns/shipped, gold = gate, amber =
+hold/warn, red = risk/blocker, teal = team context. **Copper is retired**
+(DDR-010, the green-black rebrand); gold, from the `warning` ramp, is its
+successor. Do not introduce a second brand hue.
+
+**Light-mode accents run two stops deeper than their dark counterparts.** The
+ramps' mid stops are *fill* values — sage-700 lands at 4.31:1 and warning-600 at
+3.16:1 as text on cream, both under WCAG AA. The values above are the corrected
+text-safe ones.
 ## The human-attention contract
 
 A material plan has two readers and therefore two layers:

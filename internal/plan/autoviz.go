@@ -38,10 +38,24 @@ var (
 	compareHeadRe = regexp.MustCompile(`(?i)compar|correspond|\bvs\b|versus`)
 )
 
-// swimPalette cycles bar fills for auto-swimlanes. Dark label text (#0c1112,
-// per the scaffold's .swim .bar) needs light fills — these are the catalog's
-// own accent hexes.
-var swimPalette = []string{"#99c693", "#e0a56a", "#14b8a6", "#a78bfa", "#64748b", "#f59e0b"}
+// swimPalette cycles bar fills for auto-swimlanes. These are emitted as inline
+// `background:` on each bar rather than as var(--x), so unlike the rest of the
+// page they do NOT re-theme on the light/dark toggle — every entry therefore has
+// to stay light enough for the dark label text (#111411, per the scaffold's
+// .swim .bar) in both modes, which rules out the ramps' deep stops.
+//
+// Six separable hues drawn from the sageox-design ramps. They are deliberately
+// NOT six stops of one hue: adjacent lanes must be told apart at a glance, and
+// sage-400/sage-300 side by side cannot be. Ordered so the common 2-3-lane plan
+// gets the most distinct openers.
+var swimPalette = []string{
+	"#99c693", // sage-400
+	"#d9b654", // warning-400 — copper's successor (DDR-010)
+	"#97aebd", // info
+	"#d77e6c", // error-400
+	"#b7b6a3", // silt-300
+	"#9b8bb4", // muted plum — series-only, no semantic meaning
+}
 
 // sectionViz carries the per-section context the structure-driven passes key
 // off: the H2 heading, the prose-parsed track lanes (planfacts.go), whether

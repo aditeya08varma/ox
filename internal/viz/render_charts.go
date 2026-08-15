@@ -24,7 +24,7 @@ import (
 // genuinely distinct categories (donut slices, treemap cells, sankey nodes) — used
 // when a datum names no color. Drawn from the same semantic whitelist as colorVar,
 // so it themes with the page and can't inject CSS.
-var vizPalette = []string{"sage", "copper", "teal", "violet", "amber", "slate"}
+var vizPalette = []string{"sage", "gold", "teal", "violet", "amber", "slate"}
 
 // paletteColor resolves a datum's color: an explicit (whitelisted) name wins; an
 // empty name cycles the palette by index; an unknown name falls back to sage via
