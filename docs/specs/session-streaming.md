@@ -71,8 +71,11 @@ seqs is defined as a **pure fold over `raw.jsonl` content**, not over runtime hi
 header → `open` (always seq 1); each pause/resume lifecycle marker entry → one `lifecycle`
 frame; entries inside suspended ranges → no seq; every other entry → one `turn`; footer →
 `close` (last). Pause boundaries are themselves recorded in `raw.jsonl` (ADR-020 markers),
-and pings are seq-less, so **the full assignment is recomputable from the file alone**. The
-cursor's journal is therefore a cache, not the source of truth: on cursor loss the
+and pings are seq-less, so **the full assignment is recomputable from the file alone** —
+the file plus its persisted pause markers IS the canonical eligible-frame stream. Live
+send-commit assignment consumes exactly that persisted state (the fence reads the same
+markers), so live publishing and replay reconstruction cannot produce different seq values.
+The cursor's journal is therefore a cache, not the source of truth: on cursor loss the
 publisher recomputes the assignment, resends, and the server's `(seq, revision)` dedup
 absorbs the duplicates — replay can never mint new seqs for previously-delivered content.
 
@@ -245,10 +248,13 @@ only ever name genuinely undelivered frames.
 - **Abort on the wire — durable intent, then cleanup.** On abort the publisher first
   persists a local **abort-intent marker** (atomic, in the session cache dir), then drops
   its unsent backlog (content is never sent — the safe direction) and emits
-  `close{finalize_reason:"abort"}`. The marker is cleared only on **confirmed delivery** of
-  the abort: relay-level send success plus, as the authoritative fallback, an authenticated
-  HTTPS abort call to the coordinates endpoint (retried with backoff; survives process
-  restart via the marker — `DetectAndRestart` re-attaches to abort-intent sessions too).
+  `close{finalize_reason:"abort"}`. The marker clears **only on server-confirmed tombstone
+  persistence**: a successful authenticated HTTPS abort response from the coordinates
+  endpoint (or, in the future, a receipt-plane ack). Relay-level send of the close frame is
+  best-effort notification and **never clears the marker** — the honest-ack doctrine
+  applies to aborts too: send success is not persistence. The HTTPS abort is retried with
+  backoff and survives process restart via the marker (`DetectAndRestart` re-attaches to
+  abort-intent sessions too).
   This closes the lost-close hole: a crash after backlog cleanup can no longer strand a
   partial stream that the server would later `staleness-presumed`-finalize and project.
   Server-side, abort discards the conversation's streamed content (no projection, no

@@ -14,18 +14,26 @@ Non-negotiables it encodes (do not re-derive or contradict them casually):
 - **Conversation-native envelope.** `conversation_id` = `cnv_` twin of `ses_` (pure prefix
   swap, bijective — never bind a foreign `cnv_`); legacy `turns.jsonl` shapes are
   server-side projections, never the wire format.
-- **Dense wire `seq` fold.** Wire-seq assignment is a deterministic pure function of
-  `raw.jsonl` content; liveness pings are seq-less; dedup key is
+- **Dense wire `seq` fold.** Wire-seq assignment is a deterministic fold over the
+  **canonical eligible-frame stream**: `raw.jsonl` content *including its persisted
+  pause/lifecycle markers* (suspended entries are ineligible and consume no seq). Live
+  send-commit assignment and replay reconstruction consume the same persisted marker state,
+  so they cannot diverge. Liveness pings are seq-less; dedup key is
   `(conversation_id, seq, revision)`; `revision` = file rewrite generation.
 - **Pause is fail-closed with a frame-atomic fence** (range membership on
   `suspended_from_entry_seq`, decided at send-commit; frames are never torn).
 - **Honest acks.** moq-lite has no object ack; cursor advance = local send success, not
   durability. No receipt plane exists yet (ADR-087 confirms) — never design as if one does.
-- **Abort persists a durable intent marker** until the tombstone is confirmed (relay close
-  or HTTPS fallback); aborted content is never projected.
+- **Abort persists a durable intent marker** that clears ONLY on server-confirmed tombstone
+  persistence — a successful authenticated HTTPS abort response (or a future receipt-plane
+  ack). Relay-level close delivery is best-effort notification and never clears the marker
+  (same honest-ack doctrine: send success is not persistence). Aborted content is never
+  projected.
 - **Flag-gated, default off** (`FEATURE_SESSION_STREAMING`); the cloud coordinates call is
-  the authoritative enable. Streaming failures are log-only — never surfaced into session
-  flow.
+  the authoritative enable, and enablement is **dogfood-only (sageox team accounts) until
+  the mono purge/re-redact API ships** — customer enablement is blocked on it (see the
+  spec's "Retroactive redaction (policy)" section, which is authoritative). Streaming
+  failures are log-only — never surfaced into session flow.
 
 If a change genuinely requires breaking one of these, update the spec in the same PR and
 say so explicitly in the PR body — the spec and the code must never disagree silently.
