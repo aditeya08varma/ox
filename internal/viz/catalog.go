@@ -24,15 +24,17 @@ var vizCatalogMD string
 
 // VizPattern is one catalog entry.
 type VizPattern struct {
-	ID        string   `json:"id"`               // stable slug, e.g. "sparkline"
-	Category  string   `json:"category"`         // diagram|chart|layout|mockup|annotation
-	Authoring string   `json:"authoring"`        // inline-svg|ox-render|mermaid|html-snippet
-	Tags      []string `json:"tags"`             // reviewed discovery terms; never inferred from prose
-	Origin    string   `json:"origin,omitempty"` // provenance for adapted third-party patterns
-	Use       string   `json:"use"`              // when to reach for it
-	Why       string   `json:"why"`              // the cognitive payoff
-	Param     string   `json:"param,omitempty"`  // data-shape hint when `ox viz render <id> --data` is supported
-	Body      string   `json:"body"`             // copy-paste snippet(s) + any notes
+	ID        string          `json:"id"`                        // stable slug, e.g. "sparkline"
+	Category  string          `json:"category"`                  // diagram|chart|layout|mockup|annotation
+	Authoring string          `json:"authoring"`                 // inline-svg|ox-render|mermaid|html-snippet
+	Tags      []string        `json:"tags"`                      // reviewed discovery terms; never inferred from prose
+	Origin    string          `json:"origin,omitempty"`          // provenance for adapted third-party patterns
+	Use       string          `json:"use"`                       // when to reach for it
+	Why       string          `json:"why"`                       // the cognitive payoff
+	Guidance  string          `json:"guidance"`                  // compositional guardrails for a polished artifact
+	Contract  *VisualContract `json:"visual_contract,omitempty"` // executable art direction for rich authoring
+	Param     string          `json:"param,omitempty"`           // data-shape hint when `ox viz render <id> --data` is supported
+	Body      string          `json:"body"`                      // copy-paste snippet(s) + any notes
 }
 
 // Pattern is the concise package-level name used by new consumers.

@@ -222,3 +222,22 @@ func TestAdditiveSkillsAreNotTableRows(t *testing.T) {
 		t.Errorf("ox-consult must be in additiveSkills (additive; floor is the consult-first entry)")
 	}
 }
+
+func TestOxVizSkillActivatesForMaterialPRWriting(t *testing.T) {
+	path := filepath.Join(repoRoot(t), "extensions", "skills", "ox-viz", "SKILL.md")
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"creating or",
+		"updating a PR description",
+		"architecture, lifecycle, data flow,",
+		"before/after, or multi-component changes",
+		"ox viz pr --intent",
+	} {
+		if !strings.Contains(string(content), want) {
+			t.Errorf("ox-viz activation description missing %q", want)
+		}
+	}
+}

@@ -326,3 +326,24 @@ func TestUnsetConfigValue_PlanOpen_FallsBackToDefault(t *testing.T) {
 	require.NoError(t, UnsetConfigValue("plan.open", ConfigLevelUser, ""))
 	assert.Equal(t, config.DefaultPlanOpen, config.PlanOpen(""), "unsetting plan.open must fall back to the default (ask)")
 }
+
+func TestSetConfigValue_PRVisualsRoundTripsThroughResolver(t *testing.T) {
+	t.Setenv("OX_USER_CONFIG", filepath.Join(t.TempDir(), "config.yaml"))
+
+	require.NoError(t, SetConfigValue("pr_visuals.rich", "off", ConfigLevelUser, ""))
+	require.NoError(t, SetConfigValue("pr_visuals.theme", config.PRVisualsThemeDark, ConfigLevelUser, ""))
+
+	assert.False(t, config.PRVisualsRich(""))
+	assert.Equal(t, config.PRVisualsThemeDark, config.PRVisualsTheme(""))
+
+	for _, key := range []string{"pr_visuals.rich", "pr_visuals.theme"} {
+		value, err := ResolveConfigValue(key, "")
+		require.NoError(t, err)
+		assert.Equal(t, ConfigLevelUser, value.Source)
+	}
+
+	require.NoError(t, UnsetConfigValue("pr_visuals.rich", ConfigLevelUser, ""))
+	require.NoError(t, UnsetConfigValue("pr_visuals.theme", ConfigLevelUser, ""))
+	assert.True(t, config.PRVisualsRich(""))
+	assert.Equal(t, config.PRVisualsThemeLight, config.PRVisualsTheme(""))
+}

@@ -1,7 +1,11 @@
 package viz
 
 import (
+	"bytes"
 	"fmt"
+	"image"
+	"image/color"
+	_ "image/png"
 	"regexp"
 	"strconv"
 	"strings"
@@ -27,6 +31,16 @@ type LintOptions struct {
 	// contract. Plan lint uses it to avoid policing legacy Mermaid output.
 	TaggedOnly bool
 }
+
+const (
+	// PRPNGTargetBytes keeps a typical 2x diagram fast to open in a GitHub PR.
+	// It is intentionally a warning threshold: more complex diagrams may need
+	// more pixels, but should be consciously reviewed before upload.
+	PRPNGTargetBytes = 500 * 1024
+	// PRPNGMaximumBytes is the hard ceiling for a review-only PNG. Above this,
+	// split the visual or remove unnecessary pixels before uploading.
+	PRPNGMaximumBytes = 1024 * 1024
+)
 
 var hardColorRE = regexp.MustCompile(`(?i)#[0-9a-f]{3,8}\b|rgba?\(`)
 var cssVarRE = regexp.MustCompile(`(?i)var\([^)]*\)`)
@@ -90,6 +104,47 @@ func Lint(data []byte, opts LintOptions) []Finding {
 			label = fmt.Sprintf("diagram %d", i+1)
 		}
 		findings = append(findings, lintSVG(svg, label, ids)...)
+	}
+	return findings
+}
+
+// LintPRPNG checks the review-specific portability and weight budget of an
+// exported PNG. It complements, rather than replaces, source SVG linting.
+func LintPRPNG(data []byte) []Finding {
+	if !bytes.HasPrefix(data, []byte{'\x89', 'P', 'N', 'G', '\r', '\n', '\x1a', '\n'}) {
+		return nil
+	}
+	var findings []Finding
+	if len(data) > PRPNGMaximumBytes {
+		findings = append(findings, Finding{
+			Rule:     "viz.pr.png-weight",
+			Severity: SeverityError,
+			Message:  fmt.Sprintf("PNG is %d KiB; review-only PR images must be at most %d KiB (split it or quantize the palette)", len(data)/1024, PRPNGMaximumBytes/1024),
+		})
+	} else if len(data) > PRPNGTargetBytes {
+		findings = append(findings, Finding{
+			Rule:     "viz.pr.png-weight",
+			Severity: SeverityWarning,
+			Message:  fmt.Sprintf("PNG is %d KiB; target at most %d KiB with a stripped, quantized palette", len(data)/1024, PRPNGTargetBytes/1024),
+		})
+	}
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err != nil {
+		findings = append(findings, Finding{Rule: "viz.pr.png-decode", Severity: SeverityError, Message: "PNG could not be decoded: " + err.Error()})
+	} else {
+		if _, indexed := cfg.ColorModel.(color.Palette); !indexed {
+			findings = append(findings, Finding{
+				Rule:     "viz.pr.png-palette",
+				Severity: SeverityWarning,
+				Message:  "PNG is true-color; export the flat diagram as indexed PNG (PNG-8, at most 256 colors) unless full color or alpha adds review meaning",
+			})
+		}
+		if cfg.Width > 2560 || cfg.Height > 2560 {
+			findings = append(findings, Finding{
+				Rule:     "viz.pr.png-dimensions",
+				Severity: SeverityWarning,
+				Message:  fmt.Sprintf("PNG is %dx%d; use a 2x export of the intended GitHub inline size and split the visual before adding unnecessary canvas", cfg.Width, cfg.Height),
+			})
+		}
 	}
 	return findings
 }
@@ -220,6 +275,12 @@ func lintSVG(svg *xhtml.Node, label string, ids map[string]int) []Finding {
 			if x1ok && x2ok && y1ok && y2ok && x1 != x2 && y1 != y2 {
 				warnFinding("viz.connector.diagonal", "tagged connectors must be orthogonal; use a rounded path")
 			}
+		}
+		// A line-chart series is always an open stroke. SVG otherwise defaults
+		// a polyline to an opaque black fill, which visually invents area and
+		// can turn a trend into a misleading bow-tie when embedded in host CSS.
+		if n.Type == xhtml.ElementNode && n.Data == "polyline" && strings.Contains(attr(n, "class"), "linec-series") && strings.TrimSpace(attr(n, "fill")) != "none" {
+			errFinding("viz.chart.open-stroke", "line-chart series must declare fill=\"none\"; use a separate area pattern when area is the encoding")
 		}
 	})
 	if nodes > 12 {

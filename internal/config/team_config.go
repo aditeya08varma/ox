@@ -23,6 +23,9 @@ type TeamConfig struct {
 	// SessionNotification is the message shown to users when recording starts.
 	// If empty, uses the default notification message.
 	SessionNotification string `toml:"session_notification,omitempty"`
+
+	// PRVisuals supplies team defaults for rich GitHub pull-request visuals.
+	PRVisuals *PRVisualsConfig `toml:"pr_visuals,omitempty"`
 }
 
 // LoadTeamConfig loads team configuration from <teamContextPath>/config.toml.

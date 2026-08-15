@@ -446,7 +446,7 @@ param: {"title":"workflow history growth","x_label":"hours","y_label":"history e
 ```html
 <!-- prefer the param renderer: ox viz render line-chart --data line.json
      ox scales both axes, projects each point to pixels, places the threshold, and draws the legend. -->
-<figure class="linec"><svg class="linec-svg" viewBox="0 0 300 224"><line class="linec-axis" x1="52" y1="14" x2="52" y2="190"/><line class="linec-axis" x1="52" y1="190" x2="288" y2="190"/><line class="linec-thresh" x1="52" y1="119.6" x2="288" y2="119.6" style="stroke:var(--amber)"/><polyline class="linec-series" points="52,190 288,14" style="stroke:var(--red)"/><polyline class="linec-series" points="52,190 126,120 126,181 199,120 199,181 273,120" style="stroke:var(--sage)" stroke-dasharray="5 3"/></svg><ul class="linec-leg"><li><span class="vsw" style="background:var(--red)"></span>before</li><li><span class="vsw" style="background:var(--sage)"></span>after</li></ul></figure>
+<figure class="linec"><svg class="linec-svg" viewBox="0 0 300 224"><line class="linec-axis" x1="52" y1="14" x2="52" y2="190"/><line class="linec-axis" x1="52" y1="190" x2="288" y2="190"/><line class="linec-thresh" x1="52" y1="119.6" x2="288" y2="119.6" style="stroke:var(--amber)"/><polyline class="linec-series" points="52,190 288,14" fill="none" style="stroke:var(--red)"/><polyline class="linec-series" points="52,190 126,120 126,181 199,120 199,181 273,120" fill="none" style="stroke:var(--sage)" stroke-dasharray="5 3"/></svg><ul class="linec-leg"><li><span class="vsw" style="background:var(--red)"></span>before</li><li><span class="vsw" style="background:var(--sage)"></span>after</li></ul></figure>
 ```
 
 ## pull-quote
@@ -615,7 +615,51 @@ why: stations around a hub distinguish forward motion from the durable memory th
   <g data-ox-node><rect class="node" x="390" y="460" width="180" height="74" rx="6"/><text class="name" x="480" y="504" text-anchor="middle">Enrich</text></g>
   <g data-ox-node><rect class="node" x="90" y="245" width="180" height="74" rx="6"/><text class="name" x="180" y="289" text-anchor="middle">Plan next</text></g>
   <g data-ox-node data-ox-focus><circle cx="480" cy="290" r="92" fill="var(--gold,#d9b654)" fill-opacity=".12" stroke="var(--gold,#d9b654)" stroke-width="2"/><text class="name" x="480" y="282" text-anchor="middle">Team Context</text><text class="sub" x="480" y="308" text-anchor="middle">shared memory</text></g>
-  <path data-ox-connector class="edge" d="M570 87C690 90 780 140 780 245"/><path data-ox-connector class="edge" d="M780 319C780 430 660 497 570 497"/><path data-ox-connector class="edge" d="M390 497C270 497 180 420 180 319"/><path data-ox-connector class="edge" d="M180 245C180 140 300 87 390 87"/>
-  <path data-ox-connector class="write" d="M690 282H572"/><path data-ox-connector class="write" d="M480 460V382"/>
+  <path data-ox-connector class="edge" fill="none" d="M570 87C690 90 780 140 780 245"/><path data-ox-connector class="edge" fill="none" d="M780 319C780 430 660 497 570 497"/><path data-ox-connector class="edge" fill="none" d="M390 497C270 497 180 420 180 319"/><path data-ox-connector class="edge" fill="none" d="M180 245C180 140 300 87 390 87"/>
+  <path data-ox-connector class="write" fill="none" d="M690 282H572"/><path data-ox-connector class="write" fill="none" d="M480 460V382"/>
+</svg>
+```
+
+## execution-trace
+use: concurrent work on CPU cores, threads, queues, or an async runtime — when the reviewer asks what was executing at the same time, where it waited, and which span delayed the request.
+why: aligned lanes on one clock distinguish execution, runnable wait, blocking I/O, and handoff without pretending that a sequential trace explains concurrency. Highlight the blocking span and keep task labels inside their intervals.
+```html
+<svg data-ox-viz="execution-trace" class="oxv-trace" viewBox="0 0 960 600" role="img" aria-labelledby="trace-title trace-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#f4f2ef)">
+  <title id="trace-title">Parallel checkout execution trace</title><desc id="trace-desc">CPU zero parses and signs while CPU one verifies the session. The order writer waits for the verification result and then runs on CPU zero.</desc>
+  <style>.oxv-trace text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-trace .grid{stroke:var(--hair,#212620);stroke-width:1}.oxv-trace .lane{fill:var(--bg,#0b0d0b);stroke:var(--hair,#212620);stroke-width:1}.oxv-trace .label{font:12px "Spline Sans Mono",monospace;fill:var(--dim,#b7b6a3)}.oxv-trace .task{fill:var(--sage,#99c693);fill-opacity:.18;stroke:var(--sage,#99c693);stroke-width:2}.oxv-trace .wait{fill:var(--gold,#d9b654);fill-opacity:.18;stroke:var(--gold,#d9b654);stroke-width:2;stroke-dasharray:5 3}.oxv-trace .io{fill:var(--teal,#97aebd);fill-opacity:.18;stroke:var(--teal,#97aebd);stroke-width:2}.oxv-trace .name{font-size:13px;font-weight:600}</style>
+  <text class="label" x="150" y="82">0 ms</text><text class="label" x="330" y="82">4</text><text class="label" x="510" y="82">8</text><text class="label" x="690" y="82">12</text><text class="label" x="850" y="82">16</text>
+  <path data-ox-connector class="grid" d="M150 100V510M330 100V510M510 100V510M690 100V510M850 100V510"/>
+  <text class="label" x="48" y="178">CPU 0</text><rect class="lane" x="140" y="130" width="720" height="90" rx="6"/><rect class="task" x="160" y="150" width="220" height="48" rx="5"/><text class="name" x="270" y="180" text-anchor="middle">parse + route</text><rect class="task" x="620" y="150" width="180" height="48" rx="5"/><text class="name" x="710" y="180" text-anchor="middle">write order</text>
+  <text class="label" x="48" y="308">CPU 1</text><rect class="lane" x="140" y="260" width="720" height="90" rx="6"/><rect class="task" x="205" y="280" width="165" height="48" rx="5"/><text class="name" x="287" y="310" text-anchor="middle">verify JWT</text><rect class="io" x="390" y="280" width="175" height="48" rx="5"/><text class="name" x="477" y="310" text-anchor="middle">session read</text>
+  <text class="label" x="32" y="438">order task</text><rect class="lane" x="140" y="390" width="720" height="90" rx="6"/><rect class="wait" x="160" y="410" width="430" height="48" rx="5"/><text class="name" x="375" y="440" text-anchor="middle">runnable · waits for verified subject</text><path data-ox-connector d="M565 328V410" stroke="var(--teal,#97aebd)" stroke-width="2"/><path data-ox-connector d="M590 434H620" stroke="var(--sage,#99c693)" stroke-width="2"/>
+</svg>
+```
+
+## event-stream
+use: an evented workflow across producers, topics, consumers, and durable stores — when the reviewer needs to see ordering, fan-out, replay, idempotency, or the boundary between an event and its projection.
+why: a time-ordered stream makes causality visible while showing independent consumers. It avoids the false implication that a topic is a synchronous function call; use sequence diagrams for request/response instead.
+```html
+<svg data-ox-viz="event-stream" class="oxv-events" viewBox="0 0 960 600" role="img" aria-labelledby="events-title events-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#f4f2ef)">
+  <title id="events-title">Checkout event stream</title><desc id="events-desc">The gateway emits a verified checkout event. Orders persists an order while analytics consumes the same event independently. A replay-safe event id follows both paths.</desc>
+  <defs><marker id="events-arrow" markerWidth="8" markerHeight="6" refX="7" refY="3" orient="auto"><path d="M0 0 8 3 0 6Z" fill="var(--dim,#b7b6a3)"/></marker></defs>
+  <style>.oxv-events text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-events .node{fill:var(--bg,#0b0d0b);stroke:var(--hair,#212620);stroke-width:2}.oxv-events .topic{fill:var(--sage,#99c693);fill-opacity:.12;stroke:var(--sage,#99c693);stroke-width:2}.oxv-events .name{font-size:16px;font-weight:600}.oxv-events .sub{font:12px "Spline Sans Mono",monospace;fill:var(--dim,#b7b6a3)}.oxv-events .edge{fill:none;stroke:var(--dim,#b7b6a3);stroke-width:2;marker-end:url(#events-arrow)}.oxv-events .replay{stroke:var(--teal,#97aebd);stroke-dasharray:6 4}</style>
+  <g data-ox-node><rect class="node" x="70" y="244" width="180" height="84" rx="6"/><text class="name" x="160" y="282" text-anchor="middle">Gateway</text><text class="sub" x="160" y="306" text-anchor="middle">verified checkout</text></g>
+  <g data-ox-node data-ox-focus><rect class="topic" x="360" y="214" width="240" height="144" rx="8"/><text class="name" x="480" y="262" text-anchor="middle">checkout.verified</text><text class="sub" x="480" y="292" text-anchor="middle">event_id · subject · order</text><text class="sub" x="480" y="320" text-anchor="middle">durable · replayable</text></g>
+  <g data-ox-node><rect class="node" x="710" y="120" width="180" height="84" rx="6"/><text class="name" x="800" y="158" text-anchor="middle">Orders</text><text class="sub" x="800" y="182" text-anchor="middle">idempotent write</text></g><g data-ox-node><rect class="node" x="710" y="370" width="180" height="84" rx="6"/><text class="name" x="800" y="408" text-anchor="middle">Analytics</text><text class="sub" x="800" y="432" text-anchor="middle">independent read</text></g>
+  <path data-ox-connector class="edge" d="M250 286H360"/><path data-ox-connector class="edge" d="M600 258H660V162H710"/><path data-ox-connector class="edge" d="M600 314H660V412H710"/><path data-ox-connector class="edge replay" d="M800 204V290H600"/><text class="sub" x="690" y="278" text-anchor="middle">replay on recovery</text>
+</svg>
+```
+
+## operational-time-series
+use: correlated operational signals over time — request rate, p95/p99 latency, CPU saturation, queue depth, errors, deploys, and incident windows — when the question is "what changed together, and when?"
+why: aligned time-series facets preserve the shared clock without forcing unlike units onto one deceptive axis. A deploy marker and a visible threshold connect a system change to its observed effect.
+```html
+<svg data-ox-viz="operational-time-series" class="oxv-ots" viewBox="0 0 960 600" role="img" aria-labelledby="ots-title ots-desc" style="max-width:100%;height:auto;background:var(--panel,#111411);color:var(--ink,#f4f2ef)">
+  <title id="ots-title">Checkout behavior around a gateway deploy</title><desc id="ots-desc">CPU saturation falls after a gateway deploy while request rate remains steady and p99 latency falls below the threshold.</desc>
+  <style>.oxv-ots text{font-family:Inter,system-ui,sans-serif;fill:currentColor}.oxv-ots .grid{stroke:var(--hair,#212620);stroke-width:1}.oxv-ots .axis{font:11px "Spline Sans Mono",monospace;fill:var(--dim,#b7b6a3)}.oxv-ots .name{font-size:13px;font-weight:600}.oxv-ots .rate{fill:none;stroke:var(--teal,#97aebd);stroke-width:3}.oxv-ots .lat{fill:none;stroke:var(--sage,#99c693);stroke-width:3}.oxv-ots .cpu{fill:none;stroke:var(--gold,#d9b654);stroke-width:3}.oxv-ots .deploy{stroke:var(--gold,#d9b654);stroke-width:2;stroke-dasharray:5 4}.oxv-ots .threshold{stroke:var(--red,#d77e6c);stroke-width:2;stroke-dasharray:5 4}</style>
+  <text class="name" x="48" y="110">request rate</text><text class="axis" x="48" y="130">rps</text><text class="name" x="48" y="270">p99 latency</text><text class="axis" x="48" y="290">ms</text><text class="name" x="48" y="430">CPU saturation</text><text class="axis" x="48" y="450">%</text>
+  <path class="grid" d="M160 130H890M160 210H890M160 290H890M160 370H890M160 450H890M160 530H890"/><path class="deploy" d="M560 92V530"/><text class="axis" x="570" y="105">gateway deploy</text><path class="threshold" d="M160 320H890"/><text class="axis" x="818" y="314">300 ms SLO</text>
+  <polyline class="rate" points="160,174 260,166 360,170 460,164 560,168 660,166 760,170 860,164"/><polyline class="lat" points="160,350 260,344 360,332 460,350 560,344 660,308 760,294 860,288"/><polyline class="cpu" points="160,510 260,498 360,490 460,480 560,492 660,450 760,438 860,432"/>
+  <text class="axis" x="160" y="558">09:00</text><text class="axis" x="400" y="558">09:10</text><text class="axis" x="640" y="558">09:20</text><text class="axis" x="850" y="558">09:30</text>
 </svg>
 ```

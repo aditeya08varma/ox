@@ -32,10 +32,14 @@ Available settings:
   tips                     on | off
   context_git.auto_commit  on | off
   context_git.auto_push    on | off
+  pr_visuals.rich          on | off
+  pr_visuals.theme         light | dark
   attribution.commit       (any text, "" to disable)
   attribution.pr           (any text, "" to disable)
 
-Priority: user > repo > team > default`,
+Priority: user > repo > team > default. User-level preferences apply even in
+repositories that have not run ox init; install the user-level integration
+for your AI coworker to receive the guidance everywhere.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// if terminal is interactive, launch TUI
 		if term.IsTerminal(int(os.Stdout.Fd())) && len(args) == 0 {

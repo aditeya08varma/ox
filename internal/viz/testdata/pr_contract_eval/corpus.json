@@ -1,0 +1,119 @@
+[
+  {
+    "id": "pr-424-adapter-boundaries",
+    "pr": 424,
+    "url": "https://github.com/sageox/ox/pull/424",
+    "title": "extract built-in adapters to external binaries with adapter registry and CLI management",
+    "reviewer_question": "Where do adapter responsibilities and failure boundaries live after extraction?",
+    "intent": "show the multi-component architecture for external adapters, including CLI, registry, daemon supervisor, protocol, adapter processes, hooks, and session discovery across runtime boundaries",
+    "expected_medium": "rich",
+    "expected_pattern": "architecture",
+    "baseline": "The merged PR used one 13-node Mermaid topology with a uniform box treatment.",
+    "evidence": [
+      "CLI resolves adapter metadata through the embedded registry.",
+      "The daemon supervisor owns adapter process lifecycle and NDJSON IPC.",
+      "Standalone adapter binaries implement the shared protocol.",
+      "The protocol exposes session discovery/read/import, hooks, diagnostics, and watching."
+    ]
+  },
+  {
+    "id": "pr-627-session-lifecycle",
+    "pr": 627,
+    "url": "https://github.com/sageox/ox/pull/627",
+    "title": "session pause/resume and entity lifecycle",
+    "reviewer_question": "How can a paused session keep recording locally without leaking paused work into the Ledger?",
+    "intent": "show the pause resume lifecycle including orphan recovery, fail-closed masking, upload, cancellation, and terminal states",
+    "expected_medium": "rich",
+    "expected_pattern": "state-machine",
+    "baseline": "The merged PR used an 11-state Mermaid diagram followed by a separate sequence diagram.",
+    "evidence": [
+      "recording and suspended both continue local capture.",
+      "resume returns to recording; stop advances to uploading.",
+      "orphan recovery applies the lifecycle mask before upload.",
+      "validateMaskInvariant aborts upload if excluded counts disagree."
+    ]
+  },
+  {
+    "id": "pr-647-task-claim",
+    "pr": 647,
+    "url": "https://github.com/sageox/ox/pull/647",
+    "title": "schedule tasks for the next available AI coworker",
+    "reviewer_question": "Why can two live coworkers never claim the same scheduled task, and how is abandoned work reclaimed?",
+    "intent": "show the work queue atomic claim, lease expiry, live coworker dispatch, completion, and reclaim sequence",
+    "expected_medium": "rich",
+    "expected_pattern": "sequence-diagram",
+    "baseline": "The merged PR used a Mermaid producer-to-database topology; claim and reclaim behavior lived in prose.",
+    "evidence": [
+      "producers enqueue into agent_tasks.db.",
+      "UPDATE with status=ready makes claim atomic; a racing claimer affects zero rows.",
+      "the live AI coworker dispatches claimed work into fresh context.",
+      "lease-expired or dead same-host claimers are reconciled on read."
+    ]
+  },
+  {
+    "id": "pr-568-multi-writer-recovery",
+    "pr": 568,
+    "url": "https://github.com/sageox/ox/pull/568",
+    "title": "structural multi-writer resilience and auto-repair",
+    "reviewer_question": "How does a first-push add/add conflict recover automatically, and when does ox stop rather than guess?",
+    "intent": "show the multi-writer recovery sequence after a rebase conflict, including merge attributes, pull rebase, union, accept-theirs, optional LLM resolution, retry, and fail-closed abort",
+    "expected_medium": "rich",
+    "expected_pattern": "sequence-diagram",
+    "baseline": "The merged PR used a dense 14-node Mermaid recovery flow with several feedback edges.",
+    "evidence": [
+      "EnsureMergeAttributes installs union rules before the first pull/rebase.",
+      "PushWithRetry retries after non-fast-forward and invokes conflict handling only when needed.",
+      "resolution tiers are union, safe-prefix accept-theirs, then an explicitly configured LLM merge.",
+      "if every tier is exhausted, ox aborts the rebase and surfaces the conflict."
+    ]
+  },
+  {
+    "id": "pr-753-adapter-conformance",
+    "pr": 753,
+    "url": "https://github.com/sageox/ox/pull/753",
+    "title": "session recording for six second-class agents",
+    "reviewer_question": "Which recording behaviors are now proven against real agent output, and which remain explicitly unproven?",
+    "intent": "show the conformance coverage matrix across agents for real fixtures, tool pairing, failure status, path validation, incremental reading, and smoke verification",
+    "expected_medium": "rich",
+    "expected_pattern": "coverage-matrix",
+    "baseline": "The merged PR used a prose-heavy before/after table plus two Mermaid failure flows.",
+    "evidence": [
+      "Gemini, Codex, Goose, Droid, Pi, OpenCode, Amp, and Aider have different proof status.",
+      "real fixtures require provenance; missing evidence is Unproven, never a passing invented fixture.",
+      "capability contracts probe every advertised capability.",
+      "known gaps for OpenCode, Pi, Aider, and same-size replacement remain visible."
+    ]
+  },
+  {
+    "id": "pr-383-lfs-streaming",
+    "pr": 383,
+    "url": "https://github.com/sageox/ox/pull/383",
+    "title": "stream LFS stub content into the local cache",
+    "reviewer_question": "Where does LFS content come from, when is it cached, and which consumers receive bytes?",
+    "intent": "show the multi-stage streaming data flow from an LFS source through verified cache population to stdout and local consumers, including the changing data contract",
+    "expected_medium": "rich",
+    "expected_pattern": "data-flow",
+    "baseline": "The merged PR described the streaming and caching path without a review-focused data-contract view.",
+    "evidence": [
+      "a stub identifies the LFS object and expected digest.",
+      "the fetch path streams remote bytes while verifying content identity.",
+      "verified content populates the local cache.",
+      "stdout and later reads consume the same verified object."
+    ]
+  },
+  {
+    "id": "pr-740-gitignore-relocation-control",
+    "pr": 740,
+    "url": "https://github.com/sageox/ox/pull/740",
+    "title": "stop polluting root .gitignore; stage what init writes",
+    "reviewer_question": "Which two writers now target .sageox/.gitignore instead of the repository root?",
+    "intent": "move two writers from root gitignore to sageox gitignore in a compact four node linear flow",
+    "expected_medium": "github-mermaid",
+    "expected_pattern": "",
+    "baseline": "The merged PR already used an appropriate compact Mermaid flow.",
+    "evidence": [
+      "ox init and daemon KB sync were the two writers.",
+      "both now write kb/ in .sageox/.gitignore."
+    ]
+  }
+]

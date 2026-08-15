@@ -333,6 +333,45 @@ values).`,
 		Default:     config.DefaultPlanOpen,
 		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo},
 	},
+	{
+		Key:         "pr_visuals.rich",
+		Description: "Generate rich pull-request visuals",
+		LongDescription: `Controls whether AI coworkers are guided to generate rich, review-only
+PNG/SVG visuals for GitHub pull requests.
+
+  on  - Offer and generate rich HTML/SVG-derived visuals for comparisons,
+        architecture, flows, and other review-relevant explanations. PNGs are
+        uploaded through GitHub's editor and never committed to the branch.
+        (default)
+  off - Do not use the automated rich PNG/SVG PR-image workflow. The complete
+        ox viz catalog and ` + "`ox viz suggest`" + ` remain available for plans, docs,
+        reports, and manual authoring; use a small GitHub-safe Mermaid diagram
+        in the PR only when it materially improves the review.
+
+Set this at team, repository, or personal scope. Personal choices override a
+repository choice; repository choices override a team default.`,
+		Category:    "Pull requests",
+		ValidValues: []string{"on", "off"},
+		Default:     "on",
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
+	},
+	{
+		Key:         "pr_visuals.theme",
+		Description: "Pull-request visual theme",
+		LongDescription: `Selects the intended appearance of rich GitHub pull-request visuals.
+
+  light - White/light canvas with SageOx accents. Default: aligns with GitHub's
+          reading surface and keeps a PR visual integrated with its discussion.
+  dark  - Dark canvas with SageOx accents. Use when the visual is intentionally
+          presented as a distinct artifact.
+
+This affects the design brief given to AI coworkers; it does not change
+GitHub's own color scheme. Set it at team, repository, or personal scope.`,
+		Category:    "Pull requests",
+		ValidValues: []string{config.PRVisualsThemeLight, config.PRVisualsThemeDark},
+		Default:     config.DefaultPRVisualsTheme,
+		Levels:      []ConfigLevel{ConfigLevelUser, ConfigLevelRepo, ConfigLevelTeam},
+	},
 	// NOTE: attribution.plan and attribution.session are intentionally not exposed
 	// in ox config — they are always-on transparency requirements, not user preferences.
 	{
@@ -645,6 +684,28 @@ func ResolveConfigValue(key string, projectRoot string) (*ConfigValue, error) {
 			cv.RepoVal = *repoCfg.Plan.Open
 		}
 
+	case "pr_visuals.rich":
+		if userCfg != nil && userCfg.PRVisuals.IsRichSet() {
+			cv.UserVal = boolToOnOff(*userCfg.PRVisuals.Rich)
+		}
+		if repoCfg != nil && repoCfg.PRVisuals.IsRichSet() {
+			cv.RepoVal = boolToOnOff(*repoCfg.PRVisuals.Rich)
+		}
+		if teamCfg != nil && teamCfg.PRVisuals.IsRichSet() {
+			cv.TeamVal = boolToOnOff(*teamCfg.PRVisuals.Rich)
+		}
+
+	case "pr_visuals.theme":
+		if userCfg != nil && userCfg.PRVisuals.IsThemeSet() {
+			cv.UserVal = *userCfg.PRVisuals.Theme
+		}
+		if repoCfg != nil && repoCfg.PRVisuals.IsThemeSet() {
+			cv.RepoVal = *repoCfg.PRVisuals.Theme
+		}
+		if teamCfg != nil && teamCfg.PRVisuals.IsThemeSet() {
+			cv.TeamVal = *teamCfg.PRVisuals.Theme
+		}
+
 	}
 
 	// determine effective value and source (User > Repo > Team > Default)
@@ -868,6 +929,19 @@ func setUserConfig(key, value string) error {
 		}
 		cfg.Plan.Open = config.StringPtr(value)
 
+	case "pr_visuals.rich":
+		if cfg.PRVisuals == nil {
+			cfg.PRVisuals = &config.PRVisualsConfig{}
+		}
+		enabled := value == "on"
+		cfg.PRVisuals.Rich = &enabled
+
+	case "pr_visuals.theme":
+		if cfg.PRVisuals == nil {
+			cfg.PRVisuals = &config.PRVisualsConfig{}
+		}
+		cfg.PRVisuals.Theme = config.StringPtr(value)
+
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -950,6 +1024,19 @@ func setRepoConfig(key, value, projectRoot string) error {
 		}
 		cfg.Plan.Open = config.StringPtr(value)
 
+	case "pr_visuals.rich":
+		if cfg.PRVisuals == nil {
+			cfg.PRVisuals = &config.PRVisualsConfig{}
+		}
+		enabled := value == "on"
+		cfg.PRVisuals.Rich = &enabled
+
+	case "pr_visuals.theme":
+		if cfg.PRVisuals == nil {
+			cfg.PRVisuals = &config.PRVisualsConfig{}
+		}
+		cfg.PRVisuals.Theme = config.StringPtr(value)
+
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
 	}
@@ -979,6 +1066,19 @@ func setTeamConfig(key, value, projectRoot string) error {
 	switch key {
 	case "session_recording":
 		cfg.SessionRecording = value
+
+	case "pr_visuals.rich":
+		if cfg.PRVisuals == nil {
+			cfg.PRVisuals = &config.PRVisualsConfig{}
+		}
+		enabled := value == "on"
+		cfg.PRVisuals.Rich = &enabled
+
+	case "pr_visuals.theme":
+		if cfg.PRVisuals == nil {
+			cfg.PRVisuals = &config.PRVisualsConfig{}
+		}
+		cfg.PRVisuals.Theme = config.StringPtr(value)
 
 	default:
 		return fmt.Errorf("setting %s not supported at team level", key)
@@ -1105,6 +1205,22 @@ func unsetUserConfig(key string) error {
 			}
 		}
 
+	case "pr_visuals.rich":
+		if cfg.PRVisuals != nil {
+			cfg.PRVisuals.Rich = nil
+			if cfg.PRVisuals.IsEmpty() {
+				cfg.PRVisuals = nil
+			}
+		}
+
+	case "pr_visuals.theme":
+		if cfg.PRVisuals != nil {
+			cfg.PRVisuals.Theme = nil
+			if cfg.PRVisuals.IsEmpty() {
+				cfg.PRVisuals = nil
+			}
+		}
+
 	default:
 		return fmt.Errorf("unknown user setting: %s", key)
 	}
@@ -1194,6 +1310,22 @@ func unsetRepoConfig(key, projectRoot string) error {
 			}
 		}
 
+	case "pr_visuals.rich":
+		if cfg.PRVisuals != nil {
+			cfg.PRVisuals.Rich = nil
+			if cfg.PRVisuals.IsEmpty() {
+				cfg.PRVisuals = nil
+			}
+		}
+
+	case "pr_visuals.theme":
+		if cfg.PRVisuals != nil {
+			cfg.PRVisuals.Theme = nil
+			if cfg.PRVisuals.IsEmpty() {
+				cfg.PRVisuals = nil
+			}
+		}
+
 	default:
 		return fmt.Errorf("setting %s not supported at repo level", key)
 	}
@@ -1220,6 +1352,22 @@ func unsetTeamConfig(key, projectRoot string) error {
 	switch key {
 	case "session_recording":
 		cfg.SessionRecording = ""
+
+	case "pr_visuals.rich":
+		if cfg.PRVisuals != nil {
+			cfg.PRVisuals.Rich = nil
+			if cfg.PRVisuals.IsEmpty() {
+				cfg.PRVisuals = nil
+			}
+		}
+
+	case "pr_visuals.theme":
+		if cfg.PRVisuals != nil {
+			cfg.PRVisuals.Theme = nil
+			if cfg.PRVisuals.IsEmpty() {
+				cfg.PRVisuals = nil
+			}
+		}
 
 	default:
 		return fmt.Errorf("setting %s not supported at team level", key)

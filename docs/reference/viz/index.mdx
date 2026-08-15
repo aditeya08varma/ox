@@ -1,7 +1,7 @@
 ---
 title: "ox viz"
 description: "CLI reference for ox viz"
-sidebar_position: 101
+sidebar_position: 102
 ---
 
 ## ox viz
@@ -14,9 +14,11 @@ Use a shared visualization vocabulary in plans, documentation, pull
 requests, reports, and design notes.
 
 Run with no argument to browse the catalog; pass an id to get its cognitive
-payoff and authoring recipe. 'ox viz suggest' ranks patterns for an intent,
-'ox viz render' computes parameterized visuals from JSON, and 'ox viz lint'
-checks portable SVG/HTML output. All selection is deterministic and local.
+payoff, authoring recipe, and—where mature—its executable visual contract:
+evidence slots, canvas, composition, hierarchy, typography, routing, variants,
+and finishing pass. 'ox viz suggest' ranks patterns for an intent, 'ox viz
+render' computes parameterized visuals from JSON, and 'ox viz lint' checks
+portable SVG/HTML output. All selection is deterministic and local.
 
 ```
 ox viz [id] [flags]
@@ -43,5 +45,6 @@ ox viz [id] [flags]
 
 * [ox](/)	 - Shared team context that makes agentic engineering multiplayer
 * [ox viz lint](/viz/lint)	 - Check a visual fragment for accessibility, portability, and editorial quality
+* [ox viz pr](/viz/pr)	 - Prepare a GitHub-compatible visualization for a pull request
 * [ox viz render](/viz/render)	 - Render a parameterized visualization from JSON data
 * [ox viz suggest](/viz/suggest)	 - Suggest visual patterns for what you need to explain

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New
+
+- **Reviewer-first pull-request visuals** — `ox viz pr` selects prose, GitHub-safe Mermaid, or a rich attachment from the reviewer question; rich recipes now include construction-ready visual contracts, lightweight PNG checks, and personal, repository, and team preferences.
+
 ## [0.14.0] - 2026-08-15
 
 Skills now reach each AI coworker through its native discovery mechanism, while SageOx keeps project-scoped installations safe, consistent, and repairable.
