@@ -19,7 +19,7 @@ description: >-
   (signals.material, guidance) plus the user's confirmation / the `plan.html`
   config setting — not by this skill.
 ---
-<!-- ox-hash: f3bdfe9c157b ver: 0.12.0 -->
+<!-- ox-hash: 155315960d2e ver: 0.13.0 -->
 
 <!-- Keep behavioral "when to render" guidance lean — that belongs in the
      `ox plan` JSON output (signals.material, guidance) and in the
@@ -102,9 +102,7 @@ flowchart TB
 
 ## Authoring the page (your artifact)
 
-**The contract and the quality bar live in `docs/specs/plan-authoring-html.md` — read it before authoring.** The bar is the SageOx conversation-format comparison page: tabbed views behind a sticky nav, interactive field inspectors (hover/click a field, its counterpart lights up, a docked explainer updates), animated timelines with toggles, side-by-side comparison panes, verdict cards, and the design register, all in one self-contained file. A page that merely reformats prose has missed the point.
-
-**The design register is not optional, and it is the one part of the bar you can get wrong without noticing.** Three families, no fourth: **Hedvig Letters Serif** for headings (weight **400 only** — 600/700 synthesizes a fake bold), **Inter** for body, **Spline Sans Mono** for code, IDs and eyebrows. A geometric sans on the headings is the fastest way to make a plan look like a generic dev-tool doc instead of a SageOx one. Dark runs on the warm green-black Crater ramp (canvas `#0b0d0b`, surface `#111411`, accent sage-400 `#99c693`); light is a pure-white sheet on warm cream panels, with every accent two stops deeper for AA. Copy the token block from the spec verbatim rather than picking hexes by eye — the plan is embedded in the app, so a page a few degrees off temperature reads as a foreign object no matter how good its content is.
+**The contract and the quality bar live in `docs/specs/plan-authoring-html.md` — read it before authoring.** The bar is the SageOx conversation-format comparison page: tabbed views behind a sticky nav, interactive field inspectors (hover/click a field, its counterpart lights up, a docked explainer updates), animated timelines with toggles, side-by-side comparison panes, verdict cards, the design-system dark palette (canvas `#0b0d0b`, surface `#111411`, accent `#99c693`, Inter + Spline Sans Mono), all in one self-contained file. A page that merely reformats prose has missed the point.
 
 The minimal hooks (all optional, all degrade gracefully): `<title>` for the topic/slug, `<meta name="ox-plan-slug">` to pin the slug, and H2 headings or `data-ox-section="Name"` on view containers so enrichment badges and review anchors group by section. A page with none of these still works.
 
