@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,6 +13,46 @@ import (
 	"github.com/sageox/ox/internal/agentinstance"
 	"github.com/spf13/cobra"
 )
+
+func TestAgentDispatcherBareCommandShowsHumanHandoff(t *testing.T) {
+	t.Parallel()
+
+	cmd := &cobra.Command{Use: "agent"}
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+
+	if err := runAgentDispatcher(cmd, nil); err != nil {
+		t.Fatalf("bare agent command: %v", err)
+	}
+
+	got := out.String()
+	for _, want := range []string{
+		"used automatically by AI coding tools",
+		"ox status",
+		"ox session list",
+		"ox glance",
+		"ox agent --help",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("handoff missing %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Returns agent_id") || strings.Contains(got, "Initialize a session") {
+		t.Errorf("bare agent command leaked internal reference:\n%s", got)
+	}
+}
+
+func TestAgentTechnicalHelpContractRemainsAvailable(t *testing.T) {
+	t.Parallel()
+
+	if !strings.Contains(agentCmd.Long, "Initialize a session") || !strings.Contains(agentCmd.Long, "ox agent prime") {
+		t.Fatalf("agent technical help no longer documents prime:\n%s", agentCmd.Long)
+	}
+	primeCmd, _, err := agentCmd.Find([]string{"prime"})
+	if err != nil || primeCmd != agentPrimeCmd {
+		t.Fatalf("agent prime command unavailable: command=%v err=%v", primeCmd, err)
+	}
+}
 
 // TestReinjectSessionFlags verifies the dispatcher reinjects cobra-parsed
 // values for --title, --file, --session-id, and --adapter back into
