@@ -28,7 +28,9 @@ no network, no SageOx account required.
   ox attest check                  what does my working diff invalidate
   ox attest record                 mint an attestation from a red/green run pair
   ox attest results                run reports on this machine
-  ox attest publish                write the portable layout to a directory`,
+  ox attest publish                write the portable layout to a directory
+  ox attest view <attpub_id>       view one hosted publication
+  ox attest failures --latest      verified hosted failures for AI coworkers`,
 }
 
 // attestContext is everything the read commands need, loaded once.
@@ -83,8 +85,8 @@ func loadAttestContext(cmd *cobra.Command) (*attestContext, error) {
 // Agents parse; humans read. Mirrors `ox code insights`.
 func wantJSON(cmd *cobra.Command) (bool, string) {
 	jsonOut, _ := cmd.Flags().GetBool("json")
-	agentID, _ := detectAgentContext()
-	if agentID != "" && !cmd.Flags().Changed("json") {
+	agentID, agentType := detectAgentContext()
+	if (agentID != "" || agentType != "") && !cmd.Flags().Changed("json") {
 		jsonOut = true
 	}
 	return jsonOut, agentID
