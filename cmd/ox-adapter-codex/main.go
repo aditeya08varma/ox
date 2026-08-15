@@ -31,18 +31,21 @@ func main() {
 // does — exercising the actual wiring, not just the handler functions in
 // isolation. See TestReadFromOffset_WiredInOneShotMode.
 var adapterConfig = adapterruntime.Config{
-	Info:           handleInfo,
-	Detect:         handleDetect,
-	InstallHooks:   handleInstallHooks,
-	CheckHooks:     handleCheckHooks,
-	UninstallHooks: handleUninstallHooks,
-	FindSession:    handleFindSession,
-	Read:           handleRead,
-	ReadMetadata:   handleReadMetadata,
-	ReadFromOffset: handleReadFromOffset,
-	ImportSession:  handleImportSession,
-	Diagnose:       handleDiagnose,
-	Serve:          handleServe,
+	Info:            handleInfo,
+	Detect:          handleDetect,
+	InstallHooks:    handleInstallHooks,
+	CheckHooks:      handleCheckHooks,
+	UninstallHooks:  handleUninstallHooks,
+	InstallSkills:   handleInstallSkills,
+	CheckSkills:     handleCheckSkills,
+	UninstallSkills: handleUninstallSkills,
+	FindSession:     handleFindSession,
+	Read:            handleRead,
+	ReadMetadata:    handleReadMetadata,
+	ReadFromOffset:  handleReadFromOffset,
+	ImportSession:   handleImportSession,
+	Diagnose:        handleDiagnose,
+	Serve:           handleServe,
 }
 
 // handleReadFromOffset is the one-shot mode handler for read-from-offset. The
@@ -79,13 +82,19 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 		Capabilities: []string{
 			adapterprotocol.CapSessionReader,
 			adapterprotocol.CapHookInstaller,
+			adapterprotocol.CapSkillsInstaller,
 			adapterprotocol.CapIncrementalReader,
 			adapterprotocol.CapFileWatcher,
 			adapterprotocol.CapServeMode,
 			adapterprotocol.CapSessionImporter,
 		},
 		HookEnvValues: []string{"codex"},
-		ServeMode:     true,
+		SkillTargets: []adapterprotocol.SkillTarget{{
+			Key: "agents-project", Root: ".agents/skills",
+			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
+		ServeMode: true,
 	}, nil
 }
 

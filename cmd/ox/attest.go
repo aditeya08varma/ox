@@ -30,7 +30,19 @@ no network, no SageOx account required.
   ox attest results                run reports on this machine
   ox attest publish                write the portable layout to a directory
   ox attest view <attpub_id>       view one hosted publication
-  ox attest failures --latest      verified hosted failures for AI coworkers`,
+	  ox attest failures --latest      verified hosted failures for AI coworkers`,
+	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		if cmd.Name() == "install" {
+			return
+		}
+		root, err := repotools.FindRepoRoot(repotools.VCSGit)
+		if err != nil {
+			return
+		}
+		if _, err := installAttestSkills(root); err != nil {
+			slog.Debug("Attest skills were not installed", "error", err)
+		}
+	},
 }
 
 // attestContext is everything the read commands need, loaded once.

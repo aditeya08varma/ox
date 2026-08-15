@@ -62,7 +62,7 @@ func TestOxCapabilitiesIDResolves(t *testing.T) {
 	primeXMLSrc := string(primeXMLBytes)
 
 	commandsDir := filepath.Join(root, "extensions", "claude", "commands")
-	skillsDir := filepath.Join(root, "extensions", "claude", "skills")
+	skillsDir := filepath.Join(root, "extensions", "skills")
 
 	for _, c := range OxCapabilities() {
 		c := c
@@ -75,7 +75,7 @@ func TestOxCapabilitiesIDResolves(t *testing.T) {
 					t.Errorf("capability %q (%s) does not resolve to a file: %v", c.ID, c.MechanismClass, err)
 				}
 			case MechanismSkill:
-				// skills are a directory per skill: extensions/claude/skills/<id>/SKILL.md
+				// skills are a directory per skill: extensions/skills/<id>/SKILL.md
 				path := filepath.Join(skillsDir, c.ID, "SKILL.md")
 				if _, err := os.Stat(path); err != nil {
 					t.Errorf("capability %q (%s) does not resolve to a file: %v", c.ID, c.MechanismClass, err)
@@ -151,7 +151,7 @@ func TestOxCapabilitiesCountsByClass(t *testing.T) {
 // conformance contract. TestOxCapabilitiesIDResolves already proves table→disk
 // (every table id resolves to a real file); this proves the reverse: every
 // on-disk command (extensions/claude/commands/*.md) and skill
-// (extensions/claude/skills/*/SKILL.md) is EITHER an OxCapabilities() row OR an
+// (extensions/skills/*/SKILL.md) is EITHER an OxCapabilities() row OR an
 // explicitly documented additive skill (additiveSkills). Without this, a skill
 // like ox-consult — or any future skill/command the installer ships — could
 // silently escape the conformance contract.
@@ -180,8 +180,8 @@ func TestEveryOnDiskSurfaceIsAccounted(t *testing.T) {
 		}
 	}
 
-	// on-disk skills: extensions/claude/skills/<id>/SKILL.md
-	skillsDir := filepath.Join(root, "extensions", "claude", "skills")
+	// on-disk skills: extensions/skills/<id>/SKILL.md
+	skillsDir := filepath.Join(root, "extensions", "skills")
 	skillManifests, err := filepath.Glob(filepath.Join(skillsDir, "*", "SKILL.md"))
 	if err != nil {
 		t.Fatalf("glob skills: %v", err)

@@ -4,7 +4,7 @@
 
 > **Status (post-implementation — `ox-fvjh` shipped):** this audit is the *point-in-time evidence base* that drove the epic; the verdict table below intentionally records the **pre-remediation** state. Since the audit:
 > - **`ox-cart-start` — RESOLVED in `ox-fvjh.6`.** `runCartsStart` now emits a portable `guidance` field in its `--json` output (`cmd/ox/carts.go`, `cartStartGuidance`); regression test `cmd/ox/carts_test.go` `TestCartStartGuidancePortable` fails if it leaks a host-specific token like `/rename`. Codex/Droid now receive the naming intent.
-> - **`ox-plan.md` and `ox-session-review.md` — migrated to skills in `ox-fvjh.7`.** They now live at `extensions/claude/skills/<id>/SKILL.md`, so **2 of the 16 files below are no longer commands**. Read the table as the audit's findings, not the current on-disk layout.
+> - **`ox-plan.md` and `ox-session-review.md` — migrated to skills in `ox-fvjh.7`.** They now live at `extensions/skills/<id>/SKILL.md`, so **2 of the 16 files below are no longer commands**. Read the table as the audit's findings, not the current on-disk layout.
 
 ## What this audits
 

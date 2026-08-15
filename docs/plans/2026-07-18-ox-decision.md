@@ -53,12 +53,12 @@ Zero-config default: `docs/adr`, `docs/decisions`, `adr`, `docs/architecture/dec
 **Prime + skill + doctor:**
 - `<decision-record-guidance>` block in `ox agent prime` — **gated on a corpus actually existing** (zero tokens for DR-less repos): consult-before-drafting, crediting contract, amendment rule (dated markers on Accepted DRs, never silent rewrites), verify-before-commit, credit cap.
 - Intent row (`ox decision enrich`) + consult-first route (drift-tested against the ox-consult skill description, which now names `ox decision`).
-- Thin-relay skill `extensions/claude/skills/ox-decision/SKILL.md` (activation ergonomics only).
+- Thin-relay skill `extensions/skills/ox-decision/SKILL.md` (activation ergonomics only).
 - Doctor `decision-paths` check: schema errors fail; configured paths matching zero DRs warn; no config → skip.
 
 ## Files (v1)
 
-`internal/config/decision.go` (+ `Decision` field on ProjectConfig, validation hook) · `internal/decision/{types,input,sources,parse,search,detectors,retrievers,enrich,guidance}.go` · `cmd/ox/decision.go` · `internal/plan/decision_bundle.go` + `annotate.go` regex extension · `cmd/ox/agent_prime_xml.go` (`writeDecisionRecordGuidance`) · `internal/prime/{guidance,capability_table}.go` · `extensions/claude/skills/{ox-decision,ox-consult}/SKILL.md` · `cmd/ox/doctor_decision.go` · dep `bmatcuk/doublestar/v4` (MIT) · CHANGELOG · generated `docs/reference/decision/`.
+`internal/config/decision.go` (+ `Decision` field on ProjectConfig, validation hook) · `internal/decision/{types,input,sources,parse,search,detectors,retrievers,enrich,guidance}.go` · `cmd/ox/decision.go` · `internal/plan/decision_bundle.go` + `annotate.go` regex extension · `cmd/ox/agent_prime_xml.go` (`writeDecisionRecordGuidance`) · `internal/prime/{guidance,capability_table}.go` · `extensions/skills/{ox-decision,ox-consult}/SKILL.md` · `cmd/ox/doctor_decision.go` · dep `bmatcuk/doublestar/v4` (MIT) · CHANGELOG · generated `docs/reference/decision/`.
 
 > **[Ryan review — required]** data-location config: `decision.paths` shape + default dir list. (Settled in this session's review; recorded here for the PR.)
 

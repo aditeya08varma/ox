@@ -22,7 +22,7 @@ ox works with multiple AI coding agents. Support depth varies by agent — here'
 | Lifecycle hooks | ✅ | ✅ | ✅ | ✅ | plugin | plugin | — | — | ✅ |
 | Whisper push | ✅ | ✅ | fallback | fallback | — | — | — | — | ✅ |
 | Team rules install | ✅ | — | — | ✅ | — | — | — | — | — |
-| Skills / commands install | ✅ | — | — | — | — | — | — | — | — |
+| Skills / commands install | ✅ | ✅ | ✅ | — | — | — | — | — | — |
 | Anti-entropy recovery | ✅ | — | — | — | — | — | — | — | — |
 
 **Auto-prime** means a hook or plugin runs `ox agent prime` for you. Where it's absent,
@@ -57,6 +57,20 @@ ox init        # sets up everything automatically
 ox doctor      # verifies hooks + context injection
 ```
 No extra setup needed — Claude Code is the reference implementation.
+
+Teams using Attest can additionally install its customer-journey BDD and
+evidence-recording playbooks with `ox attest install`. They are opt-in skills,
+not lifecycle hooks; use `ox integrate install` to manage hooks.
+
+## Canonical Agent Skills
+
+ox authors every portable playbook once in `extensions/skills/`, in the open
+Agent Skills `SKILL.md` format. Claude Code receives a managed copy under
+`.claude/skills/`; Codex, ChatGPT desktop's Codex surface, and Gemini CLI
+receive the same managed skill under `.agents/skills/`. `ox doctor --fix`
+reconciles the project-selected native targets, including updates, retired
+ox-owned files, and a partially installed Attest bundle, while preserving
+user-authored additions and modified managed files.
 
 ### Codex
 ```bash

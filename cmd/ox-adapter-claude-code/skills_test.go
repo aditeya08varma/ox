@@ -7,31 +7,28 @@ import (
 	"testing"
 
 	"github.com/sageox/agentx"
+	"github.com/sageox/ox/extensions/skills"
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// pickSkill returns the first embedded skill name, failing the test if none
-// ship. Tests that need a concrete skill on disk use this so they don't hardcode
-// an id that may be renamed.
+// pickSkill returns a default-installed skill name, failing the test if none
+// ship. Attest playbooks are opt-in, so lifecycle tests must not accidentally
+// select a skill the default installer intentionally leaves absent.
 func pickSkill(t *testing.T) string {
 	t.Helper()
-	skills, err := oxSkillFiles("0.8.0")
+	skills, err := skills.Selected("0.8.0", nil)
 	require.NoError(t, err)
-	require.NotEmpty(t, skills, "at least one embedded skill must ship for these tests to mean anything")
+	require.NotEmpty(t, skills, "at least one default skill must ship for these tests to mean anything")
 	return skills[0].Name
 }
 
 // --- A. Install lifecycle / stamp placement ---
 
-// TestHandleInstallSkills_StampPlacement verifies the load-bearing on-disk
-// contract: Claude must be able to parse a skill's YAML frontmatter, so the
-// frontmatter MUST be the first bytes of SKILL.md (line 1 is the `---` opener)
-// and the ox-hash drift stamp MUST sit AFTER the closing `---`, never on line 1.
-// Failure prevented: the stamp leaks onto line 1 (breaking frontmatter parsing)
-// or the frontmatter is dropped, so Claude can't read name/description.
-func TestHandleInstallSkills_StampPlacement(t *testing.T) {
+// TestHandleInstallSkills_ManifestOwnership verifies native frontmatter stays
+// byte-clean while ownership moves to the project lockfile.
+func TestHandleInstallSkills_ManifestOwnership(t *testing.T) {
 	dir := t.TempDir()
 	name := pickSkill(t)
 
@@ -52,18 +49,9 @@ func TestHandleInstallSkills_StampPlacement(t *testing.T) {
 	assert.Equal(t, "---", strings.TrimRight(lines[0], "\r"),
 		"line 1 must be the frontmatter opener so Claude can parse name/description")
 
-	stampMarker := agentx.StampComment(oxSkillStampPrefix)
-	assert.Contains(t, string(data), stampMarker, "SKILL.md must carry an ox-hash stamp")
-	assert.False(t, strings.HasPrefix(lines[0], stampMarker),
-		"the stamp must NOT be on line 1 — it belongs after the closing frontmatter fence")
-
-	// the stamp must appear strictly after the closing `---` fence.
-	stampIdx := strings.Index(string(data), stampMarker)
-	require.GreaterOrEqual(t, stampIdx, 0)
-	closingFence := strings.Index(string(data), "\n---\n")
-	require.GreaterOrEqual(t, closingFence, 0, "frontmatter must have a closing fence")
-	assert.Greater(t, stampIdx, closingFence,
-		"stamp must sit after the closing frontmatter fence, not inside the frontmatter")
+	assert.NotContains(t, string(data), agentx.StampComment(oxSkillStampPrefix),
+		"new native skills use manifest ownership; inline stamps are migration-only")
+	assert.FileExists(t, filepath.Join(dir, ".sageox", "skills.lock.json"))
 }
 
 // TestHandleInstallSkills_Idempotent verifies installing the same version twice
@@ -106,6 +94,40 @@ func TestHandleInstallSkills_NoOpReportsNothingWritten(t *testing.T) {
 	assert.Empty(t, second.FilesWritten,
 		"a re-install of an already-current skill set must write nothing — "+
 			"FilesWritten drives init's honest 'already up to date' message")
+}
+
+// TestHandleInstallSkills_OptInAttestSkillsStayOutOfDefaultInstall keeps a
+// team that uses normal ox integration from receiving Attest playbooks it did
+// not choose. An explicit capability install is the only path that writes them.
+func TestHandleInstallSkills_OptInAttestSkillsStayOutOfDefaultInstall(t *testing.T) {
+	dir := t.TempDir()
+	defaultInstall, err := handleInstallSkills(adapterprotocol.SkillsParams{
+		RepoRoot: dir,
+		Version:  "0.8.0",
+	})
+	require.NoError(t, err)
+	assert.NotContains(t, defaultInstall.FilesWritten,
+		filepath.Join(".claude", "skills", "ox-attest-goal", skillFileName))
+
+	optIn, err := handleInstallSkills(adapterprotocol.SkillsParams{
+		RepoRoot: dir,
+		Version:  "0.8.0",
+		Names:    []string{"ox-attest-goal", "ox-attest-create"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, optIn.FilesWritten,
+		filepath.Join(".claude", "skills", "ox-attest-goal", skillFileName))
+	assert.Contains(t, optIn.FilesWritten,
+		filepath.Join(".claude", "skills", "ox-attest-create", skillFileName))
+}
+
+func TestHandleInstallSkills_RejectsUnknownOptInSkill(t *testing.T) {
+	_, err := handleInstallSkills(adapterprotocol.SkillsParams{
+		RepoRoot: t.TempDir(),
+		Version:  "0.8.0",
+		Names:    []string{"does-not-exist"},
+	})
+	require.EqualError(t, err, "unknown ox skill(s): [does-not-exist]")
 }
 
 // --- B. Check lifecycle ---
@@ -160,20 +182,22 @@ func TestHandleCheckSkills_BodyEditedBelowStamp_ReportsStale(t *testing.T) {
 
 	stale, err := handleCheckSkills(params)
 	require.NoError(t, err)
-	assert.Contains(t, stale.Stale, name, "body edited below the stamp must be reported Stale")
+	assert.Contains(t, stale.Conflicts, name, "a user-modified managed body must be reported as a conflict")
 	assert.False(t, stale.Installed, "Installed must be false when a skill has drifted")
 
-	// reinstall (the --fix path) restores the file and clears staleness.
-	_, err = handleInstallSkills(params)
+	// Reinstall preserves the edit instead of silently destroying user work.
+	reinstall, err := handleInstallSkills(params)
 	require.NoError(t, err)
+	assert.False(t, reinstall.Installed)
+	assert.NotEmpty(t, reinstall.Conflicts)
 	fixed, err := handleCheckSkills(params)
 	require.NoError(t, err)
-	assert.NotContains(t, fixed.Stale, name, "reinstall must restore a drifted skill")
-	assert.True(t, fixed.Installed, "after --fix the skill set must be Installed again")
+	assert.Contains(t, fixed.Conflicts, name)
+	assert.False(t, fixed.Installed)
 
 	restored, err := os.ReadFile(skillPath)
 	require.NoError(t, err)
-	assert.NotContains(t, string(restored), "hand-edited drift", "reinstall must overwrite the tampered body")
+	assert.Contains(t, string(restored), "hand-edited drift", "reinstall must preserve a user edit")
 }
 
 // TestHandleCheckSkills_FrontmatterEdited_ReportsStale guards the gap CodeRabbit
@@ -212,24 +236,26 @@ func TestHandleCheckSkills_FrontmatterEdited_ReportsStale(t *testing.T) {
 
 	stale, err := handleCheckSkills(params)
 	require.NoError(t, err)
-	assert.Contains(t, stale.Stale, name, "a frontmatter-only edit must be reported Stale")
+	assert.Contains(t, stale.Conflicts, name, "a frontmatter-only edit must be reported as a conflict")
 	assert.False(t, stale.Installed, "Installed must be false when a skill's frontmatter drifted")
 
 	// reinstall (the --fix path) must rewrite the file and clear staleness.
 	resp, err := handleInstallSkills(params)
 	require.NoError(t, err)
-	assert.Contains(t, resp.FilesWritten, filepath.Join(".claude", "skills", name, skillFileName),
-		"--fix must rewrite a skill whose frontmatter was edited")
+	assert.False(t, resp.Installed)
+	assert.NotEmpty(t, resp.Conflicts)
+	assert.NotContains(t, resp.FilesWritten, filepath.Join(".claude", "skills", name, skillFileName),
+		"--fix must preserve a user-edited skill")
 
 	fixed, err := handleCheckSkills(params)
 	require.NoError(t, err)
-	assert.NotContains(t, fixed.Stale, name, "reinstall must restore the drifted frontmatter")
-	assert.True(t, fixed.Installed, "after --fix the skill set must be Installed again")
+	assert.Contains(t, fixed.Conflicts, name)
+	assert.False(t, fixed.Installed)
 
 	restored, err := os.ReadFile(skillPath)
 	require.NoError(t, err)
-	assert.NotContains(t, string(restored), "hand-edited frontmatter drift",
-		"reinstall must overwrite the tampered frontmatter")
+	assert.Contains(t, string(restored), "hand-edited frontmatter drift",
+		"reinstall must preserve the tampered frontmatter for manual resolution")
 }
 
 // TestHandleCheckSkills_UnstampedFrontmatterDiff_NotOverwritten verifies the
@@ -311,11 +337,11 @@ func TestHandleUninstallSkills_RemovesStampedDirs(t *testing.T) {
 	resp, err := handleUninstallSkills(params)
 	require.NoError(t, err)
 	assert.True(t, resp.Uninstalled, "expected at least one stamped skill removed")
-	assert.Contains(t, resp.FilesRemoved, filepath.Join(name, skillFileName),
+	assert.Contains(t, resp.FilesRemoved, filepath.Join(".claude", "skills", name, skillFileName),
 		"FilesRemoved must reference the removed SKILL.md")
 
-	_, err = os.Stat(skillDir)
-	assert.True(t, os.IsNotExist(err), "stamped skill dir must be removed by uninstall")
+	_, err = os.Stat(filepath.Join(skillDir, skillFileName))
+	assert.True(t, os.IsNotExist(err), "stamped SKILL.md must be removed by uninstall")
 }
 
 // TestHandleUninstallSkills_PreservesUnstampedSkill verifies a user-authored
@@ -341,67 +367,7 @@ func TestHandleUninstallSkills_PreservesUnstampedSkill(t *testing.T) {
 	assert.NoError(t, err, "user-authored unstamped skill must NOT be removed by uninstall")
 }
 
-// --- D. splitFrontmatter ---
-
-// TestSplitFrontmatter covers the parser that underpins stamp placement:
-// has-frontmatter, no-frontmatter, empty-frontmatter, and a missing closing
-// fence (which must be treated as no frontmatter, defensively).
-// Failure prevented: misparsing frontmatter places the stamp inside or before
-// the frontmatter, breaking Claude's parse or the drift hash contract.
-func TestSplitFrontmatter(t *testing.T) {
-	tests := []struct {
-		name     string
-		content  string
-		wantOK   bool
-		wantFM   string
-		wantBody string
-	}{
-		{
-			name:     "has frontmatter",
-			content:  "---\nname: x\n---\nbody line\n",
-			wantOK:   true,
-			wantFM:   "---\nname: x\n---\n",
-			wantBody: "body line\n",
-		},
-		{
-			name:     "no frontmatter",
-			content:  "# just a heading\nbody\n",
-			wantOK:   false,
-			wantFM:   "",
-			wantBody: "# just a heading\nbody\n",
-		},
-		{
-			name:     "empty frontmatter",
-			content:  "---\n---\nbody\n",
-			wantOK:   true,
-			wantFM:   "---\n---\n",
-			wantBody: "body\n",
-		},
-		{
-			name:     "no closing fence",
-			content:  "---\nname: x\nstill open\n",
-			wantOK:   false,
-			wantFM:   "",
-			wantBody: "---\nname: x\nstill open\n",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			fm, body, ok := splitFrontmatter([]byte(tc.content))
-			assert.Equal(t, tc.wantOK, ok)
-			assert.Equal(t, tc.wantFM, string(fm), "frontmatter mismatch")
-			assert.Equal(t, tc.wantBody, string(body), "body mismatch")
-			if !ok {
-				// when there's no recognized frontmatter, body must equal the full
-				// content so the stamp falls back to covering everything.
-				assert.Equal(t, tc.content, string(body))
-			}
-		})
-	}
-}
-
-// --- E. Command→skill migration cleanup (FIX 2) ---
+// --- D. Command→skill migration cleanup ---
 
 // TestHandleInstallSkills_RemovesStampedLegacyCommand verifies the self-cleaning
 // migration: when a surface moves from a slash command to a skill, an existing

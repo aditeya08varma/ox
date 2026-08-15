@@ -665,7 +665,7 @@ func TestOutputAgentPrimeXML_VisualizationGuidanceIsArtifactNeutral(t *testing.T
 }
 
 // TestConsultRoutes_NoDriftWithSkill is the conformance contract between the
-// Layer-1 <consult-first> floor reminder and the additive `ox-consult` Claude
+// Layer-1 <consult-first> floor reminder and the additive portable `ox-consult`
 // skill: both render the SAME retrieval reflex, so the skill's activation
 // description must name every corpus the floor table routes to. If a future
 // edit drops a route from the skill's frontmatter (or adds one the floor
@@ -685,7 +685,7 @@ func TestConsultRoutes_NoDriftWithSkill(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve repo root: %v", err)
 	}
-	skillPath := filepath.Join(root, "extensions", "claude", "skills", "ox-consult", "SKILL.md")
+	skillPath := filepath.Join(root, "extensions", "skills", "ox-consult", "SKILL.md")
 	raw, err := os.ReadFile(skillPath)
 	if err != nil {
 		t.Fatalf("read %s: %v", skillPath, err)

@@ -78,7 +78,7 @@ type Capability struct {
 //
 // Order is floor → command → skill. IDs are stable: command IDs resolve to
 // extensions/claude/commands/<id>.md; skill IDs resolve to
-// extensions/claude/skills/<id>/SKILL.md; floor IDs resolve to a <id> tag emit
+// extensions/skills/<id>/SKILL.md; floor IDs resolve to a <id> tag emit
 // site in cmd/ox/agent_prime_xml.go (all verified by capability_table_test.go).
 func OxCapabilities() []Capability {
 	return []Capability{
@@ -90,7 +90,7 @@ func OxCapabilities() []Capability {
 			Layer1Source:   "agent prime",
 			// the cue→corpus routing table the Layer-1 <consult-first> reminder
 			// renders from. Keep cue/command text in sync with the activation
-			// description of the additive extensions/claude/skills/ox-consult/SKILL.md
+			// description of the additive extensions/skills/ox-consult/SKILL.md
 			// (enforced by TestConsultRoutes_NoDriftWithSkill in
 			// cmd/ox/agent_prime_xml_test.go).
 			ConsultRoutes: []ConsultRoute{
@@ -151,7 +151,7 @@ func OxCapabilities() []Capability {
 		{ID: "ox-cart-drop", MechanismClass: MechanismCommand, Supports: CapabilitySupport{Slash: true}},
 
 		// ── skill: Layer-2 fat playbooks (slash AND auto-activate) ──
-		// extensions/claude/skills/<id>/SKILL.md. ox-consult is intentionally
+		// extensions/skills/<id>/SKILL.md. ox-consult is intentionally
 		// NOT a row here — it is an additive skill (see additiveSkills below).
 		{ID: "ox-plan", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
 		{ID: "ox-session-review", MechanismClass: MechanismSkill, Supports: CapabilitySupport{Slash: true, AutoActivate: true}},
@@ -173,6 +173,9 @@ func OxCapabilities() []Capability {
 //
 // The map value documents WHY each skill is additive rather than a table row.
 var additiveSkills = map[string]string{
-	"ox-consult":  "additive Layer-2 ergonomics; its deterministic floor is the consult-first floor entry (ConsultRoutes), so it is not a separate conformance surface",
-	"ox-decision": "additive Layer-2 ergonomics; its deterministic floor is the decision-record-guidance floor entry plus the consult-first decision route, so it is not a separate conformance surface",
+	"ox-consult":       "additive Layer-2 ergonomics; its deterministic floor is the consult-first floor entry (ConsultRoutes), so it is not a separate conformance surface",
+	"ox-decision":      "additive Layer-2 ergonomics; its deterministic floor is the decision-record-guidance floor entry plus the consult-first decision route, so it is not a separate conformance surface",
+	"ox-skill-manager": "native Agent Skills lifecycle guidance; the deterministic installer and ownership rules live in ox CLI code rather than this playbook",
+	"ox-attest-goal":   "opt-in Attest BDD authoring playbook; it sharpens customer-journey judgment without becoming a portable product requirement",
+	"ox-attest-create": "opt-in Attest evidence-recording playbook; the attestation CLI remains usable without the Claude-specific skill",
 }

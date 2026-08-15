@@ -21,7 +21,7 @@ const ProtocolVersion = 1
 // revision. Bumped when wire-level changes are made (new event types,
 // new HelloResponse fields) without changing the major ProtocolVersion.
 // Adapters can use this for fine-grained capability negotiation.
-const ProtocolDate = "2026-05-01"
+const ProtocolDate = "2026-08-15"
 
 // --- Adapter types ---
 
@@ -49,6 +49,13 @@ const (
 	CapCapturePrior       = "capture_prior"
 )
 
+// Native project skill target vocabulary.
+const (
+	SkillFormatAgentSkillsV1 = "agent-skills/v1"
+	SkillScopeProject        = "project"
+	SkillLinkPolicyReject    = "reject"
+)
+
 // --- Entry roles ---
 
 // Role constants for RawEntry.Role field.
@@ -73,6 +80,20 @@ type InfoResponse struct {
 	RequiredEnv     []string        `json:"required_env,omitempty"`
 	ServeMode       bool            `json:"serve_mode"`
 	SubagentConfig  *SubagentConfig `json:"subagent_config,omitempty"`
+	// SkillTargets describes native, project-scoped skill discovery roots. The
+	// ox CLI canonicalizes and deduplicates these descriptors before planning,
+	// so multiple adapters may safely advertise the same shared target.
+	SkillTargets []SkillTarget `json:"skill_targets,omitempty"`
+}
+
+// SkillTarget describes a native Agent Skills projection owned by the host.
+// Root is repository-relative; absolute and escaping paths are rejected.
+type SkillTarget struct {
+	Key        string `json:"key"`
+	Root       string `json:"root"`
+	Format     string `json:"format"`
+	Scope      string `json:"scope"`
+	LinkPolicy string `json:"link_policy"`
 }
 
 // DetectResponse is returned by the `detect` subcommand.
@@ -176,6 +197,13 @@ type UninstallCommandsResponse struct {
 type SkillsParams struct {
 	RepoRoot string `json:"repo_root"`
 	Version  string `json:"version"` // ox version for stamped content
+	// Names narrows an install/check operation to explicit skill IDs. Empty
+	// selects the adapter's default skill set, so capability-specific playbooks
+	// stay opt-in instead of silently arriving in every initialized repository.
+	Names []string `json:"names,omitempty"`
+	// Bundles selects curated capability groups such as "attest". Bundles are
+	// the stable user/team-facing install contract; Names remains for repair.
+	Bundles []string `json:"bundles,omitempty"`
 }
 
 // InstallSkillsResponse is returned by `install-skills`.
@@ -186,6 +214,7 @@ type InstallSkillsResponse struct {
 	// fileswritten.go. Entries that don't resolve inside the repo are
 	// dropped by ox and never staged.
 	FilesWritten []string `json:"files_written"`
+	Conflicts    []string `json:"conflicts,omitempty"`
 }
 
 // CheckSkillsResponse is returned by `check-skills`.
@@ -193,6 +222,10 @@ type CheckSkillsResponse struct {
 	Installed bool     `json:"installed"`
 	Missing   []string `json:"missing,omitempty"`
 	Stale     []string `json:"stale,omitempty"`
+	// Conflicts are skill IDs occupied by an unstamped, user-owned SKILL.md.
+	// They are deliberately not auto-fixed: overwriting them would destroy a
+	// local override. Callers should surface a manual resolution instead.
+	Conflicts []string `json:"conflicts,omitempty"`
 	SkillsDir string   `json:"skills_dir"`
 	Total     int      `json:"total"`
 }
@@ -201,6 +234,7 @@ type CheckSkillsResponse struct {
 type UninstallSkillsResponse struct {
 	Uninstalled  bool     `json:"uninstalled"`
 	FilesRemoved []string `json:"files_removed"`
+	Conflicts    []string `json:"conflicts,omitempty"`
 }
 
 // ReadParams are passed to `read` and `read-metadata`.

@@ -34,6 +34,9 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 		t.Fatalf("handleInfo() error: %v", err)
 	}
 	assertCapabilitySetsEqual(t, "claude-code", info.Capabilities, want)
+	if len(info.SkillTargets) != 1 || info.SkillTargets[0].Key != "claude-project" || info.SkillTargets[0].Root != ".claude/skills" {
+		t.Fatalf("claude skill targets = %#v, want claude-project target", info.SkillTargets)
+	}
 }
 
 // assertCapabilitySetsEqual compares two capability lists as sets, so the pin

@@ -3,12 +3,24 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/sageox/ox/pkg/adapterruntime"
 )
+
+func TestHandleInfo_DeclaresSharedAgentSkillsTarget(t *testing.T) {
+	info, err := handleInfo()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.SkillTargets) != 1 || info.SkillTargets[0].Key != "agents-project" || info.SkillTargets[0].Root != ".agents/skills" {
+		t.Fatalf("gemini skill targets = %#v, want shared agents-project target", info.SkillTargets)
+	}
+}
 
 // TestReadFromOffset_WiredInOneShotMode drives read-from-offset through the
 // real CLI dispatch path (adapterruntime.RunWithArgs against adapterConfig,
@@ -38,5 +50,21 @@ func TestReadFromOffset_WiredInOneShotMode(t *testing.T) {
 	}
 	if result.NewOffset <= 0 {
 		t.Fatalf("new_offset = %d, want > 0", result.NewOffset)
+	}
+}
+
+func TestInstallSkills_WritesCanonicalAgentSkills(t *testing.T) {
+	repo := t.TempDir()
+	var out bytes.Buffer
+	if err := adapterruntime.RunWithArgs(adapterConfig, []string{"install-skills", "--repo-root", repo, "--version", "1.0.0", "--skill", "ox-attest-goal"}, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(repo, ".agents", "skills", "ox-attest-goal", "SKILL.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data), "---\nname: ox-attest-goal") {
+		t.Fatal("installed skill did not retain canonical frontmatter")
 	}
 }

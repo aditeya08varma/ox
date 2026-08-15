@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-08-15
+
+Skills now reach each AI coworker through its native discovery mechanism, while SageOx keeps project-scoped installations safe, consistent, and repairable.
+
+### New
+
+- **Native skill management across Claude, Codex, and Gemini** — each AI coworker receives skills in the project directory it already knows how to discover.
+- **Project-scoped skill ownership** — `.sageox/skills.lock.json` records selected targets, bundles, revisions, and managed file digests so updates and removal are precise.
+
+### Improved
+
+- **One shared installation for Codex and Gemini** — their common `.agents/skills` target is reconciled once, eliminating duplicate work and misleading counts.
+- **`ox doctor` checks the complete skill tree** — scripts, references, and assets are verified alongside `SKILL.md`, and `ox doctor --fix` applies the same deterministic plan.
+- **Portable skills stay portable** — content installed in `.agents/skills` no longer depends on Claude-only wording or invocation syntax.
+
+### Fixed
+
+- **User edits and collisions are preserved** — SageOx updates or removes only files whose digest still matches the last managed version, reporting conflicts instead of overwriting them.
+- **Interrupted updates recover safely** — managed files are staged and validated before the ownership lockfile is committed last, so the next reconciliation converges cleanly.
+- **Selected AI coworker targets persist after `ox init`** — Doctor no longer installs skills for detected but unselected targets.
+- **Deterministic repair no longer consumes an AI task** — skill reconciliation runs during explicit lifecycle commands instead of a daily daemon-scheduled coworker job.
+
 ## [0.13.0] - 2026-08-11
 
 Plans get a full lifecycle and a genuinely better reviewing experience — and priming just got ~87% cheaper.

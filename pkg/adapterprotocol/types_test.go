@@ -22,7 +22,12 @@ func TestInfoResponse_RoundTrip(t *testing.T) {
 		Type:            adapterprotocol.TypeSession,
 		Capabilities:    []string{adapterprotocol.CapSessionReader, adapterprotocol.CapHookInstaller},
 		HookEnvValues:   []string{"claude-code"},
-		ServeMode:       true,
+		SkillTargets: []adapterprotocol.SkillTarget{{
+			Key: "claude-project", Root: ".claude/skills",
+			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
+		ServeMode: true,
 	}
 
 	data, err := json.Marshal(want)
@@ -46,6 +51,9 @@ func TestInfoResponse_RoundTrip(t *testing.T) {
 	}
 	if len(got.Capabilities) != len(want.Capabilities) {
 		t.Errorf("Capabilities len = %d, want %d", len(got.Capabilities), len(want.Capabilities))
+	}
+	if len(got.SkillTargets) != 1 || got.SkillTargets[0] != want.SkillTargets[0] {
+		t.Errorf("SkillTargets = %#v, want %#v", got.SkillTargets, want.SkillTargets)
 	}
 }
 

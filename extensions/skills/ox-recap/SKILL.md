@@ -15,8 +15,8 @@ description: >-
      ledger compounding as searchable memory), the honesty rules (never
      invent value, never lead with a bare statistic, ground every claim in a
      receipt), and the cold-start framing — lives in the `guidance` field of
-     `ox recap --json` (Layer-1 floor), which reaches Claude, Codex, and
-     Droid alike. This skill adds ONLY Claude-specific auto-activation
+     `ox recap --json` (Layer-1 floor), which reaches every primed AI
+     coworker. This native skill adds discovery and activation
      ergonomics; it duplicates no reasoning. Do not grow this body. -->
 
 ## Use when

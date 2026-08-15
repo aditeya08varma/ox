@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -13,8 +15,8 @@ import (
 // TestHandleInfo_CapabilitiesPinned pins this binary's declared capabilities to
 // the set the cross-agent conformance fixture mirrors
 // (internal/prime/conformance_test.go). Codex declares NEITHER a commands nor a
-// rules/skills installer — this is the regression lock behind "Codex users get
-// the floor (Layer 1) but no Layer-2 surfaces." If handleInfo() drifts, this
+// rules installer. Skills are a portable Layer-2 surface installed into
+// .agents/skills. If handleInfo() drifts, this
 // fails so the conformance fixture cannot silently fall out of sync.
 //
 // KEEP IN SYNC: the want set below must match the "codex" entry in adapterCaps
@@ -25,6 +27,7 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 	want := []string{
 		adapterprotocol.CapSessionReader,
 		adapterprotocol.CapHookInstaller,
+		adapterprotocol.CapSkillsInstaller,
 		adapterprotocol.CapIncrementalReader,
 		adapterprotocol.CapFileWatcher,
 		adapterprotocol.CapServeMode,
@@ -36,6 +39,25 @@ func TestHandleInfo_CapabilitiesPinned(t *testing.T) {
 		t.Fatalf("handleInfo() error: %v", err)
 	}
 	assertCapabilitySetsEqual(t, "codex", info.Capabilities, want)
+	if len(info.SkillTargets) != 1 || info.SkillTargets[0].Key != "agents-project" || info.SkillTargets[0].Root != ".agents/skills" {
+		t.Fatalf("codex skill targets = %#v, want shared agents-project target", info.SkillTargets)
+	}
+}
+
+func TestInstallSkills_WritesCanonicalAgentSkills(t *testing.T) {
+	repo := t.TempDir()
+	var out bytes.Buffer
+	if err := adapterruntime.RunWithArgs(adapterConfig, []string{"install-skills", "--repo-root", repo, "--version", "1.0.0", "--skill", "ox-attest-goal"}, nil, &out); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(repo, ".agents", "skills", "ox-attest-goal", "SKILL.md")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data), "---\nname: ox-attest-goal") {
+		t.Fatal("installed skill did not retain canonical frontmatter")
+	}
 }
 
 // TestReadFromOffset_WiredInOneShotMode drives read-from-offset through the

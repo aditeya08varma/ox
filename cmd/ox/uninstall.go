@@ -689,13 +689,13 @@ func cleanupAgentFiles(gitRoot string) error {
 				slog.Warn("failed to remove rules", "adapter", ea.Name(), "error", err)
 			}
 		}
-		if ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
-			if uninstallDryRun {
-				slog.Info("would remove skills", "adapter", ea.Name())
-			} else if _, err := ea.UninstallSkills(gitRoot, ""); err != nil {
-				slog.Warn("failed to remove skills", "adapter", ea.Name(), "error", err)
-			}
-		}
+	}
+	if uninstallDryRun {
+		slog.Info("would remove managed project skills")
+	} else if plan, err := uninstallManagedSkills(gitRoot); err != nil {
+		slog.Warn("failed to remove managed project skills", "error", err)
+	} else if len(plan.Conflicts) > 0 {
+		slog.Warn("preserved modified managed skill files during uninstall", "count", len(plan.Conflicts))
 	}
 
 	// remove ox:prime markers from all known agent instruction files

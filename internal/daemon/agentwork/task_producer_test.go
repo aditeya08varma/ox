@@ -34,7 +34,8 @@ func TestProduceAgentTasks_DoctorMarker(t *testing.T) {
 
 	m := newProducerManager(t, root)
 
-	// no marker → no task
+	// No marker or session drift → no task. Skill reconciliation is
+	// deterministic lifecycle work and must never create a daemon AI chore.
 	m.produceAgentTasks(m.loadConfig())
 	store, _ := agenttask.NewStore(root)
 	tasks, _ := store.List(false)
