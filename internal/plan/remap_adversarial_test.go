@@ -324,6 +324,9 @@ func TestRemapFeedback_Idempotent_SecondRunIsNoOp(t *testing.T) {
 // hops, wrong open-state after re-raise-across-remap. (Its first run caught
 // the chain-walk path-dependence bug that became the fold resolver.)
 func TestFeedbackMerge_ModelBattery(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: 40-round filesystem-backed model battery")
+	}
 	anchors := []string{"ha1", "ha2", "ha3", "ha4", "ha5"}
 	reviewers := []string{"alice", "bob", ""}
 	statuses := []FeedbackStatus{FeedbackApprove, FeedbackRequestChange, FeedbackFlag, FeedbackComment}

@@ -22,6 +22,9 @@ import (
 // and sets XDG env vars for isolated test caching.
 func setupIncrementalTest(t *testing.T) string {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("short: exercises multi-step recording state and raw-session filesystem flows")
+	}
 	cacheDir := t.TempDir()
 	projectRoot := t.TempDir()
 
@@ -752,6 +755,9 @@ func TestHandleAfterTool_NotRecording(t *testing.T) {
 // --- Large content handling ---
 
 func TestAppendLargeEntries(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: redacts and persists a 1 MiB tool payload")
+	}
 	tmpDir := t.TempDir()
 	rawPath := filepath.Join(tmpDir, "raw.jsonl")
 

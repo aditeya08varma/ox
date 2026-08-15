@@ -18,6 +18,9 @@ import (
 // Returns (barePath, clonePath). Both are inside t.TempDir() and auto-cleaned.
 func createBareAndClone(t *testing.T) (string, string) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("short: initializes and clones a real bare git repository")
+	}
 
 	base := t.TempDir()
 	barePath := filepath.Join(base, "remote.git")

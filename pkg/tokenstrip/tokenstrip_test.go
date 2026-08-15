@@ -336,6 +336,9 @@ func TestHeaderUntouched(t *testing.T) {
 // TestOversizedEntry verifies a single >5MB entry does not break the stream.
 // bufio.Scanner would fail here; bufio.Reader.ReadBytes must not.
 func TestOversizedEntry(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: round-trips a payload larger than 5 MiB")
+	}
 	big := strings.Repeat("x", 5*1024*1024)
 	asst := map[string]any{"type": "assistant", "content": big}
 	line := mustJSON(t, asst)

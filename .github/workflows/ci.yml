@@ -54,6 +54,7 @@ jobs:
             --rerun-fails=1 \
             --packages=./... \
             --junitfile test-results.xml \
+            --jsonfile-timing-events test-timings.json \
             -- -short -race -p 8 -parallel 32 -timeout=10m
 
       - name: Full tests (PR gate)
@@ -66,11 +67,16 @@ jobs:
             --rerun-fails=1 \
             --packages=./... \
             --junitfile test-results.xml \
+            --jsonfile-timing-events test-timings.json \
             -- -race -p 8 -parallel 32 -timeout=15m
 
       - name: Failure digest
         if: always() && hashFiles('test-results.xml') != ''
-        run: python3 .github/scripts/junit_to_summary.py test-results.xml >> "$GITHUB_STEP_SUMMARY"
+        run: |
+          python3 .github/scripts/junit_to_summary.py test-results.xml >> "$GITHUB_STEP_SUMMARY"
+          if test -f test-timings.json; then
+            python3 scripts/test_metrics.py --markdown test-timings.json >> "$GITHUB_STEP_SUMMARY" || echo "Test timing metrics unavailable." >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload JUnit results
         if: always() && hashFiles('test-results.xml') != ''
@@ -78,6 +84,14 @@ jobs:
         with:
           name: test-results
           path: test-results.xml
+          retention-days: 14
+
+      - name: Upload test timing events
+        if: always() && hashFiles('test-timings.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-timing-events
+          path: test-timings.json
           retention-days: 14
 
   lint:

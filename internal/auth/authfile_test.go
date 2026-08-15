@@ -129,6 +129,9 @@ func TestLock_MutualExclusion_SameEndpoint(t *testing.T) {
 // already held externally, withAuthFileLocked returns a timeout error.
 // Failure prevented: indefinite hang when another process holds the lock.
 func TestLock_Timeout_HeldByAnotherProcess(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: intentionally waits for the cross-process lock timeout")
+	}
 	t.Parallel()
 
 	dir := t.TempDir()

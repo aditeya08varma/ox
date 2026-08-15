@@ -46,6 +46,9 @@ func gitExec(t *testing.T, dir string, args ...string) {
 // WAL mode so reads and the serialized write path are safe; this test validates
 // the Bleve layer and SQL transaction serialization under contention.
 func TestConcurrentIndexLocalRepo(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: concurrently indexes a real git repository")
+	}
 	t.Parallel()
 
 	const goroutines = 3
@@ -86,6 +89,9 @@ func TestConcurrentIndexLocalRepo(t *testing.T) {
 // while a long IndexLocalRepo is running on the same Store. SQLite WAL mode
 // allows concurrent readers, and this test confirms no deadlock or crash.
 func TestSearchDuringIndexing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: indexes a real git repository while polling SQLite")
+	}
 	t.Parallel()
 
 	dir, _ := initGitRepo(t, 20) // larger repo → longer index time → more read overlap
@@ -132,6 +138,9 @@ func TestSearchDuringIndexing(t *testing.T) {
 // (tmp dir exists, manifest not yet written). GC must not remove a partially-built
 // overlay, and the final manifest must be intact after both complete.
 func TestGCDirtyIndexesDuringBuild(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: runs concurrent dirty-index maintenance against a real git repository")
+	}
 	t.Parallel()
 
 	dir, _ := initGitRepo(t, 3)
@@ -188,6 +197,9 @@ func TestGCDirtyIndexesDuringBuild(t *testing.T) {
 // a second time after new commits are added produces no duplicate rows — this is
 // the sequential precondition for safe incremental updates.
 func TestIncrementalIndexDoesNotDuplicateCommits(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: indexes a real git repository twice")
+	}
 	t.Parallel()
 
 	dir, _ := initGitRepo(t, 3)

@@ -350,6 +350,9 @@ func TestCloseIdleTeamStores(t *testing.T) {
 //
 // Iteration-bounded (not time-bounded) so it is deterministic and short.
 func TestPrune_RacesIdleClose(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: concurrent SQLite close-race stress test")
+	}
 	t.Parallel()
 
 	const (

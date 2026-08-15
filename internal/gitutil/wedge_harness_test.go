@@ -43,6 +43,9 @@ type ledgerFixture struct {
 
 func newLedgerFixture(t *testing.T) *ledgerFixture {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("short: drives ledger recovery against real bare and working git repositories")
+	}
 	root := t.TempDir()
 	f := &ledgerFixture{
 		t:     t,

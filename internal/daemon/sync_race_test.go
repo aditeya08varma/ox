@@ -143,6 +143,9 @@ func TestSyncDuringActiveClone(t *testing.T) {
 // TestRapidSequentialSyncs calls SyncWithProgress many times in a tight loop
 // to verify each returns successfully and shared state stays consistent.
 func TestRapidSequentialSyncs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: performs repeated syncs against a real git ledger")
+	}
 	if _, err := exec.LookPath("git"); err != nil {
 		t.Skip("git not installed")
 	}
