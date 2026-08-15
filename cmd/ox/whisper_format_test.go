@@ -102,12 +102,12 @@ func TestFormatWhispers_LiveMeetingMurmurIncludesRecordingLink(t *testing.T) {
 		Importance: whisperstore.ImportanceNormal,
 		Source:     "murmur",
 		Metadata: map[string]string{
-			"kind":         "live",
-			"recording_id": "rec_01956a64-72e0-7000-8000-abcdef012345",
+			"kind":          "live",
+			"recording_id":  "rec_01956a64-72e0-7000-8000-abcdef012345",
 			"recording_url": "https://sageox.ai/c/rec_01956a64-72e0-7000-8000-abcdef012345",
-			"participants": "Alice <Ops>, Bob",
-			"topics":       "Friday migration, Cutover ownership",
-			"started_at":   "2026-08-14T17:30:00Z",
+			"participants":  "Alice <Ops>, Bob",
+			"topics":        "Friday migration, Cutover ownership",
+			"started_at":    "2026-08-14T17:30:00Z",
 		},
 	}}
 
