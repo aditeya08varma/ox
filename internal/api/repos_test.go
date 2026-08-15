@@ -191,6 +191,10 @@ func TestGetRepos_NetworkError(t *testing.T) {
 }
 
 func TestGetRepos_Timeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("verifies a deliberately slow HTTP response")
+	}
+
 	t.Parallel()
 	// server takes too long to respond
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -685,6 +689,10 @@ func TestGetTeamInfo_URLEncoding(t *testing.T) {
 }
 
 func TestGetTeamInfo_Timeout(t *testing.T) {
+	if testing.Short() {
+		t.Skip("verifies a deliberately slow HTTP response")
+	}
+
 	t.Parallel()
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(3 * time.Second)

@@ -23,6 +23,9 @@ import (
 // Uses git CLI to avoid go-git quirks with config.
 func initGitRepo(t *testing.T, numCommits int) (string, string) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("short: builds a real git repository for CodeDB indexing")
+	}
 	dir := t.TempDir()
 
 	run := func(args ...string) string {

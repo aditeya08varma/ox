@@ -67,6 +67,9 @@ func (r *fakeHandleReader) ReadFromOffset(_ string, offset int64) ([]adapters.Ra
 // path plus a stop func.
 func runPoll(t *testing.T, reader adapters.IncrementalReader, startOffset int64) (rawPath string, recPath string, stop func()) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("short: drives the polling loop across wait intervals")
+	}
 
 	cache := t.TempDir()
 	rawPath = filepath.Join(cache, "raw.jsonl")
@@ -188,6 +191,9 @@ func TestPollSession_AdvancesTheCursorAcrossBatches(t *testing.T) {
 // TestPollSession_RestartDoesNotReplay simulates the restart directly:
 // a second loop started from the persisted offset must record nothing new.
 func TestPollSession_RestartDoesNotReplay(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: polls through a restart and wait intervals")
+	}
 	reader := &fakeHandleReader{}
 	reader.append("alpha")
 	reader.append("beta")

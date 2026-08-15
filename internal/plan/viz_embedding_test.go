@@ -12,6 +12,7 @@ func TestEditorialSVGPatternsEmbedInBothPlanThemes(t *testing.T) {
 	}
 	for _, id := range ids {
 		t.Run(id, func(t *testing.T) {
+			t.Parallel()
 			p, ok := VizPatternByID(id)
 			if !ok {
 				t.Fatalf("missing %s", id)

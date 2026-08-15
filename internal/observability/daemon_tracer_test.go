@@ -62,6 +62,10 @@ func TestNewDaemonTracer_WithInit(t *testing.T) {
 // a new trace ID (no parent relationship).
 // Failure prevented: all daemon tasks sharing one trace, defeating per-task visibility.
 func TestDaemonTracer_StartTask_IndependentTraces(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exporter shutdown waits for an unreachable endpoint")
+	}
+
 	resetGlobals()
 	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318", nil)
 	require.NoError(t, err)
@@ -88,6 +92,10 @@ func TestDaemonTracer_StartTask_IndependentTraces(t *testing.T) {
 // TestDaemonTracer_StartSubtask_ChildOfTask verifies subtask shares parent trace ID.
 // Failure prevented: subtask spans disconnected from parent task trace.
 func TestDaemonTracer_StartSubtask_ChildOfTask(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exporter shutdown waits for an unreachable endpoint")
+	}
+
 	resetGlobals()
 	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318", nil)
 	require.NoError(t, err)
@@ -114,6 +122,10 @@ func TestDaemonTracer_StartSubtask_ChildOfTask(t *testing.T) {
 // TestDaemonTracer_StartTask_WithAttrs verifies attributes are accepted without error.
 // Failure prevented: panic or ignored attributes on task spans.
 func TestDaemonTracer_StartTask_WithAttrs(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exporter shutdown waits for an unreachable endpoint")
+	}
+
 	resetGlobals()
 	err := Init(context.Background(), "ox-daemon-test", "http://192.0.2.1:4318", nil)
 	require.NoError(t, err)

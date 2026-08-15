@@ -86,6 +86,10 @@ func TestCommandName(t *testing.T) {
 // TestInit_ValidEndpoint verifies full lifecycle: init → start → traceparent → shutdown.
 // Uses a non-routable endpoint; export will fail silently (which is fine).
 func TestInit_ValidEndpoint(t *testing.T) {
+	if testing.Short() {
+		t.Skip("exporter shutdown waits for an unreachable endpoint")
+	}
+
 	resetGlobals()
 
 	// Use a non-routable IP so export silently fails (no real Collector needed)

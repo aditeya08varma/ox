@@ -25,6 +25,10 @@ import (
 // IsAuthenticatedForEndpoint returned a fatal error that blocked login
 // entirely.
 func TestLoginProceedsWhenTokenRefreshFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("device authorization flow waits for a poll timeout")
+	}
+
 	// Mock server: return 404 on /oauth2/token (refresh) and 200 on
 	// /api/auth/device/code (device flow) so we can detect that login
 	// proceeded past the refresh failure.

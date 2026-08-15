@@ -860,6 +860,9 @@ func TestContextDeadline(t *testing.T) {
 }
 
 func TestVolumeTest(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: loads a volume-sized activity dataset")
+	}
 	t.Parallel()
 	s := openTestStore(t)
 	since := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)

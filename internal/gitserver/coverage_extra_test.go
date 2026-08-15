@@ -583,6 +583,9 @@ func TestCommitAndPushAgentsMD_NoRemote(t *testing.T) {
 }
 
 func TestCommitAndPushAgentsMD_WithRemote_PushFails(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: attempts a real remote git push that must fail")
+	}
 	t.Parallel()
 	repoPath := makeCovTestRepo(t)
 	runGit(t, repoPath, "remote", "add", "origin", "https://git.example.com/fake/repo.git")

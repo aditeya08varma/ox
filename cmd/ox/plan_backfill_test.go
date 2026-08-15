@@ -142,6 +142,9 @@ func TestRunPlanBackfillTitlesOnLedger_DryRunNoPlansIsCleanNoOp(t *testing.T) {
 // here (no remote configured) without failing the command.
 func initGitLedger(t *testing.T, ledgerPath string) {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("short: initializes and commits a real ledger repository")
+	}
 	run := func(args ...string) {
 		cmd := exec.Command("git", args...)
 		cmd.Dir = ledgerPath

@@ -26,6 +26,10 @@ func TestAdapterList_NoAdapters(t *testing.T) {
 // TestAdapterList_WithDiscoveredAdapters verifies list finds adapters from OX_ADAPTER_PATH.
 // Failure prevented: discovery integration broken in CLI layer.
 func TestAdapterList_WithDiscoveredAdapters(t *testing.T) {
+	if testing.Short() {
+		t.Skip("adapter discovery executes a subprocess")
+	}
+
 	dir := t.TempDir()
 	createFakeAdapter(t, dir, "test-list", "0.2.0", "session")
 

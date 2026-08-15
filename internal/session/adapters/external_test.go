@@ -11,6 +11,9 @@ import (
 // fakeBinary creates a shell script that echoes canned responses.
 func fakeBinary(t *testing.T, responses map[string]string) string {
 	t.Helper()
+	if testing.Short() {
+		t.Skip("short: drives an external adapter subprocess")
+	}
 	script := "#!/bin/sh\ncase \"$1\" in\n"
 	for cmd, resp := range responses {
 		script += "  " + cmd + ") echo '" + resp + "';;\n"

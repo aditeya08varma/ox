@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw
-.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-all test-slow test-integration test-agents test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
+.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-timings test-all test-slow test-integration test-agents test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-publish refresh-friction-catalog bump-version verify-version beads-setup
 
 # Variables
 GO := go
@@ -109,6 +109,10 @@ run: build ## Build and run ox
 # Output: quiet by default (agent-friendly). V=1 for verbose.
 #
 GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/gotestsum@latest")
+# Leave empty to create a unique artifact per local invocation. Set explicitly
+# when a caller needs a stable path (for example, CI uploads its artifact).
+TEST_TIMINGS ?=
+TEST_METRICS := scripts/test_metrics.py
 
 # Isolate test `git` invocations from the developer's global config.
 # Many tests build scratch repos in t.TempDir() and run `git init` +
@@ -140,11 +144,20 @@ TEST_GIT_ISOLATION := \
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
 test: ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
 	$(call say,"Running fast tests (skipping >500ms, no coverage)...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 ./...
+	@timings='$(TEST_TIMINGS)'; \
+	if [ -z "$$timings" ]; then timings=$$(mktemp -p tmp test-timings.XXXXXX); else mkdir -p "$$(dirname "$$timings")"; fi; \
+	$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) --jsonfile-timing-events "$$timings" -- -short -race -p 8 -parallel 32 ./...; \
+	echo "TEST_TIMING_ARTIFACT path=$$timings"; \
+	python3 $(TEST_METRICS) "$$timings"
 
 test-cover: ## Run fast tests with coverage collection (~15-20% slower than `make test`)
 	$(call say,"Running fast tests with coverage...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
+
+test-timings: ## Reprint metrics from the latest fast-test timing artifact
+	@test -n "$(TEST_TIMINGS)" || (echo "Set TEST_TIMINGS to an artifact printed by 'make test'." && exit 1)
+	@test -f $(TEST_TIMINGS) || (echo "No fast-test timing artifact at $(TEST_TIMINGS)." && exit 1)
+	@python3 $(TEST_METRICS) $(TEST_TIMINGS)
 
 test-all: ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")

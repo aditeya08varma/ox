@@ -442,6 +442,10 @@ func TestExtract_C_ReturnType(t *testing.T) {
 }
 
 func TestExtract_LargeFile(t *testing.T) {
+	if testing.Short() {
+		t.Skip("large generated source is a full-suite regression case")
+	}
+
 	t.Parallel()
 	var b strings.Builder
 	b.WriteString("package main\n\n")

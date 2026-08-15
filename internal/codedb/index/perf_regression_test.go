@@ -613,6 +613,9 @@ func TestDiffTree_UnchangedFilesNotDuplicated(t *testing.T) {
 // and that double-indexing after checkpoints is still idempotent.
 
 func TestCheckpointFlush_DataAccessibleAfterRun(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: indexes more than a checkpoint of real git history")
+	}
 	t.Parallel()
 	// Use more than checkpointEvery commits to force at least one checkpoint.
 	numCommits := checkpointEvery + 100
@@ -629,6 +632,9 @@ func TestCheckpointFlush_DataAccessibleAfterRun(t *testing.T) {
 }
 
 func TestCheckpointFlush_IdempotentAfterCheckpoints(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: re-indexes more than a checkpoint of real git history")
+	}
 	t.Parallel()
 	// Re-indexing after a checkpoint run must produce the same counts.
 	numCommits := checkpointEvery + 50
