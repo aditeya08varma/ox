@@ -746,9 +746,9 @@ func runInit() error {
 			}
 		}
 		if hasNew || len(installedHooks) > 0 {
-			cli.PrintSuccess("Installed AI coworker hooks and commands")
+			cli.PrintSuccess("Installed AI coworker integrations and skills")
 		} else {
-			cli.PrintPreserved("AI coworker hooks and commands")
+			cli.PrintPreserved("AI coworker integrations and skills")
 		}
 	}
 
@@ -2067,6 +2067,7 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 
 	// install hooks + rules only for agents the user selected
 	externalAdapters := adapters.DiscoverExternalAdapters()
+	var selectedSkillAdapters []*adapters.ExternalAdapter
 	for _, ea := range externalAdapters {
 		if !selectedAgents[ea.Name()] {
 			continue
@@ -2121,22 +2122,46 @@ func installAgentHooks(gitRoot string, quiet bool, selectedAgents map[string]boo
 		}
 
 		if ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
-			result, err := ea.InstallSkills(gitRoot, version.Version)
-			if err != nil {
-				if !quiet {
-					cli.PrintWarning(fmt.Sprintf("Could not install %s skills: %v", ea.Name(), err))
-				}
-			} else if result.Installed {
-				// FilesWritten holds only the skills actually (over)written; it's
-				// empty when every skill was already current. Report the honest
-				// count instead of an unconditional "Installed".
-				if n := len(result.FilesWritten); n > 0 {
+			if len(ea.Info().SkillTargets) > 0 {
+				selectedSkillAdapters = append(selectedSkillAdapters, ea)
+			} else {
+				// One-release compatibility for third-party adapters that have not
+				// adopted target descriptors yet.
+				result, err := ea.InstallSkills(gitRoot, version.Version)
+				if err != nil {
 					if !quiet {
-						cli.PrintSuccess(fmt.Sprintf("Installed %d %s skills", n, ea.Name()))
+						cli.PrintWarning(fmt.Sprintf("Could not install legacy %s skills: %v", ea.Name(), err))
 					}
+				} else {
 					installedHooks = append(installedHooks, result.FilesWritten...)
-				} else if !quiet {
-					cli.PrintPreserved(fmt.Sprintf("%s skills already up to date", ea.Name()))
+				}
+			}
+		}
+	}
+	if targets, err := skillTargetsForAdapters(gitRoot, selectedSkillAdapters); err != nil {
+		if !quiet {
+			cli.PrintWarning(fmt.Sprintf("Could not resolve Agent Skills targets: %v", err))
+		}
+	} else if len(targets) > 0 {
+		plan, err := reconcileSelectedSkills(gitRoot, targets)
+		if err != nil {
+			if !quiet {
+				cli.PrintWarning(fmt.Sprintf("Could not reconcile Agent Skills: %v", err))
+			}
+		} else {
+			written := plan.WrittenPaths()
+			installedHooks = append(installedHooks, written...)
+			if plan.LockChanged() {
+				installedHooks = append(installedHooks, filepath.Join(".sageox", "skills.lock.json"))
+			}
+			if !quiet {
+				switch {
+				case len(plan.Conflicts) > 0:
+					cli.PrintWarning(fmt.Sprintf("Reconciled Agent Skills with %d preserved conflict(s)", len(plan.Conflicts)))
+				case len(written) > 0:
+					cli.PrintSuccess(fmt.Sprintf("Installed %d Agent Skills file(s) across %d native target(s)", len(written), len(targets)))
+				default:
+					cli.PrintPreserved("Agent Skills already up to date")
 				}
 			}
 		}

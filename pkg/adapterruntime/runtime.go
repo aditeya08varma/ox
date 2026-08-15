@@ -507,6 +507,12 @@ func parseSkillsParams(args []string) adapterprotocol.SkillsParams {
 		case "--version":
 			p.Version = args[i+1]
 			i++
+		case "--skill":
+			p.Names = append(p.Names, args[i+1])
+			i++
+		case "--bundle":
+			p.Bundles = append(p.Bundles, args[i+1])
+			i++
 		}
 	}
 	return p

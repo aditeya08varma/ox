@@ -128,7 +128,7 @@ push is worse than none).
 
 | Layer | State | Where |
 |---|---|---|
-| L1 | **Shipped** — `ox-plan` skill description leads with the capability (team context + ledger + review loop) and wins plan-render intent | `extensions/claude/skills/ox-plan/SKILL.md` |
+| L1 | **Shipped** — `ox-plan` skill description leads with the capability (team context + ledger + review loop) and wins plan-render intent | `extensions/skills/ox-plan/SKILL.md` |
 | L2 | **Shipped** — `buildGuidance` leads with the computed collision / expert-route / prior-art counts | `internal/plan/diagram_hints.go` (`guidanceLead`) |
 | Push tier | **Shipped** — content-aware viz suggestion now covers the parameterized catalog (`viz_hints`), not just Mermaid; matched by reviewed catalog tags shared with `ox viz suggest` | `internal/plan/diagram_hints.go` (`computeVizHints`) |
 | L4 | **Shipped** — capability line in the prime advisory | `cmd/ox/agent_prime_xml.go` (`writePlanEnrichmentGuidance`) |

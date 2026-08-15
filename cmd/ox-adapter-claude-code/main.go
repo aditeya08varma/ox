@@ -89,7 +89,12 @@ func handleInfo() (*adapterprotocol.InfoResponse, error) {
 			adapterprotocol.CapCapturePrior,
 		},
 		HookEnvValues: []string{"claude-code"},
-		ServeMode:     true,
+		SkillTargets: []adapterprotocol.SkillTarget{{
+			Key: "claude-project", Root: ".claude/skills",
+			Format: adapterprotocol.SkillFormatAgentSkillsV1, Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
+		ServeMode: true,
 	}, nil
 }
 

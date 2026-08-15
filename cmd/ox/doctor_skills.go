@@ -4,107 +4,73 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/sageox/ox/internal/session/adapters"
-	"github.com/sageox/ox/internal/version"
-	"github.com/sageox/ox/pkg/adapterprotocol"
+	"github.com/sageox/ox/internal/skillmanager"
 )
 
-// checkClaudeSkills validates that ox skills are installed and current for EVERY
-// external adapter that installs skills (not just the first). Mirrors
-// checkAdapterRules: skills land in agent-specific roots (.claude/skills/...), so
-// if a second adapter ever gains CapSkillsInstaller the check must cover it too
-// rather than silently inspecting only the first. Targets the per-skill directory
-// layout (.claude/skills/<name>/SKILL.md) via the skills_installer capability.
+// checkClaudeSkills retains its historical registration name, but checks the
+// project-selected native targets from .sageox/skills.lock.json. Detection is
+// consulted only for the one-release inline-stamp migration.
 func checkClaudeSkills(fix bool) checkResult {
 	gitRoot := findGitRoot()
 	if gitRoot == "" {
-		return SkippedCheck("Claude skills", "not in git repo", "")
+		return SkippedCheck("Agent skills", "not in git repo", "")
+	}
+	plan, err := planCommittedSkills(gitRoot)
+	if err != nil {
+		return WarningCheck("Agent skills", "cannot inspect managed skills", err.Error())
+	}
+	if plan.TargetCount == 0 {
+		return SkippedCheck("Agent skills", "no project-selected skill targets", "Run `ox init` and select an AI coworker with native Agent Skills")
+	}
+	if len(plan.Warnings) > 0 {
+		return WarningCheck("Agent skills", strings.Join(plan.Warnings, "; "), "Use the same or a newer ox version before reconciling")
+	}
+	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && len(plan.Conflicts) == 0 {
+		return PassedCheck("Agent skills", fmt.Sprintf("%d managed files across %d native target(s)", plan.DesiredFileCount, plan.TargetCount))
 	}
 
-	eas := findSkillsAdapters()
-	if len(eas) == 0 {
-		return SkippedCheck("Claude skills", "no skills adapters", "")
+	problem := describeSkillPlan(plan)
+	if !fix {
+		if len(plan.Conflicts) > 0 && len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 {
+			return WarningCheck("Agent skills", problem, "Resolve the preserved user-owned or modified files manually")
+		}
+		return FailedCheck("Agent skills", problem, "Run `ox doctor --fix` to reconcile unchanged managed files")
 	}
-
-	var problems []string // human-readable per-adapter drift descriptions
-	var driftAdapters []*adapters.ExternalAdapter
-	var warnings []string
-	var total int
-
-	for _, ea := range eas {
-		result, err := ea.CheckSkills(gitRoot, version.Version)
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("%s: %v", ea.Name(), err))
-			continue
-		}
-		total += result.Total
-		if result.Installed {
-			continue
-		}
-
-		driftAdapters = append(driftAdapters, ea)
-		var parts []string
-		if len(result.Missing) > 0 {
-			parts = append(parts, fmt.Sprintf("%d missing: %s", len(result.Missing), strings.Join(result.Missing, ", ")))
-		}
-		if len(result.Stale) > 0 {
-			parts = append(parts, fmt.Sprintf("%d outdated: %s", len(result.Stale), strings.Join(result.Stale, ", ")))
-		}
-		problems = append(problems, fmt.Sprintf("%s: %s", ea.Name(), strings.Join(parts, "; ")))
+	applied, err := reconcileCommittedSkills(gitRoot)
+	if err != nil {
+		return FailedCheck("Agent skills", problem, fmt.Sprintf("Fix failed: %v", err))
 	}
-
-	// All adapters reported their skills installed and current.
-	if len(driftAdapters) == 0 {
-		if len(warnings) > 0 {
-			return WarningCheck("Claude skills", "check error", strings.Join(warnings, "; "))
-		}
-		return PassedCheck("Claude skills", fmt.Sprintf("%d installed", total))
+	plan = applied
+	if len(plan.Conflicts) > 0 {
+		return WarningCheck("Agent skills", fmt.Sprintf("reconciled with %d preserved conflict(s)", len(plan.Conflicts)), "Resolve the preserved user-owned or modified files manually")
 	}
-
-	problemStr := strings.Join(problems, "; ")
-
-	if fix {
-		var fixed int
-		var fixErrs []string
-		for _, ea := range driftAdapters {
-			if _, err := ea.InstallSkills(gitRoot, version.Version); err != nil {
-				fixErrs = append(fixErrs, fmt.Sprintf("%s: %v", ea.Name(), err))
-				continue
-			}
-			fixed++
-		}
-		if len(fixErrs) > 0 {
-			return FailedCheck("Claude skills", problemStr,
-				fmt.Sprintf("Fix failed: %s", strings.Join(fixErrs, "; ")))
-		}
-		return PassedCheck("Claude skills", fmt.Sprintf("restored skills for %d adapter(s)", fixed))
-	}
-
-	return FailedCheck("Claude skills", problemStr,
-		"Run `ox doctor --fix` or `ox init` to restore")
+	return PassedCheck("Agent skills", fmt.Sprintf("reconciled %d file change(s) across %d native target(s)", len(plan.Creates)+len(plan.Updates)+len(plan.Removes), plan.TargetCount))
 }
 
-// findSkillsAdapters returns ALL discovered external adapters that declare
-// CapSkillsInstaller. Mirrors findRulesAdapters: should a second adapter ever
-// gain skills support, the doctor check must cover every one — unlike
-// findCommandsAdapter (which returns only the first), this returns every match.
-func findSkillsAdapters() []*adapters.ExternalAdapter {
-	var eas []*adapters.ExternalAdapter
-	for _, ea := range adapters.DiscoverExternalAdapters() {
-		if ea.HasCapability(adapterprotocol.CapSkillsInstaller) {
-			eas = append(eas, ea)
-		}
+func describeSkillPlan(plan *skillmanager.ReconcilePlan) string {
+	parts := make([]string, 0, 4)
+	if len(plan.Creates) > 0 {
+		parts = append(parts, fmt.Sprintf("%d missing", len(plan.Creates)))
 	}
-	return eas
+	if len(plan.Updates) > 0 {
+		parts = append(parts, fmt.Sprintf("%d outdated", len(plan.Updates)))
+	}
+	if len(plan.Removes) > 0 {
+		parts = append(parts, fmt.Sprintf("%d retired", len(plan.Removes)))
+	}
+	if len(plan.Conflicts) > 0 {
+		parts = append(parts, fmt.Sprintf("%d preserved conflict(s)", len(plan.Conflicts)))
+	}
+	return strings.Join(parts, "; ")
 }
 
 func init() {
 	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugClaudeSkills,
-		Name:        "Claude skills",
+		Name:        "Agent skills",
 		Category:    "Integration",
 		FixLevel:    FixLevelAuto,
-		Description: "Verifies ox skills are installed in .claude/skills/",
+		Description: "Reconciles project-selected native Agent Skills targets",
 		Run:         checkClaudeSkills,
 	})
 }

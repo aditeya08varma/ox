@@ -16,8 +16,8 @@ package prime
 //     installer; skill-class only on a skills installer. Their ABSENCE on
 //     Codex/Droid is the documented Layer-2 additive case, NOT a failure.
 //   - Floor capabilities resolve on ALL adapters (they ride Layer 1).
-//   - Codex regression lock: Codex declares zero command/rule/skill installers,
-//     yet every floor capability still reaches it via Layer 1.
+//   - Codex regression lock: Codex declares native skills but no command/rule
+//     installers, while every floor capability still reaches it via Layer 1.
 
 import (
 	"sort"
@@ -57,6 +57,7 @@ var adapterCaps = map[string][]string{
 	"codex": {
 		adapterprotocol.CapSessionReader,
 		adapterprotocol.CapHookInstaller,
+		adapterprotocol.CapSkillsInstaller,
 		adapterprotocol.CapIncrementalReader,
 		adapterprotocol.CapFileWatcher,
 		adapterprotocol.CapServeMode,
@@ -208,19 +209,21 @@ func TestResolution(t *testing.T) {
 }
 
 // TestCodexFloorLock is the explicit "Codex users get the floor" regression
-// lock. Codex declares NONE of the Layer-2 installers, yet every floor
-// capability still reaches it via Layer 1 (Layer1Source set).
+// lock. Codex has native Agent Skills but no command/rule installer, and every
+// floor capability still reaches it via Layer 1 (Layer1Source set).
 func TestCodexFloorLock(t *testing.T) {
 	const codex = "codex"
 
 	for _, cap := range []string{
 		adapterprotocol.CapCommandsInstaller,
 		adapterprotocol.CapRulesInstaller,
-		adapterprotocol.CapSkillsInstaller,
 	} {
 		if hasCap(codex, cap) {
 			t.Fatalf("codex regression lock: codex must NOT declare %q, but it does", cap)
 		}
+	}
+	if !hasCap(codex, adapterprotocol.CapSkillsInstaller) {
+		t.Fatal("codex regression lock: codex must declare native skills_installer support")
 	}
 
 	floorSeen := 0

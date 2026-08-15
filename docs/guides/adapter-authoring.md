@@ -144,6 +144,12 @@ func runInfo() {
         Type:            "session",
         Capabilities:    []string{"session_reader", "hook_installer", "incremental_reader", "serve_mode"},
         HookEnvValues:   []string{"myagent"},
+		SkillTargets: []adapterprotocol.SkillTarget{{
+			Key: "myagent-project", Root: ".agents/skills",
+			Format: adapterprotocol.SkillFormatAgentSkillsV1,
+			Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
         ServeMode:       true,
     })
 }
@@ -158,6 +164,13 @@ func runInfo() {
 | `incremental_reader` | Implements `read-from-offset` (required for serve mode) |
 | `serve_mode` | Supports `--serve` flag |
 | `file_watcher` | Pushes entry events automatically after `find-session` (no explicit subscribe) |
+| `skills_installer` | Implements the compatibility skill RPCs; native-capable adapters should also declare `skill_targets` so ox can centrally reconcile and deduplicate projections |
+
+**`skill_targets`** — optional native Agent Skills discovery roots. Roots must
+be project-relative. Multiple adapters may declare the same target key/root;
+ox writes that projection once. New adapters should use target descriptors;
+the imperative install/check/uninstall RPCs remain for one compatibility
+release.
 
 **`hook_env_values`** — the value(s) of `AGENT_ENV` that your hook installs. ox uses this to
 route hook calls to your adapter. Must match what your `install-hooks` writes.

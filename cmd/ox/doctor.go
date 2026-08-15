@@ -799,8 +799,6 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory
 		}
 		// verify ox-* slash commands are installed in .claude/commands/
 		integrationChecks = append(integrationChecks, checkClaudeCommands(opts.shouldFix(CheckSlugClaudeCommands)))
-		// detect installed skills drift in .claude/skills/ox-* (claude-only surface)
-		integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
 	}
 	if detectOpenCode() {
 		integrationChecks = append(integrationChecks, checkOpenCodeHooks(opts.shouldFix(CheckSlugOpenCodeHooks)))
@@ -811,6 +809,9 @@ func runDoctorChecks(parent context.Context, opts doctorOptions) []checkCategory
 	if detectCodex() {
 		integrationChecks = append(integrationChecks, checkCodexHooks(opts.shouldFix(CheckSlugCodexHooks)))
 	}
+	// Skill target selection is project state, not a consequence of which AI
+	// coworker happens to be detected during this Doctor run.
+	integrationChecks = append(integrationChecks, checkClaudeSkills(opts.shouldFix(CheckSlugClaudeSkills)))
 	if detectAmp() {
 		integrationChecks = append(integrationChecks, checkAmpHooks(opts.shouldFix(CheckSlugAmpHooks)))
 	}

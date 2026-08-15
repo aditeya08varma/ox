@@ -598,6 +598,34 @@ func TestRunWithArgs_InstallRules(t *testing.T) {
 	}
 }
 
+func TestRunWithArgs_InstallSkillsPassesRequestedNames(t *testing.T) {
+	var stdout bytes.Buffer
+	var got adapterprotocol.SkillsParams
+	cfg := adapterruntime.Config{
+		InstallSkills: func(p adapterprotocol.SkillsParams) (*adapterprotocol.InstallSkillsResponse, error) {
+			got = p
+			return &adapterprotocol.InstallSkillsResponse{Installed: true}, nil
+		},
+	}
+
+	err := adapterruntime.RunWithArgs(cfg, []string{
+		"install-skills", "--repo-root", "/tmp/test", "--version", "0.8.0",
+		"--skill", "ox-attest-goal", "--skill", "ox-attest-create", "--bundle", "attest",
+	}, nil, &stdout)
+	if err != nil {
+		t.Fatalf("RunWithArgs returned error: %v", err)
+	}
+	if got.RepoRoot != "/tmp/test" || got.Version != "0.8.0" {
+		t.Fatalf("skills params = %#v, want repo root and version", got)
+	}
+	if strings.Join(got.Names, ",") != "ox-attest-goal,ox-attest-create" {
+		t.Fatalf("skill names = %#v, want requested order", got.Names)
+	}
+	if strings.Join(got.Bundles, ",") != "attest" {
+		t.Fatalf("skill bundles = %#v, want requested order", got.Bundles)
+	}
+}
+
 func TestRunWithArgs_CheckRules(t *testing.T) {
 	var stdout bytes.Buffer
 	cfg := adapterruntime.Config{

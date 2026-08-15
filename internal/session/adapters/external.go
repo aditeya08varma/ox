@@ -475,7 +475,17 @@ func (ea *ExternalAdapter) UninstallCommands(repoRoot, version string) (*adapter
 
 // InstallSkills calls the adapter's install-skills subcommand.
 func (ea *ExternalAdapter) InstallSkills(repoRoot, version string) (*adapterprotocol.InstallSkillsResponse, error) {
-	out, err := ea.execOneShot("install-skills", "--repo-root", repoRoot, "--version", version)
+	return ea.InstallSkillsNamed(repoRoot, version)
+}
+
+// InstallSkillsNamed installs only the supplied skills. With no names it
+// preserves the adapter's default set; opt-in capability bundles pass names.
+func (ea *ExternalAdapter) InstallSkillsNamed(repoRoot, version string, names ...string) (*adapterprotocol.InstallSkillsResponse, error) {
+	args := []string{"--repo-root", repoRoot, "--version", version}
+	for _, name := range names {
+		args = append(args, "--skill", name)
+	}
+	out, err := ea.execOneShot("install-skills", args...)
 	if err != nil {
 		return nil, err
 	}
@@ -488,9 +498,33 @@ func (ea *ExternalAdapter) InstallSkills(repoRoot, version string) (*adapterprot
 	return &result, nil
 }
 
+func (ea *ExternalAdapter) InstallSkillsBundle(repoRoot, version string, bundles ...string) (*adapterprotocol.InstallSkillsResponse, error) {
+	args := []string{"--repo-root", repoRoot, "--version", version}
+	for _, bundle := range bundles {
+		args = append(args, "--bundle", bundle)
+	}
+	out, err := ea.execOneShot("install-skills", args...)
+	if err != nil {
+		return nil, err
+	}
+	var result adapterprotocol.InstallSkillsResponse
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidResponse, err)
+	}
+	return &result, nil
+}
+
 // CheckSkills calls the adapter's check-skills subcommand.
 func (ea *ExternalAdapter) CheckSkills(repoRoot, version string) (*adapterprotocol.CheckSkillsResponse, error) {
-	out, err := ea.execOneShot("check-skills", "--repo-root", repoRoot, "--version", version)
+	return ea.CheckSkillsNamed(repoRoot, version)
+}
+
+func (ea *ExternalAdapter) CheckSkillsNamed(repoRoot, version string, names ...string) (*adapterprotocol.CheckSkillsResponse, error) {
+	args := []string{"--repo-root", repoRoot, "--version", version}
+	for _, name := range names {
+		args = append(args, "--skill", name)
+	}
+	out, err := ea.execOneShot("check-skills", args...)
 	if err != nil {
 		return nil, err
 	}
