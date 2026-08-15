@@ -969,7 +969,7 @@ func contextSourceLabel(source string) string {
 
 // murmur whisper budget: keep context lean so murmurs don't crowd out real work.
 const (
-	maxMurmurWhisperTokens    = 1024 // ~4096 bytes — hard cap on total murmur whisper content
+	maxMurmurWhisperTokens    = 1024 // ~4096 bytes — budget for total murmur content and metadata
 	maxMurmurWhispersPerAgent = 1    // keep only the most recent murmur per authoring agent
 	estimatedBytesPerToken    = 4    // rough byte-to-token ratio for English text
 )
@@ -1195,6 +1195,7 @@ func traceWhisperDelivery(projectRoot, agentID string, entries []whisperstore.Wh
 func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.WhisperEntry {
 	var rawNonMurmur []whisperstore.WhisperEntry
 	var allMurmurs []whisperstore.WhisperEntry
+	budgetBytes := maxMurmurWhisperTokens * estimatedBytesPerToken
 
 	murmurMaxAge := 24 * time.Hour
 	now := time.Now()
@@ -1231,14 +1232,13 @@ func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.Whisp
 			continue
 		}
 		agentCount[key]++
-		capped = append(capped, e)
+		capped = append(capped, capMurmurMetadata(e, budgetBytes))
 	}
 
 	// check if everything fits in budget
-	budgetBytes := maxMurmurWhisperTokens * estimatedBytesPerToken
 	totalBytes := 0
 	for _, e := range capped {
-		totalBytes += len(e.Content)
+		totalBytes += murmurWhisperSize(e)
 	}
 
 	if totalBytes <= budgetBytes {
@@ -1260,19 +1260,25 @@ func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.Whisp
 	usedBytes := 0
 	// always include critical entries first
 	for _, e := range critical {
+		size := murmurWhisperSize(e)
+		if usedBytes+size > budgetBytes && len(e.Metadata) > 0 {
+			e.Metadata = nil
+			size = len(e.Content)
+		}
 		kept = append(kept, e)
-		usedBytes += len(e.Content)
+		usedBytes += size
 	}
 	// fill remainder with random sample of non-critical
 	rand.Shuffle(len(nonCritical), func(i, j int) {
 		nonCritical[i], nonCritical[j] = nonCritical[j], nonCritical[i]
 	})
 	for _, e := range nonCritical {
-		if usedBytes+len(e.Content) > budgetBytes && len(kept) > 0 {
+		size := murmurWhisperSize(e)
+		if usedBytes+size > budgetBytes && len(kept) > 0 {
 			continue
 		}
 		kept = append(kept, e)
-		usedBytes += len(e.Content)
+		usedBytes += size
 	}
 
 	// re-sort kept by time (newest first) for coherent output
@@ -1281,6 +1287,22 @@ func capMurmurWhispers(entries []whisperstore.WhisperEntry) []whisperstore.Whisp
 	})
 
 	return append(nonMurmur, kept...)
+}
+
+// capMurmurMetadata drops metadata that would make a single murmur exceed the
+// delivery budget. Content still keeps its existing at-least-one guarantee.
+func capMurmurMetadata(entry whisperstore.WhisperEntry, budgetBytes int) whisperstore.WhisperEntry {
+	if murmurWhisperSize(entry) > budgetBytes {
+		entry.Metadata = nil
+	}
+	return entry
+}
+
+// murmurWhisperSize accounts for content plus the metadata payload newly
+// emitted with murmurs. XML framing and pre-existing entry fields are outside
+// the established content budget.
+func murmurWhisperSize(entry whisperstore.WhisperEntry) int {
+	return len(entry.Content) + len(whisperMetadataJSON(entry.Metadata))
 }
 
 // deduplicateBySourceTopic keeps only the most recent entry per (source, topic) key.
