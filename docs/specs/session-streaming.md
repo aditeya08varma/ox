@@ -63,13 +63,28 @@ flowchart LR
 
 Cursor (`stream-cursor.json`, session cache dir, 0600, atomic temp+rename) records the last
 fully-published wire `seq`, the last published entry seq, the byte offset into `raw.jsonl`,
-a compact **wire-seq journal** (`seq` ↔ kind + `entry_seq`, contiguous runs collapsed to
-ranges — the mapping amendments need to replay under original seqs), and the file's
-**generation identity** (header `eid` + a rewrite-generation counter). On
-open, if the identity does not match the file (a sanctioned rewrite happened), the cursor
-resets to a safe replay point and replayed content is published as an **amendment** (bumped
-`revision`, below) — never as silently-skipped or mid-record bytes. Safe to lose entirely:
-restart from 0 is correct under at-least-once. Byte offset clamped to file size on load.
+and a compact **wire-seq journal** (`seq` ↔ kind + `entry_seq`, contiguous runs collapsed
+to ranges). Byte offset clamped to file size on load.
+
+**Deterministic wire-seq assignment (what makes cursor loss safe).** The assignment of wire
+seqs is defined as a **pure fold over `raw.jsonl` content**, not over runtime history:
+header → `open` (always seq 1); each pause/resume lifecycle marker entry → one `lifecycle`
+frame; entries inside suspended ranges → no seq; every other entry → one `turn`; footer →
+`close` (last). Pause boundaries are themselves recorded in `raw.jsonl` (ADR-020 markers),
+and pings are seq-less, so **the full assignment is recomputable from the file alone**. The
+cursor's journal is therefore a cache, not the source of truth: on cursor loss the
+publisher recomputes the assignment, resends, and the server's `(seq, revision)` dedup
+absorbs the duplicates — replay can never mint new seqs for previously-delivered content.
+
+**Rewrite generation & revision derivation.** The file's rewrite-generation counter is
+persisted **beside the file identity** (durable sidecar next to `raw.jsonl`, not inside the
+cursor), starting at 0 and bumped by every sanctioned rewrite. `revision` on replayed
+frames **equals the file generation** — deterministic, unambiguous after any number of
+rewrites, and it survives cursor loss. On cursor open, if the identity/generation does not
+match (a rewrite happened), the publisher recomputes the assignment against the rewritten
+file and republishes delivered frames under their original seqs at the new generation's
+revision (see Dedup & amendments) — never silently-skipped or mid-record bytes. A lost
+cursor over a never-rewritten file replays at revision 0: pure duplicates, dedup'd.
 
 ## Envelope (v1)
 
@@ -97,11 +112,14 @@ server applies caps at projection time):
   - `lifecycle` — `{event: pause|resume|stop|abort, reason, suspended_from_entry_seq?, resumed_at_entry_seq?}`.
   - `close` — final frame: `{finalize_reason}` (see Finalization).
 - `seq` — the **wire sequence**: client-allocated, 1-based, dense, monotonically increasing
-  across **all frame kinds** (one total order per conversation, mirroring the workspace
-  model's single `event_seq` spine), **never renumbered**, persisted in the cursor. Every
-  frame — `open`, `turn`, `lifecycle`, `close` — occupies exactly one `seq`, so every frame
-  kind has a well-defined dedup/retry identity and the wire sequence has **no intentional
-  gaps**: a server-observed gap always means undelivered frames.
+  across the durable frame kinds (one total order per conversation, mirroring the workspace
+  model's single `event_seq` spine), **never renumbered**. Exactly the frames that are a
+  deterministic function of `raw.jsonl` occupy seqs — `open`, `turn`, `lifecycle`, `close`
+  (see Deterministic assignment below) — so every durable frame kind has a well-defined
+  dedup/retry identity and the wire sequence has **no intentional gaps**: a server-observed
+  gap always means undelivered frames. Liveness pings (`kind:"ping"`) are **seq-less and
+  observational** — outside the dedup space, never journaled, never replayed — so ephemeral
+  traffic can never make the wire assignment unreconstructable.
 - `turn.entry_seq` — the raw.jsonl entry seq (stamped at write time; see below). This is the
   durable skeleton reference (pause ranges, erasure survivorship, git reconciliation) — a
   property of the *entry*, while `seq` is a property of the *transmission*.
@@ -118,13 +136,14 @@ server applies caps at projection time):
 - A **higher `revision` for an existing `seq` is an amendment, not a duplicate**: it
   supersedes the prior revision as a superseding revision with lineage (ADR-057 v3 revision
   machinery, exactly as ADR-087 D9 prescribes for late-delivery re-finalization). An
-  amendment is only an amendment **at the original wire `seq`** — to make that possible
-  across rewrites, the cursor durably journals the wire-seq assignment (`seq` ↔ kind +
-  `entry_seq`). A post-rewrite replay re-publishes each **previously delivered** frame under
-  its **original wire `seq`** at `revision+1` (so the redacted content supersedes the stale
-  revision rather than landing beside it); content that had **not** been delivered before
-  the rewrite takes fresh seqs at `revision 0` as normal. Late-drain resends of undelivered
-  frames are not amendments — same seq, same revision, dedup handles them.
+  amendment is only an amendment **at the original wire `seq`** — guaranteed by the
+  deterministic assignment: the same fold over the (rewritten) file yields the same seqs. A
+  post-rewrite replay re-publishes each **previously delivered** frame under its original
+  wire `seq` at `revision = file generation` (so the redacted content supersedes the stale
+  revision rather than landing beside it — deterministic even after multiple rewrites and
+  after cursor loss); content that had **not** been delivered before the rewrite takes
+  fresh seqs at the current generation as its first revision. Late-drain resends of
+  undelivered frames are not amendments — same seq, same revision, dedup handles them.
 - Amendments never resurrect purged content: deletion/erasure tombstones win over any
   revision (server-enforced; publisher drops its backlog on a tombstone response).
 - Consumers strict-decode per the ontology convention (ADR-076 chunks are fail-loud): any
@@ -223,17 +242,27 @@ only ever name genuinely undelivered frames.
   may finalize as `staleness-presumed` (~1 h without a real liveness signal — the stream's
   own frames are that signal; an idle-but-alive publisher emits a sparse `lifecycle`
   liveness ping so silence is never inferred from wire absence alone).
-- **Abort on the wire**: the publisher stops reading, **drops its unsent backlog and
-  cursor**, and emits only `close{finalize_reason:"abort"}`. The server discards the
-  conversation's streamed content (no projection, no summary derivation) and records a
-  tombstone consistent with abort-discards-capture semantics — an aborted session must never
-  be projected as a normally-stopped one, and late frames for an aborted conversation are
-  dropped by the tombstone rule.
+- **Abort on the wire — durable intent, then cleanup.** On abort the publisher first
+  persists a local **abort-intent marker** (atomic, in the session cache dir), then drops
+  its unsent backlog (content is never sent — the safe direction) and emits
+  `close{finalize_reason:"abort"}`. The marker is cleared only on **confirmed delivery** of
+  the abort: relay-level send success plus, as the authoritative fallback, an authenticated
+  HTTPS abort call to the coordinates endpoint (retried with backoff; survives process
+  restart via the marker — `DetectAndRestart` re-attaches to abort-intent sessions too).
+  This closes the lost-close hole: a crash after backlog cleanup can no longer strand a
+  partial stream that the server would later `staleness-presumed`-finalize and project.
+  Server-side, abort discards the conversation's streamed content (no projection, no
+  summary derivation) and records a tombstone — an aborted session must never be projected
+  as a normally-stopped one, and late frames for an aborted conversation are dropped by the
+  tombstone rule; the HTTPS abort suppresses any pending staleness finalization.
 - **Finalization is provisional and amendable; the FSM never reopens** (ADR-087 D9). A
   daemon that restarts after a `staleness-presumed` finalize keeps draining from its cursor:
   the client state is `stopped` (control) × `draining` (durability debt) — two axes, not a
   reopened session. Late frames are an amendment trigger: the server re-finalizes
-  idempotently (keyed on the delivered seq set), superseding derived artifacts with lineage.
+  idempotently, keyed on the **delivered watermark of `(seq → highest revision)`** — not the
+  bare seq set, since an amendment changes content without changing the seq set — and
+  recomputes derived artifacts whenever any seq's highest delivered revision increases,
+  superseding them with lineage.
   Amendment MUST respect deletion tombstones — a purged conversation is never resurrected,
   and the publisher drops its backlog on a tombstone response.
 - Continuing work later is a **new source-session with its own `ses_` id and therefore its
@@ -303,7 +332,10 @@ The server converts the conversation-native stream into whatever layers consumer
 ## Cloud contract (mono-side, required before customer enable)
 
 1. Coordinates endpoint = ensure-conversation (`ses_`→`cnv_` twin, team binding, account
-   feature check `features.session_streaming`) + relay JWT minting.
+   feature check `features.session_streaming`) + relay JWT minting + an authenticated
+   **abort** operation (the durable fallback for `close{finalize_reason:"abort"}` when the
+   relay path is unavailable: records the tombstone and suppresses any pending staleness
+   finalization).
 2. Subscriber ingesting `type='session'` conversations: `(seq, revision)` dedup
    (first-writer-wins within a revision, higher revision supersedes with lineage),
    suspended-range skeleton from `lifecycle` frames, abort-discard handling,
@@ -336,13 +368,23 @@ Test harness (PR 2b): codec round-trip + conformance; envelope-mapping goldens
 redacted `raw.jsonl` entries minus suspended ranges, with pause/resume lifecycle frames at
 the right entry seqs and a dense gap-free wire sequence); cursor crash-safety (crash at
 every step around publish/cursor-write, no loss, dedup on `(conversation_id, seq,
-revision)`); **pause-fence race test** (entries enqueued pre-pause must never reach the twin
-post-pause — exercise the read-then-pause-then-send interleaving deliberately); **rewrite
-generation test** (rewrite `raw.jsonl` under a draining cursor, assert reset + `revision+1`
-amendment replay **under the original wire seqs** — the stale revision superseded, never a
-duplicate beside it, never a mid-record resume); **mid-frame pause test** (pause landing
-between fragments of a large frame: the frame completes whole, the next suspended frame is
-discarded whole — no torn frames at the twin); **abort test** (backlog dropped, only
-`close{finalize_reason:"abort"}` arrives, twin marks tombstone, late frames dropped); pause
+revision)`); **pause-fence race test** (entries **at or past the persisted suspension
+boundary** must never reach the twin regardless of when they were read or enqueued —
+exercise the read-then-pause-then-send interleaving deliberately; entries below the
+boundary MAY legitimately land after the pause instant, per the frame-atomic
+range-membership contract); **rewrite generation test** (rewrite `raw.jsonl` under a
+draining cursor, assert replay **under the original wire seqs** at `revision = generation`
+— the stale revision superseded, never a duplicate beside it, never a mid-record resume);
+**lost-cursor recovery test** (delete `stream-cursor.json` mid-stream with pauses and
+lifecycle frames on record; restart; assert the recomputed assignment reproduces the
+original wire seqs exactly — duplicates dedup'd, no fresh seqs for delivered content);
+**mid-frame pause test** (pause landing between fragments of a large frame: the frame
+completes whole, the next suspended frame is discarded whole — no torn frames at the twin);
+**abort test** (backlog dropped, abort-intent marker persisted, only
+`close{finalize_reason:"abort"}` arrives, twin marks tombstone, late frames dropped — plus
+the close-loss variant: kill the publisher after backlog cleanup but before close delivery,
+restart, assert the abort intent is retried to confirmation and no content is ever
+projected); **revision-after-finalize test** (deliver a `revision = generation` amendment
+after finalization; assert derived artifacts recompute and supersede with lineage); pause
 fail-closed test; flag-off test (zero network, zero stream files). Deferred until mono locks
 the consumer: 5-way relay fault matrix, full golden wire suite, staging-relay integration.
