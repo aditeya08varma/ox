@@ -30,6 +30,16 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const agentHumanHandoff = `The "ox agent" command is used automatically by AI coding tools.
+You do not need to run it directly.
+
+For SageOx setup and health, run:     ox status
+To review AI coworker sessions, run:  ox session list
+To see current team activity, run:    ox glance
+
+For AI-coworker integration or debugging details, run: ox agent --help
+`
+
 // contextBytesProduced accumulates the number of context bytes written by the
 // current ox agent subcommand. Reset at the start of runWithAgentID and read
 // in a deferred heartbeat after the command completes. Best-effort tracking.
@@ -212,10 +222,11 @@ func init() {
 // (help, hook fast-path, validation errors) so even fast failures get
 // the right span name in the trace backend.
 func runAgentDispatcher(cmd *cobra.Command, args []string) error {
-	// no args = show help
+	// A person can easily discover this internal command from root help. Bare
+	// invocation is therefore a human-facing handoff, while explicit --help
+	// keeps the complete technical reference available for integrations.
 	if len(args) == 0 {
-		renameDispatcherSpan("help")
-		return cmd.Help()
+		return renderAgentHumanHandoff(cmd.OutOrStdout())
 	}
 
 	firstArg := args[0]
@@ -284,6 +295,14 @@ func runAgentDispatcher(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("%s", msg)
 	}
 	return fmt.Errorf("unknown command or invalid agent_id: %s\nRun 'ox agent --help' for usage", firstArg)
+}
+
+// renderAgentHumanHandoff directs a person who invokes bare `ox agent` to
+// the human-facing commands most likely to help. It intentionally has no
+// session, agent-ID, or daemon interactions.
+func renderAgentHumanHandoff(out io.Writer) error {
+	_, err := fmt.Fprint(out, agentHumanHandoff)
+	return err
 }
 
 // validSessionSubcommands enumerates the session sub-subcommands the
