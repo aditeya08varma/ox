@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"encoding/xml"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -18,6 +20,7 @@ type xmlEntry struct {
 	Source     string `xml:"source,attr"`
 	Agent      string `xml:"agent,attr,omitempty"`
 	Files      string `xml:"files,attr,omitempty"`
+	Metadata   string `xml:"metadata,attr,omitempty"`
 	Content    string `xml:",chardata"`
 }
 
@@ -89,6 +92,71 @@ func TestFormatWhispers_XMLRoundTrip(t *testing.T) {
 	}
 	if parsed.Entries[2].Topic != "ci" || parsed.Entries[2].Importance != "ambient" {
 		t.Errorf("entry[2] mismatch: %+v", parsed.Entries[2])
+	}
+}
+
+func TestFormatWhispers_MeetingMetadataRoundTrips(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]string
+		want     map[string]string
+	}{
+		{
+			name: "live meeting",
+			metadata: map[string]string{
+				"kind":          "live",
+				"recording_id":  "rec_01956a64-72e0-7000-8000-abcdef012345",
+				"recording_url": "https://sageox.ai/c/rec_01956a64-72e0-7000-8000-abcdef012345",
+				"participants":  "Alice <Ops>, Bob",
+				"topics":        "Friday migration, Cutover ownership",
+				"started_at":    "2026-08-14T17:30:00Z",
+			},
+			want: map[string]string{
+				"kind":          "live",
+				"recording_id":  "rec_01956a64-72e0-7000-8000-abcdef012345",
+				"recording_url": "https://sageox.ai/c/rec_01956a64-72e0-7000-8000-abcdef012345",
+				"participants":  "Alice <Ops>, Bob",
+				"topics":        "Friday migration, Cutover ownership",
+				"started_at":    "2026-08-14T17:30:00Z",
+			},
+		},
+		{name: "missing recording ID", metadata: map[string]string{"participants": "Alice <Ops>"}, want: map[string]string{"participants": "Alice <Ops>"}},
+		{name: "legacy recording ID", metadata: map[string]string{"recording_id": "legacy_123"}, want: map[string]string{"recording_id": "legacy_123"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := make(map[string]string, len(tt.metadata))
+			for key, value := range tt.metadata {
+				original[key] = value
+			}
+			entries := []whisperstore.WhisperEntry{{
+				ID:         "1",
+				Topic:      "meeting",
+				Content:    "The team agreed to ship Friday.",
+				Importance: whisperstore.ImportanceNormal,
+				Source:     "murmur",
+				Metadata:   tt.metadata,
+			}}
+
+			var buf bytes.Buffer
+			formatWhispers(&buf, entries)
+
+			var parsed xmlSystemReminder
+			if err := xml.Unmarshal(buf.Bytes(), &parsed); err != nil {
+				t.Fatalf("XML round-trip failed: %v\nraw:\n%s", err, buf.String())
+			}
+			var got map[string]string
+			if err := json.Unmarshal([]byte(parsed.Entries[0].Metadata), &got); err != nil {
+				t.Fatalf("metadata = %q, want JSON object: %v", parsed.Entries[0].Metadata, err)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("metadata = %#v, want %#v", got, tt.want)
+			}
+			if !reflect.DeepEqual(entries[0].Metadata, original) {
+				t.Errorf("formatter mutated input metadata: got %#v, want %#v", entries[0].Metadata, original)
+			}
+		})
 	}
 }
 

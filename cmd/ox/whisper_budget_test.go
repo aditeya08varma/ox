@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -119,6 +120,36 @@ func TestCapMurmurWhispers_AlwaysKeepsAtLeastOne(t *testing.T) {
 	}
 	if !found {
 		t.Error("at-least-one guarantee: single oversized entry must be kept")
+	}
+}
+
+func TestCapMurmurWhispers_MetadataRespectsDeliveryBudget(t *testing.T) {
+	now := time.Now()
+	oversizedMetadata := map[string]string{"detail": strings.Repeat("x", maxMurmurWhisperTokens*estimatedBytesPerToken)}
+	entries := []whisperstore.WhisperEntry{
+		{ID: "oversized", Source: "murmur", AgentID: "OxA", Content: "x", Metadata: oversizedMetadata, CreatedAt: now},
+		{ID: "fits", Source: "murmur", AgentID: "OxB", Content: "x", Metadata: map[string]string{"detail": strings.Repeat("x", 2500)}, CreatedAt: now.Add(-time.Minute)},
+		{ID: "also-fits", Source: "murmur", AgentID: "OxC", Content: "x", Metadata: map[string]string{"detail": strings.Repeat("x", 2500)}, CreatedAt: now.Add(-2 * time.Minute)},
+	}
+
+	result := capMurmurWhispers(entries)
+	totalBytes := 0
+	for _, entry := range result {
+		if entry.Source == "murmur" {
+			totalBytes += murmurWhisperSize(entry)
+		}
+		if entry.ID == "oversized" && len(entry.Metadata) != 0 {
+			t.Errorf("oversized metadata was kept: %#v", entry.Metadata)
+		}
+	}
+	if totalBytes > maxMurmurWhisperTokens*estimatedBytesPerToken {
+		t.Errorf("murmur payload size = %d, exceeds budget %d", totalBytes, maxMurmurWhisperTokens*estimatedBytesPerToken)
+	}
+
+	var formatted bytes.Buffer
+	formatWhispers(&formatted, result)
+	if strings.Contains(formatted.String(), oversizedMetadata["detail"]) {
+		t.Fatal("oversized metadata reached the formatted whisper")
 	}
 }
 
