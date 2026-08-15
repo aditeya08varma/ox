@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/sageox/ox/internal/auth"
 )
@@ -47,8 +49,11 @@ func TestReadHostedAttestFailuresUsesExactGrantRouteAndVerifiesEvidence(t *testi
 	oldRequest := hostedAttestRequest
 	t.Cleanup(func() { hostedAttestRequest = oldRequest })
 	var requestedURL string
-	hostedAttestRequest = func(_ context.Context, method, requestURL string, data interface{}) (*auth.APIResponse, error) {
+	hostedAttestRequest = func(_ context.Context, apiEndpoint, method, requestURL string, data any) (*auth.APIResponse, error) {
 		requestedURL = requestURL
+		if apiEndpoint != "https://sageox.ai" {
+			t.Fatalf("grant endpoint = %q", apiEndpoint)
+		}
 		if method != http.MethodPost || data != nil {
 			t.Fatalf("grant request = %s data=%#v", method, data)
 		}
@@ -70,6 +75,64 @@ func TestReadHostedAttestFailuresUsesExactGrantRouteAndVerifiesEvidence(t *testi
 	}
 	if failures.PublicationID != "attpub_test" || rawJSONArrayLength(failures.Failures) != 1 {
 		t.Fatalf("failures = %#v", failures)
+	}
+}
+
+func TestHostedAttestRequestDoesNotUseGlobalEndpointToken(t *testing.T) {
+	globalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "global endpoint must not receive the project request", http.StatusInternalServerError)
+	}))
+	defer globalServer.Close()
+
+	projectRequests := make(chan string, 1)
+	projectServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		projectRequests <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer projectServer.Close()
+
+	t.Setenv("SAGEOX_ENDPOINT", globalServer.URL)
+	t.Setenv("SAGEOX_TOKEN", "")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+
+	globalToken := &auth.StoredToken{
+		AccessToken: "global-secret",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}
+	if err := auth.SaveTokenForEndpoint(globalServer.URL, globalToken); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := hostedAttestRequest(context.Background(), projectServer.URL, http.MethodGet, projectServer.URL+"/api/v1/attest/attpub_test", nil)
+	var authErr *auth.AuthenticationError
+	if !errors.As(err, &authErr) {
+		t.Fatalf("request without project credentials error = %v, want AuthenticationError", err)
+	}
+	select {
+	case authorization := <-projectRequests:
+		t.Fatalf("project received a request without a project credential: %q", authorization)
+	default:
+	}
+
+	projectToken := &auth.StoredToken{
+		AccessToken: "project-secret",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	}
+	if err := auth.SaveTokenForEndpoint(projectServer.URL, projectToken); err != nil {
+		t.Fatal(err)
+	}
+	response, err := hostedAttestRequest(context.Background(), projectServer.URL, http.MethodGet, projectServer.URL+"/api/v1/attest/attpub_test", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !response.Ok() {
+		t.Fatalf("project request status = %d", response.StatusCode)
+	}
+	projectAuthorization := <-projectRequests
+	if projectAuthorization != "Bearer project-secret" {
+		t.Fatalf("project Authorization = %q, want project-scoped credential", projectAuthorization)
 	}
 }
 

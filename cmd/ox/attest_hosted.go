@@ -26,7 +26,9 @@ import (
 const hostedAttestReadLimit = 8 << 20
 
 var (
-	hostedAttestRequest     = auth.AuthenticatedRequest
+	hostedAttestRequest = func(ctx context.Context, apiEndpoint, method, requestURL string, data any) (*auth.APIResponse, error) {
+		return auth.NewAuthClient().WithEndpoint(apiEndpoint).AuthenticatedRequest(ctx, method, requestURL, data)
+	}
 	hostedAttestOpenBrowser = cli.OpenInBrowser
 )
 
@@ -166,15 +168,16 @@ func hostedAttestSelector(cmd *cobra.Command, args []string) (root, publicationI
 }
 
 func readHostedAttest(ctx context.Context, root, publicationID string, latest bool) (*hostedAttestReadModel, error) {
-	apiURL := endpoint.GetForProject(root) + "/api/v1/attest/" + url.PathEscape(publicationID)
+	projectEndpoint := endpoint.GetForProject(root)
+	apiURL := projectEndpoint + "/api/v1/attest/" + url.PathEscape(publicationID)
 	if latest {
 		repoID := config.GetRepoID(root)
 		if repoID == "" {
 			return nil, errors.New("project is missing its SageOx repo ID; run 'ox doctor'")
 		}
-		apiURL = endpoint.GetForProject(root) + "/api/v1/repos/" + url.PathEscape(repoID) + "/attest"
+		apiURL = projectEndpoint + "/api/v1/repos/" + url.PathEscape(repoID) + "/attest"
 	}
-	response, err := hostedAttestRequest(ctx, http.MethodGet, apiURL, nil)
+	response, err := hostedAttestRequest(ctx, projectEndpoint, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("read hosted Attest publication: %w", err)
 	}
@@ -189,8 +192,9 @@ func readHostedAttest(ctx context.Context, root, publicationID string, latest bo
 }
 
 func readHostedAttestFailures(ctx context.Context, root, publicationID string) (*hostedAttestFailures, error) {
-	grantURL := endpoint.GetForProject(root) + "/api/v1/attest/" + url.PathEscape(publicationID) + "/grants"
-	response, err := hostedAttestRequest(ctx, http.MethodPost, grantURL, nil)
+	projectEndpoint := endpoint.GetForProject(root)
+	grantURL := projectEndpoint + "/api/v1/attest/" + url.PathEscape(publicationID) + "/grants"
+	response, err := hostedAttestRequest(ctx, projectEndpoint, http.MethodPost, grantURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create Attest evidence grant: %w", err)
 	}
