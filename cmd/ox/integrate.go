@@ -64,6 +64,7 @@ var (
 	integrateCodexFlag    bool
 	integrateAmpFlag      bool
 	integratePiFlag       bool
+	integrateOMPFlag      bool
 	integrateAllFlag      bool
 	integrateForceFlag    bool
 )
@@ -76,8 +77,8 @@ var integrateCmd = &cobra.Command{
 Supported agents:
   Claude Code (default)    JSON hooks in ~/.claude/settings.json
 
-Other agents (Codex, Gemini, Amp, OpenCode, Pi) can be installed with their
-respective flags. Run 'ox init' to set up the project with appropriate
+Other agents (Codex, Gemini, Amp, OpenCode, Pi, OMP) can be installed with
+their respective flags. Run 'ox init' to set up the project with appropriate
 guidance files.
 
 The integration ensures that 'ox agent prime' runs when an AI coding session starts.`,
@@ -101,7 +102,8 @@ Other agents can be installed with their respective flags:
   --codex     Codex CLI hooks (use with --user for every repository)
   --amp       Amp CLI integration (AGENTS.md marker)
   --opencode  OpenCode plugin
-  --pi        Pi coding agent integration (AGENTS.md marker)`,
+  --pi        Pi coding agent integration (AGENTS.md marker)
+  --omp       OMP integration (.omp/AGENTS.md marker)`,
 	RunE: runIntegrateInstall,
 }
 
@@ -124,8 +126,9 @@ var integrateListCmd = &cobra.Command{
 
 // hasAnyAgentFlag returns true if any agent-specific install flag was set.
 func hasAnyAgentFlag() bool {
-	return integratePiFlag || integrateAmpFlag || integrateCodexFlag ||
-		integrateGeminiFlag || integrateOpenCodeFlag || integrateUserFlag
+	return integratePiFlag || integrateOMPFlag || integrateAmpFlag ||
+		integrateCodexFlag || integrateGeminiFlag || integrateOpenCodeFlag ||
+		integrateUserFlag
 }
 
 // integrateAgentInfo pairs adapter metadata with its current install status.
@@ -278,6 +281,20 @@ func runIntegrateInstall(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	// OMP installation
+	if integrateOMPFlag {
+		if integrateUserFlag {
+			return fmt.Errorf("OMP does not support user-level integration")
+		}
+		if err := installExternalAdapterHooks("omp", false); err != nil {
+			return fmt.Errorf("installing OMP integration: %w", err)
+		}
+
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
+	}
+
 	// Amp CLI installation
 	if integrateAmpFlag {
 		if integrateUserFlag {
@@ -402,6 +419,21 @@ func runIntegrateUninstall(cmd *cobra.Command, args []string) error {
 
 		fmt.Printf("✓ Pi project-level integration uninstalled\n")
 
+		userCfg, _ := config.LoadUserConfig()
+		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
+		return nil
+	}
+
+	// OMP uninstallation
+	if integrateOMPFlag {
+		if integrateUserFlag {
+			return fmt.Errorf("OMP does not support user-level integration")
+		}
+		if err := uninstallExternalAdapterHooks("omp", false); err != nil {
+			return fmt.Errorf("uninstalling OMP integration: %w", err)
+		}
+
+		fmt.Printf("✓ OMP project-level integration uninstalled\n")
 		userCfg, _ := config.LoadUserConfig()
 		tips.MaybeShow("hooks", tips.WhenMinimal, false, !userCfg.AreTipsEnabled(), false)
 		return nil
@@ -707,6 +739,8 @@ func init() {
 	_ = integrateInstallCmd.Flags().MarkHidden("amp")
 	integrateInstallCmd.Flags().BoolVar(&integratePiFlag, "pi", false, "install Pi integration (AGENTS.md marker)")
 	_ = integrateInstallCmd.Flags().MarkHidden("pi")
+	integrateInstallCmd.Flags().BoolVar(&integrateOMPFlag, "omp", false, "install OMP integration (.omp/AGENTS.md marker)")
+	_ = integrateInstallCmd.Flags().MarkHidden("omp")
 
 	// uninstall flags
 	integrateUninstallCmd.Flags().BoolVar(&integrateUserFlag, "user", false, "uninstall from user-level config")
@@ -722,6 +756,8 @@ func init() {
 	_ = integrateUninstallCmd.Flags().MarkHidden("amp")
 	integrateUninstallCmd.Flags().BoolVar(&integratePiFlag, "pi", false, "uninstall Pi integration (AGENTS.md marker)")
 	_ = integrateUninstallCmd.Flags().MarkHidden("pi")
+	integrateUninstallCmd.Flags().BoolVar(&integrateOMPFlag, "omp", false, "uninstall OMP integration (.omp/AGENTS.md marker)")
+	_ = integrateUninstallCmd.Flags().MarkHidden("omp")
 	_ = integrateUninstallCmd.Flags().MarkHidden("all")
 	_ = integrateUninstallCmd.Flags().MarkHidden("force")
 

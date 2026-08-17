@@ -257,6 +257,8 @@ func TestCanonicalAdapterName(t *testing.T) {
 		{"opencode", "opencode"},
 		{"pi", "pi"},
 		{"pi-coding-agent", "pi"},
+		{"omp", "omp"},
+		{"Oh My Pi", "omp"},
 		{"droid", "droid"},
 
 		// already canonical — passthrough

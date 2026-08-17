@@ -273,6 +273,7 @@ func TestGenericJSONLAdapter_AliasResolution(t *testing.T) {
 	Register(&mockAdapter{name: "amp"})
 	Register(&mockAdapter{name: "opencode"})
 	Register(&mockAdapter{name: "pi"})
+	Register(&mockAdapter{name: "omp"})
 	Register(&mockAdapter{name: "aider"})
 	Register(&mockAdapter{name: "droid"})
 	Register(&mockAdapter{name: "goose"})
@@ -297,6 +298,8 @@ func TestGenericJSONLAdapter_AliasResolution(t *testing.T) {
 		{"goose resolves to goose", "goose", "goose", false},
 		{"kiro resolves to generic", "kiro", "generic", false},
 		{"opencode resolves to opencode", "opencode", "opencode", false},
+		{"OMP resolves to omp", "OMP", "omp", false},
+		{"Oh My Pi resolves to omp", "Oh My Pi", "omp", false},
 		{"droid resolves to droid", "droid", "droid", false},
 		{"claude resolves to claude-code", "claude", "claude-code", false},
 		{"exact generic match", "generic", "generic", false},

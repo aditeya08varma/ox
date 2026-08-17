@@ -7,6 +7,8 @@ import (
 	"github.com/sageox/agentx"
 )
 
+const AgentTypeOMP = "omp"
+
 // SupportedAgents lists officially supported coding agents for MVP.
 // Other agents may work but quality of guidance is not guaranteed.
 var SupportedAgents = map[string]bool{
@@ -15,6 +17,7 @@ var SupportedAgents = map[string]bool{
 	string(agentx.AgentTypeGemini):     true,
 	string(agentx.AgentTypeAmp):        true,
 	string(agentx.AgentTypePi):         true,
+	AgentTypeOMP:                       true,
 	string(agentx.AgentTypeGoose):      true,
 }
 
@@ -34,6 +37,8 @@ func CanonicalAgentType(agentType string) string {
 		return string(agentx.AgentTypeAmp)
 	case "pi", "pi-coding-agent", "pi agent":
 		return string(agentx.AgentTypePi)
+	case "omp", "oh-my-pi", "oh my pi":
+		return AgentTypeOMP
 	case "goose":
 		return string(agentx.AgentTypeGoose)
 	}
@@ -82,7 +87,7 @@ func ClassifyAgentTier(agentType string) AgentTier {
 	// compaction event, so primed context does not survive a Goose compaction.
 	case string(agentx.AgentTypeCodex), string(agentx.AgentTypeGemini), string(agentx.AgentTypeGoose):
 		return TierSilver
-	case string(agentx.AgentTypeAmp), string(agentx.AgentTypeOpenCode), string(agentx.AgentTypePi):
+	case string(agentx.AgentTypeAmp), string(agentx.AgentTypeOpenCode), string(agentx.AgentTypePi), AgentTypeOMP:
 		return TierBronze
 	default:
 		return TierUnknown

@@ -208,6 +208,24 @@ builds:
     ldflags:
       - -s -w
 
+  - id: ox-adapter-omp
+    main: ./cmd/ox-adapter-omp
+    binary: ox-adapter-omp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - freebsd
+    goarch:
+      - amd64
+      - arm64
+    ignore:
+      - goos: freebsd
+        goarch: arm64
+    ldflags:
+      - -s -w
+
   - id: ox-adapter-aider
     main: ./cmd/ox-adapter-aider
     binary: ox-adapter-aider
@@ -330,6 +348,7 @@ brews:
       bin.install "ox-adapter-amp"
       bin.install "ox-adapter-opencode"
       bin.install "ox-adapter-pi"
+      bin.install "ox-adapter-omp"
       bin.install "ox-adapter-aider"
       bin.install "ox-adapter-droid"
       bin.install "ox-adapter-goose"

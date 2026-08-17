@@ -156,6 +156,20 @@ func initAgentPrimeCmd() {
 // LIMITATION: Running `claude "prompt"` executes the prompt BEFORE any hooks fire,
 // so ox cannot intercept this invocation. Users must run `claude` without a prompt
 // argument to allow the session-start hook to run `ox agent prime` first.
+func bypassAgentDetection(explicitAgent string) bool {
+	return prime.CanonicalAgentType(explicitAgent) == prime.AgentTypeOMP
+}
+
+func requireDetectedOrExplicitAgent(explicitAgent string) error {
+	if bypassAgentDetection(explicitAgent) {
+		return nil
+	}
+	if errMsg := agentx.RequireAgent("ox agent prime"); errMsg != "" {
+		return fmt.Errorf("%s", errMsg)
+	}
+	return nil
+}
+
 func runAgentPrime(cmd *cobra.Command, args []string) error {
 	// Deprecation handling for --ephemeral: warn loudly and propagate the
 	// env var so the in-process subsystems still behave correctly for
@@ -180,9 +194,9 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 		_ = os.Setenv(ephemeral.EnvEphemeral, "1")
 	}
 
-	// gate: require agent context
-	if errMsg := agentx.RequireAgent("ox agent prime"); errMsg != "" {
-		return fmt.Errorf("%s", errMsg)
+	agentType, _ := cmd.Flags().GetString("agent")
+	if err := requireDetectedOrExplicitAgent(agentType); err != nil {
+		return err
 	}
 
 	primeStart := time.Now()
@@ -196,7 +210,6 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 
 	textMode, _ := cmd.Flags().GetBool("text")
 	reviewMode, _ := cmd.Flags().GetBool("review")
-	agentType, _ := cmd.Flags().GetString("agent")
 	model, _ := cmd.Flags().GetString("model")
 	agentVer, _ := cmd.Flags().GetString("agent-ver")
 	idempotent, _ := cmd.Flags().GetBool("idempotent")
@@ -1147,6 +1160,17 @@ func repoSlugFromRemoteOrDir(projectRoot string) string {
 // startSessionRecording attempts to start session recording if enabled.
 // Returns the session status for inclusion in prime output.
 // Errors are logged but not fatal - session recording is optional.
+func sessionWatchMode(agentType string) string {
+	agent := GetAgent(agentType)
+	if agent == nil {
+		return "hook"
+	}
+	if !agent.SupportsHooks() || (!agent.HasHooks(false) && !agent.HasHooks(true)) {
+		return "tail"
+	}
+	return "hook"
+}
+
 func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string) *sessionStatus {
 	// resolve session mode from the config hierarchy. Sessions record into
 	// the project ledger; Knowledge Bubbles play no part (ox ADR-028).
@@ -1226,16 +1250,7 @@ func startSessionRecording(projectRoot, agentID, agentType, parentAgentID string
 		}
 	}
 
-	// determine watch mode: hook-driven agents use hooks, hookless agents use daemon tail
-	watchMode := "hook"
-	if agent := GetAgent(agentType); agent != nil {
-		if !agent.SupportsHooks() {
-			watchMode = "tail"
-		} else if !agent.HasHooks(false) && !agent.HasHooks(true) {
-			// agent supports hooks but none are installed — fall back to tail mode
-			watchMode = "tail"
-		}
-	}
+	watchMode := sessionWatchMode(agentType)
 
 	opts := session.StartRecordingOptions{
 		AgentID:       agentID,

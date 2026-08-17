@@ -26,6 +26,8 @@ func TestGetAgent_CaseInsensitive(t *testing.T) {
 		{"codex", "Codex", false},
 		{"Pi", "Pi", false},
 		{"pi", "Pi", false},
+		{"OMP", "OMP", false},
+		{"omp", "OMP", false},
 		{"nonexistent", "", true},
 		{"", "", true},
 	}
@@ -47,7 +49,7 @@ func TestGetAgent_CaseInsensitive(t *testing.T) {
 func TestAgentRegistry_AllRegistered(t *testing.T) {
 	t.Parallel()
 
-	expectedNames := []string{"Claude", "OpenCode", "Gemini", "Codex", "Amp", "Pi"}
+	expectedNames := []string{"Claude", "OpenCode", "Gemini", "Codex", "Amp", "Pi", "OMP"}
 	assert.Len(t, AgentRegistry, len(expectedNames))
 
 	for _, name := range expectedNames {
@@ -80,6 +82,8 @@ func TestAgentNames(t *testing.T) {
 		{&OpenCodeAgent{}, "OpenCode"},
 		{&GeminiAgent{}, "Gemini"},
 		{&CodexAgent{}, "Codex"},
+		{&PiAgent{}, "Pi"},
+		{&OMPAgent{}, "OMP"},
 	}
 
 	for _, tt := range tests {
@@ -102,6 +106,8 @@ func TestAgentSupportsHooks(t *testing.T) {
 		{"OpenCode", &OpenCodeAgent{}, true},
 		{"Gemini", &GeminiAgent{}, true},
 		{"Codex", &CodexAgent{}, true},
+		{"Pi", &PiAgent{}, false},
+		{"OMP", &OMPAgent{}, false},
 	}
 
 	for _, tt := range tests {

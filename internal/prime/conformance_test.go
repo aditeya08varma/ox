@@ -63,6 +63,15 @@ var adapterCaps = map[string][]string{
 		adapterprotocol.CapServeMode,
 		adapterprotocol.CapSessionImporter,
 	},
+	"omp": {
+		adapterprotocol.CapSessionReader,
+		adapterprotocol.CapHookInstaller,
+		adapterprotocol.CapSkillsInstaller,
+		adapterprotocol.CapIncrementalReader,
+		adapterprotocol.CapFileWatcher,
+		adapterprotocol.CapServeMode,
+		adapterprotocol.CapSessionImporter,
+	},
 	"droid": {
 		adapterprotocol.CapSessionReader,
 		adapterprotocol.CapHookInstaller,

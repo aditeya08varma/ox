@@ -24,6 +24,8 @@ func TestClassifyAgentTier(t *testing.T) {
 		{"amp", TierBronze},
 		{"opencode", TierBronze},
 		{"pi", TierBronze},
+		{"omp", TierBronze},
+		{"Oh My Pi", TierBronze},
 		{"", TierUnknown},
 		{"some-future-agent", TierUnknown},
 		{"cursor", TierUnknown},
@@ -49,6 +51,7 @@ func TestCanonicalAgentType(t *testing.T) {
 		{name: "codex", input: "codex", want: "codex"},
 		{name: "uppercase claude", input: "Claude-Code", want: "claude"},
 		{name: "whitespace padding", input: "  claude-code  ", want: "claude"},
+		{name: "OMP display name", input: "Oh My Pi", want: "omp"},
 		{name: "unknown agent", input: "some-unknown-agent", want: "some-unknown-agent"},
 	}
 
@@ -68,6 +71,7 @@ func TestIsAgentSupported(t *testing.T) {
 	}{
 		{name: "claude-code supported", input: "claude-code", want: true},
 		{name: "codex supported", input: "codex", want: true},
+		{name: "OMP supported", input: "omp", want: true},
 		{name: "empty unsupported", input: "", want: false},
 		{name: "unknown unsupported", input: "vim-copilot", want: false},
 		{name: "case insensitive", input: "Claude-Code", want: true},
@@ -90,6 +94,7 @@ func TestGetAgentSupportNotice(t *testing.T) {
 	}{
 		{name: "supported returns empty", input: "claude-code", wantEmpty: true},
 		{name: "codex returns empty", input: "codex", wantEmpty: true},
+		{name: "OMP returns empty", input: "Oh My Pi", wantEmpty: true},
 		{name: "empty returns generic notice", input: "", contains: "unknown if this agent"},
 		{name: "unknown agent returns specific notice", input: "cursor", contains: "explicitly designed for use with Claude Code"},
 	}
