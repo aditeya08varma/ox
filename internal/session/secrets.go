@@ -200,6 +200,28 @@ func DefaultPatterns() []SecretPattern {
 			Redact:  "[REDACTED_SAGEOX_API_KEY]",
 		},
 
+		// SageOx bearer tokens — the whole ox<letter>_ family generically
+		// (oxp_ personal, oxt_ team, and any family minted later) rather than
+		// hand-listing each one. A team token authenticates AS THE TEAM, so it
+		// has a larger blast radius than a personal PAT, and this is the worst
+		// place to leak one: an unredacted token in raw.jsonl is uploaded and
+		// synced to every teammate with ledger read access.
+		//
+		// This MUST stay in lockstep with logger.patRe — same \b anchor, same
+		// {8,} minimum. They are two independent redaction pipelines (this one
+		// guards captured session content, that one guards log output), and a
+		// family registered in only one of them is a hole shaped exactly like
+		// the one this pattern was added to close.
+		//
+		// The \b matters for more than tidiness: without it, ox[a-z]_ matches
+		// inside proxy_, so "proxy_endpoint_override" in a captured shell
+		// transcript would be silently rewritten.
+		{
+			Name:    "sageox_bearer_token",
+			Pattern: regexp.MustCompile(`\box[a-z]_[A-Za-z0-9_\-]{8,}`),
+			Redact:  "[REDACTED_SAGEOX_TOKEN]",
+		},
+
 		// AgentX keys (axk_ prefix, exactly 32 chars after prefix)
 		{
 			Name:    "agentx_key",

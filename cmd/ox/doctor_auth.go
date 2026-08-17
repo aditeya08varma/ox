@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -11,18 +12,40 @@ import (
 	"github.com/sageox/ox/internal/gitserver"
 )
 
+// malformedEnvTokenRemedy is the family-aware guidance for a SAGEOX_TOKEN that
+// is set for ep but fails the local format check.
+//
+// `ox login` is the wrong remedy for every shape of this failure, and actively
+// harmful for a team token: it only ever mints a personal oxp_ credential, so
+// following the advice silently changes which principal the CLI acts as.
+func malformedEnvTokenRemedy(ep string) string {
+	if auth.EnvTokenIsTeamFamily(ep) {
+		return auth.EnvVarToken + " holds a team token whose checksum does not match — a truncated paste is the usual cause. Re-copy it from your CI secret store. `ox login` mints personal oxp_ tokens and cannot replace it."
+	}
+	return auth.EnvVarToken + " is set for this endpoint but its value failed a local format check — a truncated paste is the usual cause. Re-copy the value, or unset " + auth.EnvVarToken + " to fall back to `ox login`."
+}
+
 // checkAuthentication verifies user is logged in - this is CRITICAL for SageOx to work
 func checkAuthentication() checkResult {
 	// use project-specific endpoint if available, otherwise default
 	gitRoot := findGitRoot()
 	projectEndpoint := endpoint.GetForProject(gitRoot)
+	// Resolve the endpoint once. auth.IsAuthenticated() is exactly
+	// IsAuthenticatedForEndpoint(endpoint.Get()), and the env-token questions
+	// below need the same endpoint the auth check used — SAGEOX_TOKEN is bound
+	// to one endpoint, so asking about "" would report every token as absent.
+	if projectEndpoint == "" {
+		projectEndpoint = endpoint.Get()
+	}
 
-	var authenticated bool
-	var err error
-	if projectEndpoint != "" {
-		authenticated, err = auth.IsAuthenticatedForEndpoint(projectEndpoint)
-	} else {
-		authenticated, err = auth.IsAuthenticated()
+	authenticated, err := auth.IsAuthenticatedForEndpoint(projectEndpoint)
+
+	// A silently-substituted principal is exactly the failure mode doctor
+	// exists to catch: the operator named one credential, ox declined to use
+	// it, and every remaining path reports the state as an ordinary absence.
+	if errors.Is(err, auth.ErrEnvTokenMalformed) {
+		return CriticalCheck("Logged in", auth.EnvVarToken+" malformed",
+			malformedEnvTokenRemedy(projectEndpoint))
 	}
 
 	if err != nil {
@@ -36,12 +59,7 @@ func checkAuthentication() checkResult {
 	}
 
 	// get user info for display
-	var token *auth.StoredToken
-	if projectEndpoint != "" {
-		token, err = auth.GetTokenForEndpoint(projectEndpoint)
-	} else {
-		token, err = auth.GetToken()
-	}
+	token, err := auth.GetTokenForEndpoint(projectEndpoint)
 	if err != nil || token == nil {
 		return PassedCheck("Logged in", "yes")
 	}

@@ -1055,3 +1055,148 @@ func TestConcurrentSaveToken_SameEndpoint(t *testing.T) {
 	require.NotNil(t, token, "token should exist after concurrent writes to same endpoint")
 	assert.Contains(t, token.AccessToken, "token-", "should be one of the written tokens")
 }
+
+// --- Env-token fail-closed behavior ---
+
+// TestGetTokenForEndpoint_MalformedEnvTokenDoesNotPromoteDiskIdentity —
+// Failure prevented: a developer logged in as themselves exports a TEAM service
+// token whose paste was truncated. The intent is "act as the team". If the
+// rejected value is silently discarded and the disk token used instead, every
+// API call, ledger write, and murmur is attributed to the human while status
+// shows a green check — a principal substitution with audit-trail consequences.
+// The declared principal is honored, or nothing is.
+func TestGetTokenForEndpoint_MalformedEnvTokenDoesNotPromoteDiskIdentity(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("SAGEOX_ENDPOINT", "")
+
+	// a real team token with the last character of its CRC suffix lost —
+	// the exact shape a truncated copy/paste produces.
+	full := validSageOxTestToken(TeamTokenPrefix, "ci_service")
+	truncated := full[:len(full)-1]
+	t.Setenv(EnvVarToken, truncated)
+
+	const ep = "https://sageox.ai"
+	disk := &StoredToken{
+		AccessToken: "disk-human-token",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		UserInfo: UserInfo{
+			UserID: "human-42",
+			Email:  "human@example.com",
+			Name:   "Human Coworker",
+		},
+	}
+	require.NoError(t, SaveTokenForEndpoint(ep, disk))
+
+	client := NewTestClient(t)
+	require.NoError(t, client.SaveTokenForEndpoint(ep, disk))
+
+	cases := []struct {
+		name string
+		get  func(string) (*StoredToken, error)
+	}{
+		{"package-level", GetTokenForEndpoint},
+		{"AuthClient", client.GetTokenForEndpoint},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.get(ep)
+			assert.Nil(t, got, "must not hand back the disk identity for a rejected env token")
+			require.Error(t, err, "a malformed SAGEOX_TOKEN must not resolve to any credential")
+			assert.ErrorIs(t, err, ErrEnvTokenMalformed)
+
+			msg := err.Error()
+			assert.Contains(t, msg, EnvVarToken, "the error must name the env var the operator set")
+			assert.NotContains(t, msg, truncated, "the error must never echo the credential value")
+		})
+	}
+}
+
+// TestGetLoggedInEndpoints_DoesNotDropEndpoint — Failure prevented: with
+// SAGEOX_TOKEN unset and two disk logins, using list length as a proxy for "the
+// env token was already added" skips whichever endpoint the randomized map
+// iteration does not reach first, so `ox status` reports a different set of
+// logins run to run.
+//
+// The call is repeated because the defect is map-order dependent: a single
+// call reproduces it only about half the time, while 16 calls make a surviving
+// bug effectively certain to show.
+func TestGetLoggedInEndpoints_DoesNotDropEndpoint(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(EnvVarToken, "")
+	t.Setenv("SAGEOX_ENDPOINT", "")
+
+	prod := &StoredToken{AccessToken: "prod-token", ExpiresAt: time.Now().Add(time.Hour)}
+	staging := &StoredToken{AccessToken: "staging-token", ExpiresAt: time.Now().Add(time.Hour)}
+	require.NoError(t, SaveTokenForEndpoint("https://sageox.ai", prod))
+	require.NoError(t, SaveTokenForEndpoint("https://staging.sageox.ai", staging))
+
+	for i := 0; i < 16; i++ {
+		assert.Len(t, GetLoggedInEndpoints(), 2, "both disk logins must be reported on every call")
+	}
+}
+
+// TestAuthClientAuthChecks_MalformedEnvTokenSurfacesReason is the client-scoped
+// twin of TestAuthChecks_MalformedEnvTokenSurfacesReason in validate_test.go.
+// The two implementations are the same swallow with the same remedy, so they get
+// the same table: if they drift, a client-scoped caller reports a different
+// verdict than the package-level one for identical inputs — the kind of
+// divergence that produces a bug report nobody can reproduce a year out.
+//
+// Row by row: "malformed" states the fix, "no credential at all" states the
+// requirement it must not break, and "unreadable auth.json" is the one that
+// guards it. A logged-out user cannot catch an over-broad fix, because the
+// resolver returns (nil, nil) and the error branch is never entered at all —
+// only a genuine resolution failure that must STILL degrade quietly can.
+func TestAuthClientAuthChecks_MalformedEnvTokenSurfacesReason(t *testing.T) {
+	const ep = "https://sageox.ai"
+
+	t.Run("malformed env token", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("SAGEOX_ENDPOINT", "")
+
+		// a real team token with the last character of its CRC suffix lost —
+		// the exact shape a truncated copy/paste produces.
+		full := validSageOxTestToken(TeamTokenPrefix, "ci_service")
+		truncated := full[:len(full)-1]
+		t.Setenv(EnvVarToken, truncated)
+
+		client := NewTestClient(t)
+		ok, err := client.IsAuthCredentialValidForEndpoint(ep)
+		assert.False(t, ok, "reported authenticated on a credential that failed the local format check")
+		assert.ErrorIs(t, err, ErrEnvTokenMalformed,
+			"swallowing the reason renders \"not logged in\" and sends the operator to a command that cannot fix a team token")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), truncated, "the error must never echo the credential value")
+	})
+
+	t.Run("no credential at all", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("SAGEOX_ENDPOINT", "")
+		t.Setenv(EnvVarToken, "")
+
+		client := NewTestClient(t)
+		ok, err := client.IsAuthCredentialValidForEndpoint(ep)
+		assert.False(t, ok, "reported authenticated with no credential present")
+		assert.NoError(t, err,
+			"being logged out is a normal state, not a failure — an error here turns every unauthenticated invocation into a hard error")
+	})
+
+	t.Run("unreadable auth.json still degrades quietly", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("SAGEOX_ENDPOINT", "")
+		t.Setenv(EnvVarToken, "")
+
+		client := NewTestClient(t)
+		authPath, err := client.GetAuthFilePath()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
+		require.NoError(t, os.WriteFile(authPath, []byte("{ this is not valid json"), 0o600))
+
+		ok, err := client.IsAuthCredentialValidForEndpoint(ep)
+		assert.False(t, ok, "reported authenticated from an unreadable auth.json")
+		assert.NoError(t, err,
+			"only ErrEnvTokenMalformed is worth surfacing here — reporting every resolution failure "+
+				"would make a corrupt auth.json a hard error for callers that only wanted to know whether to show a login hint")
+	})
+}

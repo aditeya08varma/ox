@@ -582,6 +582,79 @@ func TestRedactString_SlackTokens(t *testing.T) {
 	}
 }
 
+// TestRedactString_SageOxBearerTokens covers the whole ox<letter>_ bearer-token
+// family (oxp_ personal, oxt_ team, and any family minted later).
+//
+// Failure prevented: a SageOx token pasted into a prompt — or captured from a
+// shell adapter running `echo $SAGEOX_TOKEN` — written verbatim to raw.jsonl,
+// uploaded, and synced to every teammate with ledger read access. A team token
+// authenticates AS THE TEAM, so that hands out team-scoped API access. Before
+// this pattern existed, DefaultPatterns covered GitHub, GitLab, Slack, and the
+// mk_ SageOx API key, but nothing matched our own bearer tokens.
+//
+// The negative rows are the other half: this is a generic ox[a-z]_ pattern, so
+// without the \b anchor it matches inside proxy_, and a captured transcript
+// discussing proxy_endpoint_override would be silently rewritten.
+func TestRedactString_SageOxBearerTokens(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantFind bool
+	}{
+		{
+			name:     "team token — largest blast radius",
+			input:    "SAGEOX_TOKEN=oxt_deadbeefdeadbeefdead_1ljPfr",
+			wantFind: true,
+		},
+		{
+			name:     "personal token",
+			input:    "export SAGEOX_TOKEN=oxp_deadbeefdeadbeefdead_4bDZfN",
+			wantFind: true,
+		},
+		{
+			name:     "a family minted later is covered without a code change",
+			input:    "using oxz_deadbeefdeadbeefdead for the call",
+			wantFind: true,
+		},
+		{
+			name:     "bare token mid-sentence",
+			input:    "the token oxt_deadbeefdeadbeefdead expired",
+			wantFind: true,
+		},
+		{
+			name:     "proxy_ must survive — no left boundary would eat it",
+			input:    "failed to dial via proxy_endpoint_override: connection refused",
+			wantFind: false,
+		},
+		{
+			name:     "PROXY env var must survive",
+			input:    "HTTPS_PROXY=http://proxy_internal_corp:3128",
+			wantFind: false,
+		},
+		{
+			name:     "too short to be a credential",
+			input:    "oxt_abc",
+			wantFind: false,
+		},
+	}
+
+	r := NewRedactor()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			redacted, found := r.RedactString(tt.input)
+			hasToken := containsPattern(found, "sageox_bearer_token")
+			assert.Equal(t, tt.wantFind, hasToken)
+			if tt.wantFind {
+				assert.NotContains(t, redacted, "deadbeefdeadbeefdead",
+					"the credential body must not survive redaction")
+			} else {
+				assert.Equal(t, tt.input, redacted,
+					"a non-credential must pass through byte-for-byte")
+			}
+		})
+	}
+}
+
 func TestRedactString_StripeKeys(t *testing.T) {
 	tests := []struct {
 		name     string

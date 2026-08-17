@@ -441,10 +441,17 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				}
 			}
 
-			// distinguish "never logged in" from "token expired/refresh failed"
-			msg := "Not logged in."
-			if authErr != nil {
-				msg = "Authentication expired."
+			// Distinguish "never logged in" from "token expired/refresh failed"
+			// from "SAGEOX_TOKEN is set but unusable". The third case must NOT
+			// advise `ox login`: an env token wins over any disk credential, so
+			// the login would succeed and every command after it would fail the
+			// same way, with nothing connecting the two.
+			msg := fmt.Sprintf("Not logged in. Run 'ox login' to authenticate with %s.", endpointSlug)
+			switch {
+			case errors.Is(authErr, auth.ErrEnvTokenMalformed):
+				msg = fmt.Sprintf("SAGEOX_TOKEN is set but its value failed a local format check, so it was refused for %s. Re-copy the token (a truncated paste is the usual cause), or unset SAGEOX_TOKEN to use a stored login.", endpointSlug)
+			case authErr != nil:
+				msg = fmt.Sprintf("Authentication expired. Run 'ox login' to authenticate with %s.", endpointSlug)
 			}
 			output := agentPrimeOutput{
 				Status:             "degraded",
@@ -452,7 +459,7 @@ func runAgentPrime(cmd *cobra.Command, args []string) error {
 				Session:            sessionStat,
 				CurrentUserName:    currentUserName,
 				CurrentUserAliases: currentUserAliases,
-				Message:            fmt.Sprintf("%s Run 'ox login' to authenticate with %s. Session recording is active locally — data will be uploaded after authentication.", msg, endpointSlug),
+				Message:            msg + " Session recording is active locally — data will be uploaded after authentication.",
 			}
 			if sessionStat != nil && sessionStat.UserNotification != "" {
 				output.UserNotification = sessionStat.UserNotification

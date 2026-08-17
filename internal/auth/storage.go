@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"time"
@@ -8,6 +9,16 @@ import (
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/paths"
 )
+
+// ErrEnvTokenMalformed reports that SAGEOX_TOKEN was set and bound to the
+// requested endpoint, but its value failed the local format check — so no
+// credential was resolved at all.
+//
+// Callers that render or explain auth state should branch on this with
+// errors.Is: "the credential you named is unusable" and "you have no
+// credential" call for different advice, and conflating them sends a CI
+// operator to `ox login` when the fix is to re-copy a service token.
+var ErrEnvTokenMalformed = errors.New("SAGEOX_TOKEN is set but its value failed a local format check")
 
 // UserInfo contains user information from the authentication provider
 type UserInfo struct {
@@ -107,6 +118,29 @@ func GetToken() (*StoredToken, error) {
 	return GetTokenForEndpoint(endpoint.Get())
 }
 
+// envTokenOrError resolves SAGEOX_TOKEN for ep ahead of any disk lookup.
+//
+// Three outcomes, and the middle one is the whole point:
+//   - (token, nil)  — a usable env credential; use it, skip auth.json.
+//   - (nil, err)    — the operator set SAGEOX_TOKEN for THIS endpoint and the
+//     value is unusable. Fail closed. Falling through to auth.json would
+//     authenticate as whoever is logged in on this machine instead of the
+//     principal the operator named, silently re-attributing every API call,
+//     ledger write, and murmur — while status still shows a green check.
+//   - (nil, nil)    — no env token applies (unset, or bound to another
+//     endpoint); the caller should read auth.json as usual.
+func envTokenOrError(ep string) (*StoredToken, error) {
+	tok, state := EnvTokenFor(ep)
+	if state == EnvTokenMalformed {
+		// Never interpolate the value: this error is printed to terminals and
+		// carried into logs, and a value that failed a checksum is still a
+		// secret (it may be a correct token with one character lost).
+		return nil, fmt.Errorf("%w (endpoint %s): refusing to fall back to a stored login — re-copy the token (a truncated paste is the usual cause), or unset %s to use your `ox login` credential",
+			ErrEnvTokenMalformed, ep, EnvVarToken)
+	}
+	return tok, nil
+}
+
 // GetTokenForEndpoint loads the raw stored token for a specific endpoint.
 // Internal use only (refresh logic, display/identity checks).
 // Callers making API requests MUST use EnsureValidTokenForEndpoint(ep, 300)
@@ -114,7 +148,11 @@ func GetToken() (*StoredToken, error) {
 func GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	ep = endpoint.NormalizeEndpoint(ep)
 
-	if envTok := tokenFromEnv(ep); envTok != nil {
+	envTok, envErr := envTokenOrError(ep)
+	if envErr != nil {
+		return nil, envErr
+	}
+	if envTok != nil {
 		return envTok, nil
 	}
 
@@ -266,10 +304,18 @@ func GetLoggedInEndpoints() []string {
 	// auth.json. Reading only the file made `ox status` print "not logged in"
 	// in a shell where every API call succeeded — the most misleading thing a
 	// status command can do, and the reason a working PAT read as a broken
-	// one. tokenFromEnv() owns the endpoint-binding rules (see env_token.go);
-	// we ask it rather than re-deriving them here.
+	// one. EnvTokenFor() owns the endpoint-binding and format rules (see
+	// env_token.go); we ask it rather than re-deriving them here.
+	//
+	// A malformed env value adds nothing here: this list means "endpoints with
+	// a usable credential", and the malformed case has none. Renderers must ask
+	// EnvTokenFor(envTokenEndpoint()) directly rather than inferring the env
+	// state from this list, or a rejected token with no disk login behind it
+	// reads as a plain "not logged in".
 	envEP := envTokenEndpoint()
-	if tokenFromEnv(envEP) != nil {
+	_, envState := EnvTokenFor(envEP)
+	envAdded := envState == EnvTokenValid
+	if envAdded {
 		endpoints = append(endpoints, envEP)
 	}
 
@@ -289,7 +335,11 @@ func GetLoggedInEndpoints() []string {
 			// The env token SHADOWS a disk token for the same endpoint
 			// (GetTokenForEndpoint returns the env one first), so listing both
 			// would report two logins where the process can only ever use one.
-			if normalized == envEP && len(endpoints) > 0 {
+			// Test envAdded, never len(endpoints): the length also becomes
+			// non-zero after the first DISK endpoint is appended, so under Go's
+			// randomized map order an unrelated endpoint could suppress this
+			// one — a different answer from `ox status` run to run.
+			if normalized == envEP && envAdded {
 				continue
 			}
 			if token != nil && token.AccessToken != "" && token.ExpiresAt.After(now) {
@@ -340,7 +390,13 @@ func (c *AuthClient) GetToken() (*StoredToken, error) {
 func (c *AuthClient) GetTokenForEndpoint(ep string) (*StoredToken, error) {
 	ep = endpoint.NormalizeEndpoint(ep)
 
-	if envTok := tokenFromEnv(ep); envTok != nil {
+	// Same fail-closed contract as the package-level function — the two must
+	// never disagree about which principal is in play (see TestPackageAndClientAgree).
+	envTok, envErr := envTokenOrError(ep)
+	if envErr != nil {
+		return nil, envErr
+	}
+	if envTok != nil {
 		return envTok, nil
 	}
 
@@ -451,6 +507,23 @@ func (c *AuthClient) IsAuthenticated() (bool, error) {
 func (c *AuthClient) IsAuthCredentialValidForEndpoint(ep string) (bool, error) {
 	token, err := c.EnsureValidTokenForEndpoint(ep, 0)
 	if err != nil {
+		// Same reasoning as the package-level IsAuthCredentialValidForEndpoint
+		// in validate.go, and deliberately the same shape: a named-but-unusable
+		// credential is a different fact from no credential, and only that one
+		// is worth reporting. Everything else still degrades to "not
+		// authenticated, no error". The twins must not diverge — a client-scoped
+		// caller that reports a different verdict than the package-level one is
+		// a bug report nobody can reproduce.
+		//
+		// Branch on THIS error rather than re-reading the token:
+		// EnsureValidTokenForEndpoint returns GetTokenForEndpoint's error
+		// verbatim, so re-calling would only add a file-lock round trip on the
+		// failure path. That verbatim pass-through is load-bearing — if it ever
+		// starts wrapping or swallowing, the malformed-env-token case in
+		// TestAuthClientAuthChecks_MalformedEnvTokenSurfacesReason goes red.
+		if errors.Is(err, ErrEnvTokenMalformed) {
+			return false, err
+		}
 		raw, _ := c.GetTokenForEndpoint(ep)
 		if raw != nil {
 			return false, fmt.Errorf("token refresh failed: %w", err)
