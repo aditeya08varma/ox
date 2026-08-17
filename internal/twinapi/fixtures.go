@@ -84,6 +84,16 @@ func (tw *Twin) CreateOrphanedSession(fakeUserID string) *Session {
 	return sess
 }
 
+// DeleteUser removes a user from the store while leaving any JWT already minted
+// for them signed and unexpired. Models a deleted or deprovisioned account: the
+// credential still verifies cryptographically but no longer resolves to a
+// principal, which is the shape of the "valid token, vanished user" rejection.
+func (tw *Twin) DeleteUser(id string) {
+	tw.store.mu.Lock()
+	delete(tw.store.users, id)
+	tw.store.mu.Unlock()
+}
+
 // AdvanceTime moves the fake clock forward by d.
 func (tw *Twin) AdvanceTime(d time.Duration) {
 	tw.store.advanceClock(d)

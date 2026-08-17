@@ -277,6 +277,158 @@ func TestUserInfo_OpaqueTokenRejected(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
+// --- D2. Token introspection ---
+//
+// GET /api/v1/auth/introspect is the one door the CLI validates every bearer
+// credential through. Its 200 shape is what auth.IntrospectResult parses, and
+// its 401 error_description is the only rejection detail a client ever sees, so
+// both are asserted field by field rather than by status code alone.
+
+// introspect issues an introspection request with the given bearer token.
+func introspect(t *testing.T, tw *Twin, token string) (*http.Response, map[string]any) {
+	t.Helper()
+
+	req, err := http.NewRequest("GET", tw.APIURL+"/api/v1/auth/introspect", nil)
+	require.NoError(t, err)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = resp.Body.Close() })
+
+	var body map[string]any
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&body))
+	return resp, body
+}
+
+// TestIntrospect_ValidJWT verifies the 200 body carries the full user principal.
+// Failure prevented: a response that parses but leaves User nil, which would let
+// callers render "identity resolved server-side" for a token that named a real
+// person.
+func TestIntrospect_ValidJWT(t *testing.T) {
+	t.Parallel()
+
+	tw := Start(t)
+	fix := tw.WithAuthenticatedUser("introspect@example.com", "Intro Spector")
+
+	resp, body := introspect(t, tw, fix.JWT)
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, true, body["active"])
+	assert.Equal(t, "user", body["principal_kind"])
+	assert.Equal(t, "Bearer", body["token_type"])
+	assert.Nil(t, body["team"], "a user principal must not also carry a team branch")
+
+	user, ok := body["user"].(map[string]any)
+	require.True(t, ok, "user branch must be present for principal_kind=user")
+	assert.Equal(t, fix.UserID, user["id"])
+	assert.Equal(t, "introspect@example.com", user["email"])
+	assert.Equal(t, "Intro Spector", user["name"])
+	assert.Equal(t, "free", user["tier"])
+}
+
+// TestIntrospect_MissingAuthHeader verifies an unauthenticated request is
+// refused with a description naming the missing header.
+func TestIntrospect_MissingAuthHeader(t *testing.T) {
+	t.Parallel()
+
+	tw := Start(t)
+
+	resp, body := introspect(t, tw, "")
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Equal(t, "invalid_token", body["error"])
+	assert.Contains(t, body["error_description"], "missing authorization header")
+}
+
+// TestIntrospect_OpaqueTokenRejected verifies an opaque session token — not a
+// JWT — is refused, and that the reason says so.
+// Failure prevented: the original bug, where the CLI stored an opaque session
+// token as access_token and every local check called it valid.
+func TestIntrospect_OpaqueTokenRejected(t *testing.T) {
+	t.Parallel()
+
+	tw := Start(t)
+	fix := tw.WithAuthenticatedUser("opaque@example.com", "Opaque")
+
+	resp, body := introspect(t, tw, fix.SessionToken)
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Contains(t, body["error_description"], "malformed JWT")
+}
+
+// TestIntrospect_ExpiredJWT verifies a once-valid credential is refused after
+// the clock passes its expiry, with expiry named as the reason.
+func TestIntrospect_ExpiredJWT(t *testing.T) {
+	t.Parallel()
+
+	tw := Start(t)
+	fix := tw.WithAuthenticatedUser("stale@example.com", "Stale")
+
+	tw.AdvanceTime(25 * time.Hour)
+
+	resp, body := introspect(t, tw, fix.JWT)
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Contains(t, body["error_description"], "expired")
+}
+
+// TestIntrospect_DeletedUser verifies that a cryptographically valid, unexpired
+// JWT is still refused once its principal no longer exists — and that the
+// description says which of the two it was.
+// Failure prevented: a deprovisioned account reported to the operator as a
+// generic auth failure, sending them to rotate a credential that is fine.
+func TestIntrospect_DeletedUser(t *testing.T) {
+	t.Parallel()
+
+	tw := Start(t)
+	fix := tw.WithAuthenticatedUser("vanished@example.com", "Vanished")
+
+	// the JWT is accepted while the account exists
+	okResp, _ := introspect(t, tw, fix.JWT)
+	require.Equal(t, http.StatusOK, okResp.StatusCode)
+
+	tw.DeleteUser(fix.UserID)
+
+	resp, body := introspect(t, tw, fix.JWT)
+
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	assert.Equal(t, "invalid_token", body["error"])
+	assert.Contains(t, body["error_description"], "user account not found")
+}
+
+// TestIntrospect_FaultInjectionIsPathGeneric verifies the fault middleware and
+// the call recorder key off the request path, so the introspection route gets
+// them for free.
+// Failure prevented: a middleware that only knows the legacy OAuth2 paths,
+// which would silently make every introspection fault test a no-op.
+func TestIntrospect_FaultInjectionIsPathGeneric(t *testing.T) {
+	t.Parallel()
+
+	tw := Start(t)
+	fix := tw.WithAuthenticatedUser("faulted@example.com", "Faulted")
+
+	tw.InjectFault("/api/v1/auth/introspect", http.StatusServiceUnavailable)
+
+	req, err := http.NewRequest("GET", tw.APIURL+"/api/v1/auth/introspect", nil)
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer "+fix.JWT)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	tw.AssertCalled(t, "GET", "/api/v1/auth/introspect")
+
+	// clearing the fault restores the route
+	tw.ClearFaults()
+
+	after, _ := introspect(t, tw, fix.JWT)
+	assert.Equal(t, http.StatusOK, after.StatusCode)
+}
+
 // --- E. Token refresh ---
 
 // TestTokenRefresh_HappyPath verifies refresh returns a new JWT and rotates

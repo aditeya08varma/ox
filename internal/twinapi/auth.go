@@ -184,6 +184,69 @@ func (tw *Twin) handleUserInfo(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleIntrospect handles GET /api/v1/auth/introspect.
+//
+// This is the single family-agnostic door the CLI uses to validate ANY bearer
+// credential and learn what principal it authenticates as. The twin only mints
+// session-derived JWTs, so every accepted credential resolves to a user
+// principal here; the response shape is the same one a team-service principal
+// would arrive in, with the other branch left null.
+//
+// Rejections answer a uniform 401 with {"error", "error_description"} rather
+// than a typed reason code. The description is therefore the ONLY signal the
+// client has to tell an operator why a credential was refused, which is why
+// each rejection path below carries a distinct one.
+func (tw *Twin) handleIntrospect(w http.ResponseWriter, r *http.Request) {
+	token := extractBearer(r)
+	if token == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error":             "invalid_token",
+			"error_description": "missing authorization header",
+		})
+		return
+	}
+
+	claims, err := tw.store.validateJWT(token)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error":             "invalid_token",
+			"error_description": err.Error(),
+		})
+		return
+	}
+
+	// A signed credential only asserts who it was minted for — the principal
+	// must still exist. A deleted account whose JWT has not yet expired is a
+	// real rejection path, and one where a generic "authentication required"
+	// sends the operator chasing the wrong problem.
+	tw.store.mu.RLock()
+	_, ok := tw.store.users[claims.Sub]
+	tw.store.mu.RUnlock()
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{
+			"error":             "invalid_token",
+			"error_description": "user account not found",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"active":         true,
+		"principal_kind": "user",
+		"scope":          "full-access",
+		"token_type":     "Bearer",
+		"expires_at":     nil,
+		"user": map[string]string{
+			"id":    claims.Sub,
+			"email": claims.Email,
+			"name":  claims.Name,
+			"tier":  claims.Tier,
+		},
+		"team":  nil,
+		"token": nil,
+	})
+}
+
 // handleTokenRefresh handles POST /oauth2/token.
 // Accepts grant_type=refresh_token and returns a new JWT + refresh token.
 func (tw *Twin) handleTokenRefresh(w http.ResponseWriter, r *http.Request) {

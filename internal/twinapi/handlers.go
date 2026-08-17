@@ -16,6 +16,9 @@ func (tw *Twin) apiMux() http.Handler {
 	// JWT exchange
 	mux.HandleFunc("GET /api/v1/cli/auth/token", tw.handleJWTExchange)
 
+	// token introspection — the family-agnostic validation door
+	mux.HandleFunc("GET /api/v1/auth/introspect", tw.handleIntrospect)
+
 	// OAuth2
 	mux.HandleFunc("GET /oauth2/userinfo", tw.handleUserInfo)
 	mux.HandleFunc("POST /oauth2/token", tw.handleTokenRefresh)

@@ -2,7 +2,8 @@
 //
 // Each Twin instance runs two HTTP servers on ephemeral ports: an API server that
 // replicates the real SageOx auth surface (device flow, JWT exchange, userinfo,
-// token refresh, revocation) and an admin server for test control (user creation,
+// token introspection, token refresh, revocation) and an admin server for test
+// control (user creation,
 // fault injection, clock manipulation, call recording).
 //
 // The ox CLI points at the API port via SAGEOX_ENDPOINT and cannot distinguish

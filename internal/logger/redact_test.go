@@ -58,6 +58,15 @@ func TestRedactSecrets_Shapes(t *testing.T) {
 			secret:  "oxp_deadbeefdeadbeefdead",
 			mustCon: "ls-remote",
 		},
+		{
+			// A team token (oxt_) has a LARGER blast radius than a
+			// personal PAT — it must be redacted just as aggressively.
+			// This is the family the ox[a-z]_ generalization exists for.
+			name:    "bare sageox team-token prefix",
+			in:      "probe used token oxt_deadbeefdeadbeefdead for ls-remote",
+			secret:  "oxt_deadbeefdeadbeefdead",
+			mustCon: "ls-remote",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -82,11 +91,90 @@ func TestRedactSecrets_NoFalsePositives(t *testing.T) {
 		`{"status":"ok","count":3,"endpoint":"sageox.ai"}`,
 		"http response body (empty body)",
 		"POST https://api.sageox.ai/api/v1/repo/init 200 in 42ms",
+		// The ox[a-z]_ family pattern matches inside "proxy_" unless it is
+		// left-anchored on a word boundary — and proxy_* identifiers are the
+		// native vocabulary of network-failure log lines, exactly the ones that
+		// must stay legible when someone is debugging a connection problem.
+		"failed to dial via proxy_endpoint_override: connection refused",
+		"HTTPS_PROXY=http://proxy_internal_corp:3128",
+		"no_proxy_hosts_configured for this run",
+		"epoxy_batch_identifier_12345",
 	}
 	for _, s := range clean {
 		if got := redactSecrets(s); got != s {
 			t.Errorf("clean string altered:\n in:  %s\n out: %s", s, got)
 		}
+	}
+}
+
+// TestRedactedTokenPrefix_SurvivesLogRedaction pins the margin that lets a
+// rejected-credential diagnostic name WHICH credential was rejected.
+//
+// The auth package logs a short prefix of a malformed token ("oxp_test…[REDACTED]")
+// so an operator can tell a personal token from a team one. That line only works if
+// it survives this sink: patRe needs {8,} body characters after the prefix, and an
+// 8-character show window leaves only 4. The margin is 3 characters and is enforced
+// nowhere else — widen the show window to 12 and the diagnostic silently degrades to
+// "[REDACTED]…[REDACTED]", telling the operator nothing, with no other test noticing.
+//
+// Asserted on the literal shape on purpose: internal/logger must import no other
+// internal package (it sits underneath all of them), so it cannot import the auth
+// helper that produces this string.
+//
+// Failure prevented: a token-family diagnostic that is scrubbed into uselessness by
+// its own safety net — either by widening the show window upstream or by loosening
+// patRe's length floor here.
+func TestRedactedTokenPrefix_SurvivesLogRedaction(t *testing.T) {
+	cases := []struct {
+		name      string
+		showChars int
+		line      string
+		survives  bool
+	}{
+		{
+			name:      "current 8-char window stays legible",
+			showChars: 8,
+			line:      "prefix=oxp_test…[REDACTED] length=15",
+			survives:  true,
+		},
+		{
+			name:      "11 is the widest window that still survives",
+			showChars: 11,
+			line:      "prefix=oxp_test123…[REDACTED] length=15",
+			survives:  true,
+		},
+		{
+			// The cliff: 12 shown characters means 8 body characters, which is
+			// exactly patRe's {8,} floor, so the prefix redacts itself away.
+			name:      "12-char window destroys the diagnostic",
+			showChars: 12,
+			line:      "prefix=oxp_test1234…[REDACTED] length=15",
+			survives:  false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactSecrets(tc.line)
+			if survived := strings.Contains(got, "oxp_test"); survived != tc.survives {
+				t.Fatalf("showChars=%d: token family prefix survived=%v, want %v\n in:  %s\n out: %s",
+					tc.showChars, survived, tc.survives, tc.line, got)
+			}
+		})
+	}
+}
+
+// TestRedactSecrets_ExportedWrapper covers the exported entry point used by call
+// sites that hold a value the slog ReplaceAttr hook never sees — notably an error
+// returned to a caller and printed straight to the terminal.
+// Failure prevented: a credential surfacing in terminal output because the only
+// scrubber was wired into the log sink.
+func TestRedactSecrets_ExportedWrapper(t *testing.T) {
+	got := RedactSecrets(`introspection failed: {"error_description":"bad token oxt_deadbeefdeadbeef"}`)
+	if strings.Contains(got, "oxt_deadbeefdeadbeef") {
+		t.Fatalf("exported scrubber leaked a team token: %s", got)
+	}
+	if !strings.Contains(got, "introspection failed") {
+		t.Fatalf("exported scrubber destroyed the error context: %s", got)
 	}
 }
 

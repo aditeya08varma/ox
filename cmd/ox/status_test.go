@@ -2,9 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -779,5 +782,92 @@ func TestFormatDurationShort(t *testing.T) {
 			got := status.FormatDurationShort(tt.duration)
 			assert.Equal(t, tt.want, got)
 		})
+	}
+}
+
+// --- renderAuthStatus: principal-kind-aware identity (token-hardening-contract.md §7) ---
+//
+// These use t.Setenv, which is incompatible with t.Parallel — auth-env
+// resolution is process-global (SAGEOX_TOKEN, XDG_CONFIG_HOME), matching the
+// serial pattern internal/auth's own env-token tests use.
+
+// TestRenderAuthStatus_TeamTokenActingAs is the red-first proof for the
+// "acting as team <team_id>" rendering: before this change, an env-sourced
+// team token fell into the generic "SAGEOX_TOKEN (env) — identity resolved
+// server-side per request" branch (same as any personal PAT), which never
+// told the user WHICH team the CLI was acting as. Reverting the switch in
+// renderAuthStatus back to the old if/else on epToken.UserInfo reproduces
+// that failure — this test would then fail on the "team_abc123" assertion.
+func TestRenderAuthStatus_TeamTokenActingAs(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != auth.IntrospectEndpoint {
+			t.Errorf("unexpected path %q, want %q", r.URL.Path, auth.IntrospectEndpoint)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"active": true,
+			"principal_kind": "team-service",
+			"scope": "read-only",
+			"token_type": "Bearer",
+			"expires_at": null,
+			"user": null,
+			"team": {"team_id": "team_abc123"},
+			"token": {"prefix": "oxt_ab12", "name": "ci-deploy"}
+		}`))
+	}))
+	defer srv.Close()
+
+	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+	// oxt_test_1ljPfr is the pinned team-token golden vector (contract §7) —
+	// a real, validly-checksummed value, so it clears env_token.go's CRC
+	// precheck and reaches the mock introspection server above.
+	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+
+	out := renderAuthStatus("/tmp/auth.json")
+
+	if !strings.Contains(out, "Acting as") {
+		t.Errorf("expected an \"Acting as\" line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "team_abc123") {
+		t.Errorf("expected the introspected team_id in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "ci-deploy") {
+		t.Errorf("expected the introspected token name in output, got:\n%s", out)
+	}
+	if strings.Contains(out, "identity resolved server-side per request") {
+		t.Errorf("team token fell into the generic blank-identity branch instead of the team-specific one:\n%s", out)
+	}
+}
+
+// TestRenderAuthStatus_RejectedTeamTokenGetsFamilyAwareHint proves a rejected
+// oxt_-shaped SAGEOX_TOKEN gets team-specific guidance ("set SAGEOX_TOKEN for
+// CI/API use; `ox login` expects a personal oxp_ token") instead of the
+// generic "mint a fresh PAT" hint, which sends a team-token holder toward the
+// wrong UI entirely.
+func TestRenderAuthStatus_RejectedTeamTokenGetsFamilyAwareHint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+
+	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
+	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+
+	out := renderAuthStatus("/tmp/auth.json")
+
+	if !strings.Contains(out, "this looks like a team token") {
+		t.Errorf("expected family-aware team-token hint, got:\n%s", out)
+	}
+	if !strings.Contains(out, "ox login") {
+		t.Errorf("expected the hint to mention `ox login`, got:\n%s", out)
+	}
+	if strings.Contains(out, "mint a fresh PAT") {
+		t.Errorf("rejected team token must not get the personal-PAT hint:\n%s", out)
 	}
 }

@@ -21,7 +21,8 @@ import (
 //   - JSON string field with a sensitive key: "token":"…", "git_token":"…"
 //   - Authorization: Bearer <token> and a bare "Bearer <token>"
 //   - credentials in a URL userinfo: https://user:secret@host
-//   - well-known PAT prefixes (SageOx oxp_, GitLab glpat-, GitHub gh*_)
+//   - well-known PAT prefixes (SageOx ox[a-z]_ family — personal oxp_, team
+//     oxt_, and any future family; GitLab glpat-, GitHub gh*_)
 func redactSecrets(s string) string {
 	if s == "" {
 		return s
@@ -43,8 +44,26 @@ var (
 	// scheme://user:secret@host — keep the username, redact the secret.
 	urlCredRe = regexp.MustCompile(`([a-zA-Z][a-zA-Z0-9+.-]*://[^:/?#\s@]+):[^@/?#\s]+@`)
 	// well-known personal-access-token prefixes (bare token strings).
-	patRe = regexp.MustCompile(`(?:oxp_|glpat-|ghp_|gho_|ghu_|ghs_|github_pat_)[A-Za-z0-9_-]{8,}`)
+	// ox[a-z]_ covers the whole SageOx bearer-token family generically
+	// (oxp_ personal, oxt_ team — and any family minted later) instead of
+	// hand-listing each one; a team token has a LARGER blast radius than a
+	// PAT, so a new family must be redacted by default, not opt-in.
+	//
+	// The leading \b is load-bearing: without it the generalized ox[a-z]_
+	// alternative matches INSIDE ordinary words, most damagingly "proxy_" —
+	// so "failed to dial via proxy_endpoint_override" logged as
+	// "failed to dial via pr[REDACTED]". That is the exact vocabulary of
+	// network-failure lines, the ones an operator most needs intact. A real
+	// token is always preceded by a non-word character (line start, space,
+	// '=', quote, ':', '/'), so the boundary costs no true-positive coverage.
+	patRe = regexp.MustCompile(`\b(?:ox[a-z]_|glpat-|ghp_|gho_|ghu_|ghs_|github_pat_)[A-Za-z0-9_-]{8,}`)
 )
+
+// RedactSecrets scrubs credential material from an arbitrary string. Exported for call
+// sites that must sanitize a value which is NOT a log attribute — notably an error
+// returned to the caller and printed to the terminal, which the slog ReplaceAttr hook
+// never sees.
+func RedactSecrets(s string) string { return redactSecrets(s) }
 
 // redactAttr is the slog ReplaceAttr hook: scrub every string-valued attribute
 // (body, response, url, error, …) through redactSecrets. Non-string attrs are

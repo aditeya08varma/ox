@@ -1055,3 +1055,83 @@ func TestConcurrentSaveToken_SameEndpoint(t *testing.T) {
 	require.NotNil(t, token, "token should exist after concurrent writes to same endpoint")
 	assert.Contains(t, token.AccessToken, "token-", "should be one of the written tokens")
 }
+
+// --- Env-token fail-closed behavior ---
+
+// TestGetTokenForEndpoint_MalformedEnvTokenDoesNotPromoteDiskIdentity —
+// Failure prevented: a developer logged in as themselves exports a TEAM service
+// token whose paste was truncated. The intent is "act as the team". If the
+// rejected value is silently discarded and the disk token used instead, every
+// API call, ledger write, and murmur is attributed to the human while status
+// shows a green check — a principal substitution with audit-trail consequences.
+// The declared principal is honored, or nothing is.
+func TestGetTokenForEndpoint_MalformedEnvTokenDoesNotPromoteDiskIdentity(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("SAGEOX_ENDPOINT", "")
+
+	// a real team token with the last character of its CRC suffix lost —
+	// the exact shape a truncated copy/paste produces.
+	full := validSageOxTestToken(TeamTokenPrefix, "ci_service")
+	truncated := full[:len(full)-1]
+	t.Setenv(EnvVarToken, truncated)
+
+	const ep = "https://sageox.ai"
+	disk := &StoredToken{
+		AccessToken: "disk-human-token",
+		ExpiresAt:   time.Now().Add(time.Hour),
+		UserInfo: UserInfo{
+			UserID: "human-42",
+			Email:  "human@example.com",
+			Name:   "Human Coworker",
+		},
+	}
+	require.NoError(t, SaveTokenForEndpoint(ep, disk))
+
+	client := NewTestClient(t)
+	require.NoError(t, client.SaveTokenForEndpoint(ep, disk))
+
+	cases := []struct {
+		name string
+		get  func(string) (*StoredToken, error)
+	}{
+		{"package-level", GetTokenForEndpoint},
+		{"AuthClient", client.GetTokenForEndpoint},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := tc.get(ep)
+			assert.Nil(t, got, "must not hand back the disk identity for a rejected env token")
+			require.Error(t, err, "a malformed SAGEOX_TOKEN must not resolve to any credential")
+			assert.ErrorIs(t, err, ErrEnvTokenMalformed)
+
+			msg := err.Error()
+			assert.Contains(t, msg, EnvVarToken, "the error must name the env var the operator set")
+			assert.NotContains(t, msg, truncated, "the error must never echo the credential value")
+		})
+	}
+}
+
+// TestGetLoggedInEndpoints_DoesNotDropEndpoint — Failure prevented: with
+// SAGEOX_TOKEN unset and two disk logins, using list length as a proxy for "the
+// env token was already added" skips whichever endpoint the randomized map
+// iteration does not reach first, so `ox status` reports a different set of
+// logins run to run.
+//
+// The call is repeated because the defect is map-order dependent: a single
+// call reproduces it only about half the time, while 16 calls make a surviving
+// bug effectively certain to show.
+func TestGetLoggedInEndpoints_DoesNotDropEndpoint(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv(EnvVarToken, "")
+	t.Setenv("SAGEOX_ENDPOINT", "")
+
+	prod := &StoredToken{AccessToken: "prod-token", ExpiresAt: time.Now().Add(time.Hour)}
+	staging := &StoredToken{AccessToken: "staging-token", ExpiresAt: time.Now().Add(time.Hour)}
+	require.NoError(t, SaveTokenForEndpoint("https://sageox.ai", prod))
+	require.NoError(t, SaveTokenForEndpoint("https://staging.sageox.ai", staging))
+
+	for i := 0; i < 16; i++ {
+		assert.Len(t, GetLoggedInEndpoints(), 2, "both disk logins must be reported on every call")
+	}
+}

@@ -120,6 +120,12 @@ func TestRequireAuth_AuthRequired_NotAuthenticated(t *testing.T) {
 	assert.Contains(t, err.Error(), "authentication required")
 }
 
+// TestRequireAuth_AuthRequired_ValidToken is the only positive-path test of the
+// auth gate: it proves RequireAuth ADMITS a coworker holding a credential the
+// server accepts. Every other RequireAuth test asserts a refusal, so without
+// this one a gate that refused everything — or returned an error
+// unconditionally — would leave the suite green while locking every user out of
+// init, doctor, and status.
 func TestRequireAuth_AuthRequired_ValidToken(t *testing.T) {
 	t.Setenv("FEATURE_AUTH", "true")
 	setupPackageLevelTest(t)

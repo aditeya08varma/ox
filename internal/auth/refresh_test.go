@@ -892,8 +892,12 @@ func TestEnsureValidToken_EnvTokenSkipsRefresh(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
+	// a valid checksum (env_token.go's CRC precheck now runs at intake) with a
+	// value that still reads as what this test is about, at a fixed width so
+	// verifyTokenChecksum has a real suffix to check.
+	envTok := validSageOxTestToken(PATPrefix, "env_bypass")
 	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
-	t.Setenv(EnvVarToken, "oxp_env_bypass")
+	t.Setenv(EnvVarToken, envTok)
 
 	// route disk auth into a temp dir without altering package state
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
@@ -904,7 +908,7 @@ func TestEnsureValidToken_EnvTokenSkipsRefresh(t *testing.T) {
 	token, err := EnsureValidToken(bigBuffer)
 	require.NoError(t, err)
 	require.NotNil(t, token, "env token should be returned as-is")
-	assert.Equal(t, "oxp_env_bypass", token.AccessToken)
+	assert.Equal(t, envTok, token.AccessToken)
 	assert.Empty(t, token.RefreshToken, "env token must have no refresh credential")
 }
 
@@ -918,8 +922,11 @@ func TestAuthClient_EnsureValidToken_EnvTokenSkipsRefresh(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
+	// a valid checksum (env_token.go's CRC precheck now runs at intake) — see
+	// the twin above for why this can no longer be an arbitrary placeholder.
+	envTok := validSageOxTestToken(PATPrefix, "env_client_bypass")
 	t.Setenv("SAGEOX_ENDPOINT", mockServer.URL)
-	t.Setenv(EnvVarToken, "oxp_env_client_bypass")
+	t.Setenv(EnvVarToken, envTok)
 
 	client := NewAuthClientWithDir(t.TempDir()).WithEndpoint(mockServer.URL)
 
@@ -927,7 +934,7 @@ func TestAuthClient_EnsureValidToken_EnvTokenSkipsRefresh(t *testing.T) {
 	token, err := client.EnsureValidToken(bigBuffer)
 	require.NoError(t, err)
 	require.NotNil(t, token)
-	assert.Equal(t, "oxp_env_client_bypass", token.AccessToken)
+	assert.Equal(t, envTok, token.AccessToken)
 	assert.Empty(t, token.RefreshToken)
 }
 

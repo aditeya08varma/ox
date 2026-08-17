@@ -1870,13 +1870,15 @@ func renderAuthStatus(authFile string) string {
 		// the old lie (a working PAT reported as not-logged-in) with the more
 		// dangerous opposite — CI that reports healthy auth right up until the
 		// first real call 401s. So: validate this one, once, before claiming
-		// anything. ValidateTokenServerSide already routes an oxp_ token to
-		// /api/v1/auth/me (PATs carry no OAuth identity, so userinfo 401s them)
-		// and caps itself at 5s.
+		// anything. Introspect calls the single family-agnostic endpoint
+		// (session/JWT, personal oxp_, team oxt_ all validate the same way)
+		// and caps itself at 5s; its parsed result also tells us WHO the
+		// token authenticates as, which the identity rendering below needs.
 		envValid := true
 		var envValidErr error
+		var introspectResult *auth.IntrospectResult
 		if envSourced && epToken != nil {
-			envValidErr = auth.ValidateTokenServerSide(ep, epToken.AccessToken)
+			introspectResult, envValidErr = auth.Introspect(ep, epToken.AccessToken)
 			envValid = envValidErr == nil
 		}
 
@@ -1897,20 +1899,48 @@ func renderAuthStatus(authFile string) string {
 			b.WriteString(statusErrorStyle.Render("SAGEOX_TOKEN (env) rejected"))
 			b.WriteString(statusMutedStyle.Render(" — " + envValidErr.Error()))
 			b.WriteString("\n")
-			b.WriteString(statusMutedStyle.Render("  the value in SAGEOX_TOKEN is not a credential this endpoint accepts;"))
-			b.WriteString("\n")
-			b.WriteString(statusMutedStyle.Render("  mint a fresh PAT at /settings/tokens, or unset it to use ox login"))
+			// A rejected team token (oxt_) isn't a "your PAT expired"
+			// situation — `ox login` only ever mints a personal oxp_ token,
+			// and "/settings/tokens" is the PAT UI, so both defaults below
+			// send the user down the wrong path. Family-aware guidance per
+			// .context/token-hardening-contract.md §7.
+			if strings.HasPrefix(epToken.AccessToken, auth.TeamTokenPrefix) {
+				b.WriteString(statusMutedStyle.Render("  this looks like a team token — set SAGEOX_TOKEN for CI/API use;"))
+				b.WriteString("\n")
+				b.WriteString(statusMutedStyle.Render("  `ox login` expects a personal oxp_ token"))
+			} else {
+				b.WriteString(statusMutedStyle.Render("  the value in SAGEOX_TOKEN is not a credential this endpoint accepts;"))
+				b.WriteString("\n")
+				b.WriteString(statusMutedStyle.Render("  mint a fresh PAT at /settings/tokens, or unset it to use ox login"))
+			}
 			b.WriteString("\n")
 			continue
 		}
 
 		if epToken != nil {
-			if envSourced && epToken.UserInfo.Name == "" && epToken.UserInfo.Email == "" {
+			switch {
+			case envSourced && introspectResult != nil && introspectResult.PrincipalKind == "team-service":
+				// A team token acts AS THE TEAM, not a person — introspection
+				// is the only source for "which team" (there was no login
+				// step to learn it from). Render it explicitly instead of
+				// falling into the blank-identity branch below, which reads
+				// as broken rather than team-scoped.
+				teamID := "(unknown team)"
+				if introspectResult.Team != nil && introspectResult.Team.TeamID != "" {
+					teamID = introspectResult.Team.TeamID
+				}
+				b.WriteString(statusLabelStyle.Render("Acting as"))
+				b.WriteString(statusHighlightStyle.Render("team " + teamID))
+				if introspectResult.Token != nil && introspectResult.Token.Name != "" {
+					b.WriteString(statusMutedStyle.Render(" (" + introspectResult.Token.Name + ")"))
+				}
+				b.WriteString("\n")
+			case envSourced && epToken.UserInfo.Name == "" && epToken.UserInfo.Email == "":
 				b.WriteString(statusLabelStyle.Render("Credential"))
 				b.WriteString(statusHighlightStyle.Render("SAGEOX_TOKEN (env)"))
 				b.WriteString(statusMutedStyle.Render(" — identity resolved server-side per request"))
 				b.WriteString("\n")
-			} else {
+			default:
 				b.WriteString(statusLabelStyle.Render("User"))
 				b.WriteString(statusHighlightStyle.Render(epToken.UserInfo.Name))
 				b.WriteString(statusMutedStyle.Render(" <" + epToken.UserInfo.Email + ">"))
