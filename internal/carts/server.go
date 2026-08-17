@@ -3,6 +3,7 @@ package carts
 import (
 	"database/sql"
 	"fmt"
+	"github.com/sageox/ox/internal/proc"
 	"net"
 	"os"
 	"os/exec"
@@ -42,14 +43,11 @@ func runningServerPort(cartsDir string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	// Check if process is alive
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return 0, err
-	}
-	// Signal 0 checks if process exists
-	if err := proc.Signal(os.Signal(nil)); err != nil {
-		return 0, fmt.Errorf("server process %d not running: %w", pid, err)
+	// Check if process is alive. (Signal(nil) always fails with "unsupported
+	// signal type", which made every call believe the server was dead and try
+	// to start a second one against the same locked database.)
+	if !proc.IsAlive(pid) {
+		return 0, fmt.Errorf("server process %d not running", pid)
 	}
 
 	portData, err := os.ReadFile(filepath.Join(cartsDir, portFileName))
