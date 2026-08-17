@@ -265,6 +265,25 @@ func selectLoginEndpoint() (string, error) {
 }
 
 // runLoginFlow executes the login flow for a specific endpoint
+// loginShadowedByEnvToken reports whether a login for ep is unusable because
+// SAGEOX_TOKEN holds a value that is set, bound to this endpoint, and refused by
+// the local format check.
+//
+// This is the "green login, then nothing works" case: the device flow stores a
+// perfectly good credential, but the env token takes precedence and is itself
+// refused, so every later command fails with nothing pointing back at login.
+//
+// tokenErr may be nil — callers ask this both before the flow (to warn early,
+// rather than spending the user's time first) and after it (where the sentinel
+// arrives via the token lookup). Either signal alone is sufficient.
+func loginShadowedByEnvToken(ep string, tokenErr error) bool {
+	if errors.Is(tokenErr, auth.ErrEnvTokenMalformed) {
+		return true
+	}
+	_, state := auth.EnvTokenFor(ep)
+	return state == auth.EnvTokenMalformed
+}
+
 func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 	out := cmd.OutOrStdout()
 	// check if already authenticated for this endpoint
@@ -288,6 +307,17 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 			fmt.Fprintln(out, "Authentication canceled.")
 			return nil
 		}
+	}
+
+	// An env token SHADOWS whatever this login is about to store, so say that
+	// BEFORE spending the user's time on a device flow. A malformed one is the
+	// worst case: it is refused, but it also refuses to fall back to the
+	// credential we are about to write, so the login would appear to work and
+	// every later command would fail with no visible connection to this moment.
+	if loginShadowedByEnvToken(currentEndpoint, nil) {
+		cli.PrintWarningTo(out, auth.EnvVarToken+" is set but its value failed a local format check.")
+		fmt.Fprintf(out, "  It takes precedence over any stored login, so logging in will not\n")
+		fmt.Fprintf(out, "  make %s usable until you re-copy or unset it.\n\n", auth.EnvVarToken)
 	}
 
 	authClient := auth.NewAuthClient().WithEndpoint(currentEndpoint)
@@ -403,6 +433,18 @@ func runLoginFlow(cmd *cobra.Command, currentEndpoint string) error {
 	// get token to display success message
 	token, err := authClient.GetToken()
 	if err != nil {
+		// The credential IS stored — the device flow completed and wrote it.
+		// A malformed env token is simply shadowing it, so reporting a bare
+		// failure here would be false and would send the user back around a
+		// flow that already worked. Name the one thing standing in the way.
+		if loginShadowedByEnvToken(currentEndpoint, err) {
+			cli.PrintSuccessTo(out, "Authenticated. Your login was stored.")
+			cli.PrintWarningTo(out, auth.EnvVarToken+" is still shadowing it and is not usable.")
+			fmt.Fprintf(out, "\n  unset %s\n\n", auth.EnvVarToken)
+			fmt.Fprintf(out, "  ...or re-copy the token if you meant to use it — a truncated\n")
+			fmt.Fprintf(out, "  paste is the usual cause.\n")
+			return nil
+		}
 		return fmt.Errorf("authentication succeeded but failed to retrieve token: %w", err)
 	}
 
