@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -188,6 +190,100 @@ func TestIntrospect_InactiveTokenRejected(t *testing.T) {
 
 	if _, err := Introspect(srv.URL, "oxp_test_4bDZfN"); err == nil {
 		t.Fatal("expected error for active:false, got nil")
+	}
+}
+
+// "Your credential is unusable" and "you have no credential" are different
+// facts with different remedies, and the auth checks must not flatten one into
+// the other. A CI operator whose team service token was truncated in transit
+// gets "NOT LOGGED IN → run `ox login`" if the reason is swallowed — and
+// `ox login` mints personal tokens, so it cannot replace a team token. That is
+// the wrong remedy delivered confidently.
+//
+// The second half of this table is the counterweight: an ordinary
+// unauthenticated user must still be (false, nil). Turning "no credential"
+// into a hard error would be a far worse regression than the one being fixed.
+func TestAuthChecks_MalformedEnvTokenSurfacesReason(t *testing.T) {
+	const ep = "https://sageox.ai"
+
+	checks := []struct {
+		name string
+		fn   func(string) (bool, error)
+	}{
+		{"IsAuthenticatedForEndpoint", IsAuthenticatedForEndpoint},
+		{"IsAuthCredentialValidForEndpoint", IsAuthCredentialValidForEndpoint},
+	}
+
+	for _, c := range checks {
+		t.Run(c.name+"/malformed env token", func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("SAGEOX_ENDPOINT", "")
+
+			// A real team token with the last character of its CRC suffix
+			// lost — the exact shape a truncated copy/paste produces.
+			full := validSageOxTestToken(TeamTokenPrefix, "ci_service")
+			truncated := full[:len(full)-1]
+			t.Setenv(EnvVarToken, truncated)
+
+			ok, err := c.fn(ep)
+			if ok {
+				t.Error("reported authenticated on a credential that failed the local format check")
+			}
+			if !errors.Is(err, ErrEnvTokenMalformed) {
+				t.Errorf("err = %v, want an error wrapping ErrEnvTokenMalformed; swallowing it renders "+
+					"\"not logged in\" and sends the operator to a command that cannot fix a team token", err)
+			}
+			if err != nil && strings.Contains(err.Error(), truncated) {
+				t.Errorf("error echoes the credential value: %q", err.Error())
+			}
+		})
+
+		t.Run(c.name+"/no credential at all", func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("SAGEOX_ENDPOINT", "")
+			t.Setenv(EnvVarToken, "")
+
+			ok, err := c.fn(ep)
+			if ok {
+				t.Error("reported authenticated with no credential present")
+			}
+			if err != nil {
+				t.Errorf("err = %v, want nil: being logged out is a normal state, not a failure. "+
+					"An error here turns every unauthenticated invocation into a hard error", err)
+			}
+		})
+
+		// The row above cannot catch an over-broad fix, because a logged-out
+		// user produces no error at all — the error branch is never entered.
+		// This one does: an unreadable auth.json is a genuine resolution
+		// failure that must STILL degrade to "not authenticated, no error".
+		// Only the env-token sentinel is worth reporting.
+		t.Run(c.name+"/unreadable auth.json still degrades quietly", func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+			t.Setenv("SAGEOX_ENDPOINT", "")
+			t.Setenv(EnvVarToken, "")
+
+			authPath, err := GetAuthFilePath()
+			if err != nil {
+				t.Fatalf("GetAuthFilePath: %v", err)
+			}
+			if err := os.MkdirAll(filepath.Dir(authPath), 0o700); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			if err := os.WriteFile(authPath, []byte("{ this is not valid json"), 0o600); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+
+			ok, err := c.fn(ep)
+			if ok {
+				t.Error("reported authenticated from an unreadable auth.json")
+			}
+			if err != nil {
+				t.Errorf("err = %v, want nil: only ErrEnvTokenMalformed is worth surfacing here. "+
+					"Reporting every resolution failure would make a corrupt auth.json a hard error "+
+					"for commands that only wanted to know whether to show a login hint", err)
+			}
+		})
 	}
 }
 

@@ -507,6 +507,23 @@ func (c *AuthClient) IsAuthenticated() (bool, error) {
 func (c *AuthClient) IsAuthCredentialValidForEndpoint(ep string) (bool, error) {
 	token, err := c.EnsureValidTokenForEndpoint(ep, 0)
 	if err != nil {
+		// Same reasoning as the package-level IsAuthCredentialValidForEndpoint
+		// in validate.go, and deliberately the same shape: a named-but-unusable
+		// credential is a different fact from no credential, and only that one
+		// is worth reporting. Everything else still degrades to "not
+		// authenticated, no error". The twins must not diverge — a client-scoped
+		// caller that reports a different verdict than the package-level one is
+		// a bug report nobody can reproduce.
+		//
+		// Branch on THIS error rather than re-reading the token:
+		// EnsureValidTokenForEndpoint returns GetTokenForEndpoint's error
+		// verbatim, so re-calling would only add a file-lock round trip on the
+		// failure path. That verbatim pass-through is load-bearing — if it ever
+		// starts wrapping or swallowing, the malformed-env-token case in
+		// TestAuthClientAuthChecks_MalformedEnvTokenSurfacesReason goes red.
+		if errors.Is(err, ErrEnvTokenMalformed) {
+			return false, err
+		}
 		raw, _ := c.GetTokenForEndpoint(ep)
 		if raw != nil {
 			return false, fmt.Errorf("token refresh failed: %w", err)

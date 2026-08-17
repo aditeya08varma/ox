@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +16,7 @@ import (
 	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/status"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -785,11 +788,287 @@ func TestFormatDurationShort(t *testing.T) {
 	}
 }
 
-// --- renderAuthStatus: principal-kind-aware identity (token-hardening-contract.md §7) ---
+// --- renderAuthStatus: principal-kind-aware identity ---
 //
 // These use t.Setenv, which is incompatible with t.Parallel — auth-env
 // resolution is process-global (SAGEOX_TOKEN, XDG_CONFIG_HOME), matching the
 // serial pattern internal/auth's own env-token tests use.
+
+// Pinned token vectors. These are real, correctly-checksummed values for the
+// "valid" pair (so they clear the local format check and reach the mock
+// introspection server) and single-character corruptions for the "malformed"
+// pair (so they fail it). See internal/auth/env_token_test.go for the vectors'
+// own coverage.
+const (
+	validTeamToken       = "oxt_test_1ljPfr"
+	validPersonalToken   = "oxp_test_4bDZfN"
+	malformedTeamToken   = "oxt_test_1ljPfX"
+	malformedPersonalPAT = "oxp_test_4bDZfX"
+)
+
+// setupAuthRenderEnv isolates renderAuthStatus from every process-global input
+// it reads: the endpoint, SAGEOX_TOKEN, and the auth.json location.
+//
+// OX_GIT_CREDENTIALS_FILE is the load-bearing one: without it the Git PAT
+// section reaches gitserver.LoadCredentialsForEndpoint, which probes the
+// developer's real OS keychain. That makes a pure render test depend on the
+// host's login keychain state (and, on a locked machine, on a UI prompt).
+func setupAuthRenderEnv(t *testing.T, endpointURL, envToken string) {
+	t.Helper()
+	t.Setenv("SAGEOX_ENDPOINT", endpointURL)
+	t.Setenv("SAGEOX_TOKEN", envToken)
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("OX_XDG_DISABLE", "")
+	t.Setenv("OX_GIT_CREDENTIALS_FILE", filepath.Join(t.TempDir(), "creds.json"))
+}
+
+// writeDiskLogin plants a live auth.json login for ep, with a distinctive
+// identity, so a test can prove whether that identity leaks into output.
+func writeDiskLogin(t *testing.T, ep, name, email string) {
+	t.Helper()
+	authPath, err := auth.GetAuthFilePath()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
+
+	store := auth.AuthStore{Tokens: map[string]*auth.StoredToken{
+		endpoint.NormalizeEndpoint(ep): {
+			AccessToken:  "disk-access-token",
+			RefreshToken: "disk-refresh-token",
+			ExpiresAt:    time.Now().Add(24 * time.Hour),
+			TokenType:    "Bearer",
+			UserInfo:     auth.UserInfo{UserID: "u_disk", Name: name, Email: email},
+		},
+	}}
+	blob, err := json.Marshal(store)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(authPath, blob, 0o600))
+}
+
+// countEndpointBlocks counts rendered "Endpoint" rows. Asserting on it keeps a
+// test-isolation leak (a stray auth.json or a shared endpoint) from silently
+// satisfying a Contains() assertion via somebody else's block.
+func countEndpointBlocks(out string) int {
+	return strings.Count(out, "Endpoint")
+}
+
+// TestRenderAuthStatus_MalformedEnvTokenIsReported: with SAGEOX_TOKEN set to a
+// value that fails the local format check and no auth.json behind it, the
+// endpoint holds no usable credential and so vanishes from
+// auth.GetLoggedInEndpoints() entirely. Status then rendered a bare
+// "✗ not logged in" and advised `ox login` — the one diagnosis that never
+// mentions the credential the operator actually supplied, given to the CI
+// operator who is the entire audience for SAGEOX_TOKEN and cannot run a
+// browser login anyway.
+func TestRenderAuthStatus_MalformedEnvTokenIsReported(t *testing.T) {
+	setupAuthRenderEnv(t, "http://127.0.0.1:1", malformedTeamToken)
+
+	out := renderAuthStatus("/tmp/auth.json")
+
+	if !strings.Contains(out, auth.EnvVarToken) {
+		t.Errorf("output must name %s so the operator knows which credential was refused, got:\n%s", auth.EnvVarToken, out)
+	}
+	if !strings.Contains(out, "local format check") {
+		t.Errorf("output must say the value failed a local format check, got:\n%s", out)
+	}
+	if strings.Contains(out, "not logged in") {
+		t.Errorf("a refused env token must not render as a bare \"not logged in\", got:\n%s", out)
+	}
+	// Family-aware: a truncated team token and a truncated PAT want different
+	// next steps, and `ox login` cannot mint the former at all.
+	if !strings.Contains(out, "team token") {
+		t.Errorf("expected team-family guidance for an oxt_ value, got:\n%s", out)
+	}
+	if got := countEndpointBlocks(out); got != 1 {
+		t.Errorf("expected exactly 1 Endpoint block, got %d:\n%s", got, out)
+	}
+}
+
+// TestRenderAuthStatus_MalformedEnvTokenMustNotSilentlyFallBackToDiskIdentity
+// is the security test. With a malformed SAGEOX_TOKEN AND a live disk login for
+// the same endpoint, status used to render "(✓ logged in)" and the human's
+// name — while the operator believed CI was acting as a service account. Every
+// API call, ledger write, and murmur would be attributed to that human.
+func TestRenderAuthStatus_MalformedEnvTokenMustNotSilentlyFallBackToDiskIdentity(t *testing.T) {
+	const ep = "http://127.0.0.1:1"
+	const diskName = "Disk Login Human"
+	const diskEmail = "disk-login-human@example.test"
+
+	setupAuthRenderEnv(t, ep, malformedTeamToken)
+	writeDiskLogin(t, ep, diskName, diskEmail)
+
+	out := renderAuthStatus("/tmp/auth.json")
+
+	mentionsEnvRefusal := strings.Contains(out, auth.EnvVarToken) &&
+		(strings.Contains(out, "NOT being used") || strings.Contains(out, "local format check"))
+
+	if strings.Contains(out, diskName) || strings.Contains(out, diskEmail) {
+		if !mentionsEnvRefusal {
+			t.Fatalf("SECURITY: status presented the stored disk identity %q <%s> as the active credential while %s was set and unusable — "+
+				"every API call, ledger write, and murmur would be attributed to that person instead of the principal the operator named. Output:\n%s",
+				diskName, diskEmail, auth.EnvVarToken, out)
+		}
+	}
+	if !mentionsEnvRefusal {
+		t.Fatalf("output must say %s was set and is not being used, got:\n%s", auth.EnvVarToken, out)
+	}
+	if strings.Contains(out, "✓ logged in") {
+		t.Fatalf("a refused env token must not produce a positive endpoint verdict, got:\n%s", out)
+	}
+	if got := countEndpointBlocks(out); got != 1 {
+		t.Fatalf("expected exactly 1 Endpoint block, got %d:\n%s", got, out)
+	}
+}
+
+// TestRenderAuthStatus_UnreachableServerIsNotReportedAsRejected: a developer
+// offline (or behind a VPN that is down) with a perfectly good token was told
+// "(✗ not authenticated)", "SAGEOX_TOKEN (env) rejected", and to "mint a fresh
+// PAT". The server never answered, so "rejected" is a false claim about a
+// credential nobody judged, and the advice costs a needless rotation.
+func TestRenderAuthStatus_UnreachableServerIsNotReportedAsRejected(t *testing.T) {
+	// Bind a real port, then close it, so the address is well-formed and
+	// nothing is listening — a connection refusal, not a DNS failure.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	setupAuthRenderEnv(t, url, validTeamToken)
+
+	out := renderAuthStatus("/tmp/auth.json")
+
+	if strings.Contains(out, "rejected") {
+		t.Errorf("an unreachable endpoint must not be reported as a rejection, got:\n%s", out)
+	}
+	if strings.Contains(out, "mint a fresh PAT") {
+		t.Errorf("an unreachable endpoint must not advise a credential rotation, got:\n%s", out)
+	}
+	if strings.Contains(out, "✗ not authenticated") {
+		t.Errorf("an unreachable endpoint must not render a negative auth verdict, got:\n%s", out)
+	}
+	if strings.Contains(out, "✓ logged in") {
+		t.Errorf("an unverified credential must not render a positive auth verdict either, got:\n%s", out)
+	}
+	if !strings.Contains(out, "could not verify") {
+		t.Errorf("expected a \"could not verify\" state, got:\n%s", out)
+	}
+	if got := countEndpointBlocks(out); got != 1 {
+		t.Errorf("expected exactly 1 Endpoint block, got %d:\n%s", got, out)
+	}
+}
+
+// TestRenderAuthStatus_EnvUserTokenShowsIntrospectedIdentity: an env-sourced
+// token carries a zero UserInfo (there was no login to learn a name from), so
+// a principal_kind:"user" response carrying a real name and email still
+// rendered the generic "identity resolved server-side per request". Knowing WHO
+// a credential authenticates as is the stated reason status calls the
+// introspection endpoint rather than a bare liveness check.
+func TestRenderAuthStatus_EnvUserTokenShowsIntrospectedIdentity(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != auth.IntrospectEndpoint {
+			t.Errorf("unexpected path %q, want %q", r.URL.Path, auth.IntrospectEndpoint)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"active": true,
+			"principal_kind": "user",
+			"scope": "full-access",
+			"token_type": "Bearer",
+			"expires_at": null,
+			"user": {"id": "u_1", "email": "introspected@example.test", "name": "Introspected Person", "tier": "pro"},
+			"team": null,
+			"token": null
+		}`))
+	}))
+	defer srv.Close()
+
+	setupAuthRenderEnv(t, srv.URL, validPersonalToken)
+
+	out := renderAuthStatus("/tmp/auth.json")
+
+	if !strings.Contains(out, "Introspected Person") {
+		t.Errorf("expected the introspected name in output, got:\n%s", out)
+	}
+	if !strings.Contains(out, "introspected@example.test") {
+		t.Errorf("expected the introspected email in output, got:\n%s", out)
+	}
+	if strings.Contains(out, "identity resolved server-side per request") {
+		t.Errorf("a user-principal response with a real identity must not fall into the generic blank-identity branch:\n%s", out)
+	}
+	if got := countEndpointBlocks(out); got != 1 {
+		t.Errorf("expected exactly 1 Endpoint block, got %d:\n%s", got, out)
+	}
+}
+
+// TestRenderAuthStatus_TeamServiceWithoutTeamID: a team-service response whose
+// team object is null must still render a stable, non-empty "Acting as" line
+// and must still name the token, because the token name is the only handle an
+// operator has for finding this credential in a secret store.
+func TestRenderAuthStatus_TeamServiceWithoutTeamID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"active": true,
+			"principal_kind": "team-service",
+			"token_type": "Bearer",
+			"expires_at": null,
+			"user": null,
+			"team": null,
+			"token": {"prefix": "oxt_ab12", "name": "nightly-indexer"}
+		}`))
+	}))
+	defer srv.Close()
+
+	setupAuthRenderEnv(t, srv.URL, validTeamToken)
+
+	out := renderAuthStatus("/tmp/auth.json")
+
+	if !strings.Contains(out, "(unknown team)") {
+		t.Errorf("expected the stable (unknown team) fallback, got:\n%s", out)
+	}
+	if !strings.Contains(out, "nightly-indexer") {
+		t.Errorf("expected the token name so the operator can identify the credential, got:\n%s", out)
+	}
+	if strings.Contains(out, "identity resolved server-side per request") {
+		t.Errorf("a team-service response must not fall into the generic blank-identity branch:\n%s", out)
+	}
+}
+
+// TestRenderAuthStatus_UnknownPrincipalKindKeepsTeamID: the server contract can
+// grow a principal kind this binary predates, and an older ox must degrade
+// honestly. Two failure modes to avoid: inventing a user identity we were never
+// given, and silently dropping a team_id the server DID send — which would make
+// status tell the operator strictly less than the response contained.
+func TestRenderAuthStatus_UnknownPrincipalKindKeepsTeamID(t *testing.T) {
+	for _, kind := range []string{"team_service", "", "service"} {
+		t.Run("kind="+kind, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{
+					"active": true,
+					"principal_kind": "` + kind + `",
+					"token_type": "Bearer",
+					"expires_at": null,
+					"user": null,
+					"team": {"team_id": "team_future42"},
+					"token": {"prefix": "oxt_ab12", "name": "future-kind"}
+				}`))
+			}))
+			defer srv.Close()
+
+			setupAuthRenderEnv(t, srv.URL, validTeamToken)
+
+			out := renderAuthStatus("/tmp/auth.json")
+
+			if !strings.Contains(out, "team_future42") {
+				t.Errorf("a present team_id must never be silently dropped, got:\n%s", out)
+			}
+			if strings.Contains(out, "User") {
+				t.Errorf("an unrecognized principal kind must not claim a user identity, got:\n%s", out)
+			}
+		})
+	}
+}
 
 // TestRenderAuthStatus_TeamTokenActingAs is the red-first proof for the
 // "acting as team <team_id>" rendering: before this change, an env-sourced
@@ -819,13 +1098,9 @@ func TestRenderAuthStatus_TeamTokenActingAs(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
-	// oxt_test_1ljPfr is the pinned team-token golden vector (contract §7) —
-	// a real, validly-checksummed value, so it clears env_token.go's CRC
-	// precheck and reaches the mock introspection server above.
-	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("OX_XDG_DISABLE", "")
+	// validTeamToken is a real, correctly-checksummed value, so it clears the
+	// local format check and reaches the mock introspection server above.
+	setupAuthRenderEnv(t, srv.URL, validTeamToken)
 
 	out := renderAuthStatus("/tmp/auth.json")
 
@@ -841,33 +1116,307 @@ func TestRenderAuthStatus_TeamTokenActingAs(t *testing.T) {
 	if strings.Contains(out, "identity resolved server-side per request") {
 		t.Errorf("team token fell into the generic blank-identity branch instead of the team-specific one:\n%s", out)
 	}
+	// The verdict line is what a human and the BDD status parser read to
+	// decide whether the CLI is usable; without this the test passes under a
+	// mutation that flips it.
+	if !strings.Contains(out, "✓ logged in") {
+		t.Errorf("an accepted token must render a positive endpoint verdict, got:\n%s", out)
+	}
+	if strings.Contains(out, "✗ not authenticated") {
+		t.Errorf("an accepted token must not render a negative endpoint verdict, got:\n%s", out)
+	}
+	if got := countEndpointBlocks(out); got != 1 {
+		t.Errorf("expected exactly 1 Endpoint block, got %d:\n%s", got, out)
+	}
 }
 
-// TestRenderAuthStatus_RejectedTeamTokenGetsFamilyAwareHint proves a rejected
-// oxt_-shaped SAGEOX_TOKEN gets team-specific guidance ("set SAGEOX_TOKEN for
-// CI/API use; `ox login` expects a personal oxp_ token") instead of the
-// generic "mint a fresh PAT" hint, which sends a team-token holder toward the
-// wrong UI entirely.
-func TestRenderAuthStatus_RejectedTeamTokenGetsFamilyAwareHint(t *testing.T) {
+// TestRenderAuthStatus_RejectedTokenGetsFamilyAwareHint proves the rejected-
+// credential hint is chosen by token FAMILY, in both directions. The single-row
+// version of this test passed under an inverted HasPrefix condition, because
+// only the oxt_ arm was ever exercised — an inversion just swapped which of the
+// two arms was wrong, and no assertion looked at the other one.
+//
+// The two remedies are not interchangeable: `ox login` only ever mints a
+// personal oxp_ token, and the PAT settings page cannot issue a team credential
+// either, so pointing a team-token holder at them ends nowhere.
+func TestRenderAuthStatus_RejectedTokenGetsFamilyAwareHint(t *testing.T) {
+	tests := []struct {
+		name       string
+		envToken   string
+		wantPhrase string
+		denyPhrase string
+	}{
+		{
+			name:       "team token gets CI-secret-store guidance",
+			envToken:   validTeamToken,
+			wantPhrase: "this looks like a team token",
+			denyPhrase: "mint a fresh PAT",
+		},
+		{
+			name:       "personal token gets PAT guidance",
+			envToken:   validPersonalToken,
+			wantPhrase: "mint a fresh PAT",
+			denyPhrase: "this looks like a team token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.WriteHeader(http.StatusUnauthorized)
+			}))
+			defer srv.Close()
+
+			setupAuthRenderEnv(t, srv.URL, tt.envToken)
+
+			out := renderAuthStatus("/tmp/auth.json")
+
+			if !strings.Contains(out, tt.wantPhrase) {
+				t.Errorf("expected %q in the hint, got:\n%s", tt.wantPhrase, out)
+			}
+			if strings.Contains(out, tt.denyPhrase) {
+				t.Errorf("must not get the other family's hint (%q), got:\n%s", tt.denyPhrase, out)
+			}
+			if !strings.Contains(out, "ox login") {
+				t.Errorf("expected the hint to mention `ox login`, got:\n%s", out)
+			}
+			// The verdict line, asserted in both directions: a mutation
+			// flipping it passed this test before.
+			if !strings.Contains(out, "✗ not authenticated") {
+				t.Errorf("a rejected token must render a negative endpoint verdict, got:\n%s", out)
+			}
+			if strings.Contains(out, "✓ logged in") {
+				t.Errorf("a rejected token must not render a positive endpoint verdict, got:\n%s", out)
+			}
+			if got := countEndpointBlocks(out); got != 1 {
+				t.Errorf("expected exactly 1 Endpoint block, got %d:\n%s", got, out)
+			}
+		})
+	}
+}
+
+// TestRenderAuthStatus_RejectedTeamTokenMustNotRecommendSettingTheVarAgain: we
+// are on this line BECAUSE SAGEOX_TOKEN is set, so "set SAGEOX_TOKEN for CI/API
+// use" is advice the operator already followed. A refused team token is rotated
+// in the CI secret store, which is the only place it can be replaced.
+func TestRenderAuthStatus_RejectedTeamTokenMustNotRecommendSettingTheVarAgain(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
 
-	t.Setenv("SAGEOX_ENDPOINT", srv.URL)
-	t.Setenv("SAGEOX_TOKEN", "oxt_test_1ljPfr")
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("OX_XDG_DISABLE", "")
+	setupAuthRenderEnv(t, srv.URL, validTeamToken)
 
 	out := renderAuthStatus("/tmp/auth.json")
 
-	if !strings.Contains(out, "this looks like a team token") {
-		t.Errorf("expected family-aware team-token hint, got:\n%s", out)
+	if strings.Contains(out, "set SAGEOX_TOKEN for CI/API use") {
+		t.Errorf("hint tells the operator to do the thing they already did, got:\n%s", out)
 	}
-	if !strings.Contains(out, "ox login") {
-		t.Errorf("expected the hint to mention `ox login`, got:\n%s", out)
+	if !strings.Contains(out, "secret store") {
+		t.Errorf("expected the hint to point at the CI secret store, got:\n%s", out)
 	}
-	if strings.Contains(out, "mint a fresh PAT") {
-		t.Errorf("rejected team token must not get the personal-PAT hint:\n%s", out)
+}
+
+// --- renderIdentity: the identity matrix, without a server ---
+//
+// renderIdentity is pure, so every cell of (env-sourced) × (introspect result)
+// × (principal kind) × (team present) × (UserInfo populated) is reachable here
+// for the cost of a struct literal. The integration-shaped tests above stay as
+// proof that the wiring into renderAuthStatus is real.
+func TestRenderIdentity(t *testing.T) {
+	t.Parallel()
+
+	human := &auth.StoredToken{UserInfo: auth.UserInfo{Name: "Ada Lovelace", Email: "ada@example.test"}}
+	blank := &auth.StoredToken{}
+
+	tests := []struct {
+		name       string
+		envSourced bool
+		tok        *auth.StoredToken
+		ir         *auth.IntrospectResult
+		want       []string
+		deny       []string
+	}{
+		{
+			name: "disk login renders the stored identity",
+			tok:  human,
+			want: []string{"User", "Ada Lovelace", "ada@example.test"},
+		},
+		{
+			name:       "env token with no introspection falls back to the credential line",
+			envSourced: true,
+			tok:        blank,
+			want:       []string{"SAGEOX_TOKEN (env)", "identity resolved server-side per request"},
+		},
+		{
+			name:       "team-service renders the team and the token name",
+			envSourced: true,
+			tok:        blank,
+			ir: &auth.IntrospectResult{
+				PrincipalKind: auth.PrincipalKindTeamService,
+				Team:          &auth.IntrospectTeam{TeamID: "team_x"},
+				Token:         &auth.IntrospectTokenInfo{Name: "ci-deploy"},
+			},
+			want: []string{"Acting as", "team team_x", "ci-deploy"},
+			deny: []string{"identity resolved server-side per request"},
+		},
+		{
+			name:       "team-service with a null team keeps a stable fallback",
+			envSourced: true,
+			tok:        blank,
+			ir:         &auth.IntrospectResult{PrincipalKind: auth.PrincipalKindTeamService},
+			want:       []string{"Acting as", "(unknown team)"},
+		},
+		{
+			name:       "user principal renders the introspected identity",
+			envSourced: true,
+			tok:        blank,
+			ir: &auth.IntrospectResult{
+				PrincipalKind: auth.PrincipalKindUser,
+				User:          &auth.IntrospectUser{Name: "Grace Hopper", Email: "grace@example.test"},
+			},
+			want: []string{"User", "Grace Hopper", "grace@example.test"},
+			deny: []string{"identity resolved server-side per request"},
+		},
+		{
+			name:       "user principal with only an email still names somebody",
+			envSourced: true,
+			tok:        blank,
+			ir: &auth.IntrospectResult{
+				PrincipalKind: auth.PrincipalKindUser,
+				User:          &auth.IntrospectUser{Email: "only-email@example.test"},
+			},
+			want: []string{"User", "only-email@example.test"},
+			deny: []string{"<>"},
+		},
+		{
+			name:       "user principal with a blank user object degrades to the credential line",
+			envSourced: true,
+			tok:        blank,
+			ir:         &auth.IntrospectResult{PrincipalKind: auth.PrincipalKindUser, User: &auth.IntrospectUser{}},
+			want:       []string{"identity resolved server-side per request"},
+		},
+		{
+			name:       "unrecognized principal kind keeps a present team_id",
+			envSourced: true,
+			tok:        blank,
+			ir: &auth.IntrospectResult{
+				PrincipalKind: "team_service",
+				Team:          &auth.IntrospectTeam{TeamID: "team_future"},
+			},
+			want: []string{"team_future"},
+			deny: []string{"User", "identity resolved server-side per request"},
+		},
+		{
+			name: "introspection is ignored for a disk-sourced token",
+			tok:  human,
+			ir:   &auth.IntrospectResult{PrincipalKind: auth.PrincipalKindTeamService, Team: &auth.IntrospectTeam{TeamID: "team_x"}},
+			want: []string{"Ada Lovelace"},
+			deny: []string{"Acting as"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := renderIdentity(tt.envSourced, tt.tok, tt.ir)
+			for _, want := range tt.want {
+				if !strings.Contains(got, want) {
+					t.Errorf("expected %q in %q", want, got)
+				}
+			}
+			for _, deny := range tt.deny {
+				if strings.Contains(got, deny) {
+					t.Errorf("did not expect %q in %q", deny, got)
+				}
+			}
+		})
+	}
+}
+
+// TestAuthFollowUpHint covers the hint that prints under the auth section. Two
+// arms give demonstrably wrong advice without this logic: an offline developer
+// with a good credential was told "token refresh failed: run `ox login` to
+// re-authenticate" (a credential rotation prescribed for a network fault), and
+// a CI operator with a truncated SAGEOX_TOKEN was pointed at `ox login`, which
+// cannot mint their credential and which they cannot run.
+func TestAuthFollowUpHint(t *testing.T) {
+	t.Parallel()
+
+	unreachable := fmt.Errorf("could not reach host to validate token: %w: %w",
+		errors.New("dial tcp: connection refused"), auth.ErrEndpointUnreachable)
+
+	tests := []struct {
+		name          string
+		envMalformed  bool
+		authErr       error
+		loggedInCount int
+		want          authHint
+	}{
+		{"healthy login", false, nil, 1, authHintNone},
+		{"no credential at all", false, nil, 0, authHintLogin},
+		{"server rejected the token", false, errors.New("server rejected token (HTTP 401)"), 1, authHintRefreshFailed},
+		{"endpoint unreachable is not a rejection", false, unreachable, 1, authHintUnreachable},
+		{"unreachable with nothing logged in is still unreachable", false, unreachable, 0, authHintUnreachable},
+		{"malformed env token suppresses the login advice", true, nil, 0, authHintNone},
+		{"malformed env token wins over a reported error", true, errors.New("boom"), 0, authHintNone},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := authFollowUpHint(tt.envMalformed, tt.authErr, tt.loggedInCount); got != tt.want {
+				t.Errorf("authFollowUpHint(%v, %v, %d) = %v, want %v",
+					tt.envMalformed, tt.authErr, tt.loggedInCount, got, tt.want)
+			}
+		})
+	}
+}
+
+// --- doctor: `ox login` is the wrong remedy for a refused SAGEOX_TOKEN ---
+//
+// These live here rather than beside checkAuthentication because this file owns
+// the malformed-env-token behavior under test.
+
+// TestDoctorAuth_MalformedEnvTokenIsNotReportedAsNotLoggedIn: with a truncated
+// SAGEOX_TOKEN, doctor rendered "NOT LOGGED IN → Run `ox login`". For a team
+// token that remedy is not merely useless — `ox login` mints a personal oxp_
+// credential, so following it silently changes which principal the CLI acts as,
+// which is the failure mode doctor exists to catch.
+//
+// Once the credential resolver began surfacing the refusal as an error, the
+// symptom moved rather than disappearing: doctor then reported a generic
+// "check failed" with the raw wrapped error pasted in, and still offered no
+// family-aware remedy. Both shapes are asserted against.
+func TestDoctorAuth_MalformedEnvTokenIsNotReportedAsNotLoggedIn(t *testing.T) {
+	tests := []struct {
+		name       string
+		envToken   string
+		wantPhrase string
+	}{
+		{"team token", malformedTeamToken, "CI secret store"},
+		{"personal token", malformedPersonalPAT, "unset " + auth.EnvVarToken},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupAuthRenderEnv(t, "http://127.0.0.1:1", tt.envToken)
+
+			res := checkAuthentication()
+
+			if strings.Contains(res.message, "NOT LOGGED IN") {
+				t.Fatalf("a refused %s must not be reported as an ordinary absence, got message=%q detail=%q",
+					auth.EnvVarToken, res.message, res.detail)
+			}
+			if !strings.Contains(res.message, auth.EnvVarToken) {
+				t.Errorf("message must name %s, got %q", auth.EnvVarToken, res.message)
+			}
+			if !strings.Contains(res.detail, tt.wantPhrase) {
+				t.Errorf("expected family-aware remedy containing %q, got %q", tt.wantPhrase, res.detail)
+			}
+			if res.passed {
+				t.Errorf("a refused credential must not pass the check: %+v", res)
+			}
+		})
 	}
 }

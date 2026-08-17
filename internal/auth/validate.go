@@ -282,10 +282,22 @@ func IsAuthenticatedForEndpoint(ep string) (bool, error) {
 	// local credential check first (fast-fail if no token)
 	token, err := EnsureValidTokenForEndpoint(ep, 0)
 	if err != nil {
+		// "The credential you named is unusable" must not collapse into "you
+		// have no credential". They have different remedies: `ox login` mints
+		// personal tokens and cannot replace a team service token, so
+		// reporting a truncated SAGEOX_TOKEN as "not logged in" sends a CI
+		// operator to a command that cannot fix their problem. Every other
+		// error stays swallowed on purpose — see the return below.
+		if errors.Is(err, ErrEnvTokenMalformed) {
+			return false, err
+		}
 		raw, _ := GetTokenForEndpoint(ep)
 		if raw != nil {
 			return false, fmt.Errorf("token refresh failed: %w", err)
 		}
+		// A missing or unreadable auth.json is not a failure to report: being
+		// logged out is a normal state, and most callers here use
+		// `authenticated, _ :=` and would be unaffected anyway.
 		return false, nil
 	}
 	if token == nil {
@@ -316,6 +328,13 @@ func IsAuthenticated() (bool, error) {
 func IsAuthCredentialValidForEndpoint(ep string) (bool, error) {
 	token, err := EnsureValidTokenForEndpoint(ep, 0)
 	if err != nil {
+		// Same reasoning as IsAuthenticatedForEndpoint: a named-but-unusable
+		// credential is a different fact from no credential, and only that one
+		// is worth reporting. Everything else still degrades to "not
+		// authenticated, no error".
+		if errors.Is(err, ErrEnvTokenMalformed) {
+			return false, err
+		}
 		raw, _ := GetTokenForEndpoint(ep)
 		if raw != nil {
 			return false, fmt.Errorf("token refresh failed: %w", err)

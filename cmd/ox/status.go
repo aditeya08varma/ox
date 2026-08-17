@@ -1430,6 +1430,14 @@ daemon health, and a tree view of all SageOx directory locations.`,
 			authenticated = false
 		}
 
+		// A SAGEOX_TOKEN that fails the local format check is a REFUSAL, not an
+		// absence, and the two want different follow-up copy. The `--json`
+		// shape needs no new field: the credential resolver reports this as an
+		// error, so it lands in auth.error rather than as a bare
+		// {"authenticated": false} that reads as "nobody ever logged in".
+		_, envTokenState := auth.EnvTokenFor(currentEndpoint)
+		envTokenMalformed := envTokenState == auth.EnvTokenMalformed
+
 		// get auth token if authenticated
 		var token *auth.StoredToken
 		if authenticated {
@@ -1564,9 +1572,12 @@ daemon health, and a tree view of all SageOx directory locations.`,
 		// Human-readable output mode
 		// Authentication Status - always show, includes endpoint
 		fmt.Print(renderAuthStatus(authFile))
-		if authErr != nil {
+		switch authFollowUpHint(envTokenMalformed, authErr, len(auth.GetLoggedInEndpoints())) {
+		case authHintUnreachable:
+			fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ could not reach the endpoint:"), statusMutedStyle.Render("auth state is unverified, not invalid"))
+		case authHintRefreshFailed:
 			fmt.Printf("  %s %s\n", statusWarningStyle.Render("⚠ token refresh failed:"), statusMutedStyle.Render("run `ox login` to re-authenticate"))
-		} else if len(auth.GetLoggedInEndpoints()) == 0 {
+		case authHintLogin:
 			// use contextual action hint matching help's visual style
 			cli.PrintActionHint("ox login", "Authenticate with "+cli.Wordmark(), 1)
 		}
@@ -1839,10 +1850,43 @@ func renderAuthStatus(authFile string) string {
 	// get all logged-in endpoints
 	loggedInEndpoints := auth.GetLoggedInEndpoints()
 
+	// SAGEOX_TOKEN's state has to be asked for DIRECTLY rather than inferred
+	// from the list above. That list means "endpoints holding a usable
+	// credential", so a value that fails the local format check contributes
+	// nothing to it — and with no disk login behind it, the endpoint disappears
+	// from the list entirely. The operator who exported the token would then
+	// read a bare "not logged in": the one diagnosis that never mentions the
+	// credential they actually supplied, and the one that sends a CI operator
+	// to `ox login`, which cannot help them.
+	envEP := auth.EnvTokenEndpoint()
+	_, envState := auth.EnvTokenFor(envEP)
+	envMalformed := envState == auth.EnvTokenMalformed
+
+	if envMalformed {
+		// A disk login for the SAME endpoint is the dangerous shape: the
+		// operator believes CI is acting as the credential they named, while
+		// every API call, ledger write, and murmur would be attributed to
+		// whoever last ran `ox login` on this machine. Report the env value
+		// and render nothing that could be mistaken for an active identity.
+		shadowsDiskLogin := false
+		remaining := loggedInEndpoints[:0:0]
+		for _, ep := range loggedInEndpoints {
+			if endpoint.NormalizeEndpoint(ep) == endpoint.NormalizeEndpoint(envEP) {
+				shadowsDiskLogin = true
+				continue
+			}
+			remaining = append(remaining, ep)
+		}
+		loggedInEndpoints = remaining
+		b.WriteString(renderMalformedEnvToken(envEP, shadowsDiskLogin, authFile))
+	}
+
 	if len(loggedInEndpoints) == 0 {
-		b.WriteString(statusLabelStyle.Render("Status"))
-		b.WriteString(statusErrorStyle.Render("✗ not logged in"))
-		b.WriteString("\n")
+		if !envMalformed {
+			b.WriteString(statusLabelStyle.Render("Status"))
+			b.WriteString(statusErrorStyle.Render("✗ not logged in"))
+			b.WriteString("\n")
+		}
 		return b.String()
 	}
 
@@ -1851,7 +1895,7 @@ func renderAuthStatus(authFile string) string {
 		epToken, _ := auth.GetTokenForEndpoint(ep)
 		epSlug := endpoint.NormalizeSlug(ep)
 
-		if i > 0 {
+		if i > 0 || envMalformed {
 			b.WriteString("\n")
 		}
 
@@ -1875,39 +1919,76 @@ func renderAuthStatus(authFile string) string {
 		// and caps itself at 5s; its parsed result also tells us WHO the
 		// token authenticates as, which the identity rendering below needs.
 		envValid := true
+		envUnreachable := false
 		var envValidErr error
 		var introspectResult *auth.IntrospectResult
 		if envSourced && epToken != nil {
 			introspectResult, envValidErr = auth.Introspect(ep, epToken.AccessToken)
 			envValid = envValidErr == nil
+			// "The server said no" and "we never got to ask" are different
+			// facts with different remedies, and only one of them costs the
+			// user a credential rotation.
+			envUnreachable = errors.Is(envValidErr, auth.ErrEndpointUnreachable)
 		}
 
 		b.WriteString(statusLabelStyle.Render("Endpoint"))
 		b.WriteString(statusHighlightStyle.Render(epSlug))
-		if envSourced && !envValid {
-			// Must read as a NEGATIVE auth verdict — this is the line a human
-			// (and the BDD status parser) reads to decide whether the CLI is
-			// usable at all.
+		switch {
+		case envSourced && envUnreachable:
+			// Deliberately NEITHER verdict. This is the line a human (and the
+			// BDD status parser) reads to decide whether the CLI is usable, so
+			// it must not carry a ✓ we have not earned — but a ✗ would be an
+			// outright false claim about a credential the server never judged.
+			b.WriteString(statusWarningStyle.Render(" (? could not verify)"))
+		case envSourced && !envValid:
+			// Must read as a NEGATIVE auth verdict.
 			b.WriteString(statusErrorStyle.Render(" (✗ not authenticated)"))
-		} else {
+		default:
 			b.WriteString(statusSuccessStyle.Render(" (✓ logged in)"))
 		}
 		b.WriteString("\n")
 
-		if envSourced && !envValid {
+		// epToken != nil is part of the condition rather than an implicit
+		// invariant carried over from the Introspect block above: the hint
+		// below dereferences it, and a nil deref inside `ox status` would take
+		// out the command users run precisely when something is already wrong.
+		if envSourced && epToken != nil && envUnreachable {
+			b.WriteString(statusLabelStyle.Render("Credential"))
+			b.WriteString(statusWarningStyle.Render("SAGEOX_TOKEN (env) — could not verify"))
+			b.WriteString("\n")
+			// Deliberately avoids the word a support ticket would grep for
+			// ("rejected"): the server never judged this credential, and the
+			// copy must not read as if it had.
+			b.WriteString(statusMutedStyle.Render("  the endpoint did not answer, so this token has not been verified"))
+			b.WriteString("\n")
+			b.WriteString(statusMutedStyle.Render("  either way — check connectivity (VPN, proxy, DNS) and re-run `ox status`"))
+			b.WriteString("\n")
+			// The transport error goes last and on its own line: it is the only
+			// part of this block whose length we do not control (a dial error
+			// carries a full URL), and putting it in a labeled row would push
+			// every scannable line past the terminal width.
+			b.WriteString(statusMutedStyle.Render("  " + envValidErr.Error()))
+			b.WriteString("\n")
+			continue
+		}
+
+		if envSourced && epToken != nil && !envValid {
 			b.WriteString(statusLabelStyle.Render("Credential"))
 			b.WriteString(statusErrorStyle.Render("SAGEOX_TOKEN (env) rejected"))
 			b.WriteString(statusMutedStyle.Render(" — " + envValidErr.Error()))
 			b.WriteString("\n")
-			// A rejected team token (oxt_) isn't a "your PAT expired"
-			// situation — `ox login` only ever mints a personal oxp_ token,
-			// and "/settings/tokens" is the PAT UI, so both defaults below
-			// send the user down the wrong path. Family-aware guidance per
-			// .context/token-hardening-contract.md §7.
+			// A refused team token (oxt_) isn't a "your PAT expired" situation:
+			// `ox login` only ever mints a personal oxp_ token, and the PAT
+			// settings page cannot issue a team credential either, so both
+			// personal-token defaults send this user down a path that ends
+			// nowhere. Point at the CI secret store instead, which is where a
+			// team token is actually rotated.
 			if strings.HasPrefix(epToken.AccessToken, auth.TeamTokenPrefix) {
-				b.WriteString(statusMutedStyle.Render("  this looks like a team token — set SAGEOX_TOKEN for CI/API use;"))
+				b.WriteString(statusMutedStyle.Render("  this looks like a team token — check it has not been revoked or rotated"))
 				b.WriteString("\n")
-				b.WriteString(statusMutedStyle.Render("  `ox login` expects a personal oxp_ token"))
+				b.WriteString(statusMutedStyle.Render("  in your CI secret store; `ox login` mints personal oxp_ tokens and"))
+				b.WriteString("\n")
+				b.WriteString(statusMutedStyle.Render("  cannot replace it"))
 			} else {
 				b.WriteString(statusMutedStyle.Render("  the value in SAGEOX_TOKEN is not a credential this endpoint accepts;"))
 				b.WriteString("\n")
@@ -1918,34 +1999,7 @@ func renderAuthStatus(authFile string) string {
 		}
 
 		if epToken != nil {
-			switch {
-			case envSourced && introspectResult != nil && introspectResult.PrincipalKind == "team-service":
-				// A team token acts AS THE TEAM, not a person — introspection
-				// is the only source for "which team" (there was no login
-				// step to learn it from). Render it explicitly instead of
-				// falling into the blank-identity branch below, which reads
-				// as broken rather than team-scoped.
-				teamID := "(unknown team)"
-				if introspectResult.Team != nil && introspectResult.Team.TeamID != "" {
-					teamID = introspectResult.Team.TeamID
-				}
-				b.WriteString(statusLabelStyle.Render("Acting as"))
-				b.WriteString(statusHighlightStyle.Render("team " + teamID))
-				if introspectResult.Token != nil && introspectResult.Token.Name != "" {
-					b.WriteString(statusMutedStyle.Render(" (" + introspectResult.Token.Name + ")"))
-				}
-				b.WriteString("\n")
-			case envSourced && epToken.UserInfo.Name == "" && epToken.UserInfo.Email == "":
-				b.WriteString(statusLabelStyle.Render("Credential"))
-				b.WriteString(statusHighlightStyle.Render("SAGEOX_TOKEN (env)"))
-				b.WriteString(statusMutedStyle.Render(" — identity resolved server-side per request"))
-				b.WriteString("\n")
-			default:
-				b.WriteString(statusLabelStyle.Render("User"))
-				b.WriteString(statusHighlightStyle.Render(epToken.UserInfo.Name))
-				b.WriteString(statusMutedStyle.Render(" <" + epToken.UserInfo.Email + ">"))
-				b.WriteString("\n")
-			}
+			b.WriteString(renderIdentity(envSourced, epToken, introspectResult))
 
 			// Auth status. The OAuth access token expires every ~hour and
 			// is rotated silently via the refresh token (or Better-Auth
@@ -2005,6 +2059,175 @@ func renderAuthStatus(authFile string) string {
 			}
 			b.WriteString("\n")
 		}
+	}
+
+	return b.String()
+}
+
+// authHint selects the one-line follow-up printed under the auth section.
+type authHint int
+
+const (
+	// authHintNone: renderAuthStatus already said everything useful.
+	authHintNone authHint = iota
+	// authHintUnreachable: we could not ask the server anything.
+	authHintUnreachable
+	// authHintRefreshFailed: the server answered, and the answer was no.
+	authHintRefreshFailed
+	// authHintLogin: no credential at all.
+	authHintLogin
+)
+
+// authFollowUpHint decides which follow-up hint (if any) belongs under the auth
+// section. Split out because every arm is a wrong-advice bug waiting to happen
+// and the surrounding command body is untestable:
+//
+//   - A malformed SAGEOX_TOKEN gets NO hint: renderAuthStatus already named the
+//     variable and gave family-aware guidance, and both `ox login` hints send
+//     the operator to a command that cannot mint the credential they supplied —
+//     which, in the CI environment SAGEOX_TOKEN exists for, they cannot run at
+//     all.
+//   - An unreachable endpoint gets a connectivity hint, never "re-authenticate":
+//     the server never answered, so prescribing a credential rotation for what
+//     is almost always a VPN, proxy, or DNS fault replaces a working credential
+//     to fix a network.
+func authFollowUpHint(envTokenMalformed bool, authErr error, loggedInEndpoints int) authHint {
+	switch {
+	case envTokenMalformed:
+		return authHintNone
+	case errors.Is(authErr, auth.ErrEndpointUnreachable):
+		return authHintUnreachable
+	case authErr != nil:
+		return authHintRefreshFailed
+	case loggedInEndpoints == 0:
+		return authHintLogin
+	default:
+		return authHintNone
+	}
+}
+
+// renderIdentity renders the "who is this credential" line for one endpoint.
+//
+// Pure and I/O-free on purpose: the identity matrix is (env-sourced or not) ×
+// (introspection succeeded, failed, or was never attempted) × (principal kind)
+// × (team present or not) × (UserInfo populated or blank), and every cell of it
+// used to require a live HTTP server, three environment variables and a
+// temporary config dir to reach. Keeping the decision here lets that matrix be
+// covered by a table test while the surrounding integration-shaped tests keep
+// proving the wiring is real.
+//
+// tok must be non-nil. ir is nil whenever introspection was not attempted or
+// did not return a body.
+func renderIdentity(envSourced bool, tok *auth.StoredToken, ir *auth.IntrospectResult) string {
+	var b strings.Builder
+
+	switch {
+	case envSourced && ir != nil && (ir.PrincipalKind == auth.PrincipalKindTeamService ||
+		(ir.Team != nil && ir.Team.TeamID != "")):
+		// A team token acts AS THE TEAM, not as a person, and introspection is
+		// the only source for "which team" — there was no login step to learn
+		// it from. The second clause covers a principal kind we do not
+		// recognize: if the server named a team, dropping it would make status
+		// tell the operator strictly less than the server did, and the generic
+		// branch below reads as "no identity available" rather than "we did not
+		// understand the answer".
+		teamID := "(unknown team)"
+		if ir.Team != nil && ir.Team.TeamID != "" {
+			teamID = ir.Team.TeamID
+		}
+		b.WriteString(statusLabelStyle.Render("Acting as"))
+		b.WriteString(statusHighlightStyle.Render("team " + teamID))
+		if ir.Token != nil && ir.Token.Name != "" {
+			// Which credential this is, by the name it was minted with — the
+			// only handle an operator has for finding it in a secret store.
+			b.WriteString(statusMutedStyle.Render(" (" + ir.Token.Name + ")"))
+		}
+		b.WriteString("\n")
+
+	case envSourced && ir != nil && ir.PrincipalKind == auth.PrincipalKindUser && ir.User != nil &&
+		(ir.User.Name != "" || ir.User.Email != ""):
+		// An env-sourced token carries no UserInfo (there was no login), so
+		// without this branch a response that names a real person still
+		// rendered the generic "identity resolved server-side per request".
+		// Telling WHO a credential authenticates as is the whole reason status
+		// asks the introspection endpoint rather than a bare liveness check.
+		name := ir.User.Name
+		if name == "" {
+			name = ir.User.Email
+		}
+		b.WriteString(statusLabelStyle.Render("User"))
+		b.WriteString(statusHighlightStyle.Render(name))
+		if ir.User.Email != "" && ir.User.Email != name {
+			b.WriteString(statusMutedStyle.Render(" <" + ir.User.Email + ">"))
+		}
+		b.WriteString("\n")
+
+	case envSourced && tok.UserInfo.Name == "" && tok.UserInfo.Email == "":
+		// Nothing to name: printing "User  <>" next to a green check is worse
+		// than saying nothing. Name the credential source, which IS the useful
+		// fact here.
+		b.WriteString(statusLabelStyle.Render("Credential"))
+		b.WriteString(statusHighlightStyle.Render("SAGEOX_TOKEN (env)"))
+		b.WriteString(statusMutedStyle.Render(" — identity resolved server-side per request"))
+		b.WriteString("\n")
+
+	default:
+		b.WriteString(statusLabelStyle.Render("User"))
+		b.WriteString(statusHighlightStyle.Render(tok.UserInfo.Name))
+		b.WriteString(statusMutedStyle.Render(" <" + tok.UserInfo.Email + ">"))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+// renderMalformedEnvToken renders the endpoint block for a SAGEOX_TOKEN that is
+// set for this endpoint but failed the local format check.
+//
+// No identity is rendered here, and that is the point. Falling back to the disk
+// login would silently re-attribute every API call, ledger write, and murmur to
+// whoever last ran `ox login` on this machine, while status showed a green check
+// — so the credential is refused, and the refusal is what gets printed.
+func renderMalformedEnvToken(envEP string, shadowsDiskLogin bool, authFile string) string {
+	var b strings.Builder
+
+	b.WriteString(statusLabelStyle.Render("Endpoint"))
+	b.WriteString(statusHighlightStyle.Render(endpoint.NormalizeSlug(envEP)))
+	b.WriteString(statusErrorStyle.Render(" (✗ not authenticated)"))
+	b.WriteString("\n")
+
+	b.WriteString(statusLabelStyle.Render("Credential"))
+	b.WriteString(statusErrorStyle.Render("SAGEOX_TOKEN (env) failed a local format check"))
+	b.WriteString("\n")
+	b.WriteString(statusMutedStyle.Render("  the value is a SageOx-family token whose checksum does not match —"))
+	b.WriteString("\n")
+	b.WriteString(statusMutedStyle.Render("  a truncated paste is the usual cause"))
+	b.WriteString("\n")
+
+	if auth.EnvTokenIsTeamFamily(envEP) {
+		b.WriteString(statusMutedStyle.Render("  this looks like a team token — re-copy it from your CI secret store;"))
+		b.WriteString("\n")
+		b.WriteString(statusMutedStyle.Render("  `ox login` mints personal oxp_ tokens and cannot replace it"))
+	} else {
+		b.WriteString(statusMutedStyle.Render("  re-copy the value into SAGEOX_TOKEN, or unset it to fall back to"))
+		b.WriteString("\n")
+		b.WriteString(statusMutedStyle.Render("  `ox login`"))
+	}
+	b.WriteString("\n")
+
+	if shadowsDiskLogin {
+		// Never name the stored identity here. The operator believes CI is
+		// acting as the credential they exported; printing the human it would
+		// otherwise fall back to is one glance away from being read as the
+		// active principal — which is the substitution this block exists to
+		// refuse. The path is enough to find it.
+		b.WriteString(statusLabelStyle.Render("Disk login"))
+		b.WriteString(statusMutedStyle.Render("present but NOT being used — ox will not authenticate"))
+		b.WriteString("\n")
+		b.WriteString(statusMutedStyle.Render("  as a principal other than the one you named"))
+		b.WriteString("\n")
+		b.WriteString(statusMutedStyle.Render("  (" + authFile + ")"))
+		b.WriteString("\n")
 	}
 
 	return b.String()

@@ -1135,3 +1135,68 @@ func TestGetLoggedInEndpoints_DoesNotDropEndpoint(t *testing.T) {
 		assert.Len(t, GetLoggedInEndpoints(), 2, "both disk logins must be reported on every call")
 	}
 }
+
+// TestAuthClientAuthChecks_MalformedEnvTokenSurfacesReason is the client-scoped
+// twin of TestAuthChecks_MalformedEnvTokenSurfacesReason in validate_test.go.
+// The two implementations are the same swallow with the same remedy, so they get
+// the same table: if they drift, a client-scoped caller reports a different
+// verdict than the package-level one for identical inputs — the kind of
+// divergence that produces a bug report nobody can reproduce a year out.
+//
+// Row by row: "malformed" states the fix, "no credential at all" states the
+// requirement it must not break, and "unreadable auth.json" is the one that
+// guards it. A logged-out user cannot catch an over-broad fix, because the
+// resolver returns (nil, nil) and the error branch is never entered at all —
+// only a genuine resolution failure that must STILL degrade quietly can.
+func TestAuthClientAuthChecks_MalformedEnvTokenSurfacesReason(t *testing.T) {
+	const ep = "https://sageox.ai"
+
+	t.Run("malformed env token", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("SAGEOX_ENDPOINT", "")
+
+		// a real team token with the last character of its CRC suffix lost —
+		// the exact shape a truncated copy/paste produces.
+		full := validSageOxTestToken(TeamTokenPrefix, "ci_service")
+		truncated := full[:len(full)-1]
+		t.Setenv(EnvVarToken, truncated)
+
+		client := NewTestClient(t)
+		ok, err := client.IsAuthCredentialValidForEndpoint(ep)
+		assert.False(t, ok, "reported authenticated on a credential that failed the local format check")
+		assert.ErrorIs(t, err, ErrEnvTokenMalformed,
+			"swallowing the reason renders \"not logged in\" and sends the operator to a command that cannot fix a team token")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), truncated, "the error must never echo the credential value")
+	})
+
+	t.Run("no credential at all", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("SAGEOX_ENDPOINT", "")
+		t.Setenv(EnvVarToken, "")
+
+		client := NewTestClient(t)
+		ok, err := client.IsAuthCredentialValidForEndpoint(ep)
+		assert.False(t, ok, "reported authenticated with no credential present")
+		assert.NoError(t, err,
+			"being logged out is a normal state, not a failure — an error here turns every unauthenticated invocation into a hard error")
+	})
+
+	t.Run("unreadable auth.json still degrades quietly", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+		t.Setenv("SAGEOX_ENDPOINT", "")
+		t.Setenv(EnvVarToken, "")
+
+		client := NewTestClient(t)
+		authPath, err := client.GetAuthFilePath()
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(filepath.Dir(authPath), 0o700))
+		require.NoError(t, os.WriteFile(authPath, []byte("{ this is not valid json"), 0o600))
+
+		ok, err := client.IsAuthCredentialValidForEndpoint(ep)
+		assert.False(t, ok, "reported authenticated from an unreadable auth.json")
+		assert.NoError(t, err,
+			"only ErrEnvTokenMalformed is worth surfacing here — reporting every resolution failure "+
+				"would make a corrupt auth.json a hard error for callers that only wanted to know whether to show a login hint")
+	})
+}

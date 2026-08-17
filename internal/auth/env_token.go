@@ -65,6 +65,19 @@ func envTokenEndpoint() string {
 	return endpoint.Default
 }
 
+// EnvTokenEndpoint is the exported view of envTokenEndpoint, for display code that
+// must ask about SAGEOX_TOKEN's state before it has an endpoint to ask about.
+//
+// GetLoggedInEndpoints lists endpoints with a USABLE credential, so a malformed
+// SAGEOX_TOKEN contributes nothing to it — and with no disk login behind it, the
+// endpoint disappears from that list entirely. A renderer that infers env-token
+// state from the list would therefore report a truncated token as a plain "not
+// logged in", which is the diagnostic gap the local format check exists to close.
+// Ask EnvTokenFor(EnvTokenEndpoint()) directly instead.
+func EnvTokenEndpoint() string {
+	return envTokenEndpoint()
+}
+
 // EnvTokenState describes what SAGEOX_TOKEN holds for a given endpoint.
 type EnvTokenState int
 
@@ -150,8 +163,8 @@ func EnvTokenFor(ep string) (*StoredToken, EnvTokenState) {
 	// they skip this check entirely and fall through to normal validation.
 	if isSageOxTokenFormat(val) && !verifyTokenChecksum(val) {
 		slog.Warn("SAGEOX_TOKEN failed local checksum check — likely a typo or truncated copy/paste",
-			"prefix", redactedTokenPrefix(val),
-			"length", len(val),
+			"family", tokenFamily(val),
+			"length_class", tokenLengthClass(val),
 		)
 		return nil, EnvTokenMalformed
 	}
@@ -192,16 +205,45 @@ func isSageOxTokenFormat(tok string) bool {
 	return strings.HasPrefix(tok, PATPrefix) || strings.HasPrefix(tok, TeamTokenPrefix)
 }
 
-// redactedTokenPrefix returns a short, log-safe prefix of tok for diagnostic
-// messages — enough to recognize which credential was rejected (its family
-// and a few body characters) without printing the value that failed a
-// checksum we can no longer trust to be a complete secret anyway.
-func redactedTokenPrefix(tok string) string {
-	const showChars = 8
-	if len(tok) <= showChars {
-		return "[REDACTED]"
+// tokenFamily returns ONLY the family prefix of tok (oxp_/oxt_), never any of
+// its body.
+//
+// An earlier version of this diagnostic emitted eight characters — the prefix
+// plus four body characters. That was a mistake worth naming, because the
+// reasoning behind it was seductive: a value that failed its own checksum is
+// probably not a working credential, so why protect it? Because the most
+// common way to reach this branch is a TRUNCATED PASTE of a real one, and the
+// leading body characters of a truncated real token are leading body
+// characters of a real token. Paired with an exact byte length (see
+// tokenLengthClass) that is a materially narrowed search space, written to
+// stderr and retained by CI log storage indefinitely.
+//
+// The family alone is what the operator actually needs here: it tells them
+// whether to go re-copy a personal token or a team token, which is the only
+// decision this message drives.
+func tokenFamily(tok string) string {
+	switch {
+	case strings.HasPrefix(tok, PATPrefix):
+		return PATPrefix
+	case strings.HasPrefix(tok, TeamTokenPrefix):
+		return TeamTokenPrefix
+	default:
+		return "unknown"
 	}
-	return tok[:showChars] + "…[REDACTED]"
+}
+
+// tokenLengthClass buckets tok's length so the diagnostic can say "this looks
+// truncated" without publishing an exact byte count an attacker could use to
+// bound a brute force.
+func tokenLengthClass(tok string) string {
+	switch n := len(tok); {
+	case n <= 20:
+		return "short"
+	case n <= 80:
+		return "expected"
+	default:
+		return "long"
+	}
 }
 
 // --- CRC format precheck ---
