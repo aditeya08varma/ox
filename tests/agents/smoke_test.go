@@ -70,6 +70,15 @@ var cases = []agentCase{
 		verified:         "pi --help, @mariozechner/pi-coding-agent 0.64.0: --print for non-interactive, --session-dir for storage",
 	},
 	{
+		adapter: "omp",
+		bin:     "omp",
+		args: func(prompt, sessionDir string) []string {
+			return []string{"--print", "--session-dir", sessionDir, prompt}
+		},
+		isolatesSessions: true,
+		verified:         "omp --help, 17.3.5: --print for non-interactive mode and --session-dir for session storage",
+	},
+	{
 		adapter: "opencode",
 		bin:     "opencode",
 		args: func(prompt, _ string) []string {

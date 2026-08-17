@@ -32,7 +32,7 @@ GOTESTSUM_LEAN = $(if $(filter 1,$(V)),,--hide-summary skipped --format-hide-emp
 TIME_CMD = $(if $(filter 1,$(V)),time,)
 
 # Bundled adapters (shipped in release tarballs alongside ox)
-ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-aider ox-adapter-droid ox-adapter-goose
+ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-omp ox-adapter-aider ox-adapter-droid ox-adapter-goose
 
 # Build targets
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
@@ -145,7 +145,7 @@ TEST_GIT_ISOLATION := \
 test: ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
 	$(call say,"Running fast tests (skipping >500ms, no coverage)...")
 	@timings='$(TEST_TIMINGS)'; \
-	if [ -z "$$timings" ]; then timings=$$(mktemp -p tmp test-timings.XXXXXX); else mkdir -p "$$(dirname "$$timings")"; fi; \
+	if [ -z "$$timings" ]; then mkdir -p tmp; timings=$$(mktemp -p tmp test-timings.XXXXXX); else mkdir -p "$$(dirname "$$timings")"; fi; \
 	$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) --jsonfile-timing-events "$$timings" -- -short -race -p 8 -parallel 32 ./...; \
 	echo "TEST_TIMING_ARTIFACT path=$$timings"; \
 	python3 $(TEST_METRICS) "$$timings"

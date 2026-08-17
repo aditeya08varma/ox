@@ -10,6 +10,8 @@ import (
 	"unicode/utf8"
 )
 
+var ledgerSearchTestNow = time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
+
 func TestSearch_EmptyLedgerPath(t *testing.T) {
 	t.Parallel()
 	results, err := Search(Options{Query: "anything"})
@@ -50,7 +52,7 @@ func TestSearch_EmptyQuery(t *testing.T) {
 func TestSearch_SessionMatch(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	writeSession(t, dir, "2026-05-20T10-15-ryan-OxABCD", "# AuthN flow\n\nWe decided to use OAuth for the deployment pipeline.")
 
 	results, err := Search(Options{LedgerPath: dir, Query: "oauth", Now: now})
@@ -91,7 +93,7 @@ func TestSearch_NoMatches(t *testing.T) {
 func TestSearch_MultiResultRanking(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	// session A: single mention
 	writeSession(t, dir, "2026-05-19T10-15-ryan-OxAAAA", "We discussed cache.")
 	// session B: many mentions — should rank higher
@@ -112,7 +114,7 @@ func TestSearch_MultiResultRanking(t *testing.T) {
 func TestSearch_RespectsLimit(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	for i := 0; i < 5; i++ {
 		writeSession(t, dir, "2026-05-2"+string(rune('0'+i))+"T10-15-ryan-OxX"+string(rune('A'+i)), "matches the term widget")
 	}
@@ -128,7 +130,7 @@ func TestSearch_RespectsLimit(t *testing.T) {
 func TestSearch_AgeCutoff(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	// way in the past
 	writeSession(t, dir, "2020-01-01T10-15-ryan-OxOLDD", "ancient topic widget mention here")
 	results, err := Search(Options{LedgerPath: dir, Query: "widget", Now: now})
@@ -143,7 +145,7 @@ func TestSearch_AgeCutoff(t *testing.T) {
 func TestSearch_MurmurMatch(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	writeMurmur(t, dir, now.Add(-1*time.Hour), "murmur-1", "wip", "Working on the local query path for ledger search.")
 
 	results, err := Search(Options{LedgerPath: dir, Query: "ledger", Now: now})
@@ -164,7 +166,7 @@ func TestSearch_MurmurMatch(t *testing.T) {
 func TestSearch_MultiTermANDSemantics(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	writeSession(t, dir, "2026-05-20T10-15-ryan-OxOnly1", "only the first term: cache.")
 	writeSession(t, dir, "2026-05-20T11-15-ryan-OxBothTT", "Both cache and oauth appear here.")
 
@@ -188,7 +190,7 @@ func TestSearch_MultiTermANDSemantics(t *testing.T) {
 func TestSearch_PlanMatch(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	writePlan(t, dir, "2026-05-21-cache-layer", now.Add(-24*time.Hour),
 		"Add cache layer", "ryan",
 		"# Add cache layer\n\nWe will add an in-memory cache to the query path.")
@@ -224,7 +226,7 @@ func TestSearch_PlanFailOpenNoPlansDir(t *testing.T) {
 	t.Parallel()
 	// ledger with sessions/ but no data/plans/ — scanning plans must not error.
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	writeSession(t, dir, "2026-05-20T10-15-ryan-OxABCD", "a session about widgets")
 
 	results, err := Search(Options{LedgerPath: dir, Query: "widgets", Now: now})
@@ -240,7 +242,7 @@ func TestSearch_PlanFailOpenNoPlansDir(t *testing.T) {
 func TestSearch_PlanVsSessionDistinguishable(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	// same term in both a session and a plan: results must be tagged distinctly
 	// so the prior-art detector can phrase "planned" vs "worked on".
 	writeSession(t, dir, "2026-05-20T10-15-ryan-OxSESS", "deployment pipeline notes")
@@ -271,7 +273,7 @@ func TestSearch_PlanVsSessionDistinguishable(t *testing.T) {
 func TestSearch_PlanAgeCutoff(t *testing.T) {
 	t.Parallel()
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	// meta.json created_at far in the past — must be excluded by MaxPlanAge.
 	writePlan(t, dir, "2020-01-01-ancient-plan", time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC),
 		"Ancient plan", "ryan", "# Ancient plan\n\nwidget overhaul")
@@ -290,7 +292,7 @@ func TestSearch_PlanDateFallsBackToDirName(t *testing.T) {
 	// plan dir with no meta.json: age filter + created_at fall back to the
 	// YYYY-MM-DD dir prefix so a partial plan dir is still searchable/datable.
 	dir := makeLedger(t)
-	now := time.Now().UTC()
+	now := ledgerSearchTestNow
 	planDir := filepath.Join(dir, "data", "plans", "2026-05-23-no-meta-plan")
 	if err := os.MkdirAll(planDir, 0o755); err != nil {
 		t.Fatalf("mkdir plan: %v", err)

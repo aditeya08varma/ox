@@ -359,6 +359,57 @@ func (p *PiAgent) SupportsHooks() bool {
 	return false
 }
 
+// OMPAgent implements Agent for Oh My Pi. OMP has no lifecycle hooks, so
+// session recording tails its native JSONL transcript through ox-adapter-omp.
+type OMPAgent struct{}
+
+func (a *OMPAgent) Name() string {
+	return "OMP"
+}
+
+func (a *OMPAgent) Install(user bool) error {
+	return installExternalAdapterHooks("omp", user)
+}
+
+func (a *OMPAgent) Uninstall(user bool) error {
+	return uninstallExternalAdapterHooks("omp", user)
+}
+
+func (a *OMPAgent) HasHooks(user bool) bool {
+	return checkExternalAdapterHooks("omp", user)
+}
+
+func (a *OMPAgent) List() map[string]bool {
+	return map[string]bool{
+		"Project": a.HasHooks(false),
+		"User":    false,
+	}
+}
+
+func (a *OMPAgent) Detect() bool {
+	return a.DetectProject() || a.DetectCLI()
+}
+
+func (a *OMPAgent) DetectProject() bool {
+	gitRoot := findGitRoot()
+	if gitRoot == "" {
+		return false
+	}
+	if info, err := os.Stat(filepath.Join(gitRoot, ".omp")); err == nil && info.IsDir() {
+		return true
+	}
+	return a.HasHooks(false)
+}
+
+func (a *OMPAgent) DetectCLI() bool {
+	_, err := exec.LookPath("omp")
+	return err == nil
+}
+
+func (a *OMPAgent) SupportsHooks() bool {
+	return false
+}
+
 // AgentRegistry holds all registered agents
 var AgentRegistry = []Agent{
 	&ClaudeAgent{},
@@ -367,6 +418,7 @@ var AgentRegistry = []Agent{
 	&CodexAgent{},
 	&AmpAgent{},
 	&PiAgent{},
+	&OMPAgent{},
 }
 
 // GetAgent returns the agent by name (case-insensitive)

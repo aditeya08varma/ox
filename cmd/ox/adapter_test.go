@@ -359,12 +359,24 @@ case "$1" in
     fi
     ;;
   uninstall-hooks)
+    repo_root=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo-root) repo_root="$2"; shift 2 ;;
+        --scope) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    if [ -n "$repo_root" ]; then
+      rm -f "$repo_root/%s/hooks.json"
+    fi
     echo '{"uninstalled":true,"files_modified":[]}'
     ;;
   *)
     echo '{}'
     ;;
-esac`, name, name, version, adapterType, configDir, configDir, configDir)
+esac`, name, name, version, adapterType, configDir, configDir, configDir, configDir)
 }
 
 // createFakeAdapterWithHooks writes a fake adapter script that supports hook operations.

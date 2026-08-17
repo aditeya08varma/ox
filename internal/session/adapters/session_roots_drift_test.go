@@ -38,6 +38,11 @@ var realHandles = []handleCase{
 		captured:    "ox-adapter-pi find-session --repo-root <repo>",
 	},
 	{
+		adapter:     "omp",
+		sessionFile: "~/.omp/agent/sessions/-src-project/2026-08-17T16-55-12-957Z_01a010a6.jsonl",
+		captured:    "ox-adapter-omp find-session --repo-root <repo> against OMP 17.3.5",
+	},
+	{
 		adapter:     "droid",
 		sessionFile: "~/.factory/sessions/-Users-someone-src-project/43800deb-fcc5-4a6a-92d5-4dc6c3de2377.jsonl",
 		captured:    "ox-adapter-droid find-session --repo-root <repo>",
@@ -128,6 +133,18 @@ func TestAllowList_AcceptsWhatAdaptersActuallyReturn(t *testing.T) {
 	}
 }
 
+func TestAllowList_AcceptsOMPConfiguredSessionDirectory(t *testing.T) {
+	const home = "/Users/someone"
+	t.Setenv("PI_CODING_AGENT_SESSION_DIR", "/Volumes/sessions/omp")
+	path := "/Volumes/sessions/omp/2026-08-17_session.jsonl"
+	if !IsSessionFileAllowed("omp", path, home) {
+		t.Fatalf("daemon rejected OMP's configured session directory %s", path)
+	}
+	if IsSessionFileAllowed("omp", "/Volumes/sessions/other.jsonl", home) {
+		t.Fatal("OMP path override widened beyond the configured directory")
+	}
+}
+
 // TestAllowList_StillRejectsPathTraversal keeps the widening honest: opaque
 // handles must not become a hole through which a same-UID IPC peer can name a
 // file for the daemon to read and upload.
@@ -181,7 +198,7 @@ func TestAllowList_EveryAdapterIsGoverned(t *testing.T) {
 	// every adapter shipped in cmd/ox-adapter-* that records sessions
 	recording := []string{
 		"claude-code", "codex", "gemini", "amp", "opencode",
-		"pi", "aider", "droid", "goose", "generic",
+		"pi", "omp", "aider", "droid", "goose", "generic",
 	}
 
 	for _, name := range recording {

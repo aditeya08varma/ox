@@ -308,6 +308,10 @@ func TestSessionWatchStart_RejectsArbitrarySessionFile(t *testing.T) {
 			"pi", "/home/victim/.pi/agent/sessions/--home--victim--proj/2026-08-09T00-00-00-000Z_abc.jsonl", true},
 		{"happy: pi-coding-agent alias resolves",
 			"pi-coding-agent", "/home/victim/.pi/agent/sessions/x/y.jsonl", true},
+		{"happy: OMP under .omp/agent/sessions",
+			"omp", "/home/victim/.omp/agent/sessions/-proj/2026-08-17_session.jsonl", true},
+		{"happy: Oh My Pi alias resolves",
+			"Oh My Pi", "/home/victim/.omp/agent/sessions/-proj/session.jsonl", true},
 		{"happy: droid under .factory/sessions",
 			"droid", "/home/victim/.factory/sessions/-home-victim-proj/abc.jsonl", true},
 
@@ -331,6 +335,8 @@ func TestSessionWatchStart_RejectsArbitrarySessionFile(t *testing.T) {
 			"claude-code", "/home/victim/.claude/projects-evil/x.jsonl", false},
 		{"reject: pi outside its sessions dir (~/.pi/agent/auth.json)",
 			"pi", "/home/victim/.pi/agent/auth.json", false},
+		{"reject: OMP outside its sessions dir (~/.omp/auth.json)",
+			"omp", "/home/victim/.omp/auth.json", false},
 		{"reject: droid outside its sessions dir (~/.factory/certs)",
 			"droid", "/home/victim/.factory/certs/key.pem", false},
 	}

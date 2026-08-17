@@ -46,6 +46,7 @@ func TestAgentTypeToBinary_Mapping(t *testing.T) {
 	}{
 		{"claude", "claude"},
 		{"pi", "pi"},
+		{"omp", "omp"},
 		{"amp", "amp"},
 		{"gemini", "gemini"},
 		{"droid", "droid"},

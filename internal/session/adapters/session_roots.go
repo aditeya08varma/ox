@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sageox/ox/internal/session/omppaths"
 )
 
 // KnownSessionRoots returns the absolute path prefixes that legitimately hold
@@ -13,11 +15,10 @@ import (
 // arbitrary absolute paths (e.g., ~/.ssh/id_rsa, ~/.sageox/auth.json) and
 // exfiltrate them via the normal session-finalize pipeline.
 //
-// All ox adapters are shipped in the same release as the ox CLI itself, so the
-// set of legitimate session-file roots is fully known at compile time. This
-// keeps the trust boundary tight: the daemon does not need to consult adapter
-// binaries for path policy, and a malicious external adapter cannot widen the
-// allow-list at runtime.
+// Most roots are known at compile time. OMP additionally supports documented
+// path overrides inherited from the daemon's own environment. IPC peers cannot
+// supply those values, so an external adapter still cannot widen the allowlist
+// at runtime.
 //
 // Returns nil for unknown adapter names; callers MUST treat nil as "reject"
 // rather than "allow any" (fail-closed).
@@ -38,7 +39,24 @@ func KnownSessionRoots(adapterName, homeDir string) []string {
 	for _, r := range roots {
 		out = append(out, filepath.Join(homeDir, r))
 	}
+	if canonical == "omp" {
+		for _, root := range omppaths.SessionRoots(homeDir) {
+			if !containsRoot(out, root.Path) {
+				out = append(out, root.Path)
+			}
+		}
+	}
 	return out
+}
+
+func containsRoot(roots []string, candidate string) bool {
+	candidate = filepath.Clean(candidate)
+	for _, root := range roots {
+		if filepath.Clean(root) == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 // KnownSessionRootsForCurrentUser is a convenience wrapper that resolves
@@ -250,6 +268,7 @@ var adapterSessionRoots = map[string][]string{
 	// adapter hands back a path under ~/.pi/agent/sessions and the daemon
 	// rejected every one of them until this root was listed.
 	"pi":    {".sageox/cache/sessions", ".cache/sageox/sessions", ".pi/agent/sessions"},
+	"omp":   {".sageox/cache/sessions", ".cache/sageox/sessions"},
 	"aider": {".sageox/cache/sessions", ".cache/sageox/sessions"},
 	// Droid writes transcripts to ~/.factory/sessions/<project-slug>/<uuid>.jsonl
 	// and ox tails them in place, same as pi.

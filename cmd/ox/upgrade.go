@@ -182,6 +182,7 @@ var adapterPackages = []string{
 	"github.com/sageox/ox/cmd/ox-adapter-amp",
 	"github.com/sageox/ox/cmd/ox-adapter-opencode",
 	"github.com/sageox/ox/cmd/ox-adapter-pi",
+	"github.com/sageox/ox/cmd/ox-adapter-omp",
 	"github.com/sageox/ox/cmd/ox-adapter-aider",
 	"github.com/sageox/ox/cmd/ox-adapter-droid",
 	"github.com/sageox/ox/cmd/ox-adapter-goose",
