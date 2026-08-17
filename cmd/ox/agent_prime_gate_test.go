@@ -3,21 +3,27 @@ package main
 import (
 	"testing"
 
+	"github.com/sageox/ox/internal/prime"
 	"github.com/stretchr/testify/require"
 )
 
-func TestRequireDetectedOrExplicitAgentAcceptsOMP(t *testing.T) {
+// An explicit, recognized --agent satisfies the prime gate without ambient
+// detection — including agents (OMP) that export no marker ox can detect from
+// its own process. Supported agents return nil regardless of AGENT_ENV.
+func TestRequireDetectedOrExplicitAgentAcceptsSupportedAgents(t *testing.T) {
 	t.Setenv("AGENT_ENV", "")
-	require.NoError(t, requireDetectedOrExplicitAgent("omp"))
+	for _, agent := range []string{"omp", "Oh My Pi", "claude-code", "pi"} {
+		require.NoError(t, requireDetectedOrExplicitAgent(agent),
+			"explicit --agent %q should satisfy the gate", agent)
+	}
 }
 
-func TestOnlyOMPBypassesAgentDetection(t *testing.T) {
-	if bypassAgentDetection("typo") {
-		t.Fatal("arbitrary --agent value bypassed agent detection")
-	}
-	if !bypassAgentDetection("Oh My Pi") {
-		t.Fatal("OMP display name did not bypass agent detection")
-	}
+// A typo/unknown --agent must NOT get a free pass: it is not "supported", so
+// the gate falls through to ambient detection (which fails outside an agent).
+// Asserted via the predicate to stay independent of the host's agent markers.
+func TestUnsupportedExplicitAgentDoesNotAutoPass(t *testing.T) {
+	require.False(t, prime.IsAgentSupported("typo"))
+	require.True(t, prime.IsAgentSupported("Oh My Pi"))
 }
 
 func TestSessionWatchModeUsesTailForOMP(t *testing.T) {
