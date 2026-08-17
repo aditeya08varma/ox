@@ -635,6 +635,12 @@ func uninstallAllIntegrations(force bool) error {
 		installed = append(installed, "Pi (project)")
 	}
 
+	// check OMP
+	ompInstalled := checkExternalAdapterHooks("omp", false)
+	if ompInstalled {
+		installed = append(installed, "OMP (project)")
+	}
+
 	// check git commit hooks
 	gitRoot := findGitRoot()
 	if gitRoot != "" && HasGitHooks(gitRoot) {
@@ -690,6 +696,11 @@ func uninstallAllIntegrations(force bool) error {
 	}
 	if err := uninstallPiHooks(false); err != nil {
 		errors = append(errors, fmt.Sprintf("Pi (project): %v", err))
+	}
+	if ompInstalled {
+		if err := uninstallExternalAdapterHooks("omp", false); err != nil {
+			errors = append(errors, fmt.Sprintf("OMP (project): %v", err))
+		}
 	}
 	if gitRoot != "" {
 		if err := UninstallGitHooks(gitRoot); err != nil {

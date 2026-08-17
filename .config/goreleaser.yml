@@ -317,7 +317,7 @@ release:
 
     Pre-compiled binaries for Linux, macOS (Intel & Apple Silicon), and FreeBSD.
 
-    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode, pi, aider, droid, goose).
+    Each tarball includes ox and bundled adapters (claude-code, gemini, codex, amp, opencode, pi, omp, aider, droid, goose).
 
     ### Installation
 
