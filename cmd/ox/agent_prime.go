@@ -156,12 +156,14 @@ func initAgentPrimeCmd() {
 // LIMITATION: Running `claude "prompt"` executes the prompt BEFORE any hooks fire,
 // so ox cannot intercept this invocation. Users must run `claude` without a prompt
 // argument to allow the session-start hook to run `ox agent prime` first.
-func bypassAgentDetection(explicitAgent string) bool {
-	return prime.CanonicalAgentType(explicitAgent) == prime.AgentTypeOMP
-}
-
+// requireDetectedOrExplicitAgent gates `ox agent prime` on running inside a
+// coding agent. An explicit, recognized --agent is authoritative and satisfies
+// the gate without ambient detection: the caller has named the agent, and some
+// agents (e.g. OMP / Oh My Pi) export no environment marker ox can detect from
+// its own process — `_` is the ox binary, not the parent agent. agentx knows
+// OMP natively as of v0.1.14, so it is no longer special-cased here.
 func requireDetectedOrExplicitAgent(explicitAgent string) error {
-	if bypassAgentDetection(explicitAgent) {
+	if prime.IsAgentSupported(explicitAgent) {
 		return nil
 	}
 	if errMsg := agentx.RequireAgent("ox agent prime"); errMsg != "" {
