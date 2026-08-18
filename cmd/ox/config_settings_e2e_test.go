@@ -238,3 +238,14 @@ func TestConfigE2E_PlanHTMLAndOpenControlTheNudge(t *testing.T) {
 	assert.Contains(t, string(body2), "do NOT prompt to open",
 		"plan.open=never must suppress the open directive")
 }
+
+// TestConfigE2E_InvalidValueRejected proves the real `ox config set` command
+// rejects an out-of-enum value rather than silently accepting it — a coworker
+// who fat-fingers a setting gets a clear error, not a quietly broken config.
+func TestConfigE2E_InvalidValueRejected(t *testing.T) {
+	initedProjectForConfigE2E(t)
+	require.NoError(t, configSetCmd.Flags().Set("repo", "false"))
+	require.NoError(t, configSetCmd.Flags().Set("team", "false"))
+	err := runConfigSet(configSetCmd, []string{"session_recording", "bogus"})
+	require.Error(t, err, "an out-of-enum value must be rejected by `ox config set`")
+}

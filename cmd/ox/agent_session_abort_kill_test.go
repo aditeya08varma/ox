@@ -276,6 +276,12 @@ func TestAbort_KillsCommittedThenFinalizedSessionAndAllSummarizedData(t *testing
 	seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, sessionName)
 	commitAndPushFinalized(t, f, sessionName)
 
+	// And: an unrelated peer session also lives in the Ledger — the kill must
+	// leave it untouched (a "delete everything" regression would take it too).
+	const peerName = "2026-01-01T00-00-peer-OxPeer"
+	seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, peerName)
+	commitAndPushFinalized(t, f, peerName)
+
 	// And: a local recording-cache copy and a ledger hydration-cache copy exist.
 	repoID := getRepoIDOrDefault(f.projectRoot)
 	localDir := filepath.Join(session.GetContextPath(repoID), "sessions", sessionName)
@@ -307,4 +313,9 @@ func TestAbort_KillsCommittedThenFinalizedSessionAndAllSummarizedData(t *testing
 	gitFsckClean(t, f.barePath)
 	assert.Empty(t, runGit(t, f.ledgerPath, "status", "--porcelain", "--", "sessions/"),
 		"no staged deletion may be left dangling after the kill")
+
+	// And: the unrelated peer session is untouched — on the remote and in the worktree.
+	assert.Contains(t, remoteTree(t, f.barePath), "sessions/"+peerName+"/meta.json",
+		"aborting one session must never delete a peer session")
+	assert.DirExists(t, filepath.Join(f.ledgerPath, "sessions", peerName))
 }

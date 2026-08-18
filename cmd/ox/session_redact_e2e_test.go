@@ -2,14 +2,39 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// captureStderr redirects the process stderr to a pipe for the duration of fn
+// and returns everything written to it. The pre-push gate writes its
+// customer-facing guidance (quarantine recovery, override warning) straight to
+// os.Stderr, so asserting on it is the only way to protect those messages from
+// silent removal.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	orig := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+	done := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		done <- string(b)
+	}()
+	fn()
+	require.NoError(t, w.Close())
+	os.Stderr = orig
+	return <-done
+}
 
 // This file is the end-to-end, customer-facing proof of the redaction promise:
 // a credential a coworker records into a session NEVER reaches the shared Ledger
@@ -88,8 +113,12 @@ func TestRedactE2E_SecretInJSONLNeverReachesRemote(t *testing.T) {
 	// And: teammates receive the redacted slug in its place.
 	assert.Contains(t, runGit(t, f.barePath, "show", "HEAD:sessions/"+sessionName+"/raw.jsonl"), "[REDACTED_AWS_KEY]",
 		"the redacted slug is what shipped to the remote")
-	// And: the redaction is recorded in the session's audit trail.
-	assert.Contains(t, runGit(t, f.barePath, "show", "HEAD:sessions/"+sessionName+"/meta.json"), "redactions",
+	// And: the redaction is recorded as a real RedactionPass — decode meta.json
+	// rather than grep the member name, which an empty default member satisfies.
+	var meta lfs.SessionMeta
+	require.NoError(t, json.Unmarshal(
+		[]byte(runGit(t, f.barePath, "show", "HEAD:sessions/"+sessionName+"/meta.json")), &meta))
+	assert.NotEmpty(t, meta.Redactions,
 		"a RedactionPass must be recorded in meta.json so the scrub is auditable")
 	gitFsckClean(t, f.barePath)
 }
@@ -119,7 +148,16 @@ func TestRedactE2E_SecretInSummaryQuarantinedNotPushed(t *testing.T) {
 	commitSession(t, f.ledgerPath, leaky, clean)
 
 	// When: the coworker pushes.
-	require.NoError(t, pushLedger(context.Background(), f.ledgerPath))
+	stderr := captureStderr(t, func() {
+		require.NoError(t, pushLedger(context.Background(), f.ledgerPath))
+	})
+
+	// And: ox tells the coworker what was quarantined and how to recover — a
+	// customer-facing promise that must not silently degrade.
+	assert.Contains(t, stderr, "Quarantined",
+		"the coworker must be told a file was held back from the push")
+	assert.Contains(t, stderr, "ox doctor",
+		"the coworker must be pointed at recovery")
 
 	// Then: no object on the remote carries the credential.
 	assertRemoteObjectsCleanOf(t, f.barePath, canary)
@@ -154,7 +192,13 @@ func TestRedactE2E_AllowSecretsOverrideShipsRawSecret(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "raw.jsonl"), []byte(rawLine), 0644))
 	commitSession(t, f.ledgerPath, sessionName)
 
-	require.NoError(t, pushLedger(context.Background(), f.ledgerPath))
+	stderr := captureStderr(t, func() {
+		require.NoError(t, pushLedger(context.Background(), f.ledgerPath))
+	})
+
+	// The override must warn loudly before it publishes credentials.
+	assert.Contains(t, stderr, "credentials may be published",
+		"OX_ALLOW_SECRETS must warn that credentials may reach the cloud Ledger")
 
 	// The override deliberately ships the raw secret. If this ever redacts, the
 	// override contract changed — fail loudly so a human re-decides.
