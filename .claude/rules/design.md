@@ -35,9 +35,15 @@ It's overwritten by `npm run sync`. Edits silently disappear on the next sync.
 
 ### 3. Use semantic styles, not raw colors
 
-Never `lipgloss.Color("#…")` or ANSI escapes in `cmd/ox/**`. Use `StyleSuccess`, `StyleError`, `StyleAccent`, etc. from `internal/cli/styles.go` and `internal/ui/styles.go`. Raw hex only lives in `internal/theme/generated.go`.
+Never construct `lipgloss.Color(…)` directly, and never hand-write ANSI escapes, outside Bubble Tea code.
 
-**Enforced by:** `make check-design` greps `cmd/ox/**` for `lipgloss.Color("#"` and fails the build.
+In order of preference: reach for an existing semantic style (`StyleSuccess`, `StyleError`, `StyleAccent`, … in `internal/cli/styles.go` and `internal/ui/styles.go`); failing that, build one from a generated token via `theme.Adapt(theme.ColorX)`. A literal passed through `theme.Color("#…")` is permitted for a genuine one-off, but a color used more than once is a missing token — add it in `sageox-design` and re-sync, don't copy the hex. Net-new palette values still land in `internal/theme/generated.go` by sync, never by hand.
+
+This is a correctness rule, not a tidiness one. lipgloss v2's `Style.Render()` always emits 24-bit color, and ox prints past any `colorprofile.Writer`, so a raw `lipgloss.Color` reaches a 256-color terminal as `38;2;R;G;B` — which it misparses into a **background** color, painting whole columns unreadable. `theme.Color` / `theme.Adapt` degrade first. See [docs/design/theming.md § Color depth](../../docs/design/theming.md#color-depth).
+
+Bubble Tea code is exempt: it downsamples its own frames.
+
+**Enforced by:** `TestNoRawLipglossColorOutsideTUI` in `internal/theme/` — fails on any non-TUI file constructing `lipgloss.Color`.
 
 ### 4. Search the catalog before inventing a widget
 
@@ -60,7 +66,9 @@ Always branch on `cli.IsInteractive()` / `cli.IsHeadless()`. Bubbletea forms, sp
 
 ### 7. `NO_COLOR` is sacred
 
-Every component must render readably under `NO_COLOR=1`. Test it. lipgloss handles most of this automatically; verify by running `NO_COLOR=1 ox dev catalog`.
+Every component must render readably under `NO_COLOR=1`. Test it with `NO_COLOR=1 ox dev catalog`. lipgloss v2 does **not** handle this for you — it works only because colors go through `theme.Color` / `theme.Adapt` (rule 3), which resolves `NO_COLOR` to a no-color profile.
+
+Readable under one terminal is not readable under all of them. Check the depth ladder too — `OX_COLOR_PROFILE=ansi256 ox dev catalog` renders what a macOS Terminal.app user sees.
 
 ### 8. Single-line, key=value log output stays
 
