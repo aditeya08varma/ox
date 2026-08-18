@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/carts"
 	"github.com/sageox/ox/internal/glance"
 	"github.com/spf13/cobra"
@@ -23,6 +24,10 @@ Designed for consumption by Claude Code or Claude Cowork for visualization.`,
 func init() {
 	cartAnalyzeCmd.Flags().String("since", "24h", "Start of time window (e.g. 24h, 7d, 2026-03-20)")
 	cartAnalyzeCmd.Flags().String("until", "", "End of time window (default: now)")
+	// Hidden until carts is enabled; execution is gated in openCartsStore.
+	if !auth.IsCartsEnabled() {
+		cartAnalyzeCmd.Hidden = true
+	}
 	rootCmd.AddCommand(cartAnalyzeCmd)
 }
 

@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Reviewer-first pull-request visuals** — `ox viz pr` selects prose, GitHub-safe Mermaid, or a rich attachment from the reviewer question; rich recipes now include construction-ready visual contracts, lightweight PNG checks, and personal, repository, and team preferences.
 
+### Changed
+
+- **`ox carts` is off by default** — the experimental carts feature (backed by a local Dolt sql-server) is now gated behind `FEATURE_CARTS` and hidden from `ox --help` until enabled. Set `FEATURE_CARTS=true` to opt in.
+
+### Fixed
+
+- **Reliable carts Dolt server reuse** — ox now validates that a recorded server actually answers before reusing it (rejecting a stale port left by a crashed server whose PID was recycled), serializes startup with an advisory lock so concurrent invocations can't spawn duplicate servers, and publishes the server's pid/port only after it accepts connections.
+
 ## [0.14.0] - 2026-08-15
 
 Skills now reach each AI coworker through its native discovery mechanism, while SageOx keeps project-scoped installations safe, consistent, and repairable.

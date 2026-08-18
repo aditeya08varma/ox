@@ -2,11 +2,25 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/carts"
 )
+
+// TestOpenCartsStoreDisabledByDefault guards the feature gate: with FEATURE_CARTS
+// unset (the default), openCartsStore — the single chokepoint every carts
+// subcommand and cart-analyze funnel through — must refuse before touching repo
+// config or starting a local Dolt server.
+// Failure prevented: carts shipping enabled-by-default and spawning Dolt on
+// machines that never opted in.
+func TestOpenCartsStoreDisabledByDefault(t *testing.T) {
+	t.Setenv("FEATURE_CARTS", "")
+	if _, _, err := openCartsStore(nil); !errors.Is(err, errCartsDisabled) {
+		t.Fatalf("expected errCartsDisabled with flag unset, got %v", err)
+	}
+}
 
 // TestCartStartOutputJSON verifies the JSON that runCartsStart emits in its
 // --json branch (cartStartOutput) carries a non-empty `guidance` key with the
