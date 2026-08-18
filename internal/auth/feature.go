@@ -64,3 +64,11 @@ func IsMemoryEnabled() bool {
 	value := strings.ToLower(os.Getenv("FEATURE_MEMORY"))
 	return value == "true" || value == "1" || value == "yes"
 }
+
+// IsCartsEnabled checks if the carts feature (ox carts, ox cart-analyze) is enabled.
+// Carts is experimental, backed by a locally started Dolt sql-server, and
+// disabled by default. Set FEATURE_CARTS=true to enable.
+func IsCartsEnabled() bool {
+	value := strings.ToLower(os.Getenv("FEATURE_CARTS"))
+	return value == "true" || value == "1" || value == "yes"
+}

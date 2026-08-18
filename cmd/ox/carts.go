@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/carts"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
@@ -13,6 +15,10 @@ import (
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/spf13/cobra"
 )
+
+// errCartsDisabled is returned by every carts command when the feature is off.
+// Carts is experimental and gated behind FEATURE_CARTS (see auth.IsCartsEnabled).
+var errCartsDisabled = errors.New("ox carts is disabled — set FEATURE_CARTS=true to enable")
 
 // cartStartGuidance is the Layer-1 floor instruction returned with every
 // `ox carts start --json`. It travels in the CLI JSON so all coding agents
@@ -494,12 +500,26 @@ func init() {
 	cartsCmd.AddCommand(cartsReopenCmd)
 	cartsCmd.AddCommand(cartsDepCmd)
 
+	// Hide carts from --help until the feature is enabled. Execution is gated
+	// independently in openCartsStore, so an explicit `ox carts …` still errors
+	// cleanly when disabled.
+	if !auth.IsCartsEnabled() {
+		cartsCmd.Hidden = true
+	}
+
 	rootCmd.AddCommand(cartsCmd)
 }
 
 // --- helpers ---
 
 func openCartsStore(cmd *cobra.Command) (*carts.Store, *repotools.GitIdentity, error) {
+	// Single chokepoint: every carts subcommand and cart-analyze opens the store
+	// here, so gating the feature flag here disables them all before any local
+	// Dolt server is started.
+	if !auth.IsCartsEnabled() {
+		return nil, nil, errCartsDisabled
+	}
+
 	root, err := repotools.FindRepoRoot(repotools.VCSGit)
 	if err != nil {
 		return nil, nil, fmt.Errorf("not in a git repository")

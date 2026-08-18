@@ -1,50 +1,99 @@
 package carts
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 )
 
-// runningServerPort must return the recorded port when the pid file names a
-// live process, and an error when it names a dead one. Before the fix the
-// liveness check used proc.Signal(os.Signal(nil)), which always errored, so a
-// live server was never detected and every call started a second sql-server.
+var errStubUnreachable = errors.New("stub: endpoint unreachable")
+
+// TestRunningServerPort covers the recorded-server reuse decision: it returns
+// the saved port only when the PID is live AND the endpoint answers, and errors
+// otherwise.
+//
+// Failure prevented: before #780 the liveness check (proc.Signal(nil)) always
+// errored, so a live server was never detected and every call started a second
+// sql-server. The "unreachable endpoint (stale)" case guards the follow-up
+// validation — a live PID alone is not enough, because a crashed server can
+// leave stale pid/port files while the OS reassigns its PID to an unrelated
+// process; reusing that port would fail later with "connection refused".
 func TestRunningServerPort(t *testing.T) {
-	dir := t.TempDir()
-	writeFile := func(name, content string) {
-		t.Helper()
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	tests := []struct {
+		name     string
+		pid      string // "self" live, "dead" reaped, "" no file, else literal
+		port     string // port file content; "" means no port file
+		ping     error  // simulated endpoint probe result
+		wantErr  bool
+		wantPort int
+	}{
+		{name: "no pid file", pid: "", wantErr: true},
+		{name: "live pid, reachable endpoint", pid: "self", port: "50422", ping: nil, wantPort: 50422},
+		{name: "live pid, unreachable endpoint (stale)", pid: "self", port: "1", ping: errStubUnreachable, wantErr: true},
+		{name: "dead pid", pid: "dead", port: "50422", ping: nil, wantErr: true},
 	}
 
-	// No pid file → not running.
-	if _, err := runningServerPort(dir); err == nil {
-		t.Fatal("expected error with no pid file")
-	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
 
-	// Live process (ourselves) + port file → port is returned.
-	writeFile(pidFileName, strconv.Itoa(os.Getpid()))
-	writeFile(portFileName, "50422")
-	port, err := runningServerPort(dir)
-	if err != nil {
-		t.Fatalf("live pid: unexpected error: %v", err)
-	}
-	if port != 50422 {
-		t.Fatalf("live pid: port = %d, want 50422", port)
-	}
+			// Stub the endpoint probe per-case so the reuse branches are
+			// exercised without a real dolt server.
+			orig := pingEndpoint
+			pingEndpoint = func(string, int, time.Duration) error { return tc.ping }
+			t.Cleanup(func() { pingEndpoint = orig })
 
-	// Dead process → error. Spawn a short-lived child and wait for it so the
-	// pid is guaranteed to be gone.
-	cmd := exec.Command("true")
+			switch tc.pid {
+			case "":
+				// no pid file
+			case "self":
+				writeStateFile(t, dir, pidFileName, strconv.Itoa(os.Getpid()))
+			case "dead":
+				writeStateFile(t, dir, pidFileName, strconv.Itoa(deadPID(t)))
+			default:
+				writeStateFile(t, dir, pidFileName, tc.pid)
+			}
+			if tc.port != "" {
+				writeStateFile(t, dir, portFileName, tc.port)
+			}
+
+			port, err := runningServerPort(dir)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got port %d", port)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if port != tc.wantPort {
+				t.Fatalf("port = %d, want %d", port, tc.wantPort)
+			}
+		})
+	}
+}
+
+// deadPID returns a PID that has certainly exited: it runs the test binary as a
+// no-op child (`-test.run=^$` matches no test) and reaps it. Portable across
+// platforms, unlike shelling out to `true`, and it fails rather than skips when
+// the helper cannot run so the dead-PID assertion is never silently bypassed.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$")
 	if err := cmd.Run(); err != nil {
-		t.Skipf("cannot spawn helper process: %v", err)
+		t.Fatalf("spawn no-op helper: %v", err)
 	}
-	writeFile(pidFileName, strconv.Itoa(cmd.Process.Pid))
-	if _, err := runningServerPort(dir); err == nil {
-		t.Fatal("expected error for dead pid")
+	return cmd.Process.Pid
+}
+
+func writeStateFile(t *testing.T, dir, name, content string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
