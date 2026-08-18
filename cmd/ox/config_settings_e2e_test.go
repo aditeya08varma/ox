@@ -84,9 +84,10 @@ func TestConfigE2E_AttributionCommitControlsTheCommitTrailer(t *testing.T) {
 		return f
 	}
 	runCommitMsgHook := func(msgFile string) string {
+		origFile, origSource := hooksCommitMsgFile, hooksCommitMsgSource
 		hooksCommitMsgFile = msgFile
 		hooksCommitMsgSource = ""
-		t.Cleanup(func() { hooksCommitMsgFile = ""; hooksCommitMsgSource = "" })
+		t.Cleanup(func() { hooksCommitMsgFile = origFile; hooksCommitMsgSource = origSource })
 		require.NoError(t, runHooksCommitMsg(hooksCommitMsgCmd, nil))
 		out, err := os.ReadFile(msgFile)
 		require.NoError(t, err)
