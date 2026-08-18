@@ -354,17 +354,37 @@ func waitForServer(host string, port int, timeout time.Duration) error {
 	return fmt.Errorf("timeout waiting for dolt server on port %d", port)
 }
 
-// StopServer stops a running dolt server for the given carts directory.
+// StopServer stops the dolt server recorded for the given carts directory.
+//
+// A recorded PID is NOT sufficient authority to signal: PIDs are recycled, so a
+// record left behind by a crash can name an unrelated process that the OS handed
+// the same number, and stopping carts would kill a stranger's process. The PID
+// is only acted on once the recorded port answers as a dolt server — the same
+// proof runningServerPort requires before reusing it.
+//
+// Stale records are still cleared, so a wrong record cannot wedge future starts.
 func StopServer(cartsDir string) error {
 	st, err := readServerState(cartsDir)
 	if err != nil {
 		return nil // no server running
 	}
-	proc, err := os.FindProcess(st.PID)
-	if err != nil {
+
+	// Bind the PID to a live server on the recorded port before signaling.
+	if !processAlive(st.PID) || probeServer("127.0.0.1", st.Port, probeTimeout) != nil {
+		removeServerState(cartsDir)
 		return nil
 	}
-	_ = proc.Signal(os.Interrupt)
+
+	proc, err := os.FindProcess(st.PID)
+	if err != nil {
+		removeServerState(cartsDir)
+		return nil
+	}
+	if err := terminateProcess(proc); err != nil {
+		// Leave the record in place: the server is still running and still
+		// discoverable, which beats orphaning it behind deleted metadata.
+		return fmt.Errorf("stop dolt server %d: %w", st.PID, err)
+	}
 	removeServerState(cartsDir)
 	return nil
 }

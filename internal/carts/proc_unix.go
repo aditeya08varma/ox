@@ -24,3 +24,10 @@ func processAlive(pid int) bool {
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
 }
+
+// terminateProcess asks a dolt sql-server to shut down. SIGINT lets dolt close
+// its storage cleanly and release the write lock; a hard kill risks leaving lock
+// state behind for the next start to trip over.
+func terminateProcess(proc *os.Process) error {
+	return proc.Signal(os.Interrupt)
+}

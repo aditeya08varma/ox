@@ -3,6 +3,8 @@
 package carts
 
 import (
+	"os"
+
 	"golang.org/x/sys/windows"
 )
 
@@ -33,4 +35,16 @@ func processAlive(pid int) bool {
 		return false
 	}
 	return code == stillActive
+}
+
+// terminateProcess asks a dolt sql-server to shut down.
+//
+// os.Process.Signal(os.Interrupt) is NOT implemented on Windows — it returns an
+// error without touching the target. Using it here made StopServer a silent
+// no-op that deleted the state record while the server kept running and holding
+// dolt's write lock, which is worse than failing outright. Windows has no
+// deliverable equivalent (GenerateConsoleCtrlEvent needs a shared console and
+// hits the whole group), so terminate the process directly.
+func terminateProcess(proc *os.Process) error {
+	return proc.Kill()
 }

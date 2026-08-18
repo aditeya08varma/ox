@@ -283,6 +283,102 @@ func TestServerStatePublishesAtomically(t *testing.T) {
 	})
 }
 
+// StopServer must never signal a PID it cannot prove is our dolt server. PIDs
+// are recycled, so a record left by a crash can name an unrelated process the OS
+// handed the same number — and stopping carts would kill a stranger's process.
+func TestStopServer(t *testing.T) {
+	// longLivedChild starts a process that stays up until the test ends, standing
+	// in for the unrelated process that inherited a recycled PID. It returns the
+	// PID plus a channel closed once the child has exited AND been reaped —
+	// processAlive alone can't be used here, because a signalled-but-unreaped
+	// child lingers as a zombie that still answers signal 0.
+	longLivedChild := func(t *testing.T) (int, <-chan struct{}) {
+		t.Helper()
+		cmd := exec.Command(os.Args[0], "-test.run=TestHelperSleep", "--")
+		cmd.Env = append(os.Environ(), "CARTS_HELPER_SLEEP=1")
+		if err := cmd.Start(); err != nil {
+			t.Fatalf("start helper: %v", err)
+		}
+		exited := make(chan struct{})
+		go func() {
+			_, _ = cmd.Process.Wait()
+			close(exited)
+		}()
+		t.Cleanup(func() { _ = cmd.Process.Kill() })
+		return cmd.Process.Pid, exited
+	}
+
+	t.Run("does not signal a live process when the port is not serving", func(t *testing.T) {
+		dir := t.TempDir()
+		pid, exited := longLivedChild(t)
+		// Stale record: real live PID, but nothing dolt-like on the port.
+		writeState(t, dir, pid, freePort(t))
+		stubProbe(t) // nothing answers
+
+		if err := StopServer(dir); err != nil {
+			t.Fatalf("StopServer: %v", err)
+		}
+		select {
+		case <-exited:
+			t.Error("StopServer killed an unrelated process on the strength of a stale record")
+		case <-time.After(500 * time.Millisecond):
+			// Still running, as it must be.
+		}
+		if _, err := readServerState(dir); err == nil {
+			t.Error("stale record should be cleared so it cannot wedge future starts")
+		}
+	})
+
+	t.Run("signals the process when the recorded port is serving", func(t *testing.T) {
+		dir := t.TempDir()
+		pid, exited := longLivedChild(t)
+		port := freePort(t)
+		writeState(t, dir, pid, port)
+		stubProbe(t, port) // the recorded port answers, binding PID to server
+
+		if err := StopServer(dir); err != nil {
+			t.Fatalf("StopServer: %v", err)
+		}
+		select {
+		case <-exited:
+			// Terminated, as expected.
+		case <-time.After(5 * time.Second):
+			t.Error("expected the verified server process to be terminated")
+		}
+		if _, err := readServerState(dir); err == nil {
+			t.Error("record should be cleared after a successful stop")
+		}
+	})
+
+	t.Run("no record is a no-op", func(t *testing.T) {
+		if err := StopServer(t.TempDir()); err != nil {
+			t.Errorf("expected nil for an empty dir, got %v", err)
+		}
+	})
+
+	t.Run("dead pid clears the record without error", func(t *testing.T) {
+		dir := t.TempDir()
+		writeState(t, dir, deadPID(t), freePort(t))
+		stubProbe(t)
+
+		if err := StopServer(dir); err != nil {
+			t.Fatalf("StopServer: %v", err)
+		}
+		if _, err := readServerState(dir); err == nil {
+			t.Error("record naming a dead process should be cleared")
+		}
+	})
+}
+
+// TestHelperSleep is not a real test: it is the body of the long-lived child
+// process spawned by TestStopServer. It blocks until signalled or killed.
+func TestHelperSleep(t *testing.T) {
+	if os.Getenv("CARTS_HELPER_SLEEP") != "1" {
+		t.Skip("helper process entry point; not a standalone test")
+	}
+	time.Sleep(60 * time.Second)
+}
+
 // remainingProbe must honour both bounds it documents: capped at probeTimeout
 // above, and never a positive sliver below minProbeWindow — a probe granted a
 // few milliseconds fails a healthy server on jitter alone.
