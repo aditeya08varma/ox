@@ -3,6 +3,7 @@ package carts
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -69,7 +70,7 @@ func EnsureServer(cartsDir string) (int, error) {
 		return nil
 	})
 	if lockErr != nil {
-		return 0, lockErr
+		return 0, fmt.Errorf("start carts dolt server: %w", lockErr)
 	}
 	return port, nil
 }
@@ -152,19 +153,35 @@ func startServer(cartsDir string) (int, error) {
 	// Wait for readiness BEFORE publishing state, so a concurrent reader never
 	// observes a pid/port for a server that isn't accepting connections yet.
 	if err := waitForServer(serverHost, port, serverStartTimeout); err != nil {
-		_ = cmd.Process.Kill() // don't orphan a half-started server
+		stopProcess(cmd) // don't orphan a half-started server
 		return 0, fmt.Errorf("server failed to start: %w", err)
 	}
 
-	// Publish reusable state only after the server is ready.
-	if err := os.WriteFile(filepath.Join(cartsDir, pidFileName), []byte(strconv.Itoa(cmd.Process.Pid)), 0o644); err != nil {
-		return 0, err
-	}
-	if err := os.WriteFile(filepath.Join(cartsDir, portFileName), []byte(strconv.Itoa(port)), 0o644); err != nil {
-		return 0, err
+	// Publish reusable state only after the server is ready. If either write
+	// fails, tear the server down and clear both files: a live process with
+	// incomplete state (e.g. pid written, port missing) would be rejected by
+	// the next call, which would then start a duplicate server against the same
+	// single-writer dolt dir.
+	pidErr := os.WriteFile(filepath.Join(cartsDir, pidFileName), []byte(strconv.Itoa(cmd.Process.Pid)), 0o644)
+	portErr := os.WriteFile(filepath.Join(cartsDir, portFileName), []byte(strconv.Itoa(port)), 0o644)
+	if pidErr != nil || portErr != nil {
+		stopProcess(cmd)
+		_ = os.Remove(filepath.Join(cartsDir, pidFileName))
+		_ = os.Remove(filepath.Join(cartsDir, portFileName))
+		return 0, fmt.Errorf("publish carts server state: %w", errors.Join(pidErr, portErr))
 	}
 
 	return port, nil
+}
+
+// stopProcess kills and reaps a started process, best-effort. Reaping (Wait)
+// prevents a lingering zombie when we tear down a server we just started.
+func stopProcess(cmd *exec.Cmd) {
+	if cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Kill()
+	_, _ = cmd.Process.Wait()
 }
 
 // ensureDoltInit ensures the dolt directory is initialized.
