@@ -55,12 +55,12 @@ func New(ctx context.Context, cfg *Config) (*Store, error) {
 		}
 	}
 
-	user := cfg.CommitterName
-	if user == "" {
-		user = "root"
-	}
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/?parseTime=true&interpolateParams=true&timeout=5s&readTimeout=30s&writeTimeout=30s",
-		user, cfg.ServerHost, port)
+	// Connect as root: the sql-server is one we start on loopback with the
+	// default (root@localhost, no password) account, and no other user exists
+	// there. Connecting as the committer name failed with "Access denied" on
+	// Dolt 2.x. Commit authorship is passed explicitly via DOLT_COMMIT --author.
+	dsn := fmt.Sprintf("root@tcp(%s:%d)/?parseTime=true&interpolateParams=true&timeout=5s&readTimeout=30s&writeTimeout=30s",
+		cfg.ServerHost, port)
 
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
