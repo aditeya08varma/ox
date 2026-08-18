@@ -98,23 +98,28 @@ func TestGetAdapter_ReturnsErrNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ErrAdapterNotFound)
 }
 
+// TestDetectAdapter_ReturnsFirstMatch verifies detection skips non-detecting
+// adapters and resolves ties by name order rather than map iteration order.
+//
+// Failure prevented: with several agents installed, multiple adapters report
+// Detect()=true and the winner changes run to run, so a session can bind to a
+// different agent's adapter on every start (issue #519).
 func TestDetectAdapter_ReturnsFirstMatch(t *testing.T) {
 	ResetRegistry()
 
-	// register adapters in order
-	adapter1 := &mockAdapter{name: "adapter-1", detect: false}
-	adapter2 := &mockAdapter{name: "adapter-2", detect: true}
-	adapter3 := &mockAdapter{name: "adapter-3", detect: true}
+	// adapter-1 sorts first but does not detect, so it must be skipped;
+	// adapter-2 and adapter-3 both detect, and adapter-2 wins on name order.
+	Register(&mockAdapter{name: "adapter-1", detect: false})
+	Register(&mockAdapter{name: "adapter-3", detect: true})
+	Register(&mockAdapter{name: "adapter-2", detect: true})
 
-	Register(adapter1)
-	Register(adapter2)
-	Register(adapter3)
-
-	got, err := DetectAdapter()
-	require.NoError(t, err)
-
-	// should return one of the detecting adapters (map iteration order is non-deterministic)
-	assert.True(t, got.Detect(), "DetectAdapter() should return adapter that detects")
+	// Repeat: a single call would pass ~50% of the time under map ordering.
+	for i := 0; i < 50; i++ {
+		got, err := DetectAdapter()
+		require.NoError(t, err)
+		require.Equal(t, "adapter-2", got.Name(),
+			"DetectAdapter() must break ties deterministically by name")
+	}
 }
 
 func TestDetectAdapter_ReturnsErrNoAdapter(t *testing.T) {

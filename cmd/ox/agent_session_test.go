@@ -578,3 +578,52 @@ func TestSessionStop_NonEmptyDropFile_NotIncomplete(t *testing.T) {
 	assert.False(t, isGenericDropFileEmpty(stateNonGeneric),
 		"isGenericDropFileEmpty should return false for non-generic adapters")
 }
+
+// --- Adapter resolution at session start ---
+
+// TestResolveSessionAdapter_KnownAgentIgnoresOtherInstalledAgents verifies a
+// session whose agent type is known resolves to that agent's adapter, even when
+// other agents are installed and their adapters also detect.
+//
+// Failure prevented: Detect() reports that an agent is INSTALLED, not that it
+// produced this session. Resolving a known Claude Code session by detection let
+// whichever adapter won the registry race claim it — FindSessionFile then fails,
+// is logged at Info only, and the generic fallback is skipped because
+// adapterName is already set, leaving a recording bound to the wrong adapter
+// with no session file (the header-only raw.jsonl shape of issue #519).
+func TestResolveSessionAdapter_KnownAgentIgnoresOtherInstalledAgents(t *testing.T) {
+	adapterDir := t.TempDir()
+	// "aider" sorts before "claude-code", so it wins any name-ordered tie and
+	// would have won roughly half the map-ordered races.
+	createFakeAdapterWithHooks(t, adapterDir, "aider", "0.1.0", "session", ".aider")
+	createFakeAdapterWithHooks(t, adapterDir, "claude-code", "0.1.0", "session", ".claude")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+
+	for _, name := range []string{"aider", "claude-code"} {
+		adapters.Unregister(name)
+		t.Cleanup(func() { adapters.Unregister(name) })
+	}
+
+	// Repeat: under map-order detection this passed only by luck.
+	for i := 0; i < 25; i++ {
+		adapter, err := resolveSessionAdapter("claude-code")
+		require.NoError(t, err)
+		require.Equal(t, "claude-code", adapter.Name(),
+			"a known Claude Code session must never bind to another agent's adapter")
+	}
+}
+
+// TestResolveSessionAdapter_UnknownAgentFallsBackToDetection verifies detection
+// is still used when the agent type is unknown — the only case where guessing
+// is the best available signal.
+func TestResolveSessionAdapter_UnknownAgentFallsBackToDetection(t *testing.T) {
+	adapterDir := t.TempDir()
+	createFakeAdapterWithHooks(t, adapterDir, "aider", "0.1.0", "session", ".aider")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	adapters.Unregister("aider")
+	t.Cleanup(func() { adapters.Unregister("aider") })
+
+	adapter, err := resolveSessionAdapter("")
+	require.NoError(t, err)
+	assert.Equal(t, "aider", adapter.Name())
+}
