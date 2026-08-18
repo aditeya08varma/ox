@@ -119,6 +119,13 @@ file-format seam that `internal/attest` already documents
 (`compiled/**/*.plan.json`, `tests/bdd/runs/<runId>/{run.json,report/results.json,run-report.json}`).
 The actual runner integration is a separate, blocked task.
 
+**`FEATURE_ATTEST` stays OFF by default** until the runner is wired. `ox attest`
+is flag-gated (`FEATURE_ATTEST=1`); with no compiler or runner, every capability
+sits at `skipped` and the ladder cannot reach `attested`, so shipping the command
+on by default would advertise a proof surface ox cannot yet honor. Maintainers
+dogfood the corpus with `FEATURE_ATTEST=1 ox attest status`; revisit the default
+when the publish pipeline lands.
+
 ---
 
 ## 5. No test theater
