@@ -42,15 +42,21 @@ func TestSearch_NoNetworkCalls(t *testing.T) {
 	// Build a realistic ledger and ensure results come back via the pure-fs
 	// path. If Search ever introduces network I/O, the dialer hook above
 	// fires and fails the test.
+	// Date the session folder relative to now so it always sits inside the
+	// MaxSessionAge scan window. A hardcoded date silently ages out past the
+	// 90-day cutoff and turns this network guard into a calendar time-bomb.
+	now := time.Now()
+	sessionName := now.Format("2006-01-02T15-04") + "-ryan-OxTest"
 	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, "sessions", "2026-05-20T10-15-ryan-OxTest"), 0o755); err != nil {
+	sessionDir := filepath.Join(dir, "sessions", sessionName)
+	if err := os.MkdirAll(sessionDir, 0o755); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "sessions", "2026-05-20T10-15-ryan-OxTest", "summary.md"), []byte("the term widget matches"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(sessionDir, "summary.md"), []byte("the term widget matches"), 0o644); err != nil {
 		t.Fatalf("setup: %v", err)
 	}
 
-	results, err := Search(Options{LedgerPath: dir, Query: "widget", Now: time.Now()})
+	results, err := Search(Options{LedgerPath: dir, Query: "widget", Now: now})
 	if err != nil {
 		t.Fatalf("Search returned err (should be fail-open): %v", err)
 	}
