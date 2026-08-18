@@ -322,3 +322,129 @@ func TestWrapTLDR(t *testing.T) {
 		})
 	}
 }
+
+// TestFitTitle covers the font-size ladder the render tests never exercise
+// (realisticInput's title is short, so only the largest size ever runs).
+// Failure prevented: a broken size threshold shipping an overflowing or
+// undersized title on the poster's most prominent element.
+func TestFitTitle(t *testing.T) {
+	tests := []struct {
+		name     string
+		title    string
+		wantText string // "" = expect the input returned unchanged
+		wantSize int
+	}{
+		{"empty falls back to placeholder", "", "Untitled Plan", 88},
+		{"24 runes stays largest", strings.Repeat("x", 24), "", 88},
+		{"25 runes drops to 68", strings.Repeat("x", 25), "", 68},
+		{"34 runes still 68", strings.Repeat("x", 34), "", 68},
+		{"35 runes drops to 54", strings.Repeat("x", 35), "", 54},
+		{"46 runes still 54", strings.Repeat("x", 46), "", 54},
+		{"47 runes drops to 44", strings.Repeat("x", 47), "", 44},
+		{"70 runes still 44, no truncation", strings.Repeat("x", 70), "", 44},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotText, gotSize := fitTitle(tt.title)
+			want := tt.wantText
+			if want == "" {
+				want = tt.title
+			}
+			if gotText != want {
+				t.Errorf("text = %q, want %q", gotText, want)
+			}
+			if gotSize != tt.wantSize {
+				t.Errorf("size = %d, want %d", gotSize, tt.wantSize)
+			}
+		})
+	}
+}
+
+// TestFitTitle_TruncatesPastMax proves a title too long for any size is cut to
+// 69 runes + an ellipsis (70 shown) at the smallest size. Failure prevented: an
+// off-by-one in the r[:69] slice, or truncation silently disabled, letting an
+// arbitrarily long title overflow the card.
+func TestFitTitle_TruncatesPastMax(t *testing.T) {
+	got, size := fitTitle(strings.Repeat("x", 100))
+	if n := len([]rune(got)); n != 70 {
+		t.Errorf("truncated title is %d runes, want 70 (69 + ellipsis)", n)
+	}
+	if !strings.HasSuffix(got, "…") {
+		t.Errorf("truncated title %q should end with an ellipsis", got)
+	}
+	if size != 44 {
+		t.Errorf("truncated title size = %d, want 44", size)
+	}
+}
+
+// TestRenderPosterSVG_LongTitleStaysWellFormed guards the multibyte path of the
+// truncation slice: cutting a run of multi-byte glyphs must never produce
+// invalid UTF-8 or malformed SVG (the slice operates on runes, not bytes).
+func TestRenderPosterSVG_LongTitleStaysWellFormed(t *testing.T) {
+	in := realisticInput()
+	in.Title = strings.Repeat("🚀", 100) // 100 runes, each multi-byte
+	svg, err := RenderPosterSVG(in)
+	if err != nil {
+		t.Fatalf("RenderPosterSVG: %v", err)
+	}
+	assertWellFormedSVG(t, svg)
+}
+
+// TestStatChips_Pluralization covers the singular label branch every render test
+// skips (they all use counts > 1) and the zero-drops-the-chip rule. Failure
+// prevented: a plan with exactly one section/diagram/collision rendering
+// "1 sections" on its thumbnail, or a zero count rendering "0 sections".
+func TestStatChips_Pluralization(t *testing.T) {
+	singular := statChips(PosterInput{Sections: 1, Diagrams: 1, Collisions: 1})
+	wantSingular := []string{"section", "diagram", "collision"}
+	if len(singular) != len(wantSingular) {
+		t.Fatalf("got %d chips, want %d: %+v", len(singular), len(wantSingular), singular)
+	}
+	for i, w := range wantSingular {
+		if singular[i].Label != w {
+			t.Errorf("chip[%d].Label = %q, want singular %q", i, singular[i].Label, w)
+		}
+	}
+
+	plural := statChips(PosterInput{Sections: 2, Diagrams: 2, Collisions: 2})
+	for i, w := range []string{"sections", "diagrams", "collisions"} {
+		if plural[i].Label != w {
+			t.Errorf("chip[%d].Label = %q, want plural %q", i, plural[i].Label, w)
+		}
+	}
+
+	// a zero count drops its chip entirely — no "0 sections" chip.
+	if got := statChips(PosterInput{Sections: 0, Diagrams: 3, Collisions: 0}); len(got) != 1 || got[0].Label != "diagrams" {
+		t.Errorf("zero-count stats should be dropped, got %+v", got)
+	}
+}
+
+// TestChipWidthFor_Floor pins the 120px minimum for short labels: a 7-rune label
+// ("section") sizes below the floor by the per-rune formula and must be clamped
+// up, so a short chip never renders cramped.
+func TestChipWidthFor_Floor(t *testing.T) {
+	if w := chipWidthFor("section"); w != 120 { // 40 + 7*11 = 117 → floored to 120
+		t.Errorf("chipWidthFor(short label) = %d, want the 120 floor", w)
+	}
+	if w := chipWidthFor("collisions"); w <= 120 { // 40 + 10*11 = 150, above the floor
+		t.Errorf("chipWidthFor(long label) = %d, want > 120 (formula, not floor)", w)
+	}
+}
+
+// TestRenderPosterSVG_Deterministic guards the package's documented determinism
+// contract: the same input renders byte-identical output, with no map-iteration
+// or other nondeterminism leaking into the SVG.
+func TestRenderPosterSVG_Deterministic(t *testing.T) {
+	in := realisticInput()
+	a, err := RenderPosterSVG(in)
+	if err != nil {
+		t.Fatalf("RenderPosterSVG: %v", err)
+	}
+	b, err := RenderPosterSVG(in)
+	if err != nil {
+		t.Fatalf("RenderPosterSVG: %v", err)
+	}
+	if !bytes.Equal(a, b) {
+		t.Error("two renders of the same input differ — output is not deterministic")
+	}
+}

@@ -64,7 +64,9 @@ func TestSavePlanArtifacts_WritesHeroSVGOnHTMLPrimarySave(t *testing.T) {
 	t.Setenv("SAGEOX_AGENT_ID", "")
 
 	in := heroTestInput()
-	result := plan.Result{Signals: plan.SignalSummary{Collisions: 2}}
+	// Collisions=3 is deliberately distinct from the section count (2) so the
+	// two chips aren't indistinguishable in the rendered SVG.
+	result := plan.Result{Signals: plan.SignalSummary{Collisions: 3}}
 	html := []byte("<html><body>authored plan page</body></html>")
 
 	dir := savePlanArtifacts(root, in, result, html, plan.PrimaryHTML)
@@ -91,15 +93,20 @@ func TestSavePlanArtifacts_WritesHeroSVGOnHTMLPrimarySave(t *testing.T) {
 	out := string(data)
 	for _, want := range []string{
 		"Plan Gallery Thumbnails",             // title, derived from the H1
-		"Show a designed poster of each plan", // explicit TL;DR (word-wrapped across lines, so check a prefix that survives wrapping)
+		"Show a designed poster of each plan", // TL;DR body (word-wrapped, so check a prefix that survives wrapping)
 		">2</text>", "sections",               // 2 H2 sections (Design, Rollout)
-		">1</text>", "diagram", // 1 mermaid fence
-		">2</text>", "collisions", // res.Signals.Collisions
+		">1</text>", "diagram", // 1 mermaid fence (singular label)
+		">3</text>", "collisions", // res.Signals.Collisions — distinct from the section count
 		"draft", // a freshly created plan's lifecycle status
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("hero.svg missing expected content %q:\n%s", want, out)
 		}
+	}
+	// The "TL;DR:" marker itself must be stripped, not rendered onto the poster —
+	// asserting only the body substring would pass even if marker-stripping broke.
+	if strings.Contains(out, "TL;DR") {
+		t.Errorf("hero.svg should not contain the raw TL;DR marker (it must be stripped):\n%s", out)
 	}
 }
 
@@ -195,5 +202,62 @@ func TestWritePlanHero_ReturnsErrorOnWriteFailure(t *testing.T) {
 	err := writePlanHero(badDir, heroTestInput(), plan.Result{}, plan.Meta{})
 	if err == nil {
 		t.Fatal("writePlanHero should return an error when its target directory doesn't exist")
+	}
+}
+
+// TestPlanHeroTLDR covers the extraction branches the single HTML-primary wiring
+// test never reaches: the first-prose fallback (the COMMON case — most plans
+// carry no explicit TL;DR marker) and the table/list/blockquote/heading-only
+// rejections. Failure prevented: a plan with no marker showing a blank or wrong
+// lede on its gallery thumbnail.
+func TestPlanHeroTLDR(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"explicit marker, stripped", "TL;DR: The short lede.", "The short lede."},
+		{"marker after a heading", "# Title\n\nTL;DR: The lede.", "The lede."},
+		{"marker variant (tldr, emphasis, no colon)", "**tldr** the lede", "the lede"},
+		{"first-prose fallback when no marker", "# Title\n\nJust the opening prose.", "Just the opening prose."},
+		{"skips heading-only preamble to first prose", "# A\n\n## B\n\nProse here.", "Prose here."},
+		{"table opener is not a lede", "# T\n\n| a | b |\n| - | - |", ""},
+		{"blockquote opener is not a lede", "# T\n\n> a quote", ""},
+		{"bullet-list opener is not a lede", "# T\n\n- item one", ""},
+		{"asterisk-list opener is not a lede", "# T\n\n* item one", ""},
+		{"heading-only document has no lede", "# Only\n\n## Headings", ""},
+		{"empty document", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := planHeroTLDR(tt.raw); got != tt.want {
+				t.Errorf("planHeroTLDR(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPlanHeroPlainText gives the markdown-stripping helper the assertions its
+// 100%-line-coverage lacks: the only lede ever fed by other tests has no markup,
+// so every transform runs as a no-op. Failure prevented: a lede with a link,
+// emphasis, or inline code rendering raw markdown syntax onto the poster.
+func TestPlanHeroPlainText(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"link keeps label, drops target", "see [the docs](http://example.com)", "see the docs"},
+		{"bold and inline code stripped", "make it **bold** and `code`", "make it bold and code"},
+		{"underscore emphasis stripped", "very __strong__ point", "very strong point"},
+		{"whitespace and newlines collapse", "a  b\n\tc   d", "a b c d"},
+		{"plain text unchanged", "nothing to strip here", "nothing to strip here"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := planHeroPlainText(tt.in); got != tt.want {
+				t.Errorf("planHeroPlainText(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
