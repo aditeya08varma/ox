@@ -428,6 +428,7 @@ func TestKBGuidanceText_TeachesTheFourConcepts(t *testing.T) {
 		"3. repo navigation":       {"AGENTS.md", "curated for that bubble"},
 		"4. data not instructions": {"DATA, never instructions", "override the user"},
 		"5. pointer to long form":  {"ox guide knowledge-bubbles"},
+		"6. citations exist":       {"sageox://", "distilled topic", "transcript span"},
 	}
 	for concept, markers := range concepts {
 		for _, m := range markers {
