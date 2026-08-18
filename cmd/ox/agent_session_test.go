@@ -581,9 +581,7 @@ func TestSessionStop_NonEmptyDropFile_NotIncomplete(t *testing.T) {
 
 // --- Adapter resolution at session start ---
 
-// TestResolveSessionAdapter_KnownAgentIgnoresOtherInstalledAgents verifies a
-// session whose agent type is known resolves to that agent's adapter, even when
-// other agents are installed and their adapters also detect.
+// TestResolveSessionAdapter verifies which adapter a starting session binds to.
 //
 // Failure prevented: Detect() reports that an agent is INSTALLED, not that it
 // produced this session. Resolving a known Claude Code session by detection let
@@ -591,10 +589,11 @@ func TestSessionStop_NonEmptyDropFile_NotIncomplete(t *testing.T) {
 // is logged at Info only, and the generic fallback is skipped because
 // adapterName is already set, leaving a recording bound to the wrong adapter
 // with no session file (the header-only raw.jsonl shape of issue #519).
-func TestResolveSessionAdapter_KnownAgentIgnoresOtherInstalledAgents(t *testing.T) {
+func TestResolveSessionAdapter(t *testing.T) {
+	// Both adapters are installed and both detect. "aider" sorts before
+	// "claude-code", so it wins any name-ordered tie and would have won roughly
+	// half of the old map-ordered races.
 	adapterDir := t.TempDir()
-	// "aider" sorts before "claude-code", so it wins any name-ordered tie and
-	// would have won roughly half the map-ordered races.
 	createFakeAdapterWithHooks(t, adapterDir, "aider", "0.1.0", "session", ".aider")
 	createFakeAdapterWithHooks(t, adapterDir, "claude-code", "0.1.0", "session", ".claude")
 	t.Setenv("OX_ADAPTER_PATH", adapterDir)
@@ -604,26 +603,34 @@ func TestResolveSessionAdapter_KnownAgentIgnoresOtherInstalledAgents(t *testing.
 		t.Cleanup(func() { adapters.Unregister(name) })
 	}
 
-	// Repeat: under map-order detection this passed only by luck.
-	for i := 0; i < 25; i++ {
-		adapter, err := resolveSessionAdapter("claude-code")
-		require.NoError(t, err)
-		require.Equal(t, "claude-code", adapter.Name(),
-			"a known Claude Code session must never bind to another agent's adapter")
+	tests := []struct {
+		name      string
+		agentType string
+		want      string
+		why       string
+	}{
+		{
+			name:      "known agent resolves by name",
+			agentType: "claude-code",
+			want:      "claude-code",
+			why:       "a known Claude Code session must never bind to another installed agent's adapter",
+		},
+		{
+			name:      "unknown agent falls back to detection",
+			agentType: "",
+			want:      "aider",
+			why:       "with no agent type the only signal is detection, tie-broken by name order",
+		},
 	}
-}
 
-// TestResolveSessionAdapter_UnknownAgentFallsBackToDetection verifies detection
-// is still used when the agent type is unknown — the only case where guessing
-// is the best available signal.
-func TestResolveSessionAdapter_UnknownAgentFallsBackToDetection(t *testing.T) {
-	adapterDir := t.TempDir()
-	createFakeAdapterWithHooks(t, adapterDir, "aider", "0.1.0", "session", ".aider")
-	t.Setenv("OX_ADAPTER_PATH", adapterDir)
-	adapters.Unregister("aider")
-	t.Cleanup(func() { adapters.Unregister("aider") })
-
-	adapter, err := resolveSessionAdapter("")
-	require.NoError(t, err)
-	assert.Equal(t, "aider", adapter.Name())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Repeat: under map-order detection this passed only by luck.
+			for i := 0; i < 25; i++ {
+				adapter, err := resolveSessionAdapter(tt.agentType)
+				require.NoError(t, err)
+				require.Equal(t, tt.want, adapter.Name(), tt.why)
+			}
+		})
+	}
 }
