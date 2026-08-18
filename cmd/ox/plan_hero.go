@@ -105,7 +105,12 @@ func planHeroTLDR(raw string) string {
 		if loc := planHeroTLDRMarker.FindStringIndex(b); loc != nil {
 			return planHeroPlainText(b[loc[1]:])
 		}
-		if strings.HasPrefix(b, "|") || strings.HasPrefix(b, ">") || strings.HasPrefix(b, "-") || strings.HasPrefix(b, "*") {
+		// List markers require a following space or tab; testing the bare
+		// character would misread bold-opening prose ("**Important:** …") as a
+		// list and drop the lede.
+		if strings.HasPrefix(b, "|") || strings.HasPrefix(b, ">") ||
+			strings.HasPrefix(b, "- ") || strings.HasPrefix(b, "* ") ||
+			strings.HasPrefix(b, "-\t") || strings.HasPrefix(b, "*\t") {
 			return "" // a table/blockquote/list opener isn't a prose lede
 		}
 		return planHeroPlainText(b)

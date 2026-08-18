@@ -9,6 +9,7 @@ package main
 
 import (
 	"encoding/xml"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -120,7 +121,7 @@ func TestSavePlanArtifacts_SkipsHeroSVGOnMarkdownPrimarySave(t *testing.T) {
 		t.Fatal("savePlanArtifacts returned empty dir")
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, "hero.svg")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "hero.svg")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("hero.svg should not be written on a markdown-primary save (err=%v)", err)
 	}
 }
@@ -152,7 +153,7 @@ func TestSavePlanArtifacts_SkipsHeroSVGWhenConfigDisabled(t *testing.T) {
 		t.Fatal("savePlanArtifacts returned empty dir")
 	}
 
-	if _, err := os.Stat(filepath.Join(dir, "hero.svg")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dir, "hero.svg")); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("hero.svg should not be written when plan.hero=false (err=%v)", err)
 	}
 }
@@ -220,6 +221,7 @@ func TestPlanHeroTLDR(t *testing.T) {
 		{"marker after a heading", "# Title\n\nTL;DR: The lede.", "The lede."},
 		{"marker variant (tldr, emphasis, no colon)", "**tldr** the lede", "the lede"},
 		{"first-prose fallback when no marker", "# Title\n\nJust the opening prose.", "Just the opening prose."},
+		{"bold-opening prose is a lede, not a list", "# Title\n\n**Important:** ship it.", "Important: ship it."},
 		{"skips heading-only preamble to first prose", "# A\n\n## B\n\nProse here.", "Prose here."},
 		{"table opener is not a lede", "# T\n\n| a | b |\n| - | - |", ""},
 		{"blockquote opener is not a lede", "# T\n\n> a quote", ""},

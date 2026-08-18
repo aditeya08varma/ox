@@ -3,6 +3,7 @@ package planhero
 import (
 	"bytes"
 	"encoding/xml"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -20,7 +21,7 @@ func assertWellFormedSVG(t *testing.T, doc []byte) {
 	sawRoot := false
 	for {
 		tok, err := dec.Token()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
@@ -298,6 +299,15 @@ func TestWrapTLDR(t *testing.T) {
 			name:         "truncates with an ellipsis past two lines",
 			text:         strings.Repeat("word ", 40),
 			wantLine2end: "…",
+		},
+		{
+			// A single word wider than the line budget can't be wrapped —
+			// it must be hard-cut so it can't overflow the poster's width.
+			name:      "an over-long single word is hard-cut to the line budget",
+			text:      strings.Repeat("x", 80),
+			exact:     true,
+			wantLine1: strings.Repeat("x", tldrMaxLineChars-1) + "…",
+			wantLine2: "",
 		},
 	}
 	for _, tt := range tests {

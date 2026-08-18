@@ -302,6 +302,12 @@ func wrapTLDR(text string) (line1, line2 string) {
 	i := 0
 	for i < len(words) && len(lines) < 2 {
 		w := words[i]
+		// A single word wider than the line budget can never fit by wrapping
+		// (the width check below is skipped when cur is empty) — hard-cut it so
+		// a long URL or identifier can't overflow the card.
+		if r := []rune(w); len(r) > tldrMaxLineChars {
+			w = string(r[:tldrMaxLineChars-1]) + "…"
+		}
 		cand := w
 		if cur != "" {
 			cand = cur + " " + w
