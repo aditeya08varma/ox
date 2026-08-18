@@ -4,16 +4,20 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/sageox/ox/internal/api"
+	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/endpoint"
 	"github.com/sageox/ox/internal/repotools"
+	"github.com/sageox/ox/internal/session/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -307,6 +311,109 @@ func TestStringSlicesEqual_OneNilOneNonEmpty(t *testing.T) {
 
 	result := stringSlicesEqual(a, b)
 	assert.False(t, result, "expected nil and non-empty slice to be unequal")
+}
+
+func TestSelectAgentsForInit_NonInteractiveIncludesDetectedAdapters(t *testing.T) {
+	cli.SetNoInteractive(true)
+	t.Cleanup(func() { cli.SetNoInteractive(false) })
+
+	previousAgentsFlag := initAgentsFlag
+	initAgentsFlag = ""
+	t.Cleanup(func() { initAgentsFlag = previousAgentsFlag })
+
+	adapterDir := t.TempDir()
+	createFakeAdapterWithHooks(t, adapterDir, "codex", "0.1.0", "session", ".codex")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	t.Setenv("HOME", t.TempDir())
+
+	selected, err := selectAgentsForInit(t.TempDir())
+	require.NoError(t, err)
+	assert.True(t, selected["claude-code"])
+	assert.True(t, selected["codex"], "detected Codex must be configured when init cannot prompt")
+}
+
+func TestSelectAgentsForInit_NonInteractiveSkipsUndetectedAdapters(t *testing.T) {
+	cli.SetNoInteractive(true)
+	t.Cleanup(func() { cli.SetNoInteractive(false) })
+
+	previousAgentsFlag := initAgentsFlag
+	initAgentsFlag = ""
+	t.Cleanup(func() { initAgentsFlag = previousAgentsFlag })
+
+	adapterDir := t.TempDir()
+	createFakeAdapter(t, adapterDir, "codex", "0.1.0", "session")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	t.Setenv("HOME", t.TempDir())
+
+	selected, err := selectAgentsForInit(t.TempDir())
+	require.NoError(t, err)
+	assert.False(t, selected["codex"], "undetected Codex must not create project integration files")
+}
+
+// TestInstallAgentHooks_OpenCodeInstallsOnce verifies OpenCode hooks are
+// installed exactly once when the opencode adapter is selected.
+//
+// Failure prevented: InstallProjectOpenCodeHooks resolves the opencode external
+// adapter and calls InstallHooks on it, and the generic external-adapter loop
+// then makes the identical call again — so a selected OpenCode gets its plugin
+// written twice and double-listed in installedHooks (which feeds git staging).
+func TestInstallAgentHooks_OpenCodeInstallsOnce(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell script adapters require unix")
+	}
+	gitRoot := t.TempDir()
+	adapterDir := t.TempDir()
+	counter := filepath.Join(t.TempDir(), "install-hooks.calls")
+
+	// Adapter records every install-hooks invocation so a duplicate call is
+	// observable rather than hidden by the real adapter's idempotence.
+	script := fmt.Sprintf(`#!/bin/sh
+case "$1" in
+  info)
+    echo '{"protocol_version":1,"name":"opencode","display_name":"OpenCode","version":"0.1.0","type":"session","capabilities":["session_reader","hook_installer"]}'
+    ;;
+  detect)
+    echo '{"detected":true,"reason":"test adapter"}'
+    ;;
+  install-hooks)
+    echo call >> %q
+    repo_root=""
+    shift
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo-root) repo_root="$2"; shift 2 ;;
+        --scope) shift 2 ;;
+        *) shift ;;
+      esac
+    done
+    mkdir -p "$repo_root/.opencode/plugin"
+    echo '// ox' > "$repo_root/.opencode/plugin/ox-prime.ts"
+    echo '{"installed":true,"files_written":[".opencode/plugin/ox-prime.ts"],"hooks":["SessionStart"]}'
+    ;;
+  *)
+    echo '{}'
+    ;;
+esac`, counter)
+	require.NoError(t, os.WriteFile(filepath.Join(adapterDir, "ox-adapter-opencode"), []byte(script), 0o755))
+
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+	adapters.Unregister("opencode")
+	t.Cleanup(func() { adapters.Unregister("opencode") })
+
+	installed := installAgentHooks(gitRoot, true, map[string]bool{"opencode": true})
+
+	data, err := os.ReadFile(counter)
+	require.NoError(t, err, "adapter install-hooks was never invoked")
+	calls := len(strings.Fields(string(data)))
+	assert.Equal(t, 1, calls, "opencode install-hooks must run exactly once per init")
+
+	var pluginEntries int
+	for _, p := range installed {
+		if strings.Contains(p, "ox-prime.ts") {
+			pluginEntries++
+		}
+	}
+	assert.Equal(t, 1, pluginEntries, "OpenCode plugin must be staged once, not duplicated")
 }
 
 func TestSelectTeam_NoTeams(t *testing.T) {
