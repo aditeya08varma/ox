@@ -28,6 +28,16 @@ Feature: Aborting a Session is a Total Kill
       And ox removes the local and hydrated copies of that session
       And the Ledger history remains intact for everyone else
 
+  Rule: Aborting a session committed after N turns and then finalized leaves nothing behind
+
+    Scenario: Avery aborts a session that was published mid-recording and later finalized
+      Given Avery's session was committed to the "Acme Engineering" Ledger after several turns as a draft placeholder
+      And that same session was later finalized in the Ledger with its summary, transcript, and context trace
+      When she aborts it by its exact name
+      Then ox removes the session and every piece of its summarized data from the Ledger
+      And ox removes the local and hydrated copies of that session
+      And the Ledger history remains intact for everyone else
+
   Rule: A partial name never deletes a teammate's finalized session by collision
 
     Scenario: Avery's partial name collides with a teammate's finalized session
