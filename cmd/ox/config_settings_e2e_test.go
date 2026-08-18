@@ -1,10 +1,14 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/ledger"
+	"github.com/sageox/ox/internal/session"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -108,4 +112,129 @@ func TestConfigE2E_AttributionCommitControlsTheCommitTrailer(t *testing.T) {
 		"a custom attribution.commit is exactly what lands in the commit message")
 	assert.NotContains(t, got, "SageOx <ox@sageox.ai>",
 		"the custom value replaces the default trailer, it does not stack on top")
+}
+
+// oxConfigSetUser drives the REAL `ox config set <key> <value>` command at the
+// default (user) level.
+func oxConfigSetUser(t *testing.T, key, value string) {
+	t.Helper()
+	require.NoError(t, configSetCmd.Flags().Set("repo", "false"))
+	require.NoError(t, configSetCmd.Flags().Set("team", "false"))
+	require.NoError(t, runConfigSet(configSetCmd, []string{key, value}))
+}
+
+// TestConfigE2E_SessionRecordingGateControlsRecording proves the master switch:
+// what a coworker sets for session_recording decides whether an agent session
+// is actually recorded to disk — not just what a resolver returns.
+//
+// The observable is the recording itself: the per-agent state and the raw.jsonl
+// transcript. Failure prevented: a coworker who set recording to disabled still
+// has sessions captured (or auto silently records nothing). Red-first: force
+// startSessionRecording past the `!IsAuto()` gate and the disabled case records.
+func TestConfigE2E_SessionRecordingGateControlsRecording(t *testing.T) {
+	f := newDraftLedgerFixture(t)
+	t.Chdir(f.projectRoot)
+	cfg = &config.Config{}
+	const agentID = "OxRecGate"
+
+	// Disabled via the real command: the gate creates no recording.
+	oxConfigSetRepo(t, "session_recording", "disabled")
+	assert.Nil(t, startSessionRecording(f.projectRoot, agentID, "claude-code", ""),
+		"session_recording=disabled must not start a recording")
+	st, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+	require.NoError(t, err)
+	assert.Nil(t, st, "no recording state may exist when recording is disabled")
+
+	// Provision a ledger at its default location so the auto path can record —
+	// the disabled path short-circuits (at the !IsAuto gate) before this check.
+	lp, derr := ledger.DefaultPath()
+	require.NoError(t, derr)
+	require.NoError(t, os.MkdirAll(filepath.Join(lp, ".git"), 0o755))
+
+	// Auto via the real command: the gate creates a recording with a transcript.
+	oxConfigSetRepo(t, "session_recording", "auto")
+	status := startSessionRecording(f.projectRoot, agentID, "claude-code", "")
+	require.NotNil(t, status, "session_recording=auto must start a recording")
+	assert.True(t, status.Recording, "auto must actually record")
+	st2, err := session.LoadRecordingStateForAgent(f.projectRoot, agentID)
+	require.NoError(t, err)
+	require.NotNil(t, st2, "auto must persist recording state")
+	assert.FileExists(t, filepath.Join(st2.SessionPath, "raw.jsonl"),
+		"auto must create the session transcript on disk")
+}
+
+// TestConfigE2E_CloudQueryGateControlsTheNetworkDecision proves the privacy
+// default and the opt-in, end to end through the real prompt-path decision.
+//
+// The observable is PrepareCloudQuery's decision — the canonical chokepoint every
+// future cloud query must pass. Failure prevented: ox reaches the network on the
+// prompt path when the coworker never opted in, or transmits an un-redacted
+// prompt. Red-first: drop the `!ResolveUserPromptSubmitCloudQuery` gate and the
+// default-off case opts in.
+func TestConfigE2E_CloudQueryGateControlsTheNetworkDecision(t *testing.T) {
+	withIsolatedConfig(t)
+
+	// Default (off): the decision never opts in and the redactor never runs.
+	def := PrepareCloudQuery(context.Background(), "", "find the login handler")
+	assert.False(t, def.ShouldQuery, "default config must make no cloud query")
+	assert.Empty(t, def.RedactedPrompt, "the off path must not invoke the redactor")
+
+	// Opt in via the real command, with a local (fake, non-expired) token.
+	oxConfigSetUser(t, "hooks.userpromptsubmit.cloud_query", "on")
+	writeFakeToken(t, "")
+	const secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+	on := PrepareCloudQuery(context.Background(), "", "debug this, token: "+secret)
+	assert.True(t, on.ShouldQuery, "cloud_query=on + a valid token must open the gate")
+	assert.NotContains(t, on.RedactedPrompt, secret,
+		"the prompt must be redacted before anything could be transmitted")
+	assert.Contains(t, on.RedactedPrompt, "[REDACTED_GITHUB_TOKEN]",
+		"the redacted slug is what a transmit would carry")
+}
+
+// TestConfigE2E_PlanHTMLAndOpenControlTheNudge proves that plan.html gates
+// whether the plan-exit render recommendation fires, and plan.open shapes what
+// it tells the agent to do.
+//
+// The observable is the stashed nudge file and its text. Failure prevented: a
+// coworker who turned plan HTML off still gets render nudges, or plan.open is
+// ignored so the agent opens a browser the coworker said never to. Red-first:
+// drop the `PlanHTML==Off` gate and the off case still stashes a nudge.
+func TestConfigE2E_PlanHTMLAndOpenControlTheNudge(t *testing.T) {
+	root := planNudgeProject(t)
+	isolatePlanConfigEnv(t)
+	t.Chdir(root)
+	stubPlanEnrichment(t, func(string) (planJSONResult, bool) {
+		var r planJSONResult
+		r.Signals.NonTrivial = true // material enough that a render would be recommended
+		return r, true
+	})
+	const agentID = "OxPlanCfg"
+	nudgeFile := planNudgePath(root, agentID)
+	run := func() { handlePlanExit(planExitCtx(root, "# Big plan\n- do the thing"), agentID) }
+
+	// plan.html=off: no render nudge is stashed at all.
+	oxConfigSetUser(t, "plan.html", "off")
+	_ = os.Remove(nudgeFile)
+	run()
+	assert.NoFileExists(t, nudgeFile, "plan.html=off must produce no render nudge")
+
+	// plan.html=recommend + plan.open=always: a nudge is stashed, told to open directly.
+	oxConfigSetUser(t, "plan.html", "recommend")
+	oxConfigSetUser(t, "plan.open", "always")
+	_ = os.Remove(nudgeFile)
+	run()
+	require.FileExists(t, nudgeFile, "plan.html=recommend must stash a render nudge")
+	body, err := os.ReadFile(nudgeFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "plan.open=always",
+		"plan.open=always must shape the nudge to open the render directly")
+
+	// plan.open=never: the nudge is told NOT to open a browser.
+	oxConfigSetUser(t, "plan.open", "never")
+	_ = os.Remove(nudgeFile)
+	run()
+	body2, err := os.ReadFile(nudgeFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(body2), "do NOT prompt to open",
+		"plan.open=never must suppress the open directive")
 }

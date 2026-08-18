@@ -22,7 +22,6 @@ Feature: A Coworker's Config Choices Take Effect
       When Devon makes a commit
       Then the commit message carries exactly Devon's line and not the default
 
-  @wip
   Rule: Turning session recording off records nothing
 
     Scenario: Avery disables session recording, then starts an agent
@@ -31,16 +30,6 @@ Feature: A Coworker's Config Choices Take Effect
       Then no session is recorded to the Ledger
       And the session's /c/ link never resolves, because there is nothing to link
 
-  @wip
-  Rule: With auto-sync off, sessions stay on my machine until I push
-
-    Scenario: Sam turns off auto-push, then finishes a session
-      Given Sam has turned auto-sync off
-      When Sam finishes a recorded session
-      Then the session is saved to Sam's local Ledger
-      But it does not reach the team remote until Sam pushes by hand
-
-  @wip
   Rule: The privacy default makes no network call on the prompt path
 
     Scenario: Riley works with the default privacy settings
@@ -54,7 +43,6 @@ Feature: A Coworker's Config Choices Take Effect
       When Riley submits a prompt to an agent
       Then ox also asks the cloud, and the remote-tagged context appears
 
-  @wip
   Rule: Turning off plan HTML silences the render and its nudge
 
     Scenario: Quinn turns plan HTML off, then finishes a material plan
