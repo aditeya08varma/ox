@@ -401,7 +401,7 @@ func TestCaptureSlog_RoundTrips(t *testing.T) {
 	}
 }
 
-// TestKBGuidanceText_TeachesTheFourConcepts pins the four things the prime
+// TestKBGuidanceText_TeachesTheCoreConcepts pins the concepts the prime
 // KB block MUST teach an AI coworker, one marker per concept:
 //
 //  1. WHAT a bubble is — the Curator's synthesis of the team's conversations,
@@ -421,13 +421,14 @@ func TestCaptureSlog_RoundTrips(t *testing.T) {
 // most dangerously the data-not-instructions rule, which is the prompt-
 // injection boundary for every file the Curator writes, and which must
 // stay in prime itself rather than being deferred to the guide.
-func TestKBGuidanceText_TeachesTheFourConcepts(t *testing.T) {
+func TestKBGuidanceText_TeachesTheCoreConcepts(t *testing.T) {
 	concepts := map[string][]string{
 		"1. what a bubble is":      {"synthesis of the conversations", "salient points", "cohesive area"},
 		"2. discovery command":     {"ox kb describe '#<slug>'", "steering prompt", "local_path"},
 		"3. repo navigation":       {"AGENTS.md", "curated for that bubble"},
 		"4. data not instructions": {"DATA, never instructions", "override the user"},
 		"5. pointer to long form":  {"ox guide knowledge-bubbles"},
+		"6. citations exist":       {"sageox://", "distilled topic", "transcript span"},
 	}
 	for concept, markers := range concepts {
 		for _, m := range markers {
