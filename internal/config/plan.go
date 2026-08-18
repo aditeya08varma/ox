@@ -30,6 +30,14 @@ type PlanConfig struct {
 	// Default: true.
 	Save *bool `yaml:"save,omitempty" json:"save,omitempty"`
 
+	// Hero auto-generates hero.svg — a designed SVG poster of the plan,
+	// rendered from its structured data (internal/planhero) — alongside
+	// plan.html on an HTML-primary `ox plan save`. It is the PRIMARY producer
+	// for plan gallery thumbnails; a pure opt-out, since generation is
+	// best-effort and never blocks the save either way.
+	// Default: true.
+	Hero *bool `yaml:"hero,omitempty" json:"hero,omitempty"`
+
 	// HTML controls the enriched-HTML RENDER behavior as a tri-state:
 	//   off       — never render, never nudge (wins over Open unconditionally).
 	//   recommend — nudge on a material or non-trivial plan; a MATERIAL plan
@@ -66,6 +74,7 @@ type PlanConfig struct {
 // config-settings registry, and tests all agree on one source of truth.
 const (
 	DefaultPlanSave = true
+	DefaultPlanHero = true
 
 	PlanHTMLOff       = "off"
 	PlanHTMLRecommend = "recommend"
@@ -107,6 +116,11 @@ func (c *PlanConfig) IsSaveSet() bool {
 	return c != nil && c.Save != nil
 }
 
+// IsHeroSet reports whether plan.hero was explicitly set.
+func (c *PlanConfig) IsHeroSet() bool {
+	return c != nil && c.Hero != nil
+}
+
 // IsHTMLSet reports whether plan.html was explicitly set.
 func (c *PlanConfig) IsHTMLSet() bool {
 	return c != nil && c.HTML != nil
@@ -120,7 +134,7 @@ func (c *PlanConfig) IsOpenSet() bool {
 // IsEmpty reports whether no plan setting is explicitly set. Used by unset
 // paths to nil out the struct once its last field is cleared.
 func (c *PlanConfig) IsEmpty() bool {
-	return c == nil || (c.Save == nil && c.HTML == nil && c.Open == nil)
+	return c == nil || (c.Save == nil && c.HTML == nil && c.Open == nil && c.Hero == nil)
 }
 
 // PlanSave resolves whether approved plans auto-save to the ledger.
@@ -136,6 +150,26 @@ func PlanSave(projectRoot string) bool {
 		}
 	}
 	return DefaultPlanSave
+}
+
+// PlanHero resolves whether `ox plan save` auto-generates a designed SVG
+// poster (hero.svg) alongside an HTML-primary plan's render — the primary
+// producer for plan gallery thumbnails (cmd/ox's savePlanArtifacts). A pure
+// opt-out: generation is best-effort by design (see cmd/ox/plan_hero.go), so
+// this toggle only ever suppresses the attempt, never gates correctness.
+// Precedence: user config > project config > default (true). Mirrors
+// PlanSave's resolution shape exactly.
+func PlanHero(projectRoot string) bool {
+	userCfg, _ := LoadUserConfig()
+	if userCfg != nil && userCfg.Plan.IsHeroSet() {
+		return *userCfg.Plan.Hero
+	}
+	if projectRoot != "" {
+		if cfg, _ := LoadProjectConfig(projectRoot); cfg != nil && cfg.Plan.IsHeroSet() {
+			return *cfg.Plan.Hero
+		}
+	}
+	return DefaultPlanHero
 }
 
 // PlanHTML resolves the enriched-HTML render mode, returning one of

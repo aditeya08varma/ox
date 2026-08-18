@@ -283,6 +283,21 @@ func savePlanArtifacts(gitRoot string, in plan.Input, result plan.Result, html [
 		return ""
 	}
 
+	// Hero poster: a designed SVG poster of the plan (internal/planhero),
+	// generated from its structured data — NOT a browser screenshot, so this
+	// adds no headless-browser/Chromium dependency to the ox binary. Primary
+	// producer for plan gallery thumbnails. Only on an HTML-primary save (a
+	// hero only makes sense paired with a plan.html), and best-effort: mirrors
+	// commitPlanToLedger below — a hero failure must never break `ox plan
+	// save`. Placed here (after Save, before commitPlanToLedger) so the
+	// existing `git add --sparse <dir>` sweeps hero.svg into the same commit
+	// as plan.html with no separate commit path.
+	if primary == plan.PrimaryHTML && config.PlanHero(gitRoot) {
+		if err := writePlanHero(dir, in, result, meta); err != nil {
+			slog.Warn("plan: hero poster generation failed, skipping", "error", err, "dir", dir)
+		}
+	}
+
 	// reverse link: record the slug on the live recording so it folds into the
 	// session's meta.json at stop (no-op if there's no live recording). Passes
 	// the state resolved alongside the provenance so both links name the same
