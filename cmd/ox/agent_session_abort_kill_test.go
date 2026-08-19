@@ -24,7 +24,7 @@ import (
 // ledger. The one thing a kill must never do is destroy a teammate's finalized
 // session that a partial name merely collided with.
 //
-// The mirror capability doc is tests/acceptance/session-recording/session-abort-kill.feature.
+// The mirror capability doc is tests/acceptance/features/session-recording/session-abort-kill.feature.
 
 // seedFinalizedLedgerSessionWithArtifacts writes a finalized (non-draft) session
 // into the ledger with the FULL set of summarized artifacts a real finalized
@@ -233,4 +233,89 @@ func TestAbort_PartialNameNeverKillsTeammateFinalizedSession(t *testing.T) {
 		"a teammate's finalized session must survive a colliding partial abort")
 	assert.DirExists(t, filepath.Join(f.ledgerPath, "sessions", teammate))
 	gitFsckClean(t, f.barePath)
+}
+
+// TestAbort_KillsCommittedThenFinalizedSessionAndAllSummarizedData is the union
+// lifecycle: the session the customer actually aborts has already travelled the
+// full road — committed to the Ledger BECAUSE N turns passed (an ADR-029 draft
+// placeholder), THEN finalized with its whole summarized artifact set
+// superseding that draft. Aborting it by exact name must leave nothing behind:
+// not the draft commit's tree, not the finalized summary/transcript/trace, not
+// the local or hydrated caches.
+//
+// This is the customer promise the two sibling tests only cover in halves —
+// TestAbort_KillsCommittedDraftAndAllLocalData drives the N-turn draft but a
+// draft carries no summarized data, and TestAbort_KillsFinalizedSessionAndAll-
+// SummarizedData carries the full summary set but seeds it directly, never
+// through the draft->finalize supersession. Failure prevented: a kill that
+// handles a freshly-finalized session but mishandles one whose git history
+// includes the earlier draft-placeholder commit — leaving an orphaned artifact
+// on the remote or a dangling staged deletion.
+//
+// Red-first check: revert the StatusUploaded branch in runAgentSessionAbortByName
+// to `return fmt.Errorf(... already uploaded ...)` and this test fails — abort
+// refuses and the finalized dir survives on the remote.
+func TestAbort_KillsCommittedThenFinalizedSessionAndAllSummarizedData(t *testing.T) {
+	f := newDraftLedgerFixture(t)
+	t.Chdir(f.projectRoot)
+	cfg = &config.Config{}
+
+	const sessionName = "2026-01-01T00-00-testuser-OxUnin"
+
+	// Given: the session was committed to the Ledger after N turns as a draft
+	// placeholder (the "committed because N turns passed" beat), pushed to the
+	// remote so /c/<id> resolves mid-recording.
+	f.publish(t, sessionName, config.DraftPublishTurn)
+	f.push(t)
+	require.Contains(t, remoteTree(t, f.barePath), "sessions/"+sessionName+"/meta.json",
+		"precondition: the N-turn draft placeholder must be committed to the remote")
+
+	// And: it was then finalized — the full summarized artifact set supersedes
+	// the draft in the same session dir, committed on top and pushed. Git history
+	// now carries BOTH the draft commit and the finalize commit.
+	seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, sessionName)
+	commitAndPushFinalized(t, f, sessionName)
+
+	// And: an unrelated peer session also lives in the Ledger — the kill must
+	// leave it untouched (a "delete everything" regression would take it too).
+	const peerName = "2026-01-01T00-00-peer-OxPeer"
+	seedFinalizedLedgerSessionWithArtifacts(t, f.ledgerPath, peerName)
+	commitAndPushFinalized(t, f, peerName)
+
+	// And: a local recording-cache copy and a ledger hydration-cache copy exist.
+	repoID := getRepoIDOrDefault(f.projectRoot)
+	localDir := filepath.Join(session.GetContextPath(repoID), "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(localDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(localDir, "raw.jsonl"), []byte("local raw"), 0644))
+
+	hydrationDir := filepath.Join(f.ledgerPath, ".sageox", "cache", "sessions", sessionName)
+	require.NoError(t, os.MkdirAll(hydrationDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(hydrationDir, "raw.jsonl"), []byte("hydrated bytes"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(hydrationDir, "summary.md"), []byte("hydrated summary"), 0644))
+
+	// When: the agent aborts it by its EXACT name.
+	setForceFlag(t, true)
+	inst := &agentinstance.Instance{AgentID: "OxKill"}
+	require.NoError(t, runAgentSessionAbort(inst, agentCmd, []string{sessionName}))
+
+	// Then: nothing under sessions/<name>/ survives on the remote — neither the
+	// N-turn draft nor the finalized summarized artifacts.
+	assert.Empty(t, remotePathsUnder(t, f.barePath, sessionName),
+		"a committed-then-finalized session must leave nothing on the remote after a kill")
+	assert.NoDirExists(t, filepath.Join(f.ledgerPath, "sessions", sessionName),
+		"the session must be gone from the ledger worktree")
+
+	// And: both caches are gone.
+	assert.NoDirExists(t, localDir, "the local recording cache copy must be removed")
+	assert.NoDirExists(t, hydrationDir, "the ledger hydration cache (summarized bytes) must be removed")
+
+	// And: the Ledger history stays intact for everyone else, no dangling deletion.
+	gitFsckClean(t, f.barePath)
+	assert.Empty(t, runGit(t, f.ledgerPath, "status", "--porcelain", "--", "sessions/"),
+		"no staged deletion may be left dangling after the kill")
+
+	// And: the unrelated peer session is untouched — on the remote and in the worktree.
+	assert.Contains(t, remoteTree(t, f.barePath), "sessions/"+peerName+"/meta.json",
+		"aborting one session must never delete a peer session")
+	assert.DirExists(t, filepath.Join(f.ledgerPath, "sessions", peerName))
 }
