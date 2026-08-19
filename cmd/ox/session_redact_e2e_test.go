@@ -24,15 +24,25 @@ func captureStderr(t *testing.T, fn func()) string {
 	orig := os.Stderr
 	r, w, err := os.Pipe()
 	require.NoError(t, err)
-	os.Stderr = w
 	done := make(chan string, 1)
 	go func() {
 		b, _ := io.ReadAll(r)
 		done <- string(b)
 	}()
+
+	// cleanup restores os.Stderr and closes the writer so the reader goroutine
+	// unblocks. It runs on EVERY exit path: the deferred call covers a require.*
+	// Goexit inside fn, and the explicit call on the normal path closes w before
+	// we read `done`. Double-close returns an ignored error, not a panic.
+	cleanup := func() {
+		os.Stderr = orig
+		_ = w.Close()
+	}
+	defer cleanup()
+
+	os.Stderr = w
 	fn()
-	require.NoError(t, w.Close())
-	os.Stderr = orig
+	cleanup()
 	return <-done
 }
 
