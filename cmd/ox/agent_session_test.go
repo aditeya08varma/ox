@@ -578,3 +578,59 @@ func TestSessionStop_NonEmptyDropFile_NotIncomplete(t *testing.T) {
 	assert.False(t, isGenericDropFileEmpty(stateNonGeneric),
 		"isGenericDropFileEmpty should return false for non-generic adapters")
 }
+
+// --- Adapter resolution at session start ---
+
+// TestResolveSessionAdapter verifies which adapter a starting session binds to.
+//
+// Failure prevented: Detect() reports that an agent is INSTALLED, not that it
+// produced this session. Resolving a known Claude Code session by detection let
+// whichever adapter won the registry race claim it — FindSessionFile then fails,
+// is logged at Info only, and the generic fallback is skipped because
+// adapterName is already set, leaving a recording bound to the wrong adapter
+// with no session file (the header-only raw.jsonl shape of issue #519).
+func TestResolveSessionAdapter(t *testing.T) {
+	// Both adapters are installed and both detect. "aider" sorts before
+	// "claude-code", so it wins any name-ordered tie and would have won roughly
+	// half of the old map-ordered races.
+	adapterDir := t.TempDir()
+	createFakeAdapterWithHooks(t, adapterDir, "aider", "0.1.0", "session", ".aider")
+	createFakeAdapterWithHooks(t, adapterDir, "claude-code", "0.1.0", "session", ".claude")
+	t.Setenv("OX_ADAPTER_PATH", adapterDir)
+
+	for _, name := range []string{"aider", "claude-code"} {
+		adapters.Unregister(name)
+		t.Cleanup(func() { adapters.Unregister(name) })
+	}
+
+	tests := []struct {
+		name      string
+		agentType string
+		want      string
+		why       string
+	}{
+		{
+			name:      "known agent resolves by name",
+			agentType: "claude-code",
+			want:      "claude-code",
+			why:       "a known Claude Code session must never bind to another installed agent's adapter",
+		},
+		{
+			name:      "unknown agent falls back to detection",
+			agentType: "",
+			want:      "aider",
+			why:       "with no agent type the only signal is detection, tie-broken by name order",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Repeat: under map-order detection this passed only by luck.
+			for i := 0; i < 25; i++ {
+				adapter, err := resolveSessionAdapter(tt.agentType)
+				require.NoError(t, err)
+				require.Equal(t, tt.want, adapter.Name(), tt.why)
+			}
+		})
+	}
+}

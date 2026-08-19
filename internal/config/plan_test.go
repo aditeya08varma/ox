@@ -45,6 +45,13 @@ func TestPlanSave_DefaultsTrue(t *testing.T) {
 	assert.True(t, DefaultPlanSave, "guard: plan.save default must be true")
 }
 
+func TestPlanHero_DefaultsTrue(t *testing.T) {
+	isolateUserConfig(t)
+	assert.Equal(t, DefaultPlanHero, PlanHero(""), "empty project root")
+	assert.Equal(t, DefaultPlanHero, PlanHero(t.TempDir()), "uninitialized temp project")
+	assert.True(t, DefaultPlanHero, "guard: plan.hero default must be true")
+}
+
 func TestPlanHTML_DefaultsRecommend(t *testing.T) {
 	isolateUserConfig(t)
 	clearPlanHTMLEnv(t)
@@ -84,6 +91,28 @@ func TestPlanSave_ProjectOverride(t *testing.T) {
 				Plan:        &PlanConfig{Save: tt.save},
 			})
 			assert.Equal(t, tt.want, PlanSave(dir))
+		})
+	}
+}
+
+func TestPlanHero_ProjectOverride(t *testing.T) {
+	tests := []struct {
+		name string
+		hero *bool
+		want bool
+	}{
+		{"explicit false sticks against true default", boolPtr(false), false},
+		{"explicit true", boolPtr(true), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateUserConfig(t)
+			dir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+				ProjectID:   "test_project",
+				WorkspaceID: "test_workspace",
+				Plan:        &PlanConfig{Hero: tt.hero},
+			})
+			assert.Equal(t, tt.want, PlanHero(dir))
 		})
 	}
 }
@@ -175,6 +204,32 @@ func TestPlanSave_ProjectUsedWhenUserUnset(t *testing.T) {
 		Plan:        &PlanConfig{Save: boolPtr(false)},
 	})
 	assert.False(t, PlanSave(dir), "project explicit-false used when user is unset")
+}
+
+func TestPlanHero_UserBeatsProject(t *testing.T) {
+	// user=false, project=true → user wins (false).
+	userDir := t.TempDir()
+	userCfgPath := filepath.Join(userDir, "config.yaml")
+	require.NoError(t, os.WriteFile(userCfgPath, []byte("plan:\n  hero: false\n"), 0644))
+	t.Setenv("OX_USER_CONFIG", userCfgPath)
+
+	dir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+		ProjectID:   "test_project",
+		WorkspaceID: "test_workspace",
+		Plan:        &PlanConfig{Hero: boolPtr(true)},
+	})
+
+	assert.False(t, PlanHero(dir), "user explicit-false must override project explicit-true")
+}
+
+func TestPlanHero_ProjectUsedWhenUserUnset(t *testing.T) {
+	isolateUserConfig(t)
+	dir := CreateInitializedProjectWithConfig(t, &ProjectConfig{
+		ProjectID:   "test_project",
+		WorkspaceID: "test_workspace",
+		Plan:        &PlanConfig{Hero: boolPtr(false)},
+	})
+	assert.False(t, PlanHero(dir), "project explicit-false used when user is unset")
 }
 
 func TestPlanHTML_UserBeatsProject(t *testing.T) {
@@ -391,6 +446,13 @@ func TestPlanConfig_IsEmpty(t *testing.T) {
 	assert.False(t, (&PlanConfig{Save: boolPtr(false)}).IsEmpty(), "save set → not empty")
 	assert.False(t, (&PlanConfig{HTML: StringPtr(PlanHTMLOff)}).IsEmpty(), "html set → not empty")
 	assert.False(t, (&PlanConfig{Open: StringPtr(PlanOpenNever)}).IsEmpty(), "open set → not empty")
+	assert.False(t, (&PlanConfig{Hero: boolPtr(false)}).IsEmpty(), "hero set → not empty")
+}
+
+func TestPlanConfig_IsHeroSet(t *testing.T) {
+	assert.False(t, (*PlanConfig)(nil).IsHeroSet(), "nil config: not set")
+	assert.False(t, (&PlanConfig{}).IsHeroSet(), "zero-value config: not set")
+	assert.True(t, (&PlanConfig{Hero: boolPtr(true)}).IsHeroSet(), "hero set")
 }
 
 func TestPlanConfig_IsOpenSet(t *testing.T) {

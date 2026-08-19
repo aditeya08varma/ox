@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -156,20 +157,48 @@ func Register(adapter Adapter) {
 	registry[name] = adapter
 }
 
+// snapshotAdapters returns the registered adapters ordered by name.
+//
+// Two reasons this exists instead of ranging over the registry directly.
+// Ordering: map iteration is randomized, so several adapters reporting
+// Detect()=true made DetectAdapter's answer a coin flip that changed run to
+// run. Locking: Detect() shells out to the adapter binary, so holding the
+// registry lock across the loop would block every other adapter user for the
+// duration of a subprocess call.
+func snapshotAdapters() []Adapter {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+
+	names := make([]string, 0, len(registry))
+	for name := range registry {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	ordered := make([]Adapter, 0, len(names))
+	for _, name := range names {
+		ordered = append(ordered, registry[name])
+	}
+	return ordered
+}
+
 // DetectAdapter finds the appropriate adapter for the current environment.
 // First checks registered (built-in) adapters, then falls through to external
 // adapter discovery if no registered adapter matches.
 // Returns ErrNoAdapterDetected if no adapter can handle the environment.
+//
+// Detection is a GUESS and callers should prefer GetAdapter when they already
+// know which agent is running: an adapter's Detect() reports that its agent is
+// installed on this machine, not that it produced the session at hand, so on a
+// multi-agent machine several adapters answer true at once. Ties are broken by
+// name order, which makes the result reproducible but still arbitrary.
 func DetectAdapter() (Adapter, error) {
 	// fast path: check already-registered adapters (built-ins loaded at init time)
-	registryMu.RLock()
-	for _, adapter := range registry {
+	for _, adapter := range snapshotAdapters() {
 		if adapter.Detect() {
-			registryMu.RUnlock()
 			return adapter, nil
 		}
 	}
-	registryMu.RUnlock()
 
 	// slow path: scan controlled directories (ADR-006) for ox-adapter-* binaries,
 	// call `info` on each, and register them. This covers agents that only have
@@ -178,9 +207,7 @@ func DetectAdapter() (Adapter, error) {
 		slog.Debug("external adapter discovery failed during detect", "error", err)
 	}
 
-	registryMu.RLock()
-	defer registryMu.RUnlock()
-	for _, adapter := range registry {
+	for _, adapter := range snapshotAdapters() {
 		if adapter.Detect() {
 			return adapter, nil
 		}

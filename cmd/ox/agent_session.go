@@ -148,12 +148,12 @@ func runAgentSessionStart(inst *agentinstance.Instance, args []string) error {
 		}
 		sessionFile = sf
 	} else {
-		// Deep adapter detection: only for Claude Code or unknown agents.
-		// For known non-Claude agents, skip detection to avoid false positives
+		// Deep adapter resolution: only for Claude Code or unknown agents.
+		// For known non-Claude agents, skip it to avoid false positives
 		// (the claude-code adapter's Detect() returns true if ~/.claude exists,
 		// which is common on machines where multiple agents are installed).
 		if agentType == string(agentx.AgentTypeClaudeCode) || agentType == "" {
-			if adapter, detectErr := adapters.DetectAdapter(); detectErr == nil {
+			if adapter, detectErr := resolveSessionAdapter(agentType); detectErr == nil {
 				adapterName = adapter.Name()
 				since := time.Now().Add(-5 * time.Minute)
 				sf, findErr := adapter.FindSessionFile(adapters.SessionLookup{
@@ -2285,6 +2285,25 @@ func rawJSONLHasEntries(rawPath string) bool {
 // file created (no session file provided and adapter is generic).
 func needsGenericDropFile(sessionFile, adapterName string) bool {
 	return sessionFile == "" && pipeline.IsGenericAdapter(adapterName)
+}
+
+// resolveSessionAdapter picks the deep adapter for a starting session.
+//
+// A known agent type is looked up by name; detection is only a guess and is
+// used solely when the type is unknown. An adapter's Detect() reports that its
+// agent is INSTALLED on this machine, not that it produced this session, so on
+// a machine with several agents installed multiple adapters answer true and
+// DetectAdapter has to break the tie arbitrarily. Detecting for an agent we
+// have already identified could therefore bind a Claude Code session to, say,
+// the aider adapter — FindSessionFile then fails, the failure is only logged at
+// Info, and because adapterName is already set the generic fallback below does
+// not fire. The recording ends up registered under the wrong adapter with no
+// session file, which is the header-only raw.jsonl shape of issue #519.
+func resolveSessionAdapter(agentType string) (adapters.Adapter, error) {
+	if agentType != "" {
+		return adapters.GetAdapter(agentType)
+	}
+	return adapters.DetectAdapter()
 }
 
 // isGenericDropFileEmpty returns true when a generic adapter's drop file is
