@@ -26,6 +26,7 @@ func captureStderr(t *testing.T, fn func()) string {
 	require.NoError(t, err)
 	done := make(chan string, 1)
 	go func() {
+		defer func() { _ = r.Close() }() // close the read end too — cleanup only closes w
 		b, _ := io.ReadAll(r)
 		done <- string(b)
 	}()
