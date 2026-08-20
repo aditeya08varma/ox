@@ -124,7 +124,7 @@ func (r inviteResult) hasFailure() bool {
 }
 
 var inviteCmd = &cobra.Command{
-	Use:   "invite <email>...",
+	Use:   "invite [email]...",
 	Short: "Invite people to a team by email",
 	Long: `Invite one or more people to a SageOx team.
 
@@ -154,7 +154,7 @@ Examples:
 // keeps its exact behavior. The `invite -> team invite` catalog entry documents
 // the move; this alias is what actually preserves it.
 var inviteAliasCmd = &cobra.Command{
-	Use:    "invite <email>...",
+	Use:    "invite [email]...",
 	Short:  "Invite people to a team by email",
 	Hidden: true,
 	Args:   cobra.ArbitraryArgs,

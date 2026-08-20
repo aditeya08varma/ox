@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 	"time"
 
@@ -38,7 +39,7 @@ var teamCmd = &cobra.Command{
 	Short:   "Work with your teams and coworkers",
 	Long: `Work with your teams and coworkers.
 
-A bare 'ox team' lists the teams you belong to. Each team owns a team context —
+A bare 'ox team' lists the teams you belong to. Each team owns a Team Context —
 its permanent conversation store of recordings, discussions, sessions, and
 shared memory. That is not a knowledge bubble ('ox kb list' lists those; see ox
 ADR-028 for the distinction).
@@ -47,7 +48,6 @@ Commands:
   list       List the teams you belong to
   members    List a team's coworkers (humans and AI coworkers)
   show       Show one team's details
-  context    Output a team's context for AI planning
   open       Open a team's dashboard in the browser
   invite     Invite people to a team by email`,
 	Args: cobra.ArbitraryArgs,
@@ -67,9 +67,9 @@ func runTeamDispatch(cmd *cobra.Command, args []string) error {
 var teamListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List the teams you belong to",
-	Long: `List the teams you belong to and their team contexts.
+	Long: `List the teams you belong to and their Team Contexts.
 
-A team context is the team's permanent conversation store — recordings,
+A Team Context is the team's permanent conversation store — recordings,
 discussions, sessions, and shared memory. It is not a knowledge bubble
 (` + "`ox kb list`" + ` lists those; see ox ADR-028 for the distinction).`,
 	RunE: runTeams,
@@ -97,39 +97,31 @@ Example:
 }
 
 var teamShowCmd = &cobra.Command{
-	Use:   "show",
+	Use:   "show [team]",
 	Short: "Show one team's details",
-	Long: `Show a single team: its identity, where its context lives on disk, how
+	Long: `Show a single team: its identity, where its Team Context lives on disk, how
 recently it synced, and how many coworkers it has.
 
-With no --team, shows this repo's team.
+Name the team as a positional argument or with --team; with neither, shows this
+repo's team.
 
 Example:
   ox team show
+  ox team show acme
   ox team show --team acme
   ox team show --json`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runTeamShow,
 }
 
-var teamContextCmd = &cobra.Command{
-	Use:     "context [slug]",
-	Aliases: []string{"ctx"},
-	Short:   "Output a team's context for AI planning",
-	Long: `Output a team's discussions and distilled context for AI planning.
-
-Without arguments: outputs this repo's team context. With a team slug: outputs
-that team's context. This is the same context surfaced to AI coworkers by
-'ox agent team-ctx'.`,
-	Args: cobra.MaximumNArgs(1),
-	RunE: runAgentTeamCtx,
-}
-
 var teamOpenCmd = &cobra.Command{
-	Use:   "open",
+	Use:   "open [team]",
 	Short: "Open a team's dashboard in the browser",
 	Long: `Open the SageOx web dashboard for a team.
 
-With no --team, opens this repo's team.`,
+Name the team as a positional argument or with --team; with neither, opens this
+repo's team.`,
+	Args: cobra.MaximumNArgs(1),
 	RunE: runTeamOpen,
 }
 
@@ -151,7 +143,6 @@ func init() {
 	teamCmd.AddCommand(teamListCmd)
 	teamCmd.AddCommand(teamMembersCmd)
 	teamCmd.AddCommand(teamShowCmd)
-	teamCmd.AddCommand(teamContextCmd)
 	teamCmd.AddCommand(teamOpenCmd)
 	teamCmd.AddCommand(inviteCmd) // re-homed: canonical `ox team invite` (invite.go)
 
@@ -331,27 +322,63 @@ type teamCard struct {
 	lastSync string
 }
 
-// resolveTeamCard picks the team `ox team show` describes: --team when given
-// (resolved locally, else passed through as a bare ref), otherwise this repo's
-// primary team.
-func resolveTeamCard(projectRoot, teamFlag string) (teamCard, error) {
-	if teamFlag != "" {
-		if t := resolveTeamByQuery(projectRoot, teamFlag); t != nil {
-			return teamCardFromEnriched(*t), nil
+// teamRefFromArgs picks the team reference `ox team show`/`open` acts on. A
+// positional argument wins over --team so `ox team show acme` (advertised by the
+// list hints) is honored rather than silently ignored; with neither, the repo's
+// primary team is used.
+func teamRefFromArgs(cmd *cobra.Command, args []string) string {
+	if len(args) > 0 && strings.TrimSpace(args[0]) != "" {
+		return strings.TrimSpace(args[0])
+	}
+	ref, _ := cmd.Flags().GetString("team")
+	return strings.TrimSpace(ref)
+}
+
+// validTeamRef rejects references that survive URL escaping and still change
+// which /team/<ref> route the request reaches (dot segments, path separators,
+// control bytes). Mirrors internal/api validateTeamRef and ListTeamRoster's
+// guard so a stray value can neither retarget an endpoint nor corrupt terminal
+// output. A real team id/slug never contains any of these.
+func validTeamRef(ref string) bool {
+	switch strings.TrimSpace(ref) {
+	case "", ".", "..":
+		return false
+	}
+	if strings.ContainsAny(ref, "/\\") {
+		return false
+	}
+	for _, r := range ref {
+		if r < 0x20 || r == 0x7f {
+			return false
 		}
-		// Not synced locally — show what the flag gives us; the server owns the
-		// rest and `ox team members`/`open` still resolve it as a slug/id.
-		return teamCard{teamID: teamFlag, name: teamFlag, slug: teamFlag}, nil
+	}
+	return true
+}
+
+// resolveTeamCard picks the team `ox team show` describes: the given ref when
+// present (resolved from local state when synced, else a thin card the caller
+// validates against the server), otherwise this repo's primary team. The bool
+// reports whether the card came from local state — an unresolved ref must be
+// server-confirmed before it is rendered as a real team.
+func resolveTeamCard(projectRoot, teamRef string) (teamCard, bool, error) {
+	if teamRef != "" {
+		if t := resolveTeamByQuery(projectRoot, teamRef); t != nil {
+			return teamCardFromEnriched(*t), true, nil
+		}
+		// Not synced locally — the server is the authority on whether this team
+		// exists and who belongs to it. runTeamShow confirms it via the roster
+		// before rendering, so a typo cannot print a plausible-looking card.
+		return teamCard{teamID: teamRef, name: teamRef, slug: teamRef}, false, nil
 	}
 	for _, t := range discoverAllTeams(projectRoot) {
 		if t.Primary {
-			return teamCardFromEnriched(t), nil
+			return teamCardFromEnriched(t), true, nil
 		}
 	}
 	if tc := config.FindRepoTeamContext(projectRoot); tc != nil {
-		return teamCard{teamID: tc.TeamID, name: tc.TeamName, slug: tc.Slug, path: tc.Path, primary: true}, nil
+		return teamCard{teamID: tc.TeamID, name: tc.TeamName, slug: tc.Slug, path: tc.Path, primary: true}, true, nil
 	}
-	return teamCard{}, fmt.Errorf("no team configured; run 'ox init' or pass --team")
+	return teamCard{}, false, fmt.Errorf("no team configured; run 'ox init' or pass a team")
 }
 
 func teamCardFromEnriched(t enrichedTeam) teamCard {
@@ -378,19 +405,34 @@ func runTeamShow(cmd *cobra.Command, args []string) error {
 	}
 	ep := endpoint.GetForProject(projectRoot)
 
-	teamFlag, _ := cmd.Flags().GetString("team")
-	card, err := resolveTeamCard(projectRoot, teamFlag)
+	teamRef := teamRefFromArgs(cmd, args)
+	if teamRef != "" && !validTeamRef(teamRef) {
+		return fmt.Errorf("invalid team reference %q", teamRef)
+	}
+
+	card, local, err := resolveTeamCard(projectRoot, teamRef)
 	if err != nil {
 		return err
 	}
 
-	// Coworker count is a best-effort roster read: a missing feature or a
-	// reachability blip leaves the count unknown rather than failing the card.
-	count, countKnown := teamCoworkerCount(projectRoot, ep, card.teamID)
+	// One roster read serves two ends: the coworker count and, for a ref we
+	// could not resolve locally, server confirmation that the team is real and
+	// that the caller belongs to it. The typed error tells "not a member"
+	// (reject) apart from "can't tell" (feature off / offline / unauthenticated).
+	resp, rosterErr := teamRoster(projectRoot, ep, card.teamID)
+	if teamRef != "" && !local {
+		if errors.Is(rosterErr, api.ErrForbidden) {
+			return fmt.Errorf("you are not a member of team %q (or it does not exist); run 'ox teams' to list your teams", teamRef)
+		}
+		if resp != nil && resp.TeamID != "" {
+			card.teamID = resp.TeamID // canonical id from the server
+		}
+	}
+	count, countKnown := rosterCount(resp)
 
 	dashboard := ""
 	if ep != "" && card.teamID != "" {
-		dashboard = fmt.Sprintf("%s/team/%s", strings.TrimRight(ep, "/"), card.teamID)
+		dashboard = fmt.Sprintf("%s/team/%s", strings.TrimRight(ep, "/"), url.PathEscape(card.teamID))
 	}
 
 	if jsonMode {
@@ -400,23 +442,31 @@ func runTeamShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// teamCoworkerCount fetches the roster size, degrading to (0, false) whenever
-// the roster can't be served — no auth, feature off, server unreachable.
-func teamCoworkerCount(projectRoot, ep, teamRef string) (int, bool) {
+// teamRoster fetches a team's roster, returning the response alongside the typed
+// error so callers can distinguish "not a member" (api.ErrForbidden) from the
+// benign "can't tell" states — no auth, feature off, server unreachable — which
+// all return a nil error and nil response so the caller degrades gracefully.
+func teamRoster(projectRoot, ep, teamRef string) (*api.TeamRosterResponse, error) {
 	if teamRef == "" {
-		return 0, false
+		return nil, nil
 	}
 	token, err := auth.EnsureValidTokenForEndpoint(ep, 300)
 	if err != nil || token == nil || token.AccessToken == "" {
-		return 0, false
+		return nil, nil
 	}
 	client := api.NewRepoClientForProject(projectRoot).WithAuthToken(token.AccessToken)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	resp, err := client.ListTeamRoster(ctx, teamRef)
-	if err != nil || resp == nil {
+	return client.ListTeamRoster(ctx, teamRef)
+}
+
+// rosterCount derives the coworker count from a roster response, reporting
+// (0, false) when the roster is absent so an unknown count never renders as a
+// misleading "0".
+func rosterCount(resp *api.TeamRosterResponse) (int, bool) {
+	if resp == nil {
 		return 0, false
 	}
 	if resp.Total > 0 {
@@ -487,8 +537,8 @@ func renderTeamShow(w io.Writer, c teamCard, count int, countKnown bool, dashboa
 		sync = "never"
 	}
 	kv("Sync", teamsValueStyle.Render(sync))
-	kv("Path", teamsPathStyle.Render(c.path))
-	kv("Dashboard", teamsPathStyle.Render(dashboard))
+	kv("Path", teamsPathStyle.Render(cli.SanitizeTerminalText(c.path)))
+	kv("Dashboard", teamsPathStyle.Render(cli.SanitizeTerminalText(dashboard)))
 
 	fmt.Fprintf(w, "\n  %s %s\n", teamsHintStyle.Render("Coworkers:"), teamsCommandStyle.Render("ox team members"))
 }
@@ -503,13 +553,16 @@ func runTeamOpen(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to load project config: %w", err)
 	}
 
-	teamFlag, _ := cmd.Flags().GetString("team")
+	teamRef := teamRefFromArgs(cmd, args)
+	if teamRef != "" && !validTeamRef(teamRef) {
+		return fmt.Errorf("invalid team reference %q", teamRef)
+	}
 	teamID := cfg.TeamID
-	if teamFlag != "" {
-		if t := resolveTeamByQuery(projectRoot, teamFlag); t != nil {
+	if teamRef != "" {
+		if t := resolveTeamByQuery(projectRoot, teamRef); t != nil {
 			teamID = t.TeamID
 		} else {
-			teamID = teamFlag
+			teamID = teamRef
 		}
 	}
 	if teamID == "" {
@@ -523,14 +576,14 @@ func runTeamOpen(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	url := fmt.Sprintf("%s/team/%s", strings.TrimRight(endpointURL, "/"), teamID)
-	fmt.Fprintf(cmd.OutOrStdout(), "Opening %s\n", url)
-	if err := cli.OpenInBrowser(url); err != nil {
+	dashURL := fmt.Sprintf("%s/team/%s", strings.TrimRight(endpointURL, "/"), url.PathEscape(teamID))
+	fmt.Fprintf(cmd.OutOrStdout(), "Opening %s\n", cli.SanitizeTerminalText(dashURL))
+	if err := cli.OpenInBrowser(dashURL); err != nil {
 		if errors.Is(err, cli.ErrHeadless) {
-			fmt.Fprintf(cmd.OutOrStdout(), "Visit: %s\n", url)
+			fmt.Fprintf(cmd.OutOrStdout(), "Visit: %s\n", cli.SanitizeTerminalText(dashURL))
 			return nil
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "%s Could not open browser. Visit: %s\n", cli.StyleWarning.Render("!"), url)
+		fmt.Fprintf(cmd.OutOrStdout(), "%s Could not open browser. Visit: %s\n", cli.StyleWarning.Render("!"), cli.SanitizeTerminalText(dashURL))
 	}
 	return nil
 }

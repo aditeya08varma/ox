@@ -315,11 +315,11 @@
     },
     {
       "pattern": "team-ctx",
-      "target": "team context",
+      "target": "agent team-ctx",
       "has_regex": false,
       "auto_execute": true,
       "confidence": 0.95,
-      "description": "Missing subcommand: team-ctx -> team context (the human-facing verb; ox agent team-ctx remains for AI priming)"
+      "description": "Missing subcommand: team-ctx -> agent team-ctx (the agent-consumption surface)"
     },
     {
       "pattern": "agent murmur",

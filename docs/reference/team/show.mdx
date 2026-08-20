@@ -1,7 +1,7 @@
 ---
 title: "ox team show"
 description: "CLI reference for ox team show"
-sidebar_position: 100
+sidebar_position: 99
 ---
 
 ## ox team show
@@ -10,18 +10,20 @@ Show one team's details
 
 ### Synopsis
 
-Show a single team: its identity, where its context lives on disk, how
+Show a single team: its identity, where its Team Context lives on disk, how
 recently it synced, and how many coworkers it has.
 
-With no --team, shows this repo's team.
+Name the team as a positional argument or with --team; with neither, shows this
+repo's team.
 
 Example:
   ox team show
+  ox team show acme
   ox team show --team acme
   ox team show --json
 
 ```
-ox team show [flags]
+ox team show [team] [flags]
 ```
 
 ### Options
