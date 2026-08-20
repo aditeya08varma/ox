@@ -1,6 +1,38 @@
 package store
 
-import "database/sql"
+import (
+	"database/sql"
+	"strings"
+)
+
+// isDuplicateColumnError reports whether err is SQLite's "duplicate column
+// name" error — the signature a losing `ALTER TABLE ADD COLUMN` gets when a
+// concurrent caller already added the same column. SQLite has no `ADD COLUMN
+// IF NOT EXISTS`, so every migration below checks column existence and then
+// ALTERs in two separate statements; on a brand-new database two openers
+// (e.g. `ox index code` racing another `Open`/`OpenSQLOnly` of the same
+// freshly created codedb — see #758) can both observe the column missing and
+// both attempt the ALTER. The loser's failure here does not mean anything is
+// wrong — it means the column exists now, which is exactly what was wanted —
+// so it must not fail the whole CreateSchema call.
+func isDuplicateColumnError(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "duplicate column name")
+}
+
+// testAddColumnRaceHook, when non-nil, is invoked by each ALTER-based
+// migration immediately after it observes a column as missing and before it
+// attempts the ALTER. Production code always leaves this nil (zero-cost).
+// Tests use it to force the #758 race window deterministically — pausing N
+// goroutines right after they've all observed "missing" and releasing them
+// together — rather than betting on goroutine scheduling to hit a
+// microsecond-wide window on its own.
+var testAddColumnRaceHook func()
+
+func addColumnRaceHook() {
+	if testAddColumnRaceHook != nil {
+		testAddColumnRaceHook()
+	}
+}
 
 const schemaDDL = `
 CREATE TABLE IF NOT EXISTS repos (
@@ -238,7 +270,8 @@ func migrateAddEdgeVersion(db *sql.DB) error {
 	if exists {
 		return nil
 	}
-	if _, err := db.Exec(`ALTER TABLE blobs ADD COLUMN edge_version INTEGER NOT NULL DEFAULT 0`); err != nil {
+	addColumnRaceHook()
+	if _, err := db.Exec(`ALTER TABLE blobs ADD COLUMN edge_version INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumnError(err) {
 		return err
 	}
 	// Index supports the backfill scan: find blobs needing edges fast.
@@ -257,19 +290,22 @@ func migrateAddTypeInfo(db *sql.DB) error {
 	if exists {
 		return nil
 	}
+	addColumnRaceHook()
 
-	stmts := []string{
+	alters := []string{
 		`ALTER TABLE symbols ADD COLUMN signature TEXT`,
 		`ALTER TABLE symbols ADD COLUMN return_type TEXT`,
 		`ALTER TABLE symbols ADD COLUMN params TEXT`,
-		`UPDATE blobs SET parsed = 0 WHERE language IS NOT NULL`,
 	}
-	for _, s := range stmts {
-		if _, err := db.Exec(s); err != nil {
+	for _, s := range alters {
+		if _, err := db.Exec(s); err != nil && !isDuplicateColumnError(err) {
 			return err
 		}
 	}
-	return nil
+	// Idempotent regardless of race outcome: re-marking already-reset rows as
+	// unparsed is a no-op, so concurrent callers stepping on this is harmless.
+	_, err = db.Exec(`UPDATE blobs SET parsed = 0 WHERE language IS NOT NULL`)
+	return err
 }
 
 // migrateAddComments creates the comments table and adds the comments_parsed
@@ -309,7 +345,8 @@ func migrateAddComments(db *sql.DB) error {
 		return err
 	}
 	if !colExists {
-		if _, err := db.Exec(`ALTER TABLE blobs ADD COLUMN comments_parsed INTEGER NOT NULL DEFAULT 0`); err != nil {
+		addColumnRaceHook()
+		if _, err := db.Exec(`ALTER TABLE blobs ADD COLUMN comments_parsed INTEGER NOT NULL DEFAULT 0`); err != nil && !isDuplicateColumnError(err) {
 			return err
 		}
 	}

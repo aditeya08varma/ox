@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -89,10 +90,14 @@ CREATE TABLE IF NOT EXISTS symbol_refs (
 `
 
 // createOldSchemaDB opens a SQLite DB with the V1 schema (no migration columns).
+// Pragmas match openSQLite's production DSN (store.go) — in particular
+// busy_timeout, without which a concurrent-writer test would see raw
+// SQLITE_BUSY errors that real ox connections never surface, since
+// busy_timeout makes SQLite retry internally instead of failing instantly.
 func createOldSchemaDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "metadata.db")
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
@@ -535,5 +540,154 @@ func TestOpenExistingDB_TriggersAllMigrations(t *testing.T) {
 	}
 	if !tableExists(t, s.db, "pr_commits") {
 		t.Error("migrateAddPRCommits did not run")
+	}
+}
+
+// TestCreateSchema_ConcurrentFreshOpen reproduces #758 end-to-end: a cold
+// `ox index code` racing another opener (e.g. a concurrent `OpenSQLOnly` read
+// path, or two agents cold-building the same repo) against a codedb
+// directory that does not exist yet. This is a real-world sanity check, not
+// the regression proof — goroutine scheduling makes the exact race window
+// unreliable to hit on its own (it did not reproduce #758 even once across
+// 8 runs against the unfixed code during development of this test). The
+// deterministic proof is TestAddColumnMigrations_ConcurrentRace below, which
+// forces the window with a hook instead of hoping for it.
+//
+// Failure prevented (when it does land): a cold index build failing under
+// concurrent openers, leaving an empty-but-schema-complete codedb that
+// answers every future query with zero results instead of erroring loudly.
+func TestCreateSchema_ConcurrentFreshOpen(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
+
+	const openers = 16
+	root := t.TempDir()
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, openers)
+	dbs := make([]*sql.DB, openers)
+
+	for i := range openers {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start // maximize overlap on the check-then-ALTER race window
+			db, err := openSQLite(root)
+			errs[i] = err
+			dbs[i] = db
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	defer func() {
+		for _, db := range dbs {
+			if db != nil {
+				_ = db.Close()
+			}
+		}
+	}()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("opener %d: openSQLite on fresh codedb: %v", i, err)
+		}
+	}
+
+	// Regardless of which opener "won" each migration's race, the schema
+	// must have landed fully and be queryable from an independent connection.
+	verifyDB, err := openSQLite(root)
+	if err != nil {
+		t.Fatalf("reopen after concurrent creation: %v", err)
+	}
+	defer func() { _ = verifyDB.Close() }()
+
+	for _, c := range []struct{ table, column string }{
+		{"blobs", "edge_version"},
+		{"symbols", "signature"},
+		{"blobs", "comments_parsed"},
+	} {
+		if !columnExists(t, verifyDB, c.table, c.column) {
+			t.Errorf("%s.%s missing after concurrent CreateSchema", c.table, c.column)
+		}
+	}
+}
+
+// TestAddColumnMigrations_ConcurrentRace is the deterministic regression
+// proof for #758. It forces the exact race — N callers all observing a
+// column as missing, then all attempting `ALTER TABLE ADD COLUMN`
+// together — via testAddColumnRaceHook, rather than betting on goroutine
+// scheduling to land the same microsecond-wide window on its own (see the
+// non-deterministic TestCreateSchema_ConcurrentFreshOpen above, which did
+// not catch this bug in 8/8 runs against the unfixed code).
+//
+// Covers the class of failure, not just the one reported column: every
+// ALTER-based migration in schema.go shares the identical
+// "SELECT exists, then ALTER" pattern, so all three are exercised here.
+//
+// Not run with t.Parallel(): it mutates the package-level race hook, which
+// would race against other tests in this file that also touch the DB.
+func TestAddColumnMigrations_ConcurrentRace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: SQLite migration")
+	}
+
+	cases := []struct {
+		name    string
+		migrate func(*sql.DB) error
+		table   string
+		column  string
+	}{
+		{"edge_version", migrateAddEdgeVersion, "blobs", "edge_version"},
+		{"type_info", migrateAddTypeInfo, "symbols", "signature"},
+		{"comments_parsed", migrateAddComments, "blobs", "comments_parsed"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			db, _ := createOldSchemaDB(t)
+			defer func() { _ = db.Close() }()
+
+			const racers = 8
+			ready := make(chan struct{}, racers)
+			release := make(chan struct{})
+
+			testAddColumnRaceHook = func() {
+				ready <- struct{}{}
+				<-release
+			}
+			t.Cleanup(func() { testAddColumnRaceHook = nil })
+
+			var wg sync.WaitGroup
+			errs := make([]error, racers)
+			for i := range racers {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					errs[i] = tc.migrate(db)
+				}(i)
+			}
+
+			// Block until every racer has observed the column missing and is
+			// parked in the hook, then release them all into the ALTER at once —
+			// guarantees the race window is hit, not just hoped for.
+			for range racers {
+				<-ready
+			}
+			close(release)
+			wg.Wait()
+
+			for i, err := range errs {
+				if err != nil {
+					t.Errorf("racer %d: %s: %v (a losing ALTER must be swallowed as success, not returned)", i, tc.name, err)
+				}
+			}
+			if !columnExists(t, db, tc.table, tc.column) {
+				t.Errorf("%s.%s missing after concurrent migration", tc.table, tc.column)
+			}
+		})
 	}
 }
