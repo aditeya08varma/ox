@@ -1,27 +1,30 @@
 ---
-title: "ox release-notes"
-description: "CLI reference for ox release-notes"
-sidebar_position: 77
+title: "ox team open"
+description: "CLI reference for ox team open"
+sidebar_position: 98
 ---
 
-## ox release-notes
+## ox team open
 
-Display release notes for the current version
+Open a team's dashboard in the browser
 
 ### Synopsis
 
-Display formatted release notes showing what's new, changed, and fixed in the current version.
+Open the SageOx web dashboard for a team.
+
+Name the team as a positional argument or with --team; with neither, opens this
+repo's team.
 
 ```
-ox release-notes [flags]
+ox team open [team] [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help     help for release-notes
-      --latest   show only the latest version (default: false)
-      --raw      output raw markdown without formatting (default: false)
+      --endpoint string   SageOx endpoint URL (for multi-endpoint repos)
+  -h, --help              help for open
+      --team string       Team ID or slug to open (defaults to this repo's team)
 ```
 
 ### Options inherited from parent commands
@@ -37,5 +40,5 @@ ox release-notes [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox team](/team)	 - Work with your teams and coworkers
 
