@@ -1,27 +1,29 @@
 ---
-title: "ox release-notes"
-description: "CLI reference for ox release-notes"
-sidebar_position: 77
+title: "ox team context"
+description: "CLI reference for ox team context"
+sidebar_position: 95
 ---
 
-## ox release-notes
+## ox team context
 
-Display release notes for the current version
+Output a team's context for AI planning
 
 ### Synopsis
 
-Display formatted release notes showing what's new, changed, and fixed in the current version.
+Output a team's discussions and distilled context for AI planning.
+
+Without arguments: outputs this repo's team context. With a team slug: outputs
+that team's context. This is the same context surfaced to AI coworkers by
+'ox agent team-ctx'.
 
 ```
-ox release-notes [flags]
+ox team context [slug] [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help     help for release-notes
-      --latest   show only the latest version (default: false)
-      --raw      output raw markdown without formatting (default: false)
+  -h, --help   help for context
 ```
 
 ### Options inherited from parent commands
@@ -37,5 +39,5 @@ ox release-notes [flags]
 
 ### SEE ALSO
 
-* [ox](/)	 - Shared team context that makes agentic engineering multiplayer
+* [ox team](/team)	 - Work with your teams and coworkers
 
