@@ -639,11 +639,11 @@ func TestAddColumnMigrations_ConcurrentRace(t *testing.T) {
 		name    string
 		migrate func(*sql.DB) error
 		table   string
-		column  string
+		columns []string
 	}{
-		{"edge_version", migrateAddEdgeVersion, "blobs", "edge_version"},
-		{"type_info", migrateAddTypeInfo, "symbols", "signature"},
-		{"comments_parsed", migrateAddComments, "blobs", "comments_parsed"},
+		{"edge_version", migrateAddEdgeVersion, "blobs", []string{"edge_version"}},
+		{"type_info", migrateAddTypeInfo, "symbols", []string{"signature", "return_type", "params"}},
+		{"comments_parsed", migrateAddComments, "blobs", []string{"comments_parsed"}},
 	}
 
 	for _, tc := range cases {
@@ -685,8 +685,10 @@ func TestAddColumnMigrations_ConcurrentRace(t *testing.T) {
 					t.Errorf("racer %d: %s: %v (a losing ALTER must be swallowed as success, not returned)", i, tc.name, err)
 				}
 			}
-			if !columnExists(t, db, tc.table, tc.column) {
-				t.Errorf("%s.%s missing after concurrent migration", tc.table, tc.column)
+			for _, col := range tc.columns {
+				if !columnExists(t, db, tc.table, col) {
+					t.Errorf("%s.%s missing after concurrent migration", tc.table, col)
+				}
 			}
 		})
 	}
