@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New
+
+- **`ox kb query` — search files across knowledge bubbles** — one question, ranked file hits grouped per bubble: `ox kb query '#engineering' '#platform' "how do we batch relay spans"`. Honest per-bubble outcomes (no matches vs. never indexed vs. failed), `--mode`/`-k`/`--path` controls, and `--json` with AI coworker guidance. Requires KB file search enabled server-side.
+
 ### Improved
 
 - **`ox upgrade` now updates direct installs in place** — if you installed ox with the quick-install script, `ox upgrade` downloads and swaps in the new version for you (verified before it is applied) instead of just printing instructions. Homebrew and `go install` installs upgrade as before.
