@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +53,39 @@ func TestFirstUnstageableFileInIndex_ReadsStagedBlobNotWorkingTree(t *testing.T)
 	require.NoError(t, err)
 	assert.Equal(t, "meta.json", conflicted,
 		"must catch the conflict still staged in the index, even though the working-tree copy is now clean")
+}
+
+// TestFirstUnstageableFileInIndex_CleanStagedRename is the regression for
+// the gap both CodeRabbit and Greptile flagged: `git diff --cached
+// --name-status` reports a rename/copy as THREE tab-separated fields
+// (status, source, dest), not two. A naive per-line tab split glues source
+// and dest into one bogus path and `git show :<that>` errors — meaning a
+// perfectly clean staged rename would have made this guard refuse every
+// commit, not just conflicted ones.
+func TestFirstUnstageableFileInIndex_CleanStagedRename(t *testing.T) {
+	skipIntegration(t)
+	repo := t.TempDir()
+
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	// content long enough for git's similarity heuristic to detect a rename
+	// rather than a delete+add pair.
+	content := []byte(`{"attempts": 1, "note": "enough content for rename detection to kick in"}` + "\n")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "old-name.json"), content, 0644))
+	mustRunGit(t, repo, "add", "old-name.json")
+	mustRunGit(t, repo, "commit", "-m", "base")
+
+	mustRunGit(t, repo, "mv", "old-name.json", "new-name.json")
+
+	// sanity: confirm the test setup actually produced a rename record and
+	// not a plain delete+add, or this test would validate nothing.
+	nameStatus, err := runIsolatedGit(t, repo, "diff", "--cached", "--name-status")
+	require.NoError(t, err)
+	require.True(t, strings.HasPrefix(nameStatus, "R"),
+		"test setup did not produce a detected rename; got status: %q", nameStatus)
+
+	conflicted, ferr := firstUnstageableFileInIndex(repo)
+	require.NoError(t, ferr, "a clean staged rename must not error out")
+	assert.Equal(t, "", conflicted, "a clean staged rename must not be flagged as a conflict")
 }
 
 // --- firstUnstageableFileInIndex: real-git regression coverage ---

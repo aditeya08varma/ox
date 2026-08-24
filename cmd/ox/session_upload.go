@@ -238,19 +238,39 @@ func firstUnstageableFileInIndex(ledgerPath string) (string, error) {
 		return unmerged[0].Path, nil
 	}
 
-	diffOut, err := exec.Command("git", "-C", ledgerPath, "diff", "--cached", "--name-status").Output()
+	// -z (NUL-delimited) is required, not cosmetic: a tab-delimited rename or
+	// copy record is status\tsource\tdest — three fields, not two — so a
+	// naive line/tab split leaves "source\tdest" glued together as one bogus
+	// path and every staged rename/copy makes this function error out on an
+	// otherwise-clean commit. -z instead emits a flat NUL-separated token
+	// stream per git-diff(1): one status token, then one path token for an
+	// ordinary entry or two (source, dest) for R*/C*, with no ambiguity.
+	diffOut, err := exec.Command("git", "-C", ledgerPath, "diff", "--cached", "--name-status", "-z").Output()
 	if err != nil {
 		return "", fmt.Errorf("git diff --cached: %w", err)
 	}
-	for _, line := range strings.Split(strings.TrimSpace(string(diffOut)), "\n") {
-		if line == "" {
-			continue
+	tokens := strings.Split(strings.Trim(string(diffOut), "\x00"), "\x00")
+	if len(tokens) == 1 && tokens[0] == "" {
+		tokens = nil // nothing staged
+	}
+	for i := 0; i < len(tokens); {
+		status := tokens[i]
+		i++
+		if i >= len(tokens) {
+			break // truncated record; nothing more to read
 		}
-		fields := strings.SplitN(line, "\t", 2)
-		if len(fields) != 2 {
-			continue
+		rel := tokens[i]
+		i++
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			// rename/copy: the token just consumed was the SOURCE path;
+			// the destination — what will actually exist post-commit — is
+			// the next one.
+			if i >= len(tokens) {
+				break
+			}
+			rel = tokens[i]
+			i++
 		}
-		status, rel := fields[0], fields[1]
 		if strings.HasPrefix(status, "D") {
 			continue // deleted from the index — no blob left to inspect
 		}
