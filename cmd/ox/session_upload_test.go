@@ -21,42 +21,37 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestFirstConflictMarkerFile covers the guard commitAndPushLedger and
-// commitPointerRewriteAndPush use to refuse staging a conflicted file
-// instead of silently baking its markers into a commit (#749).
-// Failure prevented: a concurrent daemon autostash-pop conflict lands in
-// meta.json right as a session is stopping; without this check, the normal
-// session-stop commit path stages and commits the markers as if nothing
-// were wrong.
-func TestFirstConflictMarkerFile(t *testing.T) {
-	dir := t.TempDir()
+// TestFirstUnstageableFileInIndex_ReadsStagedBlobNotWorkingTree is the
+// load-bearing regression for the gap both CodeRabbit and Greptile flagged
+// independently in review: `git commit` with no pathspec persists the
+// STAGED INDEX content, not whatever is currently on disk. An earlier
+// version of this guard read the working-tree file instead, so a staged
+// blob that still carried conflict markers would sneak through undetected
+// the moment the working-tree copy diverged from what was actually staged.
+func TestFirstUnstageableFileInIndex_ReadsStagedBlobNotWorkingTree(t *testing.T) {
+	skipIntegration(t)
+	repo := t.TempDir()
 
-	clean := filepath.Join(dir, "clean.json")
-	require.NoError(t, os.WriteFile(clean, []byte(`{"ok": true}`), 0644))
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 1}`+"\n"), 0644))
+	mustRunGit(t, repo, "add", "meta.json")
+	mustRunGit(t, repo, "commit", "-m", "base")
 
-	conflicted := filepath.Join(dir, "meta.json")
-	require.NoError(t, os.WriteFile(conflicted, []byte(
+	// stage a conflicted blob
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(
 		"{\n<<<<<<< Updated upstream\n\"attempts\": 3,\n=======\n\"attempts\": 2,\n>>>>>>> Stashed changes\n}\n"),
 		0644))
+	mustRunGit(t, repo, "add", "meta.json")
 
-	missing := filepath.Join(dir, "does-not-exist.json")
+	// then, WITHOUT re-adding, overwrite the working-tree copy with clean
+	// content — the index still holds the conflicted blob from the `add`
+	// above. This is exactly the divergence a working-tree read would miss.
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 4}`+"\n"), 0644))
 
-	cases := []struct {
-		name  string
-		files []string
-		want  string
-	}{
-		{"no files", nil, ""},
-		{"all clean", []string{clean}, ""},
-		{"conflicted file found", []string{clean, conflicted}, conflicted},
-		{"missing file treated as clean, not a false positive", []string{missing, clean}, ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := firstConflictMarkerFile(tc.files)
-			assert.Equal(t, tc.want, got)
-		})
-	}
+	conflicted, err := firstUnstageableFileInIndex(repo)
+	require.NoError(t, err)
+	assert.Equal(t, "meta.json", conflicted,
+		"must catch the conflict still staged in the index, even though the working-tree copy is now clean")
 }
 
 // --- firstUnstageableFileInIndex: real-git regression coverage ---

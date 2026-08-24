@@ -27,10 +27,18 @@ func HasConflictMarkers(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("read %s: %w", path, err)
 	}
+	return HasConflictMarkersBytes(data), nil
+}
+
+// HasConflictMarkersBytes is the scan behind HasConflictMarkers, taking raw
+// content directly. Use this when the content under inspection isn't (or
+// might not be) the working-tree file — e.g. a staged git blob read via
+// `git show :<path>`, which can differ from what's currently on disk.
+func HasConflictMarkersBytes(data []byte) bool {
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.HasPrefix(line, ConflictMarkerStart) {
-			return true, nil
+			return true
 		}
 	}
-	return false, nil
+	return false
 }

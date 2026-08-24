@@ -202,35 +202,10 @@ func ensureSessionsGitignore(sessionsDir string) error {
 // Uses exec.Command("git") rather than go-git for the same reasons as the daemon
 // (see daemon/sync.go doPull): rebase support, process isolation, and lock safety.
 // This is a low-volume path (once per session stop), so subprocess overhead is negligible.
-// firstConflictMarkerFile returns the first path in files that contains an
-// unresolved git conflict marker, or "" if none do. Missing files are
-// treated as clean (not this guard's job to catch a bad path — the
-// subsequent `git add` will fail loudly on that instead).
-func firstConflictMarkerFile(files []string) string {
-	if i := firstConflictMarkerFileIndex(files); i >= 0 {
-		return files[i]
-	}
-	return ""
-}
-
-// firstConflictMarkerFileIndex is the shared scan behind
-// firstConflictMarkerFile; it returns an index (not a path) so a caller
-// tracking a parallel slice of relative paths — as firstUnstageableFileInIndex
-// does — can report the relative form instead of the full path this
-// function actually reads from disk.
-func firstConflictMarkerFileIndex(files []string) int {
-	for i, f := range files {
-		if has, err := gitutil.HasConflictMarkers(f); err == nil && has {
-			return i
-		}
-	}
-	return -1
-}
-
 // firstUnstageableFileInIndex scans the ledger for anything that must not
 // be committed, immediately before a `git commit` with no pathspec — which
 // commits the WHOLE staged index, not just the files this call explicitly
-// staged. Two things a content-only, caller's-own-files-only check misses:
+// staged. Three things a content-only, caller's-own-files-only check misses:
 //
 //  1. A conflict shaped as UD/DU (one side deleted the path) carries no
 //     "<<<<<<<" text at all — there is no content to scan. Only `git
@@ -243,8 +218,17 @@ func firstConflictMarkerFileIndex(files []string) int {
 //     would silently drop those legitimate side effects rather than catch
 //     a real problem, so the check runs against the actual staged diff
 //     instead of restricting what gets committed.
+//  3. A staged blob whose content has since diverged from the working-tree
+//     file at the same path — `git commit` persists the INDEX content, not
+//     whatever currently happens to be on disk. Reading the working-tree
+//     file here (as an earlier version of this guard did) would miss
+//     markers that are still staged if the working-tree copy was cleaned
+//     or overwritten afterward. Each staged path is therefore read via
+//     `git show :<path>`, the actual blob about to be committed.
 //
-// Returns the first offending path, or "" if the index is clean.
+// Returns the first offending path, or "" if the index is clean. Inspection
+// failures on a staged blob are returned as errors (fail closed) rather
+// than treated as clean — an unreadable blob is not proof it's safe.
 func firstUnstageableFileInIndex(ledgerPath string) (string, error) {
 	statusOut, err := exec.Command("git", "-C", ledgerPath, "status", "--porcelain=v1").Output()
 	if err != nil {
@@ -254,20 +238,29 @@ func firstUnstageableFileInIndex(ledgerPath string) (string, error) {
 		return unmerged[0].Path, nil
 	}
 
-	diffOut, err := exec.Command("git", "-C", ledgerPath, "diff", "--cached", "--name-only").Output()
+	diffOut, err := exec.Command("git", "-C", ledgerPath, "diff", "--cached", "--name-status").Output()
 	if err != nil {
 		return "", fmt.Errorf("git diff --cached: %w", err)
 	}
-	var staged, stagedRel []string
-	for _, rel := range strings.Split(strings.TrimSpace(string(diffOut)), "\n") {
-		if rel == "" {
+	for _, line := range strings.Split(strings.TrimSpace(string(diffOut)), "\n") {
+		if line == "" {
 			continue
 		}
-		staged = append(staged, filepath.Join(ledgerPath, rel))
-		stagedRel = append(stagedRel, rel)
-	}
-	if i := firstConflictMarkerFileIndex(staged); i >= 0 {
-		return stagedRel[i], nil
+		fields := strings.SplitN(line, "\t", 2)
+		if len(fields) != 2 {
+			continue
+		}
+		status, rel := fields[0], fields[1]
+		if strings.HasPrefix(status, "D") {
+			continue // deleted from the index — no blob left to inspect
+		}
+		blob, err := exec.Command("git", "-C", ledgerPath, "show", ":"+rel).Output()
+		if err != nil {
+			return "", fmt.Errorf("inspect staged blob %s: %w", rel, err)
+		}
+		if gitutil.HasConflictMarkersBytes(blob) {
+			return rel, nil
+		}
 	}
 	return "", nil
 }
