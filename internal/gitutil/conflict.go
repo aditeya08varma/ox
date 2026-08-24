@@ -1,6 +1,7 @@
 package gitutil
 
 import (
+	"fmt"
 	"os"
 	"strings"
 )
@@ -24,7 +25,7 @@ const ConflictMarkerStart = "<<<<<<<"
 func HasConflictMarkers(path string) (bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("read %s: %w", path, err)
 	}
 	for _, line := range strings.Split(string(data), "\n") {
 		if strings.HasPrefix(line, ConflictMarkerStart) {

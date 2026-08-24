@@ -957,10 +957,15 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 			return FailedCheck("Ledger clean workdir",
 				"unresolved conflicts present, refusing to auto-commit",
 				fmt.Sprintf("%d unmerged file(s) at %s, e.g. %s.\n       "+
-					"Run `ox doctor --fix` again — the ledger unmerged-paths check "+
-					"resolves these first; auto-committing over them would bake the "+
-					"conflict markers into the ledger permanently.",
-					len(unmerged), ledgerPath, sample))
+					"Auto-committing over them would bake the conflict markers into "+
+					"the ledger permanently, so this is refused instead. A stash-pop "+
+					"conflict like this one has no in-progress merge/rebase to abort, "+
+					"so it needs manual resolution:\n       "+
+					"  cd %s\n       "+
+					"  git status                       # inspect the conflict\n       "+
+					"  git checkout --ours <file>       # or --theirs, depending on intent\n       "+
+					"  git add <file> && git commit",
+					len(unmerged), ledgerPath, sample, ledgerPath))
 		}
 	}
 

@@ -207,12 +207,69 @@ func ensureSessionsGitignore(sessionsDir string) error {
 // treated as clean (not this guard's job to catch a bad path — the
 // subsequent `git add` will fail loudly on that instead).
 func firstConflictMarkerFile(files []string) string {
-	for _, f := range files {
-		if has, err := gitutil.HasConflictMarkers(f); err == nil && has {
-			return f
-		}
+	if i := firstConflictMarkerFileIndex(files); i >= 0 {
+		return files[i]
 	}
 	return ""
+}
+
+// firstConflictMarkerFileIndex is the shared scan behind
+// firstConflictMarkerFile; it returns an index (not a path) so a caller
+// tracking a parallel slice of relative paths — as firstUnstageableFileInIndex
+// does — can report the relative form instead of the full path this
+// function actually reads from disk.
+func firstConflictMarkerFileIndex(files []string) int {
+	for i, f := range files {
+		if has, err := gitutil.HasConflictMarkers(f); err == nil && has {
+			return i
+		}
+	}
+	return -1
+}
+
+// firstUnstageableFileInIndex scans the ledger for anything that must not
+// be committed, immediately before a `git commit` with no pathspec — which
+// commits the WHOLE staged index, not just the files this call explicitly
+// staged. Two things a content-only, caller's-own-files-only check misses:
+//
+//  1. A conflict shaped as UD/DU (one side deleted the path) carries no
+//     "<<<<<<<" text at all — there is no content to scan. Only `git
+//     status` reveals it.
+//  2. Content already staged by something ELSE before this call ran — e.g.
+//     leftover from an interrupted prior operation, or (harmlessly) the
+//     root .gitignore / *.rej / *.needs-summary stage-and-untrack side
+//     effects EnsureGitignoreBeforeCommit performs outside this call's own
+//     file list. Scoping the commit itself to a narrow pathspec instead
+//     would silently drop those legitimate side effects rather than catch
+//     a real problem, so the check runs against the actual staged diff
+//     instead of restricting what gets committed.
+//
+// Returns the first offending path, or "" if the index is clean.
+func firstUnstageableFileInIndex(ledgerPath string) (string, error) {
+	statusOut, err := exec.Command("git", "-C", ledgerPath, "status", "--porcelain=v1").Output()
+	if err != nil {
+		return "", fmt.Errorf("git status: %w", err)
+	}
+	if unmerged := parseUnmergedPaths(string(statusOut)); len(unmerged) > 0 {
+		return unmerged[0].Path, nil
+	}
+
+	diffOut, err := exec.Command("git", "-C", ledgerPath, "diff", "--cached", "--name-only").Output()
+	if err != nil {
+		return "", fmt.Errorf("git diff --cached: %w", err)
+	}
+	var staged, stagedRel []string
+	for _, rel := range strings.Split(strings.TrimSpace(string(diffOut)), "\n") {
+		if rel == "" {
+			continue
+		}
+		staged = append(staged, filepath.Join(ledgerPath, rel))
+		stagedRel = append(stagedRel, rel)
+	}
+	if i := firstConflictMarkerFileIndex(staged); i >= 0 {
+		return stagedRel[i], nil
+	}
+	return "", nil
 }
 
 func commitAndPushLedger(ledgerPath, sessionName string) error {
@@ -230,23 +287,26 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 
 	filesToAdd := append([]string{metaPath, gitignorePath}, sessionArtifactsToStage(sessionDir)...)
 
-	// Refuse to stage any file that still carries unresolved conflict
-	// markers — a concurrent daemon `pull --rebase --autostash` can leave a
-	// stash-pop conflict in exactly one of these paths (most often
-	// meta.json) with no MERGE_HEAD-style marker to detect it by. `git add`
-	// does not refuse a conflicted path on its own; it stages the markers as
-	// if resolved, and the commit below would make that permanent. See #749.
-	if conflicted := firstConflictMarkerFile(filesToAdd); conflicted != "" {
-		return fmt.Errorf("refusing to commit %s: contains unresolved conflict markers "+
-			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", conflicted)
-	}
-
 	// --sparse: ledger repos use sparse-checkout (cone mode); this flag
 	// prevents git from blocking adds if sparse rules change or edge cases arise
 	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, filesToAdd...)
 	addCmd := exec.Command("git", addArgs...)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
+	}
+
+	// Refuse to commit if anything now staged — not just the files this call
+	// intended to add — still carries an unresolved conflict. `git commit`
+	// below has no pathspec, so it commits the WHOLE index. A concurrent
+	// daemon `pull --rebase --autostash` can leave a stash-pop conflict with
+	// no MERGE_HEAD-style marker to detect it by, and `git add` does not
+	// refuse a conflicted path on its own — it stages the markers as if
+	// resolved. See #749.
+	if conflicted, err := firstUnstageableFileInIndex(ledgerPath); err != nil {
+		return fmt.Errorf("checking for unresolved conflicts: %w", err)
+	} else if conflicted != "" {
+		return fmt.Errorf("refusing to commit %s: contains an unresolved conflict "+
+			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", conflicted)
 	}
 
 	// commit
@@ -283,17 +343,19 @@ func commitPointerRewriteAndPush(ledgerPath, sessionName string, pointerPaths []
 
 	waitForGCSwap(ledgerPath)
 
-	// See the identical guard in commitAndPushLedger above (#749).
-	if conflicted := firstConflictMarkerFile(pointerPaths); conflicted != "" {
-		return fmt.Errorf("refusing to commit %s: contains unresolved conflict markers "+
-			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", conflicted)
-	}
-
 	// --sparse: ledger repos use sparse-checkout (cone mode)
 	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, pointerPaths...)
 	addCmd := exec.Command("git", addArgs...)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
+	}
+
+	// See the identical guard in commitAndPushLedger above (#749).
+	if conflicted, err := firstUnstageableFileInIndex(ledgerPath); err != nil {
+		return fmt.Errorf("checking for unresolved conflicts: %w", err)
+	} else if conflicted != "" {
+		return fmt.Errorf("refusing to commit %s: contains an unresolved conflict "+
+			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", conflicted)
 	}
 
 	// commit under a distinct subject so it doesn't shadow the canonical

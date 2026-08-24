@@ -59,6 +59,91 @@ func TestFirstConflictMarkerFile(t *testing.T) {
 	}
 }
 
+// --- firstUnstageableFileInIndex: real-git regression coverage ---
+//
+// TestFirstUnstageableFileInIndex_CatchesModifyDeleteConflict covers the gap
+// CodeRabbit flagged in review: a modify/delete conflict (UD/DU) has no
+// "<<<<<<<" text at all — one side deleted the file, so there is no content
+// for firstConflictMarkerFile to scan. Only `git status` reveals it.
+// Failure prevented: `git add` on a modify/delete conflict marks it resolved
+// (keeping whichever side was staged) with no marker text anywhere, so a
+// content-only guard would wave it through into a commit.
+func TestFirstUnstageableFileInIndex_CatchesModifyDeleteConflict(t *testing.T) {
+	skipIntegration(t)
+	repo := t.TempDir()
+
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 1}`+"\n"), 0644))
+	mustRunGit(t, repo, "add", "meta.json")
+	mustRunGit(t, repo, "commit", "-m", "base")
+
+	mustRunGit(t, repo, "checkout", "-b", "feature")
+	mustRunGit(t, repo, "rm", "meta.json")
+	mustRunGit(t, repo, "commit", "-m", "feature deletes meta.json")
+
+	mustRunGit(t, repo, "checkout", "main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 2}`+"\n"), 0644))
+	mustRunGit(t, repo, "commit", "-am", "main modifies meta.json")
+
+	out, err := runIsolatedGit(t, repo, "merge", "--no-ff", "--no-edit", "feature")
+	require.Error(t, err, "merge must conflict on modify/delete; got success: %s", out)
+
+	status, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	unmerged := parseUnmergedPaths(status + "\n")
+	require.NotEmpty(t, unmerged, "test setup must produce a modify/delete conflict")
+	require.NotEqual(t, "UU", unmerged[0].Code,
+		"test setup produced a content conflict, not the marker-less modify/delete shape this test targets")
+
+	// sanity: no conflict-marker text exists anywhere to scan — this is
+	// exactly the shape a content-only guard cannot see
+	if _, statErr := os.Stat(filepath.Join(repo, "meta.json")); statErr == nil {
+		content, readErr := os.ReadFile(filepath.Join(repo, "meta.json"))
+		require.NoError(t, readErr)
+		require.NotContains(t, string(content), "<<<<<<<",
+			"test setup must not accidentally produce marker text")
+	}
+
+	conflicted, ferr := firstUnstageableFileInIndex(repo)
+	require.NoError(t, ferr)
+	assert.Equal(t, "meta.json", conflicted,
+		"must catch the modify/delete conflict via git status, not content scanning")
+}
+
+// TestFirstUnstageableFileInIndex_CatchesUnrelatedAlreadyStagedConflict
+// covers the Greptile finding: `git commit` with no pathspec commits the
+// WHOLE staged index, not just the files a caller intended to add. A guard
+// scoped only to the caller's own file list misses conflict-marker content
+// that was already staged by something else before the caller's own `git
+// add` ran (e.g. leftover from an interrupted prior operation).
+func TestFirstUnstageableFileInIndex_CatchesUnrelatedAlreadyStagedConflict(t *testing.T) {
+	skipIntegration(t)
+	repo := t.TempDir()
+
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "unrelated.json"), []byte(`{"ok": true}`+"\n"), 0644))
+	mustRunGit(t, repo, "add", "unrelated.json")
+	mustRunGit(t, repo, "commit", "-m", "base")
+
+	// simulate leftover staged content from an interrupted prior operation:
+	// a file with literal conflict-marker text, already `git add`ed, sitting
+	// in the index before this call's own intended files are staged.
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "unrelated.json"), []byte(
+		"{\n<<<<<<< Updated upstream\n\"attempts\": 3,\n=======\n\"attempts\": 2,\n>>>>>>> Stashed changes\n}\n"),
+		0644))
+	mustRunGit(t, repo, "add", "unrelated.json")
+
+	// the caller's own, entirely clean file — this is what a guard scoped
+	// only to the caller's file list would check, and it would find nothing
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 1}`+"\n"), 0644))
+	mustRunGit(t, repo, "add", "meta.json")
+
+	conflicted, err := firstUnstageableFileInIndex(repo)
+	require.NoError(t, err)
+	assert.Equal(t, "unrelated.json", conflicted,
+		"must catch conflict-marker content staged by something else, not just the caller's own files")
+}
+
 func TestCheckUploadAccess_NoRepoID(t *testing.T) {
 	// bare temp dir with no .sageox/config.json → GetRepoID returns "" → fail-open returns nil
 	tmpDir := t.TempDir()
