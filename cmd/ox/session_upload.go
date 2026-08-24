@@ -202,6 +202,19 @@ func ensureSessionsGitignore(sessionsDir string) error {
 // Uses exec.Command("git") rather than go-git for the same reasons as the daemon
 // (see daemon/sync.go doPull): rebase support, process isolation, and lock safety.
 // This is a low-volume path (once per session stop), so subprocess overhead is negligible.
+// firstConflictMarkerFile returns the first path in files that contains an
+// unresolved git conflict marker, or "" if none do. Missing files are
+// treated as clean (not this guard's job to catch a bad path — the
+// subsequent `git add` will fail loudly on that instead).
+func firstConflictMarkerFile(files []string) string {
+	for _, f := range files {
+		if has, err := gitutil.HasConflictMarkers(f); err == nil && has {
+			return f
+		}
+	}
+	return ""
+}
+
 func commitAndPushLedger(ledgerPath, sessionName string) error {
 	waitForGCSwap(ledgerPath)
 
@@ -216,6 +229,17 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	gitignorePath := filepath.Join(sessionsDir, ".gitignore")
 
 	filesToAdd := append([]string{metaPath, gitignorePath}, sessionArtifactsToStage(sessionDir)...)
+
+	// Refuse to stage any file that still carries unresolved conflict
+	// markers — a concurrent daemon `pull --rebase --autostash` can leave a
+	// stash-pop conflict in exactly one of these paths (most often
+	// meta.json) with no MERGE_HEAD-style marker to detect it by. `git add`
+	// does not refuse a conflicted path on its own; it stages the markers as
+	// if resolved, and the commit below would make that permanent. See #749.
+	if conflicted := firstConflictMarkerFile(filesToAdd); conflicted != "" {
+		return fmt.Errorf("refusing to commit %s: contains unresolved conflict markers "+
+			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", conflicted)
+	}
 
 	// --sparse: ledger repos use sparse-checkout (cone mode); this flag
 	// prevents git from blocking adds if sparse rules change or edge cases arise
@@ -258,6 +282,12 @@ func commitPointerRewriteAndPush(ledgerPath, sessionName string, pointerPaths []
 	}
 
 	waitForGCSwap(ledgerPath)
+
+	// See the identical guard in commitAndPushLedger above (#749).
+	if conflicted := firstConflictMarkerFile(pointerPaths); conflicted != "" {
+		return fmt.Errorf("refusing to commit %s: contains unresolved conflict markers "+
+			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", conflicted)
+	}
 
 	// --sparse: ledger repos use sparse-checkout (cone mode)
 	addArgs := append([]string{"-C", ledgerPath, "add", "--sparse"}, pointerPaths...)

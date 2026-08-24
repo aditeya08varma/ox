@@ -425,3 +425,94 @@ func TestCheckLedgerUnmergedPaths_ReportsCriticalWithoutFix(t *testing.T) {
 	assert.Equal(t, "critical", r.priority)
 	assert.Equal(t, CheckSlugLedgerUnmergedPaths, r.slug)
 }
+
+// --- E. fixLedgerDirtyWorkdir must not sweep a conflict into a commit ---
+//
+// Real-git integration test reproducing #749: a `git stash pop` conflict
+// leaves UU files with NO MERGE_HEAD/rebase-merge marker (a stash pop isn't
+// a resumable operation), so detectInProgressGitOp can't see it and
+// checkLedgerCleanWorkdir's own dirty-count excludes U-state entries from
+// what triggers the fix. But that exclusion never reached the actual
+// `git add -A` inside the fix — so once an UNRELATED dirty file tripped the
+// auto-commit, `-A` swept the conflicted file in too and committed the
+// literal conflict markers into the ledger.
+//
+// buildAutostashConflictRepo reproduces that exact shape: a conflicted
+// meta.json (UU, real conflict markers, no state-directory marker) sitting
+// alongside a genuinely dirty, unrelated untracked file.
+func buildAutostashConflictRepo(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 1}`+"\n"), 0644))
+	mustRunGit(t, repo, "add", "meta.json")
+	mustRunGit(t, repo, "commit", "-m", "base")
+
+	// local uncommitted change to meta.json — this is what autostash stashes
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 2}`+"\n"), 0644))
+	mustRunGit(t, repo, "stash", "push", "-m", "autostash", "--", "meta.json")
+
+	// a conflicting change lands on main in the meantime (the daemon's pull)
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 99}`+"\n"), 0644))
+	mustRunGit(t, repo, "commit", "-am", "conflicting upstream change")
+
+	// an unrelated, genuinely dirty file — this is what trips
+	// checkLedgerCleanWorkdir's dirty count and triggers the auto-commit
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "unrelated.txt"), []byte("wip\n"), 0644))
+
+	// popping the stash now conflicts on meta.json
+	out, err := runIsolatedGit(t, repo, "stash", "pop")
+	require.Error(t, err, "stash pop must conflict; got success: %s", out)
+
+	status, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	require.Contains(t, status, "UU meta.json",
+		"test setup did not produce the UU wedge; cannot validate fix")
+	require.Contains(t, status, "unrelated.txt",
+		"test setup did not produce the unrelated dirty file; cannot validate fix")
+
+	// sanity: NO state-directory marker exists for a stash-pop conflict —
+	// this is the whole reason detectInProgressGitOp can't see it
+	op, _ := detectInProgressGitOp(repo)
+	require.Equal(t, "", op,
+		"a stash-pop conflict must have no in-progress op marker; got %q", op)
+
+	return repo
+}
+
+// TestFixLedgerDirtyWorkdir_RefusesUnrelatedDirtyFileWithConflictPresent is
+// the load-bearing regression for #749. Without the fix, this test commits
+// the literal conflict markers into the ledger's history — permanently.
+func TestFixLedgerDirtyWorkdir_RefusesUnrelatedDirtyFileWithConflictPresent(t *testing.T) {
+	skipIntegration(t)
+	repo := buildAutostashConflictRepo(t)
+
+	beforeLog, err := runIsolatedGit(t, repo, "log", "--oneline")
+	require.NoError(t, err)
+
+	r := fixLedgerDirtyWorkdir(repo, 1)
+
+	assert.False(t, r.passed,
+		"must refuse to auto-commit while a conflict is present: %+v", r)
+
+	// no new commit — especially not one containing the markers
+	afterLog, err := runIsolatedGit(t, repo, "log", "--oneline")
+	require.NoError(t, err)
+	assert.Equal(t, beforeLog, afterLog,
+		"no commit should have been created")
+
+	// the conflict must still be sitting there, unresolved, for
+	// checkLedgerUnmergedPaths to pick up next
+	status, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	assert.Contains(t, status, "UU meta.json",
+		"conflict must survive the refusal, not be silently resolved")
+
+	// and the working-tree file must still literally contain the markers —
+	// proof nothing quietly rewrote it
+	content, err := os.ReadFile(filepath.Join(repo, "meta.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "<<<<<<<",
+		"conflict markers must still be present in the untouched file")
+}

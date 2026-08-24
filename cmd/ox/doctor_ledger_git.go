@@ -930,6 +930,40 @@ func checkLedgerCleanWorkdir(fix bool) checkResult {
 
 // fixLedgerDirtyWorkdir stages and commits all changes in the ledger.
 func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
+	// Re-check for unmerged (U-state) paths immediately before staging.
+	// checkLedgerCleanWorkdir deliberately excludes U-state entries from the
+	// dirty count that triggers this fix — a lone conflict is
+	// checkLedgerUnmergedPaths's job, not this one's. But that exclusion is
+	// COUNTING logic only; it does not reach the `git add -A` below. `-A`
+	// stages every changed path unconditionally, including any conflicted
+	// one sitting alongside genuinely dirty files that DID trigger this fix.
+	// git has no concept of "refuse to stage a conflict" — `git add` on a
+	// conflicted path takes its current working-tree content, markers
+	// included, and marks it resolved. The commit that follows would then
+	// bake those markers permanently into the ledger. This is the exact
+	// mechanism behind #749: a `git stash pop` conflict (from the daemon's
+	// `pull --rebase --autostash`) leaves UU files with no MERGE_HEAD/
+	// rebase-merge marker — autostash pop isn't a resumable operation, so
+	// detectInProgressGitOp can't see it either. They just sit there until
+	// an unrelated dirty file triggers this auto-commit and sweeps them in.
+	// Refuse instead of guessing at a resolution.
+	statusCmd := exec.Command("git", "-C", ledgerPath, "status", "--porcelain=v1")
+	if statusOut, statusErr := statusCmd.Output(); statusErr == nil {
+		if unmerged := parseUnmergedPaths(string(statusOut)); len(unmerged) > 0 {
+			sample := unmerged[0].Path
+			if len(unmerged) > 1 {
+				sample = fmt.Sprintf("%s (+%d more)", sample, len(unmerged)-1)
+			}
+			return FailedCheck("Ledger clean workdir",
+				"unresolved conflicts present, refusing to auto-commit",
+				fmt.Sprintf("%d unmerged file(s) at %s, e.g. %s.\n       "+
+					"Run `ox doctor --fix` again — the ledger unmerged-paths check "+
+					"resolves these first; auto-committing over them would bake the "+
+					"conflict markers into the ledger permanently.",
+					len(unmerged), ledgerPath, sample))
+		}
+	}
+
 	// ensure .gitignore exists and untrack any cache files BEFORE staging.
 	// without this, git add -A will commit local-only files like sync-state.json.
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)

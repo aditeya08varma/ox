@@ -21,6 +21,44 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestFirstConflictMarkerFile covers the guard commitAndPushLedger and
+// commitPointerRewriteAndPush use to refuse staging a conflicted file
+// instead of silently baking its markers into a commit (#749).
+// Failure prevented: a concurrent daemon autostash-pop conflict lands in
+// meta.json right as a session is stopping; without this check, the normal
+// session-stop commit path stages and commits the markers as if nothing
+// were wrong.
+func TestFirstConflictMarkerFile(t *testing.T) {
+	dir := t.TempDir()
+
+	clean := filepath.Join(dir, "clean.json")
+	require.NoError(t, os.WriteFile(clean, []byte(`{"ok": true}`), 0644))
+
+	conflicted := filepath.Join(dir, "meta.json")
+	require.NoError(t, os.WriteFile(conflicted, []byte(
+		"{\n<<<<<<< Updated upstream\n\"attempts\": 3,\n=======\n\"attempts\": 2,\n>>>>>>> Stashed changes\n}\n"),
+		0644))
+
+	missing := filepath.Join(dir, "does-not-exist.json")
+
+	cases := []struct {
+		name  string
+		files []string
+		want  string
+	}{
+		{"no files", nil, ""},
+		{"all clean", []string{clean}, ""},
+		{"conflicted file found", []string{clean, conflicted}, conflicted},
+		{"missing file treated as clean, not a false positive", []string{missing, clean}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := firstConflictMarkerFile(tc.files)
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
 func TestCheckUploadAccess_NoRepoID(t *testing.T) {
 	// bare temp dir with no .sageox/config.json → GetRepoID returns "" → fail-open returns nil
 	tmpDir := t.TempDir()
