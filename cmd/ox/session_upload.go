@@ -202,6 +202,94 @@ func ensureSessionsGitignore(sessionsDir string) error {
 // Uses exec.Command("git") rather than go-git for the same reasons as the daemon
 // (see daemon/sync.go doPull): rebase support, process isolation, and lock safety.
 // This is a low-volume path (once per session stop), so subprocess overhead is negligible.
+// firstUnstageableFileInIndex scans the ledger for anything that must not
+// be committed, immediately before a `git commit` with no pathspec — which
+// commits the WHOLE staged index, not just the files this call explicitly
+// staged. Three things a content-only, caller's-own-files-only check misses:
+//
+//  1. A conflict shaped as UD/DU (one side deleted the path) carries no
+//     "<<<<<<<" text at all — there is no content to scan. Only `git
+//     status` reveals it.
+//  2. Content already staged by something ELSE before this call ran — e.g.
+//     leftover from an interrupted prior operation, or (harmlessly) the
+//     root .gitignore / *.rej / *.needs-summary stage-and-untrack side
+//     effects EnsureGitignoreBeforeCommit performs outside this call's own
+//     file list. Scoping the commit itself to a narrow pathspec instead
+//     would silently drop those legitimate side effects rather than catch
+//     a real problem, so the check runs against the actual staged diff
+//     instead of restricting what gets committed.
+//  3. A staged blob whose content has since diverged from the working-tree
+//     file at the same path — `git commit` persists the INDEX content, not
+//     whatever currently happens to be on disk. Reading the working-tree
+//     file here (as an earlier version of this guard did) would miss
+//     markers that are still staged if the working-tree copy was cleaned
+//     or overwritten afterward. Each staged path is therefore read via
+//     `git show :<path>`, the actual blob about to be committed.
+//
+// Returns the first offending path, or "" if the index is clean. Inspection
+// failures on a staged blob are returned as errors (fail closed) rather
+// than treated as clean — an unreadable blob is not proof it's safe.
+func firstUnstageableFileInIndex(ledgerPath string) (string, error) {
+	statusOut, err := exec.Command("git", "-C", ledgerPath, "status", "--porcelain=v1").Output()
+	if err != nil {
+		return "", fmt.Errorf("git status: %w", err)
+	}
+	if unmerged := parseUnmergedPaths(string(statusOut)); len(unmerged) > 0 {
+		return unmerged[0].Path, nil
+	}
+
+	// -z (NUL-delimited) is required, not cosmetic: a tab-delimited rename or
+	// copy record is status\tsource\tdest — three fields, not two — so a
+	// naive line/tab split leaves "source\tdest" glued together as one bogus
+	// path and every staged rename/copy makes this function error out on an
+	// otherwise-clean commit. -z instead emits a flat NUL-separated token
+	// stream per git-diff(1): one status token, then one path token for an
+	// ordinary entry or two (source, dest) for R*/C*, with no ambiguity.
+	diffOut, err := exec.Command("git", "-C", ledgerPath, "diff", "--cached", "--name-status", "-z").Output()
+	if err != nil {
+		return "", fmt.Errorf("git diff --cached: %w", err)
+	}
+	tokens := strings.Split(strings.Trim(string(diffOut), "\x00"), "\x00")
+	if len(tokens) == 1 && tokens[0] == "" {
+		tokens = nil // nothing staged
+	}
+	for i := 0; i < len(tokens); {
+		status := tokens[i]
+		i++
+		if i >= len(tokens) {
+			break // truncated record; nothing more to read
+		}
+		rel := tokens[i]
+		i++
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			// rename/copy: the token just consumed was the SOURCE path;
+			// the destination — what will actually exist post-commit — is
+			// the next one.
+			if i >= len(tokens) {
+				break
+			}
+			rel = tokens[i]
+			i++
+		}
+		if strings.HasPrefix(status, "D") {
+			continue // deleted from the index — no blob left to inspect
+		}
+		// ":./" + path (not a bare ":" + path) is required: git's `:path`
+		// colon-syntax is ambiguous with the `:<n>:path` stage-lookup form,
+		// so a literal path starting with digits-then-colon (e.g. "1:foo")
+		// gets misparsed as "stage 1 of foo" instead of the real path.
+		// ":./" pins it as a pathname relative to cwd, never a stage number.
+		blob, err := exec.Command("git", "-C", ledgerPath, "show", ":./"+rel).Output()
+		if err != nil {
+			return "", fmt.Errorf("inspect staged blob %s: %w", rel, err)
+		}
+		if gitutil.HasConflictMarkersBytes(blob) {
+			return rel, nil
+		}
+	}
+	return "", nil
+}
+
 func commitAndPushLedger(ledgerPath, sessionName string) error {
 	waitForGCSwap(ledgerPath)
 
@@ -223,6 +311,20 @@ func commitAndPushLedger(ledgerPath, sessionName string) error {
 	addCmd := exec.Command("git", addArgs...)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
+	}
+
+	// Refuse to commit if anything now staged — not just the files this call
+	// intended to add — still carries an unresolved conflict. `git commit`
+	// below has no pathspec, so it commits the WHOLE index. A concurrent
+	// daemon `pull --rebase --autostash` can leave a stash-pop conflict with
+	// no MERGE_HEAD-style marker to detect it by, and `git add` does not
+	// refuse a conflicted path on its own — it stages the markers as if
+	// resolved. See #749.
+	if conflicted, err := firstUnstageableFileInIndex(ledgerPath); err != nil {
+		return fmt.Errorf("checking for unresolved conflicts: %w", err)
+	} else if conflicted != "" {
+		return fmt.Errorf("refusing to commit %s: contains an unresolved conflict "+
+			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", conflicted)
 	}
 
 	// commit
@@ -264,6 +366,14 @@ func commitPointerRewriteAndPush(ledgerPath, sessionName string, pointerPaths []
 	addCmd := exec.Command("git", addArgs...)
 	if output, err := addCmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("git add failed: %s: %w", string(output), err)
+	}
+
+	// See the identical guard in commitAndPushLedger above (#749).
+	if conflicted, err := firstUnstageableFileInIndex(ledgerPath); err != nil {
+		return fmt.Errorf("checking for unresolved conflicts: %w", err)
+	} else if conflicted != "" {
+		return fmt.Errorf("refusing to commit %s: contains an unresolved conflict "+
+			"(likely a concurrent autostash-pop conflict; resolve it before retrying)", conflicted)
 	}
 
 	// commit under a distinct subject so it doesn't shadow the canonical

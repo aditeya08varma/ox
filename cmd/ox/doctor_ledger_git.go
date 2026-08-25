@@ -930,6 +930,46 @@ func checkLedgerCleanWorkdir(fix bool) checkResult {
 
 // fixLedgerDirtyWorkdir stages and commits all changes in the ledger.
 func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
+	// Re-check for unmerged (U-state) paths immediately before staging.
+	// checkLedgerCleanWorkdir deliberately excludes U-state entries from the
+	// dirty count that triggers this fix — a lone conflict is
+	// checkLedgerUnmergedPaths's job, not this one's. But that exclusion is
+	// COUNTING logic only; it does not reach the `git add -A` below. `-A`
+	// stages every changed path unconditionally, including any conflicted
+	// one sitting alongside genuinely dirty files that DID trigger this fix.
+	// git has no concept of "refuse to stage a conflict" — `git add` on a
+	// conflicted path takes its current working-tree content, markers
+	// included, and marks it resolved. The commit that follows would then
+	// bake those markers permanently into the ledger. This is the exact
+	// mechanism behind #749: a `git stash pop` conflict (from the daemon's
+	// `pull --rebase --autostash`) leaves UU files with no MERGE_HEAD/
+	// rebase-merge marker — autostash pop isn't a resumable operation, so
+	// detectInProgressGitOp can't see it either. They just sit there until
+	// an unrelated dirty file triggers this auto-commit and sweeps them in.
+	// Refuse instead of guessing at a resolution.
+	statusCmd := exec.Command("git", "-C", ledgerPath, "status", "--porcelain=v1")
+	if statusOut, statusErr := statusCmd.Output(); statusErr == nil {
+		if unmerged := parseUnmergedPaths(string(statusOut)); len(unmerged) > 0 {
+			sample := unmerged[0].Path
+			if len(unmerged) > 1 {
+				sample = fmt.Sprintf("%s (+%d more)", sample, len(unmerged)-1)
+			}
+			return FailedCheck("Ledger clean workdir",
+				"unresolved conflicts present, refusing to auto-commit",
+				fmt.Sprintf("%d unmerged file(s) at %s, e.g. %s.\n       "+
+					"Auto-committing over them would bake the conflict markers into "+
+					"the ledger permanently, so this is refused instead. A stash-pop "+
+					"conflict like this one has no in-progress merge/rebase to abort, "+
+					"so it needs manual resolution:\n       "+
+					"  cd %s\n       "+
+					"  git status                       # inspect the conflict\n       "+
+					"  git checkout --ours <file>       # or --theirs — only if that side HAS the file\n       "+
+					"  git rm <file>                    # instead, if the side you want deleted it\n       "+
+					"  git add <file> && git commit",
+					len(unmerged), ledgerPath, sample, ledgerPath))
+		}
+	}
+
 	// ensure .gitignore exists and untrack any cache files BEFORE staging.
 	// without this, git add -A will commit local-only files like sync-state.json.
 	gitserver.EnsureGitignoreBeforeCommit(ledgerPath)
@@ -951,6 +991,36 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 		return FailedCheck("Ledger clean workdir",
 			"staging failed",
 			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(output))))
+	}
+
+	// The pre-add U-state check above only catches a LIVE conflict — one
+	// `git add -A` hasn't touched yet. But `git add` on a conflicted path
+	// doesn't just stage it, it resolves the U-state (git now considers it
+	// "modified", not "unmerged"), while the staged content is still the
+	// literal markers. A file that was already staged-with-markers before
+	// this function ran (never U-state at all — e.g. plain-modified, or
+	// unrelated leftover content from an interrupted prior operation) is
+	// invisible to the pre-add check for the same reason. firstUnstageableFileInIndex
+	// (session_upload.go) covers exactly this by reading the actual staged
+	// blobs post-add, the same guard the session-stop commit paths use —
+	// parity here closes the gap instead of leaving doctor's auto-commit
+	// weaker than the routine commit path it's meant to be backing up.
+	if conflicted, err := firstUnstageableFileInIndex(ledgerPath); err != nil {
+		return FailedCheck("Ledger clean workdir",
+			"unable to verify staged content is conflict-free",
+			fmt.Sprintf("checking staged blobs: %s", err))
+	} else if conflicted != "" {
+		return FailedCheck("Ledger clean workdir",
+			"unresolved conflict staged, refusing to auto-commit",
+			fmt.Sprintf("%s still carries unresolved conflict markers even though `git add` "+
+				"accepted it. This is not a live git conflict — `git add` already resolved "+
+				"whatever U-state existed, so there's no --ours/--theirs to choose between "+
+				"anymore (running it here silently does nothing and re-commits the same "+
+				"broken content). It's literal marker text baked into the staged file. "+
+				"Resolve it manually:\n       cd %s\n       git show :./%s   # inspect the staged content\n       "+
+				"# edit %s by hand to remove the markers, or `git checkout HEAD -- %s` to discard the local change\n       "+
+				"git add %s && git commit",
+				conflicted, ledgerPath, conflicted, conflicted, conflicted, conflicted))
 	}
 
 	// commit via RunGit: it owns the commit.gpgsign=false override plus the
