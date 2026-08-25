@@ -516,3 +516,45 @@ func TestFixLedgerDirtyWorkdir_RefusesUnrelatedDirtyFileWithConflictPresent(t *t
 	assert.Contains(t, string(content), "<<<<<<<",
 		"conflict markers must still be present in the untouched file")
 }
+
+// TestFixLedgerDirtyWorkdir_RefusesPlainModifiedFileWithMarkers covers the
+// doctor/session-upload parity gap flagged in review: the pre-add U-state
+// check above only sees a LIVE conflict. A file that carries marker text but
+// was never U-state at all — plain-modified, never went through a real git
+// conflict — is invisible to that check both before AND after `git add -A`
+// (add just stages it as an ordinary change; there's no U-state to clear).
+// firstUnstageableFileInIndex's post-add blob scan is what has to catch this.
+func TestFixLedgerDirtyWorkdir_RefusesPlainModifiedFileWithMarkers(t *testing.T) {
+	skipIntegration(t)
+	repo := t.TempDir()
+
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 1}`+"\n"), 0644))
+	mustRunGit(t, repo, "add", "meta.json")
+	mustRunGit(t, repo, "commit", "-m", "base")
+
+	// plain, uncommitted modification carrying marker text — never went
+	// through a real git conflict, so git status reports it as ordinary " M",
+	// never "UU".
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(
+		"{\n<<<<<<< Updated upstream\n\"attempts\": 3,\n=======\n\"attempts\": 2,\n>>>>>>> Stashed changes\n}\n"),
+		0644))
+
+	status, err := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	require.NoError(t, err)
+	require.Empty(t, parseUnmergedPaths(status+"\n"),
+		"test setup must produce a plain modification, not a real U-state conflict")
+	require.Contains(t, status, "M meta.json",
+		"test setup did not produce the expected plain-modified shape")
+
+	beforeLog, err := runIsolatedGit(t, repo, "log", "--oneline")
+	require.NoError(t, err)
+
+	r := fixLedgerDirtyWorkdir(repo, 1)
+	assert.False(t, r.passed,
+		"must refuse to auto-commit a plain-modified file that still carries conflict markers: %+v", r)
+
+	afterLog, err := runIsolatedGit(t, repo, "log", "--oneline")
+	require.NoError(t, err)
+	assert.Equal(t, beforeLog, afterLog, "no commit should have been created")
+}

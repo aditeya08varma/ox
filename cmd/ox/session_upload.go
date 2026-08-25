@@ -274,7 +274,12 @@ func firstUnstageableFileInIndex(ledgerPath string) (string, error) {
 		if strings.HasPrefix(status, "D") {
 			continue // deleted from the index — no blob left to inspect
 		}
-		blob, err := exec.Command("git", "-C", ledgerPath, "show", ":"+rel).Output()
+		// ":./" + path (not a bare ":" + path) is required: git's `:path`
+		// colon-syntax is ambiguous with the `:<n>:path` stage-lookup form,
+		// so a literal path starting with digits-then-colon (e.g. "1:foo")
+		// gets misparsed as "stage 1 of foo" instead of the real path.
+		// ":./" pins it as a pathname relative to cwd, never a stage number.
+		blob, err := exec.Command("git", "-C", ledgerPath, "show", ":./"+rel).Output()
 		if err != nil {
 			return "", fmt.Errorf("inspect staged blob %s: %w", rel, err)
 		}

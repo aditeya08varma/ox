@@ -992,6 +992,33 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 			fmt.Sprintf("git add error: %s", strings.TrimSpace(string(output))))
 	}
 
+	// The pre-add U-state check above only catches a LIVE conflict — one
+	// `git add -A` hasn't touched yet. But `git add` on a conflicted path
+	// doesn't just stage it, it resolves the U-state (git now considers it
+	// "modified", not "unmerged"), while the staged content is still the
+	// literal markers. A file that was already staged-with-markers before
+	// this function ran (never U-state at all — e.g. plain-modified, or
+	// unrelated leftover content from an interrupted prior operation) is
+	// invisible to the pre-add check for the same reason. firstUnstageableFileInIndex
+	// (session_upload.go) covers exactly this by reading the actual staged
+	// blobs post-add, the same guard the session-stop commit paths use —
+	// parity here closes the gap instead of leaving doctor's auto-commit
+	// weaker than the routine commit path it's meant to be backing up.
+	if conflicted, err := firstUnstageableFileInIndex(ledgerPath); err != nil {
+		return FailedCheck("Ledger clean workdir",
+			"unable to verify staged content is conflict-free",
+			fmt.Sprintf("checking staged blobs: %s", err))
+	} else if conflicted != "" {
+		return FailedCheck("Ledger clean workdir",
+			"unresolved conflict staged, refusing to auto-commit",
+			fmt.Sprintf("%s still carries unresolved conflict markers even though `git add` "+
+				"accepted it. Committing would bake the markers into the ledger permanently. "+
+				"Resolve it manually:\n       cd %s\n       git status\n       "+
+				"git checkout --ours %s   # or --theirs, depending on intent\n       "+
+				"git add %s && git commit",
+				conflicted, ledgerPath, conflicted, conflicted))
+	}
+
 	// commit via RunGit: it owns the commit.gpgsign=false override plus the
 	// GIT_TERMINAL_PROMPT=0 / cmd.Dir safeguards, so the auto-commit can't
 	// drift from the managed-git execution contract.

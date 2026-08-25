@@ -88,6 +88,29 @@ func TestFirstUnstageableFileInIndex_CleanStagedRename(t *testing.T) {
 	assert.Equal(t, "", conflicted, "a clean staged rename must not be flagged as a conflict")
 }
 
+// TestFirstUnstageableFileInIndex_LiteralColonPrefixedPath is the
+// regression for the Greptile finding: `git show :<path>` is ambiguous
+// with git's `:<n>:<path>` stage-lookup syntax, so a literal staged path
+// starting with digits-then-colon (e.g. "1:foo") gets misparsed as "stage 1
+// of foo" instead of the real path — turning an ordinary, clean commit
+// into a spurious refusal.
+func TestFirstUnstageableFileInIndex_LiteralColonPrefixedPath(t *testing.T) {
+	skipIntegration(t)
+	repo := t.TempDir()
+
+	mustRunGit(t, repo, "init", "--initial-branch=main")
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "meta.json"), []byte(`{"attempts": 1}`+"\n"), 0644))
+	mustRunGit(t, repo, "add", "meta.json")
+	mustRunGit(t, repo, "commit", "-m", "base")
+
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "1:foo"), []byte(`{"clean": true}`+"\n"), 0644))
+	mustRunGit(t, repo, "add", "1:foo")
+
+	conflicted, err := firstUnstageableFileInIndex(repo)
+	require.NoError(t, err, "a clean staged file whose name happens to look like a stage-lookup must not error out")
+	assert.Equal(t, "", conflicted, "a clean literal colon-prefixed path must not be flagged as a conflict")
+}
+
 // --- firstUnstageableFileInIndex: real-git regression coverage ---
 //
 // TestFirstUnstageableFileInIndex_CatchesModifyDeleteConflict covers the gap
