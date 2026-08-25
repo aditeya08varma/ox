@@ -963,7 +963,8 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 					"so it needs manual resolution:\n       "+
 					"  cd %s\n       "+
 					"  git status                       # inspect the conflict\n       "+
-					"  git checkout --ours <file>       # or --theirs, depending on intent\n       "+
+					"  git checkout --ours <file>       # or --theirs — only if that side HAS the file\n       "+
+					"  git rm <file>                    # instead, if the side you want deleted it\n       "+
 					"  git add <file> && git commit",
 					len(unmerged), ledgerPath, sample, ledgerPath))
 		}
@@ -1012,11 +1013,14 @@ func fixLedgerDirtyWorkdir(ledgerPath string, fileCount int) checkResult {
 		return FailedCheck("Ledger clean workdir",
 			"unresolved conflict staged, refusing to auto-commit",
 			fmt.Sprintf("%s still carries unresolved conflict markers even though `git add` "+
-				"accepted it. Committing would bake the markers into the ledger permanently. "+
-				"Resolve it manually:\n       cd %s\n       git status\n       "+
-				"git checkout --ours %s   # or --theirs, depending on intent\n       "+
+				"accepted it. This is not a live git conflict — `git add` already resolved "+
+				"whatever U-state existed, so there's no --ours/--theirs to choose between "+
+				"anymore (running it here silently does nothing and re-commits the same "+
+				"broken content). It's literal marker text baked into the staged file. "+
+				"Resolve it manually:\n       cd %s\n       git show :./%s   # inspect the staged content\n       "+
+				"# edit %s by hand to remove the markers, or `git checkout HEAD -- %s` to discard the local change\n       "+
 				"git add %s && git commit",
-				conflicted, ledgerPath, conflicted, conflicted))
+				conflicted, ledgerPath, conflicted, conflicted, conflicted, conflicted))
 	}
 
 	// commit via RunGit: it owns the commit.gpgsign=false override plus the
