@@ -11,7 +11,6 @@ import (
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/index"
-	"github.com/sageox/ox/internal/codedb/store"
 	"github.com/sageox/ox/internal/config"
 	"github.com/sageox/ox/internal/daemon"
 	gh "github.com/sageox/ox/internal/github"
@@ -83,83 +82,77 @@ func indexCodeInProcess(cmd *cobra.Command, args []string, full bool) error {
 	}
 
 	dataDir := resolveCodeDBDir(gitRoot)
-
-	if full {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Full reindex (in-process)...\n")
-		if err := os.RemoveAll(dataDir); err != nil {
-			return fmt.Errorf("wipe index for full reindex: %w", err)
-		}
-	} else {
-		fmt.Fprintf(cmd.ErrOrStderr(), "Indexing local repo (in-process)...\n")
-	}
-
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
-		return fmt.Errorf("create codedb dir: %w", err)
-	}
-
-	db, err := codedb.Open(dataDir)
-	if err != nil {
-		return fmt.Errorf("open codedb: %w", err)
-	}
-
-	// codedb.Open self-heals a corrupt cache transparently: it nukes and
-	// recreates a structurally broken bleve sub-index and writes a
-	// .needs_reindex marker mid-open. The daemon acts on that marker on its
-	// next pass, but a one-shot in-process `ox index` has no next pass — if we
-	// index incrementally now, the emptied sub-index stays empty, because the
-	// commits are already in SQLite and incremental indexing skips them (silent
-	// empty code search, worse than a hard error). So when a marker is present
-	// (from this open or a prior run), escalate to a full rebuild in this same
-	// invocation. Wiping dataDir also clears the markers, so it cannot loop.
-	if !full && len(store.NeedsReindexMarkers(dataDir)) > 0 {
-		fmt.Fprintf(cmd.ErrOrStderr(),
-			"codedb self-heal detected (corrupt cache recovered); rebuilding from scratch...\n")
-		if closeErr := db.Close(); closeErr != nil {
-			slog.Warn("close codedb before self-heal rebuild failed", "error", closeErr)
-		}
-		if err := os.RemoveAll(dataDir); err != nil {
-			return fmt.Errorf("wipe self-healed codedb for full reindex: %w", err)
-		}
-		if err := os.MkdirAll(dataDir, 0o755); err != nil {
-			return fmt.Errorf("recreate codedb dir after self-heal: %w", err)
-		}
-		db, err = codedb.Open(dataDir)
-		if err != nil {
-			return fmt.Errorf("reopen codedb after self-heal rebuild: %w", err)
-		}
-	}
-	defer db.Close()
-
 	ctx := cmd.Context()
 	opts := index.IndexOptions{}
 
-	if len(args) > 0 {
-		if err := db.IndexRepo(ctx, args[0], opts); err != nil {
-			return fmt.Errorf("index: %w", err)
-		}
-	} else {
-		if err := db.IndexLocalRepo(ctx, gitRoot, opts); err != nil {
-			if errors.Is(err, index.ErrAlternatesUnsupported) {
-				fmt.Fprintf(cmd.ErrOrStderr(),
-					"codedb: skipping local index — repo uses git alternates (go-git v6 limitation).\n"+
-						"  Remediation: `git repack -a -d --local` to copy objects locally, or\n"+
-						"  re-clone without --shared / --reference. See `ox doctor` (git-alternates check).\n")
-				return nil
+	// build performs the COMPLETE codedb build against db: git index + symbol and
+	// comment parse. Both the atomic from-scratch path and the incremental
+	// self-heal path run this exact closure, so they stay behaviorally identical.
+	var symbolsExtracted uint64
+	build := func(ctx context.Context, db *codedb.DB) error {
+		if len(args) > 0 {
+			if err := db.IndexRepo(ctx, args[0], opts); err != nil {
+				return fmt.Errorf("index: %w", err)
 			}
-			return fmt.Errorf("index local: %w", err)
+		} else {
+			if err := db.IndexLocalRepo(ctx, gitRoot, opts); err != nil {
+				return fmt.Errorf("index local: %w", err)
+			}
+		}
+		stats, err := db.ParseSymbols(ctx, nil)
+		if err != nil {
+			// Cache corruption must abort the build so the recovery paths can
+			// react (OpenIndexWithHeal discards + retries; BuildCodeDBAtomic
+			// refuses to swap a partial index into place). Ordinary parse
+			// failures stay non-fatal.
+			if index.IsCorruptionError(err) {
+				return fmt.Errorf("parse symbols: %w", err)
+			}
+			slog.Warn("symbol parsing failed (non-fatal)", "error", err)
+		}
+		symbolsExtracted = stats.SymbolsExtracted
+		if _, err := db.ParseComments(ctx, nil); err != nil {
+			if index.IsCorruptionError(err) {
+				return fmt.Errorf("parse comments: %w", err)
+			}
+			slog.Warn("comment parsing failed (non-fatal)", "error", err)
+		}
+		return nil
+	}
+
+	var runErr error
+	if full {
+		// Prevent tier: build into a sibling temp dir and atomically swap it into
+		// place, so a kill mid-build never leaves a half-written cache that would
+		// crash-loop every subsequent run.
+		fmt.Fprintf(cmd.ErrOrStderr(), "Full reindex (in-process)...\n")
+		runErr = codedb.BuildCodeDBAtomic(ctx, dataDir, build)
+	} else {
+		// Recover tier: index in place. OpenIndexWithHeal escalates to a
+		// from-scratch rebuild when Open self-healed a corrupt sub-index (marker
+		// present), and discards + retries once if the pass itself fails on a
+		// corrupt cache — so a half-written cache neither crash-loops the caller
+		// nor silently leaves search empty.
+		fmt.Fprintf(cmd.ErrOrStderr(), "Indexing local repo (in-process)...\n")
+		var db *codedb.DB
+		db, runErr = codedb.OpenIndexWithHeal(ctx, dataDir, build)
+		if db != nil {
+			defer db.Close()
 		}
 	}
 
-	stats, err := db.ParseSymbols(ctx, nil)
-	if err != nil {
-		slog.Warn("symbol parsing failed (non-fatal)", "error", err)
+	if runErr != nil {
+		if errors.Is(runErr, index.ErrAlternatesUnsupported) {
+			fmt.Fprintf(cmd.ErrOrStderr(),
+				"codedb: skipping local index — repo uses git alternates (go-git v6 limitation).\n"+
+					"  Remediation: `git repack -a -d --local` to copy objects locally, or\n"+
+					"  re-clone without --shared / --reference. See `ox doctor` (git-alternates check).\n")
+			return nil
+		}
+		return fmt.Errorf("index (in-process): %w", runErr)
 	}
 
-	if _, err := db.ParseComments(ctx, nil); err != nil {
-		slog.Warn("comment parsing failed (non-fatal)", "error", err)
-	}
-
-	fmt.Fprintf(cmd.ErrOrStderr(), "Done (in-process). %d symbols extracted\n", stats.SymbolsExtracted)
+	fmt.Fprintf(cmd.ErrOrStderr(), "Done (in-process). %d symbols extracted\n", symbolsExtracted)
 	return nil
 }
 

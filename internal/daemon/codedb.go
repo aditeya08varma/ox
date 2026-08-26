@@ -455,12 +455,6 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		return nil, fmt.Errorf("create codedb dir: %w", err)
 	}
 
-	db, err := codedb.Open(dataDir)
-	if err != nil {
-		return nil, fmt.Errorf("open codedb: %w", err)
-	}
-	defer db.Close()
-
 	totalStart := time.Now()
 
 	// periodic progress logging for long-running indexing
@@ -487,32 +481,40 @@ func (m *CodeDBManager) doIndex(ctx context.Context, payload CodeIndexPayload, p
 		},
 	}
 
-	// stage 1: git indexing (committed content only)
+	// stage 1: git indexing (committed content only). OpenIndexWithHeal discards
+	// the cache and rebuilds once if the pass fails on a corrupt/interrupted
+	// cache — otherwise a half-written cache makes every subsequent index fail
+	// identically (a permanent crash loop the daemon's next-pass marker recovery
+	// can't break when the whole process is being restarted from scratch).
 	indexStart := time.Now()
-	if payload.URL != "" {
-		if pw != nil {
-			_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing %s...", payload.URL))
+	indexFn := func(ctx context.Context, db *codedb.DB) error {
+		if payload.URL != "" {
+			if pw != nil {
+				_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing %s...", payload.URL))
+			}
+			return db.IndexRepo(ctx, payload.URL, opts)
 		}
-		if err := db.IndexRepo(ctx, payload.URL, opts); err != nil {
-			m.setError(err)
-			return nil, fmt.Errorf("index: %w", err)
-		}
-	} else {
 		if pw != nil {
 			_ = pw.WriteStage("indexing", fmt.Sprintf("Indexing local repo %s...", projectRoot))
 		}
-		if err := db.IndexLocalRepo(ctx, projectRoot, opts); err != nil {
-			if errors.Is(err, index.ErrAlternatesUnsupported) {
-				m.logger.Info("codedb local: skipped (alternates configured)", "path", projectRoot)
-				if pw != nil {
-					_ = pw.WriteStage("indexing", "codedb: skipped (git alternates not supported)")
-				}
-				return nil, nil
-			}
-			m.setError(err)
-			return nil, fmt.Errorf("index local: %w", err)
-		}
+		return db.IndexLocalRepo(ctx, projectRoot, opts)
 	}
+	db, err := codedb.OpenIndexWithHeal(ctx, dataDir, indexFn)
+	if err != nil {
+		if errors.Is(err, index.ErrAlternatesUnsupported) {
+			m.logger.Info("codedb local: skipped (alternates configured)", "path", projectRoot)
+			if pw != nil {
+				_ = pw.WriteStage("indexing", "codedb: skipped (git alternates not supported)")
+			}
+			return nil, nil
+		}
+		m.setError(err)
+		if payload.URL != "" {
+			return nil, fmt.Errorf("index: %w", err)
+		}
+		return nil, fmt.Errorf("index local: %w", err)
+	}
+	defer db.Close()
 	indexDuration := time.Since(indexStart)
 	m.logger.Info("codedb stage complete", "stage", "git-index", "duration", indexDuration.Round(time.Millisecond))
 
