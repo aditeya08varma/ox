@@ -49,6 +49,21 @@ func validatePathArg(name, arg string) error {
 	return nil
 }
 
+// validateDateArg validates --after/--before values. Unlike validateSymbolArg
+// it permits ':' so ISO 8601 timestamps (e.g. 2026-04-01T10:00:00Z) pass; it
+// still rejects whitespace and quotes, which are the real DSL-injection vectors
+// — a colon inside a single whitespace-free token cannot introduce a second
+// filter.
+func validateDateArg(name, arg string) error {
+	if arg == "" {
+		return fmt.Errorf("%s: value must not be empty", name)
+	}
+	if strings.ContainsAny(arg, " \t\n\r\"'") {
+		return fmt.Errorf("%s: value must not contain whitespace or quotes", name)
+	}
+	return nil
+}
+
 // codeCallersCmd — "who calls X?" Wraps `search "" calledby:<name>`.
 var codeCallersCmd = &cobra.Command{
 	Use:   "callers <name>",
@@ -175,8 +190,17 @@ Examples:
 			if v.val == "" {
 				continue
 			}
-			if err := validateSymbolArg(v.name, v.val); err != nil {
-				return err
+			var verr error
+			switch v.name {
+			case "--after", "--before":
+				// Dates carry ':' in ISO 8601 timestamps (2026-04-01T10:00:00Z);
+				// validateSymbolArg would wrongly reject them.
+				verr = validateDateArg(v.name, v.val)
+			default:
+				verr = validateSymbolArg(v.name, v.val)
+			}
+			if verr != nil {
+				return verr
 			}
 		}
 

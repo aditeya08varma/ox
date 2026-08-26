@@ -181,6 +181,20 @@ func runCodeSearch(cmd *cobra.Command, query string) error {
 	dataDir, useLedger := resolvePreferredCodeDBDir(root)
 	agentID, _ := detectAgentContext()
 
+	// No index has ever been built: emit the structured not_indexed contract
+	// for agents (mirrors code_activity/prs/insights) instead of surfacing a
+	// raw codedb.Open error, which trains agents to abandon the tool. Every
+	// verb (callers/callees/defs/refs/log) routes through here, so this is the
+	// single place that closes the never-indexed gap for all of them.
+	if _, statErr := os.Stat(filepath.Join(dataDir, store.MetadataDBFile)); os.IsNotExist(statErr) {
+		if agentID != "" {
+			return emitIndexNotReadyJSON(cmd, indexStatusNotIndexed,
+				"No code index found for this repo.",
+				"Run 'ox code index' to build the index, then rerun.")
+		}
+		return fmt.Errorf("no code index found for this repo — run 'ox code index' first")
+	}
+
 	// Index-not-ready paths: emit structured JSON when an agent is calling
 	// so it can branch on `status` instead of treating an error as terminal.
 	if isCodeDBIndexing(useLedger) {
