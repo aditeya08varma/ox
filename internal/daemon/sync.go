@@ -44,7 +44,9 @@ import (
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/ledger"
 	"github.com/sageox/ox/internal/observability"
+	"github.com/sageox/ox/internal/paths"
 	"github.com/sageox/ox/internal/perf"
+	"github.com/sageox/ox/internal/session"
 	"github.com/sageox/ox/internal/version"
 	whisperstore "github.com/sageox/ox/internal/whisper/store"
 )
@@ -1523,10 +1525,13 @@ func (s *SyncScheduler) doPull(ctx context.Context, progress *ProgressWriter, fo
 		}
 	}
 
-	// push any unpushed session-draft commits (batched by sync cycle).
-	// Not gated on whisperRegistry — drafts are unrelated to murmurs, and a
+	// retract orphaned draft placeholders (crashed sessions), then push any
+	// unpushed session-draft commits (both batched by sync cycle). Retraction
+	// commits use the session-draft: subject prefix, so the push below carries
+	// them. Not gated on whisperRegistry — drafts are unrelated to murmurs, and a
 	// repo with whispers disabled still needs its /c/ links to resolve.
 	if l := s.workspaceRegistry.GetLedger(); l != nil && l.Path != "" && l.Exists {
+		s.retractOrphanedDrafts(ctx, l.Path)
 		s.pushSessionDraftCommits(ctx, l.Path)
 	}
 
@@ -1738,6 +1743,149 @@ func shouldPushSessionDrafts(logOutput string) (blockingSubject string, ok bool)
 		sawDraft = true
 	}
 	return "", sawDraft
+}
+
+// retractOrphanedDrafts git-removes committed draft placeholders whose recording
+// is gone, so a crashed session's "in progress" /c/ page stops resolving and the
+// phantom row leaves `ox session list`. Runs on the sync cycle just before
+// pushSessionDraftCommits, which carries the resulting `session-draft: retract`
+// commits to the remote.
+//
+// Why the daemon and not only `ox doctor --fix`: a draft is invisible to every
+// other reclaimer, and a crashed agent never reaches the clean-stop/abort paths
+// that would retract it. Without an automatic sweep the ledger accumulates
+// orphaned drafts until a human happens to run doctor. `checkSessionDraftOrphan`
+// remains the on-demand equivalent; both share session.FindOrphanedDrafts so
+// "orphaned" means exactly the same thing in both.
+//
+// Safety: only session.OrphanedDraftAge-stale drafts with no local recording are
+// touched (the updated_at heartbeat is committed to the shared ledger, so a
+// session live on another machine is never reaped). The mid-rebase guard is
+// load-bearing — an unguarded git rm/commit during a conflicted rebase marks the
+// conflict resolved and consumes the replay step, silently destroying whatever
+// was being replayed (see .claude/rules/cache-only-design.md).
+func (s *SyncScheduler) retractOrphanedDrafts(ctx context.Context, ledgerPath string) {
+	if gitutil.IsRebaseInProgress(ledgerPath) {
+		return
+	}
+
+	cacheDirs := s.draftCacheDirs(ledgerPath)
+	orphans, err := session.FindOrphanedDrafts(ledgerPath, cacheDirs)
+	if err != nil || len(orphans) == 0 {
+		return
+	}
+
+	s.ledgerMu.Lock()
+	defer s.ledgerMu.Unlock()
+
+	// Re-check after taking the lock: a concurrent finalize/pull may have started
+	// a rebase or changed the tree between detection and mutation.
+	if gitutil.IsRebaseInProgress(ledgerPath) {
+		return
+	}
+
+	var removed int
+	for _, name := range orphans {
+		if err := session.ValidateDraftSessionName(name); err != nil {
+			continue
+		}
+		// Revalidate under the lock. SaveRecordingState writes .recording.json /
+		// raw.jsonl WITHOUT ledgerMu, so a recording could have appeared for this
+		// name between detection and here. Never git-rm a draft that now has
+		// local recording data — recovering it is upload-retry's job.
+		if session.DraftHasLocalSessionData(cacheDirs, name) {
+			continue
+		}
+		rel := filepath.ToSlash(filepath.Join("sessions", name))
+
+		// Only retract drafts that are ALREADY on the remote. If a draft's publish
+		// commit is still local/unpushed, stacking a retraction on top of it would
+		// make pushSessionDraftCommits ship BOTH — manufacturing a publish the
+		// daemon never should. An unpushed draft belongs to the publish flow, not
+		// this reaper. Unknown/unresolvable upstream fails safe to skip.
+		if !s.draftPublishedOnRemote(ctx, ledgerPath, rel) {
+			continue
+		}
+
+		if _, err := s.git.RunGit(ctx, ledgerPath, "rm", "-r", "--force", "--ignore-unmatch", "--", rel); err != nil {
+			s.logger.Warn("retract orphaned draft: git rm failed", "session", name, "error", err)
+			continue
+		}
+		// Remove any untracked leftovers git rm --ignore-unmatch left behind. If
+		// that fails, do NOT commit a partial retraction — restore and retry next
+		// scan, otherwise the remote loses meta.json while leftover files linger
+		// locally and no future scan rediscovers them.
+		if err := os.RemoveAll(filepath.Join(ledgerPath, "sessions", name)); err != nil {
+			s.restoreDraftForRetry(ctx, ledgerPath, rel, name, fmt.Errorf("remove leftovers: %w", err))
+			continue
+		}
+
+		// A published draft's meta.json is tracked, so git rm must have staged a
+		// deletion. If the diff errors or shows nothing staged, we cannot safely
+		// commit — restore the index + worktree from HEAD so a dangling staged
+		// deletion can't be swept into an unrelated commit, and the next scan
+		// rediscovers the orphan to retry.
+		staged, diffErr := s.git.RunGit(ctx, ledgerPath, "diff", "--cached", "--name-only", "--", rel)
+		if diffErr != nil || strings.TrimSpace(staged) == "" {
+			s.restoreDraftForRetry(ctx, ledgerPath, rel, name, diffErr)
+			continue
+		}
+		if _, err := s.git.RunGit(ctx, ledgerPath, "commit", "--no-verify",
+			"-m", sessionDraftCommitPrefix+"retract "+name, "--", rel); err != nil {
+			// Commit failed: the deletion is staged and the dir is gone, which
+			// would orphan the candidate. Restore so the next scan retries.
+			s.restoreDraftForRetry(ctx, ledgerPath, rel, name, err)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		s.logger.Info("retracted orphaned session drafts", "path", ledgerPath, "count", removed)
+	}
+}
+
+// draftPublishedOnRemote reports whether the draft at rel exists in the ledger's
+// upstream tree — i.e. it has actually been published to the remote. Fails safe
+// to false (skip retraction) when the upstream cannot be resolved, so the daemon
+// never stacks a retraction on a draft the remote has not seen.
+func (s *SyncScheduler) draftPublishedOnRemote(ctx context.Context, ledgerPath, rel string) bool {
+	_, err := s.git.RunGit(ctx, ledgerPath, "cat-file", "-e", "@{upstream}:"+rel+"/meta.json")
+	return err == nil
+}
+
+// restoreDraftForRetry undoes a partial retraction — unstages the deletion and
+// restores the draft dir from HEAD — so a failed retract leaves no dangling
+// staged deletion (which an unrelated commit could sweep under the wrong
+// message) and the next scan can rediscover the orphan and retry it.
+func (s *SyncScheduler) restoreDraftForRetry(ctx context.Context, ledgerPath, rel, name string, cause error) {
+	s.logger.Warn("retract orphaned draft: restoring after failed retraction", "session", name, "error", cause)
+	if _, err := s.git.RunGit(ctx, ledgerPath, "reset", "-q", "--", rel); err != nil {
+		s.logger.Warn("retract orphaned draft: reset failed", "session", name, "error", err)
+	}
+	if _, err := s.git.RunGit(ctx, ledgerPath, "checkout", "-q", "HEAD", "--", rel); err != nil {
+		s.logger.Warn("retract orphaned draft: checkout restore failed", "session", name, "error", err)
+	}
+}
+
+// draftCacheDirs returns the local cache session directories a draft's recording
+// could live in, for the orphan detector to consult.
+func (s *SyncScheduler) draftCacheDirs(ledgerPath string) []string {
+	dirs := []string{filepath.Join(ledgerPath, ".sageox", "cache", "sessions")}
+	// Resolve the repo ID the way the CLI does — from the configured project —
+	// so the XDG cache paths match where StartRecording actually wrote. A custom
+	// ledger path whose basename differs from the repo ID would otherwise miss a
+	// live recording and let a recoverable draft be retracted.
+	repoID := config.GetRepoID(s.config.ProjectRoot)
+	if repoID == "" {
+		repoID = filepath.Base(ledgerPath) // fallback: ledger dirs are named by repo id
+	}
+	if repoID != "" && repoID != "." {
+		dirs = append(dirs, filepath.Join(paths.SessionCacheDir(repoID), "sessions"))
+		for _, altDir := range paths.AlternateSessionCacheDirs(repoID) {
+			dirs = append(dirs, filepath.Join(altDir, "sessions"))
+		}
+	}
+	return dirs
 }
 
 func (s *SyncScheduler) pushSessionDraftCommits(ctx context.Context, ledgerPath string) {

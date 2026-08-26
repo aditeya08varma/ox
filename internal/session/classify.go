@@ -2,6 +2,8 @@ package session
 
 import (
 	"bufio"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -251,7 +253,13 @@ func ClassifyRawFile(rawPath string) RawKind {
 
 	f, err := os.Open(rawPath)
 	if err != nil {
-		return RawMissing
+		if errors.Is(err, os.ErrNotExist) {
+			return RawMissing
+		}
+		// Present but unreadable (permission / transient I/O). Fail SAFE — never
+		// let a cleanup path delete a raw.jsonl we simply could not open; only a
+		// genuinely absent file is RawMissing.
+		return RawSubstantive
 	}
 	defer f.Close()
 
@@ -265,7 +273,63 @@ func ClassifyRawFile(rawPath string) RawKind {
 			return RawSubstantive // at least one line beyond header
 		}
 	}
+	// Fail SAFE on an incomplete read. A line exceeding the 256 KiB scanner
+	// buffer (a large paste or tool payload) stops the scan with an error; a
+	// too-long line is itself evidence of substantial content, and reporting
+	// RawHeaderOnly here would let the cleanup paths os.RemoveAll a real
+	// session. Never classify what we could not read as a deletable phantom.
+	if scanner.Err() != nil {
+		return RawSubstantive
+	}
 	return RawHeaderOnly
+}
+
+// HasUserTurn reports whether a raw.jsonl file contains at least one user turn
+// (an entry of type "user") — i.e. a real coworker prompt was recorded. The
+// metadata header and machine-generated entries (assistant/tool/system) do NOT
+// count: a recording with no user turn never happened from the coworker's point
+// of view, and must not be git-committed as a draft nor registered with the
+// server. This is the floor that keeps phantom sessions off the ledger and out
+// of the team's session count.
+//
+// A content-store pointer stub reports true: its transcript is real and already
+// passed this gate when it was finalized.
+func HasUserTurn(rawPath string) bool {
+	if lfs.IsPointerFile(rawPath) {
+		return true
+	}
+
+	f, err := os.Open(rawPath)
+	if err != nil {
+		return false
+	}
+	defer func() { _ = f.Close() }()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 256*1024), 256*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var entry struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(line, &entry) != nil {
+			continue
+		}
+		if entry.Type == "user" {
+			return true
+		}
+	}
+	// Fail safe on an incomplete read: a user entry larger than the 256 KiB
+	// scanner buffer stops the scan with an error, and reporting "no user turn"
+	// would suppress registration and draft publication for a real session with
+	// a large prompt. When we could not read the file fully, assume a user turn.
+	if scanner.Err() != nil {
+		return true
+	}
+	return false
 }
 
 // HasSubstantiveEntries returns true if a raw.jsonl file holds at least one
