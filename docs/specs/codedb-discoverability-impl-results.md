@@ -63,7 +63,7 @@ After `ox code index --full` (526 commits, 6,818 blobs, 24,777 symbols indexed):
 | Command | Result | Notes |
 |---|---|---|
 | `ox code log cmd/ox/code.go --after 2026-06-01 --limit 3` | 3 results | Hash + author + message in compact JSON; this branch's own commits surface correctly |
-| `ox code log cmd/ox/code.go --limit 3` | 20 results | Defaulted `--after` to one year ago — verifies the default-window fallback |
+| `ox code log cmd/ox/code.go --limit 3` | 3 shown (20 total) | Defaulted `--after` to one year ago — verifies the default-window fallback; compact JSON returns `--limit` entries, `total` reports all matches |
 | `ox code refs ParseQuery --limit 5` | 11 results in 18ms | Text-mode search works end-to-end |
 | `ox code defs ParseQuery` | 0 (bleve symbol sub-index mid-rebuild on this machine) | SQL has the symbol (`ox code sql "SELECT … FROM symbols"` returns it); verb wrapper builds correct DSL; environment limitation, not code |
 | `ox code insights --json` | `{}` (empty hotspots / contention) | SQL queries succeed but no qualifying rows in test window |

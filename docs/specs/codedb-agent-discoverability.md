@@ -4,8 +4,14 @@ Investigation into why AI coworkers (Claude Code, Cursor, Codex, Windsurf) rarel
 reach for `ox code …` even when it would help, plus ranked recommendations and
 concrete proposed patches.
 
-Audience: ox maintainers. Status: research artifact for review, no production
-code modified.
+Audience: ox maintainers. Status: **pre-implementation snapshot** (investigation
+dated 2026-05-28). The gaps it documents — no DSL grammar in `ox code search
+--help`, no verb wrappers, structured index statuses as proposed work — are the
+*before* picture. PR #664 implements the load-bearing recommendations; read the
+current-state claims below (e.g. "none of it is documented", "verb wrappers out
+of scope", "proposed index statuses") as the state that motivated the change,
+not the shipped result. See `codedb-discoverability-impl-results.md` for what
+actually landed.
 
 ---
 
