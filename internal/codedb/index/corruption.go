@@ -12,7 +12,7 @@ import (
 // analog of the git checkout's discard-and-reclone recovery.
 //
 // It deliberately returns false for context cancellation and deadline errors: a
-// timeout is not corruption. Discarding a large cache on every slow or cancelled
+// timeout is not corruption. Discarding a large cache on every slow or canceled
 // run would be wasteful and could mask the real problem — the exact
 // "timed out vs. corrupt on disk" conflation flagged in review of the external
 // shell workaround this replaces.

@@ -14,8 +14,3 @@ func uninstallDroidHooks(user bool) error {
 func hasDroidHooks(user bool) bool {
 	return checkExternalAdapterHooks("droid", user)
 }
-
-// listDroidHooks returns the installation status of Factory Droid hooks.
-func listDroidHooks() map[string]bool {
-	return listExternalAdapterHooks("droid")
-}
