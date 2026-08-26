@@ -17,6 +17,7 @@ import (
 
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/mapping"
+	"github.com/gofrs/flock"
 	lru "github.com/hashicorp/golang-lru/v2"
 	codedbsqlc "github.com/sageox/ox/internal/codedb/sqlc"
 	"go.etcd.io/bbolt"
@@ -364,18 +365,12 @@ func createBleveSubIndex(path, name string) (bleve.Index, error) {
 func upgradeBleveSubIndex(root, path, name string, fromVersion int) (bleve.Index, error) {
 	slog.Info("bleve mapping version upgrade, rebuilding",
 		"name", name, "from", fromVersion, "to", bleveMappingVersion(name))
-	if err := os.RemoveAll(path); err != nil {
-		return nil, fmt.Errorf("remove out-of-date bleve sub-index %s: %w", path, err)
-	}
-	idx, err := createBleveSubIndex(path, name)
-	if err != nil {
-		return nil, fmt.Errorf("recreate bleve sub-index %s: %w", path, err)
-	}
-	if err := WriteNeedsReindexMarker(root, name); err != nil {
-		slog.Warn("failed to write needs_reindex marker after mapping upgrade",
-			"name", name, "err", err)
-	}
-	return idx, nil
+	// Serialize with the same per-sub-index heal lock the corruption path uses,
+	// with requireVersion=true so the recheck adopts only a replacement whose
+	// mapping is already current — a concurrent process that beat us to the
+	// upgrade is respected instead of racing to re-nuke its result (#828).
+	return rebuildSubIndexLocked(root, path, name, true,
+		fmt.Errorf("mapping version %d below current %d", fromVersion, bleveMappingVersion(name)))
 }
 
 // openBleveIndexes opens (or self-heals + recreates) the three bleve
@@ -743,28 +738,302 @@ func openOrCreateBleveIndex(root, path, name string) (bleve.Index, error) {
 // `.needs_reindex_<name>` marker so the next daemon pass does a full rebuild.
 // Logs a single warn line so the recovery is visible in daemon logs.
 //
+// The destructive rebuild is serialized across processes by a per-sub-index
+// filesystem lock (see rebuildSubIndexLocked) so two concurrent codedb.Open
+// callers cannot race to delete each other's freshly-created replacement — the
+// nuke+recreate race in issue #828. requireVersion is false: any bleve that now
+// opens cleanly is an acceptable replacement (the healed index is empty and
+// carries the current mapping version).
+//
 // The marker is best-effort: if the marker write fails (disk full, permission
 // denied) the function still returns the empty index — the daemon will see
 // the empty bleve on its next freshness check via different signals (empty
 // search results) but the explicit signal is preferred. Marker failure is
 // logged at warn level.
 func selfHealBleveSubIndex(root, path, name string, openErr error) (bleve.Index, error) {
-	slog.Warn("bleve sub-index structurally corrupt, self-healing (nuke + recreate)",
-		"name", name, "path", path, "open_err", openErr)
+	return rebuildSubIndexLocked(root, path, name, false, openErr)
+}
 
+// healVerdict is the decision reclassifyUnderLock reaches once the per-sub-index
+// heal lock is held: adopt a replacement a concurrent process already produced,
+// nuke a still-corrupt/stale index ourselves, or defer to a live writer that
+// holds an otherwise-healthy index open.
+type healVerdict int
+
+const (
+	// healAdopt: the on-disk index now opens cleanly under the current mapping —
+	// a concurrent process already repaired it. Return that index; do not nuke.
+	healAdopt healVerdict = iota
+	// healNuke: the index is still provably corrupt (self-heal) or still stale
+	// (upgrade). We hold the lock; rebuild it.
+	healNuke
+	// healDefer: the index cannot be reopened but is NOT provably corrupt — a
+	// live writer holds its exclusive bbolt lock. Never nuke a healthy-but-held
+	// index; surface the pre-existing retryable "lock contention" error.
+	healDefer
+)
+
+var (
+	// subIndexHealLockTimeout bounds how long a caller waits for the per-sub-index
+	// heal lock before conceding another process holds it. The lock is held only
+	// for the brief nuke+recreate critical section (not the store's lifetime), so
+	// this is generous. Overridable in tests.
+	subIndexHealLockTimeout = 10 * time.Second
+	subIndexHealLockPoll    = 50 * time.Millisecond
+	// subIndexHealLockAcquiredHook fires immediately after the heal lock is
+	// acquired (never on a failed acquisition). Overridable so a concurrency test
+	// can deterministically interleave a second healer instead of racing on
+	// wall-clock timing (see .claude/rules/testing.md).
+	subIndexHealLockAcquiredHook = func(path string) {}
+	// subIndexRebuildActionHook fires with the verdict actually taken
+	// ("adopt"/"nuke"/"defer") so race tests can assert exact counts rather than
+	// inferring the loser's behavior from side effects.
+	subIndexRebuildActionHook = func(action string) {}
+	// acquireSubIndexHealLockFn is the seam rebuildSubIndexLocked uses to take the
+	// heal lock. Overridable so a test can simulate a flock-hostile filesystem —
+	// a setup error, distinct from a timeout — without an actual unsupported FS.
+	acquireSubIndexHealLockFn = acquireSubIndexHealLock
+)
+
+// subIndexHealLockPath returns the lock-file path serializing destructive
+// self-heal / upgrade of one bleve sub-index across processes. It is a SIBLING
+// of the sub-index dir (path + ".heal.lock"), never a child, so os.RemoveAll(path)
+// cannot delete the lock file out from under a healer mid-nuke — which would
+// hand a second healer a fresh, uncontended lock and reopen the race.
+func subIndexHealLockPath(path string) string {
+	return path + ".heal.lock"
+}
+
+// acquireSubIndexHealLock takes the exclusive cross-process heal lock for one
+// sub-index. It reports three distinct outcomes the caller must handle
+// differently — a timeout and a setup failure are NOT the same:
+//
+//   - (fl, true, nil):  lock held; caller must Unlock.
+//   - (nil, false, nil): TIMEOUT — a live process holds the lock (flock is
+//     released on process death, so a timeout is never a dead holder). The
+//     caller should defer to that peer, never nuke.
+//   - (nil, false, err): SETUP FAILURE — the lock file could not be created or
+//     the filesystem does not support flock. There is no peer to defer to, so
+//     the caller must fall back to healing without the lock.
+//
+// flock.TryLockContext returns (false, context.DeadlineExceeded) when our own
+// deadline expires (see gofrs/flock tryCtx), so a plain timeout arrives here as
+// an error. We translate that back into the (nil, false, nil) timeout outcome
+// and surface only genuine setup errors — otherwise a healthy peer holding the
+// lock would be misread as a broken filesystem.
+func acquireSubIndexHealLock(path string) (*flock.Flock, bool, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return nil, false, fmt.Errorf("create dir for heal lock: %w", err)
+	}
+	fl := flock.New(subIndexHealLockPath(path))
+	ctx, cancel := context.WithTimeout(context.Background(), subIndexHealLockTimeout)
+	defer cancel()
+	locked, err := fl.TryLockContext(ctx, subIndexHealLockPoll)
+	if err != nil {
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, false, nil // normal timeout: a live peer holds the lock
+		}
+		return nil, false, err // genuine flock-setup failure (hostile FS)
+	}
+	if !locked {
+		return nil, false, nil
+	}
+	subIndexHealLockAcquiredHook(path)
+	return fl, true, nil
+}
+
+// reclassifyUnderLock re-runs the corruption/staleness decision after the heal
+// lock is held, so a concurrent process's repair is adopted rather than
+// clobbered.
+//
+// It must NEVER block on bleve.Open against an index a live writer may hold:
+// bleve.Open takes bbolt's exclusive lock with no timeout and would hang forever.
+// So the classification uses only BOUNDED bbolt probes — the same non-blocking
+// primitives openOrCreateBleveIndex uses — and adopts only once it has PROVEN the
+// index is free (we briefly held the exclusive lock ourselves), via
+// boundedAdoptOpen so even a writer that races into the post-probe window caps
+// the wait rather than hanging. A healthy index held open by the winning process
+// therefore resolves to healDefer, never to a hang and never to a nuke (the #828
+// data-loss path).
+//
+// requireVersion additionally treats a clean, free-but-stale index as healNuke
+// (the mapping-version upgrade path); for plain self-heal it is false.
+func reclassifyUnderLock(path, name string, requireVersion bool) (bleve.Index, healVerdict) {
+	boltPath := filepath.Join(path, "store", "root.bolt")
+	if _, statErr := os.Stat(boltPath); statErr != nil {
+		if errors.Is(statErr, os.ErrNotExist) {
+			// bolt genuinely absent / path structure broken → needs a (re)build.
+			return nil, healNuke
+		}
+		// A transient stat failure (permission, I/O) on a bolt that may well exist
+		// must NOT be read as "rebuild": that would let a retryable error destroy a
+		// healthy index. Defer and let a later pass reclassify.
+		return nil, healDefer
+	}
+	// Provable structural corruption via the read-only peek (100ms per attempt).
+	if isBleveIndexCorrupt(boltPath) {
+		return nil, healNuke
+	}
+	// Bounded EXCLUSIVE probe: distinguishes free / held / corrupt without ever
+	// blocking. A live writer (the winner holding its fresh index open) yields
+	// ErrTimeout → healDefer.
+	db, err := bbolt.Open(boltPath, 0o600, &bbolt.Options{Timeout: bleveExclusiveProbeTimeout})
+	if err != nil {
+		if errors.Is(err, bbolterrors.ErrInvalid) ||
+			errors.Is(err, bbolterrors.ErrVersionMismatch) ||
+			errors.Is(err, bbolterrors.ErrChecksum) {
+			return nil, healNuke // proven on-disk corruption
+		}
+		return nil, healDefer // held by a live writer, or transient — never nuke
+	}
+	// We hold the exclusive lock: the index is healthy AND free. Release it and
+	// hand back a real bleve handle to adopt. There is a narrow window between the
+	// Close here and the adopt open below in which an ordinary codedb.Open could
+	// grab bbolt's exclusive lock; because bleve.Open has no deadline, a naked
+	// open would then block for that store's whole lifetime. boundedAdoptOpen caps
+	// the wait and maps that contention to healDefer instead of a hang.
+	_ = db.Close()
+	idx, openErr := boundedAdoptOpen(path, bleveExclusiveProbeTimeout)
+	if openErr != nil {
+		// Raced away between probe and open, timed out on a late writer, or a
+		// non-corruption open failure — defer rather than nuke a possibly-healthy
+		// index.
+		return nil, healDefer
+	}
+	if requireVersion {
+		got, verErr := readMappingVersion(path)
+		if verErr != nil {
+			// Staleness was already established at the top-level upgrade call; if we
+			// cannot re-confirm the version under the lock, adopting would silently
+			// return a maybe-stale index and skip both the upgrade and the marker.
+			// Defer instead so a later pass makes the call on solid ground.
+			_ = idx.Close()
+			return nil, healDefer
+		}
+		if got < bleveMappingVersion(name) {
+			_ = idx.Close()
+			return nil, healNuke // clean + free but still stale → upgrade it
+		}
+	}
+	return idx, healAdopt
+}
+
+// boundedAdoptOpen opens a bleve index but never blocks longer than timeout.
+// bleve.Open takes bbolt's exclusive lock with no deadline, so if an ordinary
+// codedb.Open races in and grabs the lock between reclassifyUnderLock's freedom
+// probe and this open, a naked open would hang until that store closes. We cap
+// it: on timeout we return an error (the caller maps it to healDefer) and, if
+// the abandoned open later succeeds, close the handle so it cannot leak.
+func boundedAdoptOpen(path string, timeout time.Duration) (bleve.Index, error) {
+	type openResult struct {
+		idx bleve.Index
+		err error
+	}
+	ch := make(chan openResult, 1)
+	go func() {
+		idx, err := safeOpenBleve(path)
+		ch <- openResult{idx, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.idx, r.err
+	case <-time.After(timeout):
+		// Reap a late success so the orphaned handle can't leak. Guard defensively:
+		// the abandoned open may resolve after the index dir has been torn down,
+		// where Close can hit a typed-nil handle or panic — neither may crash us.
+		go func() {
+			r := <-ch
+			if r.err != nil || r.idx == nil {
+				return
+			}
+			defer func() { _ = recover() }()
+			_ = r.idx.Close()
+		}()
+		return nil, fmt.Errorf("adopt open of %s timed out after %s (index became busy)", path, timeout)
+	}
+}
+
+// rebuildSubIndexLocked serializes a destructive sub-index rebuild across
+// processes and skips it when a concurrent process already produced an
+// acceptable replacement. It is the shared core of self-heal and mapping-version
+// upgrade — the two nuke+recreate+marker sites that raced in #828.
+//
+// Flow: acquire the per-sub-index heal lock, then reclassify under it:
+//   - healAdopt → return the replacement the winner created; never nuke it.
+//   - healDefer → return the pre-existing retryable "lock contention" error; a
+//     healthy index is being held open, not corrupt.
+//   - healNuke  → we hold the lock and it is still corrupt/stale: RemoveAll +
+//     recreate empty + write the .needs_reindex marker.
+//
+// A destructive rebuild (RemoveAll + recreate) runs ONLY while the heal lock is
+// held. When the lock cannot be acquired — for EITHER reason — we never nuke,
+// because a lockless nuke lets two processes RemoveAll each other's fresh
+// replacement (REMOVE CREATE REMOVE CREATE). The two no-lock cases:
+//   - TIMEOUT (a live peer holds a working lock): the peer will complete the
+//     rebuild; adopt a ready replacement, else return a retryable deferral.
+//   - SETUP FAILURE (flock-hostile FS, no peer): we cannot serialize at all, so
+//     we still refuse to nuke. Adopt an already-healthy index; otherwise defer.
+//     A genuinely corrupt sub-index on a flock-less filesystem is recovered by a
+//     full reindex (which wipes the whole dataDir), not by a racy per-sub-index
+//     nuke — the codedb is a rebuildable derived cache, so this trades an exotic-
+//     FS repair for the stronger no-racy-nuke guarantee.
+func rebuildSubIndexLocked(root, path, name string, requireVersion bool, openErrForLog error) (bleve.Index, error) {
+	fl, locked, lockErr := acquireSubIndexHealLockFn(path)
+	if !locked {
+		if lockErr != nil {
+			// flock is unusable on this filesystem: no peer, and no safe way to
+			// serialize a destructive rebuild. Refuse to nuke without the lock.
+			slog.Warn("bleve self-heal lock unavailable on this filesystem; deferring (no lockless nuke)",
+				"name", name, "path", path, "err", lockErr)
+		}
+		// No lock held (timeout or setup failure): adopt an already-repaired index,
+		// otherwise return a retryable deferral. Never nuke here.
+		if idx, verdict := reclassifyUnderLock(path, name, requireVersion); verdict == healAdopt {
+			subIndexRebuildActionHook("adopt")
+			return idx, nil
+		}
+		subIndexRebuildActionHook("defer")
+		return nil, fmt.Errorf("bleve sub-index %s self-heal deferred (heal lock unavailable): %w", name, openErrForLog)
+	}
+	defer func() { _ = fl.Unlock() }()
+	return applyRebuildVerdict(root, path, name, requireVersion, openErrForLog)
+}
+
+// applyRebuildVerdict reclassifies the sub-index and acts on the verdict:
+// adopt a concurrent repair, defer to a live writer, or nuke+recreate+marker a
+// still-corrupt/stale index. Callers MUST hold the heal lock — the healNuke path
+// does a destructive RemoveAll, which is safe to run only under cross-process
+// serialization (see rebuildSubIndexLocked; the no-lock paths never reach here).
+func applyRebuildVerdict(root, path, name string, requireVersion bool, openErrForLog error) (bleve.Index, error) {
+	idx, verdict := reclassifyUnderLock(path, name, requireVersion)
+	switch verdict {
+	case healAdopt:
+		slog.Info("bleve sub-index already repaired by a concurrent process; adopting replacement",
+			"name", name, "path", path)
+		subIndexRebuildActionHook("adopt")
+		return idx, nil
+	case healDefer:
+		subIndexRebuildActionHook("defer")
+		return nil, fmt.Errorf("bleve index appears to be in use (lock contention): %w", openErrForLog)
+	}
+
+	// healNuke: the index is still provably corrupt/stale. The specific trigger
+	// (parse error vs stale mapping version) is in open_err.
+	slog.Warn("bleve sub-index rebuild (nuke + recreate)",
+		"name", name, "path", path, "open_err", openErrForLog)
 	if removeErr := os.RemoveAll(path); removeErr != nil {
 		return nil, fmt.Errorf("remove corrupt bleve sub-index %s: %w", path, removeErr)
 	}
-	idx, err := createBleveSubIndex(path, name)
+	newIdx, err := createBleveSubIndex(path, name)
 	if err != nil {
 		return nil, fmt.Errorf("recreate empty bleve sub-index %s: %w", path, err)
 	}
-
 	if markerErr := WriteNeedsReindexMarker(root, name); markerErr != nil {
 		slog.Warn("failed to write needs_reindex marker; daemon may not auto-rebuild",
 			"name", name, "root", root, "err", markerErr)
 	}
-	return idx, nil
+	subIndexRebuildActionHook("nuke")
+	return newIdx, nil
 }
 
 // WriteNeedsReindexMarker creates the marker file that signals to the daemon's
