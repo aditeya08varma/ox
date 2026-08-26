@@ -215,8 +215,19 @@ func BuildCodeDBAtomic(ctx context.Context, finalDir string, buildFn func(contex
 		// by the deferred cleanup.
 		if haveBackup {
 			if restoreErr := renameDir(backupDir, finalDir); restoreErr != nil {
-				slog.Error("failed to restore previous codedb cache after swap failure",
-					"final_dir", finalDir, "backup_dir", backupDir, "error", restoreErr)
+				// Restore also failed. If finalDir now holds a usable cache — e.g.
+				// a concurrent builder promoted into it while ours was moved aside,
+				// so both of our renames hit a non-empty target — our backup is
+				// redundant; discard it so a full index copy does not leak into the
+				// shared ledger cache. Otherwise the backup is the only surviving
+				// copy: keep it and surface where to recover it from.
+				if _, statErr := os.Stat(finalDir); statErr == nil {
+					_ = os.RemoveAll(backupDir)
+				} else {
+					slog.Error("codedb cache stranded after failed swap and restore; recover from backup",
+						"final_dir", finalDir, "backup_dir", backupDir, "restore_error", restoreErr)
+					return fmt.Errorf("promote codedb build into place: %w (previous cache preserved at %s)", err, backupDir)
+				}
 			}
 		}
 		return fmt.Errorf("promote codedb build into place: %w", err)
