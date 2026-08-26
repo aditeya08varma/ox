@@ -662,10 +662,12 @@ func uninstallAllIntegrations(force bool) error {
 	}
 
 	// check Factory Droid
-	if hasDroidHooks(false) {
+	droidProjectInstalled := hasDroidHooks(false)
+	if droidProjectInstalled {
 		installed = append(installed, "Factory Droid (project)")
 	}
-	if hasDroidHooks(true) {
+	droidUserInstalled := hasDroidHooks(true)
+	if droidUserInstalled {
 		installed = append(installed, "Factory Droid (user)")
 	}
 
@@ -735,11 +737,18 @@ func uninstallAllIntegrations(force bool) error {
 	if err := uninstallGeminiHooks(true); err != nil {
 		errors = append(errors, fmt.Sprintf("Gemini CLI (user): %v", err))
 	}
-	if err := uninstallDroidHooks(false); err != nil {
-		errors = append(errors, fmt.Sprintf("Factory Droid (project): %v", err))
+	// only dispatch droid uninstall when detected — the external droid adapter
+	// may be absent, and uninstalling a non-installed external adapter errors
+	// with "adapter not found" (unlike the graceful skip that OMP gets below).
+	if droidProjectInstalled {
+		if err := uninstallDroidHooks(false); err != nil {
+			errors = append(errors, fmt.Sprintf("Factory Droid (project): %v", err))
+		}
 	}
-	if err := uninstallDroidHooks(true); err != nil {
-		errors = append(errors, fmt.Sprintf("Factory Droid (user): %v", err))
+	if droidUserInstalled {
+		if err := uninstallDroidHooks(true); err != nil {
+			errors = append(errors, fmt.Sprintf("Factory Droid (user): %v", err))
+		}
 	}
 	if err := uninstallAmpHooks(false); err != nil {
 		errors = append(errors, fmt.Sprintf("Amp CLI (project): %v", err))
