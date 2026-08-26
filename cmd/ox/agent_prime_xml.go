@@ -189,18 +189,34 @@ func outputAgentPrimeXML(cmd *cobra.Command, output agentPrimeOutput) (*prime.Co
 		// dirs) so repos without DRs pay zero prime tokens for it.
 		writeDecisionRecordGuidance(&sb)
 
-		// code-search: behavioral instruction to prefer ox code search over built-in tools
+		// code-search: demonstrate what CodeDB does that Grep/Glob can't (resolved
+		// call graph, indexed PRs/comments, git history+content in one query) rather
+		// than prescribing a "prefer" rule — agents follow concrete capability
+		// examples more reliably than soft directives. Static prefix-cache region.
 		if output.CodeDBAvailable {
 			sb.WriteString("\n<code-search status=\"indexed\">\n")
-			sb.WriteString("This repo has a live code search index. PREFER `ox code search \"&lt;query&gt;\"` over Grep/Glob/ripgrep for:\n")
-			sb.WriteString("- Cross-file symbol search, function lookup, type definitions\n")
-			sb.WriteString("- Git history, diffs, and blame queries\n")
-			sb.WriteString("- Exploratory searches where you don't know the exact file\n")
-			sb.WriteString("Use `ox code insights` before planning multi-file changes (shows hotspots, contention, open PRs).\n")
+			sb.WriteString("This repo has a live CodeDB index. `ox code` does things Grep/Glob can't:\n\n")
+			sb.WriteString("Verb-mode (reach for these when the intent matches):\n")
+			sb.WriteString("  ox code defs &lt;name&gt;                # where is &lt;name&gt; defined?\n")
+			sb.WriteString("  ox code callers &lt;name&gt;             # who calls &lt;name&gt;? (resolved call graph)\n")
+			sb.WriteString("  ox code callees &lt;name&gt; --depth N   # what does &lt;name&gt; call? (transitive)\n")
+			sb.WriteString("  ox code refs &lt;name&gt; [--lang go]    # text references across the index\n")
+			sb.WriteString("  ox code log &lt;path&gt; [--author X] [--after YYYY-MM-DD]   # commits touching path\n")
+			sb.WriteString("  ox code prs --sort stalled         # PR triage (most-stalled first)\n")
+			sb.WriteString("  ox code activity --since 7d        # recent GitHub events (PRs, issues, commits)\n")
+			sb.WriteString("  ox code insights                   # hotspots, contention, open PRs/issues\n\n")
+			sb.WriteString("DSL-mode (when verbs don't fit — see `ox code search --help` for the full grammar):\n")
+			sb.WriteString("  ox code search \"rate limit\" type:pr             # indexed PR titles/bodies/comments\n")
+			sb.WriteString("  ox code search \"TODO\" type:comment ckind:todo   # source comments by kind\n")
+			sb.WriteString("  ox code search \"migration\" author:&lt;n&gt; after:2026-04-01   # git log + content\n\n")
+			sb.WriteString("Full DSL grammar + keyword list: `ox code search --help` or `.claude/rules/ox-code.md`.\n\n")
 			if root := findGitRoot(); decision.CorpusDetected(root) && config.DecisionEnrichEnabled(root) {
-				sb.WriteString("Decision Records are in this index too: hits under docs/adr etc. carry doc_type:\"decision\"; add --decisions to search only them.\n")
+				sb.WriteString("Decision Records are indexed too: add --decisions to search only them (doc_type:\"decision\").\n\n")
 			}
-			sb.WriteString("Reserve Grep/Glob for: exact-string matches in a known file, or when ox code search returns no results.\n")
+			sb.WriteString("Grep/Glob fit only (a) an exact-string match in a known file, or (b) an `ox code` 0-result fallback.\n\n")
+			sb.WriteString("If the index is mid-build or missing, agent-mode calls return JSON\n")
+			sb.WriteString("`{\"status\":\"indexing\"|\"not_indexed\", \"fallback_hint\":\"...\"}` instead of erroring —\n")
+			sb.WriteString("branch on `status` and fall back per the hint.\n")
 			sb.WriteString("</code-search>\n")
 		}
 

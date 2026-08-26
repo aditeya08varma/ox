@@ -113,8 +113,17 @@ func TestPrimeTokenBudget_FullAndCompactStayUnderCeiling(t *testing.T) {
 	// read the old "Required/Automatic" wording as "always attribute" and fabricated
 	// provenance, and the imperative tone re-triggered prompt-injection suspicion
 	// every session. The follow-on prime-slimming work (S1) brings this back down.
+	// Raised 3340 -> 3600 (#664): the <commands> table gains verb-mode +
+	// DSL-mode `ox code` rows (defs/callers/callees/refs/log, plus type:pr /
+	// calls: / calledby: intents) so agents discover CodeDB's call-graph,
+	// indexed-PR, and git-history capabilities instead of defaulting to grep.
+	// ~200 tokens in the prefix-cached region (paid once per session), backed
+	// by the A/B data in docs/specs/codedb-discoverability-impl-results.md. The
+	// verb-led <code-search> banner was trimmed (keyword inventory + fallback
+	// prose moved to `ox code search --help` / .claude/rules/ox-code.md) to hold
+	// the real-usage cost down; this fixture measures the banner-off path.
 	const (
-		fullCeiling    = 3340
+		fullCeiling    = 3600
 		compactCeiling = 400
 	)
 
