@@ -9,11 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.14.2] - 2026-08-25
 
-Resumed work stays connected, stale sessions clean up after themselves, code indexing self-heals, team rules recover reliably, and SageOx uses one calm visual language everywhere.
+Resumed work stays connected, stale sessions clean up after themselves, AI coworkers navigate code more directly, code indexing self-heals, team rules recover reliably, and SageOx uses one calm visual language everywhere.
 
 ### Improved
 
 - **Resumed AI coworker sessions stay connected** — a new recording keeps a durable link to the session it continues, including through drafts, recovery, and upload retries.
+- **AI coworkers navigate code more directly** — `ox code` adds `callers`, `callees`, `defs`, `refs`, and `log` alongside inline result snippets and a clearer index status, so "who calls this?" or "where's this defined?" resolves in one step instead of several searches.
 - **The CLI and documentation stay in sync** — CI now detects generated-reference drift, the complete stable command set is published, and the docs workflow can use a dedicated package credential when repository permissions are insufficient.
 - **SageOx has one consistent palette** — CLI, TUI, plans, demos, and documentation now share an all-sage brand palette, reserving gold for warnings and using accessible light and dark variants.
 
@@ -21,6 +22,8 @@ Resumed work stays connected, stale sessions clean up after themselves, code ind
 
 - **Session history stays clean** — sessions that were only primed or never captured a prompt no longer pile up on your machine or linger as stale "in progress" conversation links. ox reclaims them automatically in the background and during `ox doctor`, and a session is only registered once real work happens.
 - **Code indexing recovers from a damaged cache** — a corrupted index now rebuilds itself instead of crash-looping `ox`.
+- **`ox doctor` no longer reports false-positive warnings** — a healthy setup checks clean instead of surfacing spurious issues.
+- **`ox integrate uninstall --all` no longer errors when an optional adapter isn't installed** — removing all integrations now skips adapters that aren't present instead of failing the whole run.
 - **Device login works with opaque session credentials** — the login flow uses the credential returned by device authentication to fetch identity while continuing to store the exchanged API token.
 - **Team rules survive sparse-checkout recovery** — fallback manifests include the `agents/` directory, so repositories without a usable manifest still materialize shared AI coworker guidance.
 
