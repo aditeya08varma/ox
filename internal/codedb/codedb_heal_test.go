@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/sageox/ox/internal/codedb"
@@ -98,8 +99,8 @@ func TestBuildCodeDBAtomic_PreservesFinalDirOnFailure(t *testing.T) {
 	if _, statErr := os.Stat(good); statErr != nil {
 		t.Fatalf("expected finalDir preserved on failure, GOOD missing: %v", statErr)
 	}
-	if _, statErr := os.Stat(finalDir + ".building"); !os.IsNotExist(statErr) {
-		t.Fatalf("expected .building cleaned up on failure, err=%v", statErr)
+	if leftovers, _ := filepath.Glob(finalDir + ".*"); len(leftovers) != 0 {
+		t.Fatalf("expected staging/backup dirs cleaned up on failure, found %v", leftovers)
 	}
 }
 
@@ -131,7 +132,47 @@ func TestBuildCodeDBAtomic_SwapsFreshBuildIntoPlace(t *testing.T) {
 	if _, statErr := os.Stat(filepath.Join(finalDir, "repos")); statErr != nil {
 		t.Fatalf("expected the freshly-built store swapped in (repos/ dir), err=%v", statErr)
 	}
-	if _, statErr := os.Stat(finalDir + ".building"); !os.IsNotExist(statErr) {
-		t.Fatalf("expected .building removed after swap, err=%v", statErr)
+	if leftovers, _ := filepath.Glob(finalDir + ".*"); len(leftovers) != 0 {
+		t.Fatalf("expected no staging/backup leftovers after swap, found %v", leftovers)
+	}
+}
+
+// Concurrent from-scratch builds share the ledger cache (one per worktree). A
+// fixed staging path let one build delete another's in-progress files and could
+// leave finalDir absent. With per-build staging dirs, finalDir must always end
+// as a valid, openable store — never absent or half-written.
+func TestBuildCodeDBAtomic_ConcurrentBuildsLeaveValidCache(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: opens several real stores concurrently")
+	}
+	finalDir := filepath.Join(t.TempDir(), "codedb")
+
+	const builders = 4
+	var wg sync.WaitGroup
+	for i := 0; i < builders; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// A promotion race may make one builder error; that is acceptable, as
+			// long as no builder ever corrupts or removes the published cache.
+			_ = codedb.BuildCodeDBAtomic(context.Background(), finalDir, func(ctx context.Context, db *codedb.DB) error {
+				return nil
+			})
+		}()
+	}
+	wg.Wait()
+
+	// finalDir must exist and open cleanly — the data-loss failure was an absent
+	// finalDir after an overlapping build removed a just-published cache.
+	if _, statErr := os.Stat(filepath.Join(finalDir, "repos")); statErr != nil {
+		t.Fatalf("finalDir must be a valid store after concurrent builds, err=%v", statErr)
+	}
+	db, err := codedb.Open(finalDir)
+	if err != nil {
+		t.Fatalf("published cache must open cleanly after concurrent builds: %v", err)
+	}
+	_ = db.Close()
+	if leftovers, _ := filepath.Glob(finalDir + ".*"); len(leftovers) != 0 {
+		t.Fatalf("expected no staging/backup leftovers after concurrent builds, found %v", leftovers)
 	}
 }

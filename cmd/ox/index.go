@@ -101,10 +101,20 @@ func indexCodeInProcess(cmd *cobra.Command, args []string, full bool) error {
 		}
 		stats, err := db.ParseSymbols(ctx, nil)
 		if err != nil {
+			// Cache corruption must abort the build so the recovery paths can
+			// react (OpenIndexWithHeal discards + retries; BuildCodeDBAtomic
+			// refuses to swap a partial index into place). Ordinary parse
+			// failures stay non-fatal.
+			if index.IsCorruptionError(err) {
+				return fmt.Errorf("parse symbols: %w", err)
+			}
 			slog.Warn("symbol parsing failed (non-fatal)", "error", err)
 		}
 		symbolsExtracted = stats.SymbolsExtracted
 		if _, err := db.ParseComments(ctx, nil); err != nil {
+			if index.IsCorruptionError(err) {
+				return fmt.Errorf("parse comments: %w", err)
+			}
 			slog.Warn("comment parsing failed (non-fatal)", "error", err)
 		}
 		return nil

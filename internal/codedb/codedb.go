@@ -6,11 +6,17 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/sageox/ox/internal/codedb/index"
 	"github.com/sageox/ox/internal/codedb/search"
 	"github.com/sageox/ox/internal/codedb/store"
 )
+
+// renameDir indirects os.Rename so tests can inject a promotion failure and
+// verify the previous cache survives (BuildCodeDBAtomic).
+var renameDir = os.Rename
 
 // DB is the top-level CodeDB facade.
 type DB struct {
@@ -156,39 +162,68 @@ func reopenClean(db *DB, dataDir string) (*DB, error) {
 // write in place (a whole-directory swap would force a full rebuild every pass
 // and break concurrent readers).
 func BuildCodeDBAtomic(ctx context.Context, finalDir string, buildFn func(context.Context, *DB) error) error {
-	tmpDir := finalDir + ".building"
-	// clear any half-written temp dir left by a prior killed build
-	if err := os.RemoveAll(tmpDir); err != nil {
-		return fmt.Errorf("clear stale codedb build dir: %w", err)
+	parent := filepath.Dir(finalDir)
+	base := filepath.Base(finalDir)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return fmt.Errorf("create codedb parent dir: %w", err)
 	}
-	if err := os.MkdirAll(tmpDir, 0o755); err != nil {
+
+	// Unique staging dir per build. A fixed "<dir>.building" path lets two
+	// concurrent builds (e.g. one per worktree, sharing the ledger cache) delete
+	// each other's in-progress files; MkdirTemp gives each build its own.
+	tmpDir, err := os.MkdirTemp(parent, base+".building-*")
+	if err != nil {
 		return fmt.Errorf("create codedb build dir: %w", err)
 	}
+	// Always clean up the staging dir. On the success path it has already been
+	// renamed to finalDir, so this is a no-op; on every failure path it removes
+	// the abandoned build (no orphan accumulation in the shared ledger cache).
+	defer func() { _ = os.RemoveAll(tmpDir) }()
 
 	db, err := Open(tmpDir)
 	if err != nil {
-		_ = os.RemoveAll(tmpDir)
 		return err
 	}
 	if err := buildFn(ctx, db); err != nil {
 		_ = db.Close()
-		_ = os.RemoveAll(tmpDir)
 		return err
 	}
 	if err := db.Close(); err != nil {
-		_ = os.RemoveAll(tmpDir)
 		return fmt.Errorf("close codedb build before swap: %w", err)
 	}
 
-	// swap into place: remove the stale final dir, then rename the freshly-built
-	// one on top. os.Rename within the same parent dir is atomic on POSIX.
-	if err := os.RemoveAll(finalDir); err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return fmt.Errorf("remove stale codedb before swap: %w", err)
+	// Promote without ever leaving a window where no usable cache exists: move
+	// any existing cache aside first, rename the freshly-built one into place,
+	// then discard the moved-aside copy. If the promoting rename fails, restore
+	// the previous cache — it stays available until the replacement is installed.
+	// os.Rename within the same parent dir is atomic on POSIX.
+	suffix := strings.TrimPrefix(filepath.Base(tmpDir), base+".building-")
+	backupDir := filepath.Join(parent, base+".old-"+suffix)
+	haveBackup := false
+	if _, statErr := os.Stat(finalDir); statErr == nil {
+		if err := renameDir(finalDir, backupDir); err != nil {
+			return fmt.Errorf("move stale codedb aside before swap: %w", err)
+		}
+		haveBackup = true
+	} else if !os.IsNotExist(statErr) {
+		return fmt.Errorf("stat codedb before swap: %w", statErr)
 	}
-	if err := os.Rename(tmpDir, finalDir); err != nil {
-		_ = os.RemoveAll(tmpDir)
-		return fmt.Errorf("atomic swap codedb into place: %w", err)
+
+	if err := renameDir(tmpDir, finalDir); err != nil {
+		// Promotion failed: restore the previous healthy cache so it stays usable
+		// (the build simply re-runs on the next pass). The staging dir is removed
+		// by the deferred cleanup.
+		if haveBackup {
+			if restoreErr := renameDir(backupDir, finalDir); restoreErr != nil {
+				slog.Error("failed to restore previous codedb cache after swap failure",
+					"final_dir", finalDir, "backup_dir", backupDir, "error", restoreErr)
+			}
+		}
+		return fmt.Errorf("promote codedb build into place: %w", err)
+	}
+
+	if haveBackup {
+		_ = os.RemoveAll(backupDir)
 	}
 	return nil
 }
