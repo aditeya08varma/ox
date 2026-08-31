@@ -2,19 +2,29 @@
 // in a way that can NEVER rewrite that repository's .git/config.
 //
 // Why this exists (issue #819): codedb opens the managed source project repo
-// in place to read objects. go-git re-marshals config through the single
-// contract Storer.SetConfig, and across go-git v6 alpha snapshots that has
-// flipped core.bare, dropped extensions.worktreeConfig, and (in some snapshots)
-// persisted config as a side effect of *opening* a worktree repo. On a linked
-// worktree that silently flipped core.bare=true on the shared main .git/config,
-// breaking every work-tree git command until it was manually reset.
+// in place to read objects. go-git persists config through exactly one contract
+// — Storer.SetConfig — reached from Init, Clone, CreateRemote, tag ops, and
+// setIsBare (which flips core.bare=true). On the pinned go-git (v6 alpha) a
+// read-only open never reaches SetConfig, but a config round-trip there flips
+// core.bare and drops extensions.worktreeConfig, so any accidental write is
+// catastrophic: on a linked worktree it silently sets core.bare=true on the
+// shared main .git/config, breaking every work-tree git command until manually
+// reset.
 //
 // The daemon must never write the managed source repo's .git/config (see
-// .claude/rules/daemon-git.md). We enforce that structurally rather than
-// trusting any particular alpha's open path to be read-only: SetConfig — the
-// only path through which go-git persists config in every version — is a no-op
-// for these read-only opens. codedb only READS objects here, so denying the
-// write is always safe.
+// .claude/rules/daemon-git.md). We enforce that STRUCTURALLY and FAIL-CLOSED,
+// rather than trusting any particular go-git version's open path to be
+// read-only: every open here goes through a storer whose SetConfig is a no-op,
+// and GuardedPlainOpen has no unguarded fallback for any layout it might hand a
+// user repo to. codedb only READS objects, so denying the write is always safe.
+//
+// The #819 recurrence (issue reopened on v0.14.2) came from the one layout that
+// slipped past the guard: a "bare hub + git worktree add" checkout, where
+// commondir points directly at the bare hub (no ".git" wrapper). ResolveGitDir
+// mis-derived the root as its parent, so GuardedPlainOpen missed every guarded
+// branch and fell through to an unguarded git.PlainOpen on the shared hub
+// config. Both are fixed here: ResolveGitDir is bare-hub aware, and the
+// fallback is guarded.
 package gitopen
 
 import (
@@ -22,6 +32,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	billy "github.com/go-git/go-billy/v6"
 	"github.com/go-git/go-billy/v6/osfs"
 	"github.com/go-git/go-git/v6"
 	"github.com/go-git/go-git/v6/config"
@@ -54,55 +65,85 @@ func WrapReadOnlyConfig(s *filesystem.Storage) storage.Storer {
 }
 
 // GuardedPlainOpen is a drop-in replacement for git.PlainOpen for user-owned
-// repositories. It opens with config writes denied so #819 can never recur,
-// covering three layouts:
+// repositories. Every layout is opened with config writes denied so #819 can
+// never recur — there is no unguarded fallback:
 //   - a normal checkout (.git is a directory),
-//   - a linked worktree (.git is a file with a commondir → the shared main
-//     checkout, resolved by ResolveGitDir),
-//   - a submodule (.git is a file whose self-contained gitdir has no commondir).
+//   - a linked worktree off a non-bare main (.git is a file whose commondir
+//     resolves to "<root>/.git"; ResolveGitDir returns <root>),
+//   - a linked worktree off a BARE hub (.git is a file whose commondir resolves
+//     to the hub git dir itself; ResolveGitDir returns that hub dir) — the #819
+//     recurrence layout,
+//   - a submodule (.git is a file whose self-contained gitdir has no commondir),
+//   - a bare repository (path is itself the git dir, e.g. codedb's own cache
+//     clone).
 //
-// A bare repository (e.g. codedb's own cache clone) falls back to git.PlainOpen:
-// its config legitimately carries core.bare=true and it has no worktree/
-// extensions to lose, so it is not part of the #819 surface.
+// codedb only READS objects, so a config write is never needed for any of them;
+// guarding even the bare cache clone is harmless (SetConfig is unused on the
+// read path) and keeps the open path uniformly fail-closed.
 func GuardedPlainOpen(path string) (*git.Repository, error) {
-	// Normal repo, or a linked worktree resolved to its shared main checkout —
+	// Normal repo, or a linked worktree resolved to a non-bare main checkout —
 	// either way the resolved root has a real .git directory holding objects.
 	root, _ := ResolveGitDir(path)
 	if fi, err := os.Stat(filepath.Join(root, ".git")); err == nil && fi.IsDir() {
 		return openGuarded(filepath.Join(root, ".git"), root)
 	}
+	// The resolved root IS a git directory: a bare hub (resolved from a linked
+	// worktree, no .git wrapper — the #819 recurrence) or a bare cache clone
+	// opened directly. Guard it too rather than falling through unguarded.
+	if isGitDir(root) {
+		return openGuarded(root, "")
+	}
 	// A .git FILE that ResolveGitDir did not remap: a submodule, whose gitdir
-	// (e.g. .git/modules/<name>) is self-contained. Guard it directly rather
-	// than falling through to an unguarded open.
+	// (e.g. .git/modules/<name>) is self-contained.
 	if gitDir, ok := submoduleGitDir(path); ok {
 		return openGuarded(gitDir, path)
 	}
-	// Bare repo (path is itself the git dir) or unresolvable layout.
-	return git.PlainOpen(path)
+	// Unresolvable layout: still open GUARDED (fail-closed) rather than handing
+	// go-git a config-writable handle to a user repo. Worst case this errors as
+	// "repository does not exist" — never a silent config rewrite (#819).
+	return openGuarded(path, "")
 }
 
-// openGuarded opens the repo whose git directory is dotDir and worktree is
-// wtDir, with config writes denied.
+// openGuarded opens the repo whose git directory is dotDir with config writes
+// denied. wtDir is the worktree root, or "" for a bare repo (no worktree
+// filesystem — codedb reads objects only, so no worktree is required).
 func openGuarded(dotDir, wtDir string) (*git.Repository, error) {
 	dot := osfs.New(dotDir, osfs.WithBoundOS())
-	wt := osfs.New(wtDir, osfs.WithBoundOS())
 	s := filesystem.NewStorage(dotgit.NewRepositoryFilesystem(dot, nil), cache.NewObjectLRUDefault())
+	var wt billy.Filesystem
+	if wtDir != "" {
+		wt = osfs.New(wtDir, osfs.WithBoundOS())
+	}
 	return git.Open(readOnlyConfigStorer{s}, wt)
+}
+
+// isGitDir reports whether dir is itself a git directory (a bare repo, or the
+// shared .git a worktree hub points at): it holds a HEAD file and an objects
+// directory. Used to guard the bare-hub / bare-cache open paths that would
+// otherwise fall through to an unguarded open.
+func isGitDir(dir string) bool {
+	if fi, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil || fi.IsDir() {
+		return false
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "objects")); err != nil || !fi.IsDir() {
+		return false
+	}
+	return true
 }
 
 // ResolveGitDir returns the path to open with go-git and whether it is a linked
 // worktree. For linked worktrees (where .git is a file containing "gitdir: ..."
-// AND the target has a commondir), it follows commondir to the main repo's root
-// so go-git can access the shared object store. For normal repos, submodules, or
-// anything unresolvable, returns the path unchanged.
+// AND the target has a commondir), it follows commondir to the shared object
+// store so go-git can read it. For normal repos, submodules, or anything
+// unresolvable, returns the path unchanged.
 func ResolveGitDir(repoPath string) (string, bool) {
 	worktreeGitDir, ok := gitdirTarget(repoPath)
 	if !ok {
 		return repoPath, false // normal repo, no .git, or unreadable .git file
 	}
 
-	// A linked worktree has a commondir pointing at the shared .git; a submodule
-	// does not (its gitdir is self-contained and is handled by GuardedPlainOpen).
+	// A linked worktree has a commondir pointing at the shared git dir; a
+	// submodule does not (its gitdir is self-contained, handled by GuardedPlainOpen).
 	commondirFile := filepath.Join(worktreeGitDir, "commondir")
 	commondirBytes, err := os.ReadFile(commondirFile)
 	if err != nil {
@@ -112,9 +153,21 @@ func ResolveGitDir(repoPath string) (string, bool) {
 	if !filepath.IsAbs(commondir) {
 		commondir = filepath.Join(worktreeGitDir, commondir)
 	}
+	commondir = filepath.Clean(commondir)
 
-	// commondir points to the main .git dir; the repo root is its parent
-	return filepath.Dir(commondir), true
+	// commondir points at the SHARED git directory. Two layouts diverge here:
+	//   - non-bare main checkout: commondir is "<root>/.git", so the repo root
+	//     (whose ".git" subdir GuardedPlainOpen opens) is its parent.
+	//   - bare hub (git init --bare + git worktree add, often with a manual
+	//     `git config core.bare false`): commondir IS the hub git dir itself
+	//     (e.g. "<name>.git"), with no ".git" wrapper — its parent is WRONG.
+	//     Taking the parent here was the #819 recurrence: GuardedPlainOpen then
+	//     missed every guarded branch and fell through to an unguarded open on
+	//     the shared hub config.
+	if filepath.Base(commondir) == ".git" {
+		return filepath.Dir(commondir), true
+	}
+	return commondir, true
 }
 
 // submoduleGitDir returns the self-contained gitdir a submodule's ".git" file
