@@ -175,6 +175,15 @@ func init() {
 	})
 
 	RegisterDoctorCheck(&DoctorCheck{
+		Slug:        CheckSlugSourceRepoBare,
+		Name:        "Source repo work tree",
+		Category:    "Git Repository Health",
+		FixLevel:    FixLevelAuto,
+		Description: "Repairs a managed checkout whose core.bare was flipped to true (issue #819)",
+		Run:         checkSourceRepoBareFlipped,
+	})
+
+	RegisterDoctorCheck(&DoctorCheck{
 		Slug:        CheckSlugGitConnectivity,
 		Name:        "Git connectivity",
 		Category:    "Git Repository Health",

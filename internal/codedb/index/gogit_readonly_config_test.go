@@ -305,3 +305,51 @@ func TestGuardedOpen_Submodule_PreservesConfig(t *testing.T) {
 	assert.Equal(t, string(snap), string(after),
 		"submodule .git/modules/<name>/config must be byte-identical (#819)")
 }
+
+// TestGuardedOpen_BareHubWorktree_PreservesSharedConfig covers the #819
+// RECURRENCE (issue reopened on v0.14.2): a linked worktree off a BARE hub
+// (git init --bare, core.bare manually false, worktreeConfig extension, an [lfs]
+// section) — the layout where commondir resolves directly to the hub git dir
+// with no ".git" wrapper. Before the fix, ResolveGitDir mis-derived the root as
+// the hub's parent, so GuardedPlainOpen missed every guarded branch and fell
+// through to an unguarded git.PlainOpen; a config write then flipped
+// core.bare=true and dropped extensions.worktreeConfig on the SHARED hub config,
+// breaking every work-tree git command until manually reset.
+//
+// Fails without the fail-closed guard (unguarded open lets the write land),
+// passes with it (SetConfig is a no-op) — the version-independent proof that the
+// bare-hub open is now guarded.
+func TestGuardedOpen_BareHubWorktree_PreservesSharedConfig(t *testing.T) {
+	t.Parallel()
+	if testing.Short() {
+		t.Skip("short: bare-hub git worktree operations")
+	}
+	hubDir, worktreeDir := createBareHubWorktree(t)
+
+	// give the shared hub config the reported bug shape: an [lfs] section that
+	// go-git preserves while it drops worktreeConfig and flips core.bare.
+	hubCfg := filepath.Join(hubDir, "config")
+	base, err := os.ReadFile(hubCfg)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(hubCfg,
+		[]byte(string(base)+"[lfs]\n\trepositoryformatversion = 0\n"), 0o644))
+	snap, err := os.ReadFile(hubCfg)
+	require.NoError(t, err)
+
+	repo, err := gitopen.GuardedPlainOpen(worktreeDir)
+	require.NoError(t, err)
+	cfg, err := repo.Storer.Config()
+	require.NoError(t, err)
+	// drive the exact corruption: flip core.bare, and clear worktreeConfig so
+	// go-git writes the whole BASE hub config (its worktreeConfig=true path would
+	// instead route a delta to config.worktree). The guard must swallow it.
+	cfg.Core.IsBare = true
+	cfg.Extensions.WorktreeConfig = false
+	require.NoError(t, repo.Storer.SetConfig(cfg)) // guarded → no-op
+	require.NoError(t, repo.Close())
+
+	after, err := os.ReadFile(hubCfg)
+	require.NoError(t, err)
+	assert.Equal(t, string(snap), string(after),
+		"bare-hub shared config must be byte-identical (#819 recurrence)")
+}
