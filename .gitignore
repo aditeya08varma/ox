@@ -36,6 +36,10 @@ docs/design/**/*.webm
 *.out
 go.work
 
+# python tooling
+__pycache__/
+*.py[cod]
+
 # dependencies
 /vendor/
 

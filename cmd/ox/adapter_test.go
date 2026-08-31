@@ -46,6 +46,10 @@ func TestAdapterList_WithDiscoveredAdapters(t *testing.T) {
 // TestAdapterInfo_KnownAdapter verifies info shows details for a discovered adapter.
 // Failure prevented: info command fails to find adapter that list shows.
 func TestAdapterInfo_KnownAdapter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("adapter discovery executes a subprocess")
+	}
+
 	dir := t.TempDir()
 	createFakeAdapter(t, dir, "test-info", "1.0.0", "session")
 

@@ -1,6 +1,8 @@
 name: Coverage
 
 on:
+  pull_request:
+    branches: [main]
   schedule:
     - cron: '0 11 * * *'  # daily at 3am Pacific / 11am UTC
   workflow_dispatch: {}   # allow manual trigger
@@ -13,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -24,10 +28,22 @@ jobs:
           git config --global user.name "CI"
 
       - name: Install gotestsum
-        run: go install gotest.tools/gotestsum@latest
+        run: go install gotest.tools/gotestsum@v1.13.0
 
       - name: Test with coverage
-        run: gotestsum --junitfile junit.xml --format pkgname-and-test-fails -- -short -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: TEST_JUNIT=junit.xml make test-cover
+
+      - name: Require requested test artifact
+        run: |
+          test -s junit.xml
+          python3 -c 'import xml.etree.ElementTree as ET; root = ET.parse("junit.xml").getroot(); assert any(root.iter("testcase")), "JUnit artifact has no test cases"'
+
+      - name: Enforce risk-package coverage ratchets
+        run: python3 scripts/coverage_ratchet.py coverage.out
+
+      - name: Enforce changed-line coverage
+        if: github.event_name == 'pull_request'
+        run: python3 scripts/coverage_ratchet.py coverage.out --diff-base "${{ github.event.pull_request.base.sha }}"
 
       - name: Upload coverage
         if: always()

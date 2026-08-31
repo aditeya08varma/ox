@@ -17,22 +17,23 @@ Follow these steps exactly:
 git branch --show-current
 git status
 
-# Run quality gates (run lint and tests in parallel)
+# Run the executable in-repo release gates
 make lint
-make test-all          # all unit tests incl. expensive (git clone, SQLite, LFS)
-make test-slow         # build tag: slow (real ox binary tests)
-make test-digital-twin # ledger + team-context structural verification
+make test-release      # full + coverage ratchets + slow + acceptance + digital twins
 ```
 
 If tests or lint fail, fix issues before proceeding.
 
-### Step 1b: E2E Integration Tests (MANDATORY — requires claude CLI + ANTHROPIC_API_KEY)
+### Step 1b: External Harness Compatibility Evidence
 
 ```bash
 make test-integration
 ```
 
-**This is a hard release gate.** These tests launch real Claude Code instances, exercise real hooks, send real SIGINT signals, and verify the full session recording and anti-entropy pipelines end-to-end. Do NOT proceed if integration tests fail.
+These tests launch real Claude Code instances and exercise hooks, signals, and
+session pipelines end-to-end. Investigate failures, but do not represent this
+as an automated release gate until `ox-ilrr.4` provides machine-verifiable
+current-binary provenance and attestation.
 
 ### Step 1c: Smoke Tests (requires SAGEOX_CI_PASSWORD)
 
@@ -159,31 +160,43 @@ Include in the PR body: summary of changes, changelog highlights, test results, 
 
 Tell the user to review and merge the PR. Wait for merge before proceeding.
 
-### Step 8: Tag and Create Draft GitHub Release
+### Step 8: Create and Review Draft, Then Dispatch Verification
 
 After the PR is merged to main:
 
 ```bash
 git checkout main
 git pull
-git tag v0.X.0
-git push --tags
 ```
 
-Extract the changelog section for this version and create a draft release:
+Extract the changelog section for this version and create a draft release
+before the tag exists. GoReleaser uses `mode: keep`, so this preserves the
+human-written notes:
 
 ```bash
-gh release create v0.X.0 --draft --title "v0.X.0" --notes-file -
+gh release create v0.X.0 --draft --target main --title "v0.X.0" --notes-file -
 ```
 
 Pipe the release notes (the changelog section for this version) to the command.
+Review the draft at https://github.com/sageox/ox/releases. When the notes are
+approved, explicitly dispatch the verified release workflow:
+
+```bash
+gh workflow run release.yml -f tag=v0.X.0
+```
+
+Creating a release for a missing tag may create the tag automatically, so tag
+pushes intentionally do not trigger publication. The explicit dispatch starts
+`.github/workflows/release.yml`; its verification job
+must pass before GoReleaser uploads artifacts and publishes the existing draft.
+Do not publish the draft manually.
 
 ### Step 9: Final Instructions
 
 After completing all steps, tell the user:
 
-1. **Review the draft release** at: https://github.com/sageox/ox/releases
-2. **Publish the release** in GitHub to trigger GoReleaser automation
+1. **Watch the explicitly dispatched release workflow.**
+2. **Verify the draft was published with signed artifacts** only after all enforced tiers passed.
 
 ## Important Rules
 
@@ -192,5 +205,5 @@ After completing all steps, tell the user:
 - One release per day max
 - NEVER auto-generate changelogs from commits
 - ALWAYS ask user to confirm version before bumping
-- Draft releases only - human publishes
+- Draft release notes are human-reviewed; the explicitly dispatched verified workflow publishes
 - ALL changes go through a PR - never commit directly to main

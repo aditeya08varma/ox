@@ -35,15 +35,23 @@ func TestFreshInstall_MockServer_InitThenDoctor(t *testing.T) {
 
 	t.Logf("ox init completed: exit=%d duration=%s", initExit, initDuration)
 
-	if initExit != 0 {
-		t.Logf("WARNING: ox init exited with code %d\nOutput:\n%s", initExit, initOutput)
-	}
+	require.Equal(t, 0, initExit, "ox init must succeed before doctor evidence is meaningful; output:\n%s", initOutput)
 
-	// === STEP 2: ox doctor (immediately, NO ox sync) ===
+	// Match the documented quick start: persist init's repository changes before
+	// asking doctor to distinguish product health from normal uncommitted setup.
+	gitAdd := testguard.OxCmd(t, "git", repoDir, nil, "add", "-A")
+	require.NoError(t, gitAdd.Run())
+	gitCommit := testguard.OxCmd(t, "git", repoDir, nil,
+		"-c", "commit.gpgsign=false", "commit", "-m", "initialize SageOx")
+	commitOutput, err := gitCommit.CombinedOutput()
+	require.NoError(t, err, "commit initialized files: %s", commitOutput)
+
+	// === STEP 2: ox doctor (after init commit, NO ox sync) ===
 	doctorOutput, doctorExit, doctorDuration := testguard.RunOx(t, oxBin, repoDir, envVars,
 		"doctor", "--json", "--verbose")
 
 	t.Logf("ox doctor completed: exit=%d duration=%s", doctorExit, doctorDuration)
+	require.Equal(t, 0, doctorExit, "doctor must succeed when the cloud twin reports no issues; output:\n%s", doctorOutput)
 
 	// === STEP 3: parse and report ===
 	doctorJSON := parseDoctorJSON(t, doctorOutput)
@@ -59,13 +67,18 @@ func TestFreshInstall_MockServer_InitThenDoctor(t *testing.T) {
 	logReport(t, report)
 
 	// === ASSERTIONS ===
-	if doctorJSON != nil {
-		assert.Greater(t, len(doctorJSON.Categories), 0, "doctor should return at least one category")
+	require.NotNil(t, doctorJSON, "doctor must produce parseable JSON; output:\n%s", doctorOutput)
+	assert.Greater(t, len(doctorJSON.Categories), 0, "doctor should return at least one category")
+	assert.Greater(t, mockServer.cloudDoctorAuthedCalls.Load(), int32(0),
+		"compiled ox must exercise the current authenticated cloud doctor route")
+	assert.Zero(t, mockServer.cloudDoctorLegacyCalls.Load(),
+		"compiled ox must not fall back after the current route succeeds")
+	assert.Zero(t, mockServer.cloudDoctorSingularCalls.Load(),
+		"compiled ox must not use the obsolete singular cloud doctor route")
 
-		t.Logf("Doctor summary: passed=%d warnings=%d failed=%d skipped=%d",
-			doctorJSON.Summary.Passed, doctorJSON.Summary.Warnings,
-			doctorJSON.Summary.Failed, doctorJSON.Summary.Skipped)
-	}
+	t.Logf("Doctor summary: passed=%d warnings=%d failed=%d skipped=%d",
+		doctorJSON.Summary.Passed, doctorJSON.Summary.Warnings,
+		doctorJSON.Summary.Failed, doctorJSON.Summary.Skipped)
 
 	// assert the bootstrapping grace period is working:
 	// git repo paths should NOT be a failure right after init (it should be info/warning)
@@ -94,6 +107,40 @@ func TestFreshInstall_MockServer_InitThenDoctor(t *testing.T) {
 		for _, w := range unexpectedWarnings {
 			t.Errorf("  %s > %s: %s [fix: %s]", w.Category, w.Name, w.Message, w.FixLevel)
 		}
+	}
+}
+
+func TestParseDoctorJSONOutput(t *testing.T) {
+	payload := `{
+  "categories": [
+    {"name": "setup", "checks": []}
+  ],
+  "summary": {"passed": 1}
+}`
+
+	tests := []struct {
+		name    string
+		output  string
+		wantErr bool
+	}{
+		{name: "clean pretty JSON", output: payload},
+		{name: "logs around pretty JSON", output: "INFO starting doctor\n" + payload + "\nINFO complete"},
+		{name: "unrelated braces before payload", output: "DEBUG response={not-json}\n" + payload},
+		{name: "no payload", output: "INFO doctor failed before output", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseDoctorJSONOutput(tt.output)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Len(t, got.Categories, 1)
+		})
 	}
 }
 
@@ -137,9 +184,7 @@ func TestFreshInstall_RealRepo_InitThenDoctor(t *testing.T) {
 
 	t.Logf("ox init completed: exit=%d duration=%s", initExit, initDuration)
 
-	if initExit != 0 {
-		t.Logf("WARNING: ox init exited with code %d\nOutput:\n%s", initExit, initOutput)
-	}
+	require.Equal(t, 0, initExit, "ox init must succeed before sync/doctor evidence is meaningful; output:\n%s", initOutput)
 
 	// === STEP 2: ox doctor (immediately, NO ox sync) ===
 	doctorOutput, doctorExit, doctorDuration := testguard.RunOx(t, oxBin, repoDir, envVars,
@@ -218,11 +263,10 @@ func TestFreshInstall_MockServer_InitThenSyncThenDoctor(t *testing.T) {
 	t.Log("=== WITH SYNC (comparison test) ===")
 	logReport(t, report)
 
-	if doctorJSON != nil {
-		t.Logf("With-sync summary: passed=%d warnings=%d failed=%d skipped=%d",
-			doctorJSON.Summary.Passed, doctorJSON.Summary.Warnings,
-			doctorJSON.Summary.Failed, doctorJSON.Summary.Skipped)
-	}
+	require.NotNil(t, doctorJSON, "doctor must produce parseable JSON; output:\n%s", doctorOutput)
+	t.Logf("With-sync summary: passed=%d warnings=%d failed=%d skipped=%d",
+		doctorJSON.Summary.Passed, doctorJSON.Summary.Warnings,
+		doctorJSON.Summary.Failed, doctorJSON.Summary.Skipped)
 }
 
 // filterExpectedE2EIssues removes issues that are expected in an E2E test
@@ -305,6 +349,11 @@ func isExpectedE2EIssue(check ReportCheck) bool {
 
 	// version/update checks
 	if cat == "Updates" {
+		return true
+	}
+
+	// Historical commits predate session capture in this isolated repository.
+	if cat == "Sessions" && name == "session trailer coverage" {
 		return true
 	}
 

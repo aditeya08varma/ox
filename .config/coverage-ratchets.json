@@ -1,0 +1,60 @@
+{
+  "module": "github.com/sageox/ox/",
+  "changed_line_coverage": {
+    "minimum": 90.0,
+    "excluded_paths": [
+      "**/*_generated.go"
+    ],
+    "exceptions": [
+      {
+        "path": "cmd/ox/agent_session.go",
+        "reason": "Durable score write and retry preservation are directly tested; the orchestration call site awaits the ox-ilrr.7 lifecycle seam",
+        "expires": "2026-09-30"
+      }
+    ]
+  },
+  "packages": [
+    {
+      "path": "cmd/ox/",
+      "recursive": false,
+      "minimum": 40.0,
+      "reason": "Primary CLI orchestration and user-facing failure handling"
+    },
+    {
+      "path": "internal/daemon/",
+      "recursive": false,
+      "minimum": 54.5,
+      "reason": "Sync, IPC, retry, and recovery orchestration"
+    },
+    {
+      "path": "internal/codedb/index/",
+      "recursive": false,
+      "minimum": 34.0,
+      "reason": "Repository indexing and recovery boundary"
+    },
+    {
+      "path": "internal/dashboard/state/",
+      "recursive": false,
+      "minimum": 55.0,
+      "reason": "Pure dashboard state and reducer invariants"
+    },
+    {
+      "path": "internal/session/",
+      "recursive": false,
+      "minimum": 84.0,
+      "reason": "Session recording, finalization, redaction, and recovery"
+    },
+    {
+      "path": "internal/daemon/agentwork/",
+      "recursive": false,
+      "minimum": 65.0,
+      "reason": "External AI coworker process, timeout, and output boundary"
+    },
+    {
+      "path": "internal/session/pipeline/",
+      "recursive": false,
+      "minimum": 90.0,
+      "reason": "Durable session copy and upload orchestration"
+    }
+  ]
+}

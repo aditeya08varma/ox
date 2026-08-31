@@ -1,8 +1,6 @@
 name: Release
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -11,18 +9,56 @@ on:
         type: string
 
 concurrency:
-  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 permissions:
   contents: write
+  packages: write
 
 env:
-  RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+  RELEASE_TAG: ${{ inputs.tag }}
 
 jobs:
+  verify-inrepo:
+    if: github.repository == 'sageox/ox'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require an existing human-reviewed draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          is_draft=$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')
+          if [ "$is_draft" != "true" ]; then
+            echo "::error::Release $RELEASE_TAG must exist as a reviewed draft before dispatch."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Configure git identity for tests
+        run: |
+          git config --global user.email "ci@sageox.ai"
+          git config --global user.name "CI"
+
+      - name: Install pinned test runner
+        run: go install gotest.tools/gotestsum@v1.13.0
+
+      - name: Run enforceable release tiers
+        run: make test-release
+
   build-and-release:
     if: github.repository == 'sageox/ox'
+    needs: verify-inrepo
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -48,8 +84,8 @@ jobs:
           public_key=$(jq -r '.public_key' .github/release-signatures.json)
           signatures=$(jq -r '[.signatures | to_entries[] | "\(.key):\(.value)"] | join(";")' .github/release-signatures.json)
 
-          echo "SAGEOX_CLI_PUBLIC_KEY=$public_key" >> $GITHUB_OUTPUT
-          echo "SAGEOX_CLI_SIGNATURES=$signatures" >> $GITHUB_OUTPUT
+          echo "SAGEOX_CLI_PUBLIC_KEY=$public_key" >> "$GITHUB_OUTPUT"
+          echo "SAGEOX_CLI_SIGNATURES=$signatures" >> "$GITHUB_OUTPUT"
 
           # List signed artifacts for logs
           echo "Signed artifacts:"
@@ -79,13 +115,22 @@ jobs:
 
       - name: Release summary
         run: |
-          echo "## Release ${{ env.RELEASE_TAG }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Status:** Published" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Signed artifacts:**" >> $GITHUB_STEP_SUMMARY
-          go run ./scripts/sign-manifest --list 2>/dev/null | sed 's/^/- /' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "[View Release](https://github.com/sageox/ox/releases/tag/${{ env.RELEASE_TAG }})" >> $GITHUB_STEP_SUMMARY
+          {
+            echo "## Release ${{ env.RELEASE_TAG }}"
+            echo ""
+            echo "**Status:** Published"
+            echo ""
+            echo "**Signed artifacts:**"
+            go run ./scripts/sign-manifest --list 2>/dev/null | sed 's/^/- /'
+            echo ""
+            echo "[View Release](https://github.com/sageox/ox/releases/tag/${{ env.RELEASE_TAG }})"
+          } >> "$GITHUB_STEP_SUMMARY"
         env:
           SAGEOX_CLI_SIGNING_KEY: ${{ secrets.SAGEOX_CLI_SIGNING_KEY }}
+
+  publish-docs:
+    needs: build-and-release
+    uses: ./.github/workflows/docs.yml
+    with:
+      tag: ${{ inputs.tag }}
+    secrets: inherit

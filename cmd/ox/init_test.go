@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -21,51 +20,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// skipIntegration skips the test when running with -short flag
-func skipIntegration(t *testing.T) {
-	t.Helper()
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
-}
-
-// testGitRepo initializes a temporary git repository for testing.
-// It calls skipIntegration to skip with -short flag.
-func testGitRepo(t *testing.T) string {
-	t.Helper()
-	skipIntegration(t)
-
-	tmpDir := t.TempDir()
-
-	// initialize git repo
-	cmd := exec.Command("git", "init")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to init git repo")
-
-	// configure git user for commits
-	cmd = exec.Command("git", "config", "user.name", "Test User")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to set git user.name")
-
-	cmd = exec.Command("git", "config", "user.email", "test@example.com")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to set git user.email")
-
-	// create initial commit (required for GetInitialCommitHash)
-	readmePath := filepath.Join(tmpDir, "README.md")
-	require.NoError(t, os.WriteFile(readmePath, []byte("# Test\n"), 0644), "failed to create README")
-
-	cmd = exec.Command("git", "add", "README.md")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to git add")
-
-	cmd = exec.Command("git", "commit", "-m", "Initial commit")
-	cmd.Dir = tmpDir
-	require.NoError(t, cmd.Run(), "failed to git commit")
-
-	return tmpDir
-}
 
 func TestCreateSageoxReadme(t *testing.T) {
 	tmpDir := t.TempDir()
