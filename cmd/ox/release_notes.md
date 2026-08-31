@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.3] - 2026-08-31
+
+Code indexing stays safe on every worktree layout, a wedged checkout repairs itself, and team-scoped credentials just work with `ox query`.
+
+### Improved
+
+- **`ox query` works out of the box with a team-scoped credential** — it infers your team and searches that team's ledgers, so you no longer need to pass `--team` explicitly.
+
+### Fixed
+
+- **Code indexing can never rewrite your repo's git config** — the indexer now opens your checkout read-only across every git worktree layout, so it can't flip `core.bare` or drop your worktree settings and leave `git status` / `git pull` failing.
+- **`ox doctor` repairs a checkout wedged into a bare state** — if `core.bare` gets flipped to true (the state where every work-tree git command fails with "must be run in a work tree"), doctor now detects and restores it automatically instead of leaving you to reset it by hand.
+- **Code indexing keeps recovering from a damaged cache** — a corrupt index rebuilds safely without losing data or crash-looping `ox`.
+
 ## [0.14.2] - 2026-08-25
 
 Resumed work stays connected, stale sessions clean up after themselves, AI coworkers navigate code more directly, code indexing self-heals, team rules recover reliably, and SageOx uses one calm visual language everywhere.
