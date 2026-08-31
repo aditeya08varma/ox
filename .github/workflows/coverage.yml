@@ -30,8 +30,8 @@ jobs:
       - name: Install gotestsum
         run: go install gotest.tools/gotestsum@v1.13.0
 
-      - name: Test with coverage
-        run: TEST_JUNIT=junit.xml make test-cover
+      - name: Full test suite with coverage
+        run: TEST_JUNIT=junit.xml make test-all
 
       - name: Require requested test artifact
         run: |
