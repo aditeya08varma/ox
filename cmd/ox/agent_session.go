@@ -1470,6 +1470,16 @@ func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMet
 	}
 	if scoreFile != nil {
 		builder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
+	} else {
+		// A prior attempt may have persisted metadata and consumed the score
+		// carrier before a later LFS/push failure. Preserve that durable score on
+		// retry instead of overwriting meta.json with an unscored rebuild.
+		existing, readErr := lfs.ReadSessionMeta(sessionDir)
+		if readErr == nil && existing.SageoxScore != nil {
+			builder.SageoxScore(*existing.SageoxScore, existing.SageoxScoreCategory, existing.SageoxScoreReason)
+		} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("read existing session metadata: %w", readErr)
+		}
 	}
 
 	meta := builder.Build()

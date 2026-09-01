@@ -73,7 +73,7 @@ def validate(config: dict) -> list[str]:
                     failures.append(f"{name}: go_test.count must be a positive integer")
             for field in ("package_parallelism", "test_parallelism"):
                 value = go_test.get(field)
-                if not isinstance(value, int) or value < 1:
+                if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                     failures.append(f"{name}: go_test.{field} must be a positive integer")
             timeout = go_test.get("timeout")
             if not isinstance(timeout, str) or not SAFE_TIMEOUT.fullmatch(timeout):

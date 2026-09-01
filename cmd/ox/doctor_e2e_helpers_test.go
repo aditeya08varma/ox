@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/api"
 	"github.com/sageox/ox/internal/testguard"
 	"github.com/stretchr/testify/require"
 )
@@ -280,18 +281,31 @@ func startMockSageoxAPI(t *testing.T) *mockSageoxAPI {
 	// counters ensure the acceptance test cannot green on a legacy fallback.
 	cloudDoctorHandler := func(calls *atomic.Int32, requireAuth bool) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
-			if strings.HasSuffix(r.URL.Path, "/doctor") && r.Method == http.MethodGet {
-				if requireAuth && r.Header.Get("Authorization") != "Bearer test-access-token-fresh-install" {
-					http.Error(w, `{"error":"invalid_token"}`, http.StatusUnauthorized)
+			if requireAuth && r.Header.Get("Authorization") != "Bearer test-access-token-fresh-install" {
+				http.Error(w, `{"error":"invalid_token"}`, http.StatusUnauthorized)
+				return
+			}
+			if r.Method == http.MethodGet {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/ledger-status"):
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(api.LedgerStatusResponse{
+						Status:     "ready",
+						RepoURL:    "https://localhost:1/ledger-test.git",
+						RepoID:     123,
+						CreatedAt:  time.Now().Format(time.RFC3339),
+						Visibility: "private",
+					})
+					return
+				case strings.HasSuffix(r.URL.Path, "/doctor"):
+					calls.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					json.NewEncoder(w).Encode(map[string]any{
+						"issues":     []any{},
+						"checked_at": time.Now().Format(time.RFC3339),
+					})
 					return
 				}
-				calls.Add(1)
-				w.Header().Set("Content-Type", "application/json")
-				json.NewEncoder(w).Encode(map[string]any{
-					"issues":     []any{},
-					"checked_at": time.Now().Format(time.RFC3339),
-				})
-				return
 			}
 			http.Error(w, "not found", http.StatusNotFound)
 		}

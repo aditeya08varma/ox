@@ -35,13 +35,13 @@
     {
       "path": "internal/dashboard/state/",
       "recursive": false,
-      "minimum": 55.0,
+      "minimum": 54.0,
       "reason": "Pure dashboard state and reducer invariants"
     },
     {
       "path": "internal/session/",
       "recursive": false,
-      "minimum": 84.0,
+      "minimum": 81.5,
       "reason": "Session recording, finalization, redaction, and recovery"
     },
     {

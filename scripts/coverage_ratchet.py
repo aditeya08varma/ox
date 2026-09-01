@@ -296,7 +296,18 @@ def evaluate_changed_lines(
             continue
         file_blocks = [block for block in blocks.values() if block.path == path]
         if not file_blocks:
-            failures.append(f"{path}: changed production file has no coverage data")
+            package = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+            package_profiled = any(
+                block.path.startswith(package)
+                and "/" not in block.path[len(package) :]
+                for block in blocks.values()
+            )
+            if package_profiled:
+                notices.append(
+                    f"SKIP {path}: no executable statements in the current profile"
+                )
+            else:
+                failures.append(f"{path}: changed production file has no coverage data")
             continue
         overlapping = [
             block
@@ -317,12 +328,18 @@ def evaluate_changed_lines(
 
 
 def git_changed_lines(base: str) -> dict[str, set[int]]:
+    merge_base = subprocess.run(
+        ["git", "merge-base", base, "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
     command = [
         "git",
         "diff",
         "--unified=0",
         "--no-color",
-        base,
+        merge_base,
         "--",
         "*.go",
     ]

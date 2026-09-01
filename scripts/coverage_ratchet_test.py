@@ -5,6 +5,7 @@ import unittest
 from contextlib import redirect_stdout
 from datetime import date
 from pathlib import Path
+from unittest import mock
 
 import coverage_ratchet
 
@@ -136,6 +137,7 @@ diff --git a/deleted.go b/deleted.go
             blocks,
             {
                 "internal/risk/a.go": {11, 20},
+                "internal/risk/types.go": {1},
                 "internal/new/file.go": {1},
                 "internal/risk/a_test.go": {1},
                 "internal/risk/schema_generated.go": {1},
@@ -152,6 +154,29 @@ diff --git a/deleted.go b/deleted.go
             ],
             failures,
         )
+
+    @mock.patch("coverage_ratchet.subprocess.run")
+    def test_changed_lines_diff_uses_merge_base(self, run):
+        run.side_effect = [
+            mock.Mock(stdout="abc123\n"),
+            mock.Mock(
+                stdout="""diff --git a/a.go b/a.go
+--- a/a.go
++++ b/a.go
+@@ -0,0 +1 @@
++package a
+"""
+            ),
+        ]
+
+        changed = coverage_ratchet.git_changed_lines("origin/main")
+
+        self.assertEqual({"a.go": {1}}, changed)
+        self.assertEqual(
+            ["git", "merge-base", "origin/main", "HEAD"],
+            run.call_args_list[0].args[0],
+        )
+        self.assertEqual("abc123", run.call_args_list[1].args[0][4])
 
     def test_changed_line_exception_is_reviewable_and_expires(self):
         settings = {

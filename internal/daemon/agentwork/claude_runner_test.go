@@ -292,28 +292,6 @@ func TestClaudeRunner_Run_ExitCode(t *testing.T) {
 	assert.Equal(t, "partial", result.Output)
 }
 
-func TestClaudeRunner_Run_SuccessfulInvocation(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping real claude test in short mode")
-	}
-	r := NewClaudeRunner(slog.Default())
-	if !r.Available() {
-		t.Skip("claude binary not installed")
-	}
-
-	result, err := r.Run(context.Background(), RunRequest{
-		Prompt:          "respond with exactly one word: hello",
-		WorkDir:         t.TempDir(),
-		TimeoutOverride: 30 * time.Second,
-	})
-	require.NoError(t, err)
-	assert.Equal(t, 0, result.ExitCode)
-	assert.NotEmpty(t, result.Output, "expected non-empty output from real claude")
-	assert.Greater(t, result.TokensIn, 0)
-	assert.Greater(t, result.TokensOut, 0)
-	assert.True(t, result.Duration > 0)
-}
-
 // TestClaudeRunner_Run_ModelFlag verifies that req.Model becomes a
 // `--model <id>` pair in the argv passed to claude, and that an empty
 // req.Model omits the flag entirely. Failure prevented: the cost-saving

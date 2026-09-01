@@ -150,7 +150,7 @@ make test-all         # All unit tests without build tags
 make test-slow        # Real ox binary tests (build tag: slow)
 make test-acceptance  # Deterministic current-source compiled-binary journeys
 make test-digital-twin # Hermetic auth, ledger, and KB twins
-make test-integration # Real Claude sessions (build tag: integration)
+make test-integration # Print external ox-test-harness guidance, then exit non-zero
 make test-release     # Enforceable in-repo release tiers
 make coverage         # Fast tests with coverage report
 ```

@@ -309,6 +309,7 @@ release:
   # Keep existing release notes written by humans
   # GoReleaser only uploads binaries, doesn't touch notes
   mode: keep
+  use_existing_draft: true
   draft: false
   prerelease: auto
   name_template: "v{{.Version}}"

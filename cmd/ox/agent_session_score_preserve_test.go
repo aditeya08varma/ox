@@ -64,6 +64,41 @@ func TestWriteInitialSessionMetaConsumesScoreOnlyAfterDurableWrite(t *testing.T)
 		assert.Nil(t, score, "durable metadata owns the score after a successful write")
 	})
 
+	t.Run("retry without carrier preserves persisted score", func(t *testing.T) {
+		retryAgentID := agentID + "Retry"
+		require.NoError(t, session.WriteSageoxScore(retryAgentID, 0.8, "survive post-meta upload failure"))
+		sessionDir := t.TempDir()
+		firstBuilder := lfs.NewSessionMeta(
+			"2026-08-31T12-00-ryan-OxScoreRetry",
+			"Ryan",
+			retryAgentID,
+			"codex",
+			time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC),
+		)
+
+		first, err := writeInitialSessionMeta(sessionDir, retryAgentID, firstBuilder)
+		require.NoError(t, err)
+		require.NotNil(t, first.SageoxScore)
+		carrier, readErr := session.ReadSageoxScore(retryAgentID)
+		require.NoError(t, readErr)
+		require.Nil(t, carrier, "first durable metadata write consumes the carrier")
+
+		retryBuilder := lfs.NewSessionMeta(
+			first.SessionName,
+			first.Username,
+			retryAgentID,
+			first.AgentType,
+			first.CreatedAt,
+		)
+		retried, err := writeInitialSessionMeta(sessionDir, retryAgentID, retryBuilder)
+
+		require.NoError(t, err)
+		require.NotNil(t, retried.SageoxScore)
+		assert.Equal(t, 0.8, *retried.SageoxScore)
+		assert.Equal(t, "critical", retried.SageoxScoreCategory)
+		assert.Equal(t, "survive post-meta upload failure", retried.SageoxScoreReason)
+	})
+
 	t.Run("unreadable score blocks metadata and preserves carrier", func(t *testing.T) {
 		require.NoError(t, session.WriteSageoxScore(agentID, 0.5, "must survive corruption"))
 		scorePath := filepath.Join(paths.CacheDir(), "scores", agentID+".json")

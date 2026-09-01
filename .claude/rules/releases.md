@@ -23,8 +23,8 @@ make bump-version NEW_VERSION=0.10.0
 
 1. **Agent prepares release notes** — update `CHANGELOG.md`. Follow Release Notes Guidelines below. NO commit hashes. NO auto-generated changelogs.
 2. **Agent asks human for version confirmation** — always ask. Default: bump middle number.
-3. **Human creates and reviews a draft release** at github.com/sageox/ox/releases/new (tag: `v0.X.0`)
-4. **Agent explicitly dispatches `release.yml` for the approved tag** — the workflow verifies required tiers, signs and uploads binaries, then publishes the existing draft. Never publish it manually; tag creation alone does not authorize publication.
+3. **Agent creates and pushes the approved tag, then the human creates and reviews its draft release** at github.com/sageox/ox/releases/new (tag: `v0.X.0`). Raw tag creation does not publish.
+4. **Agent explicitly dispatches `release.yml` for the reviewed draft** — the workflow verifies required tiers, signs and uploads binaries, then publishes the existing draft. Never publish it manually; tag creation alone does not authorize publication.
 
 ## Release Notes Guidelines
 

@@ -81,6 +81,22 @@ class TestTierContractTest(unittest.TestCase):
         )
         self.assertIn("slow: go_test.timeout must be a safe Go duration", failures)
 
+    def test_rejects_boolean_parallelism(self):
+        config = copy.deepcopy(self.config)
+        config["tiers"]["fast"]["go_test"]["package_parallelism"] = True
+        config["tiers"]["full"]["go_test"]["test_parallelism"] = False
+
+        failures = test_tiers.validate(config)
+
+        self.assertIn(
+            "fast: go_test.package_parallelism must be a positive integer",
+            failures,
+        )
+        self.assertIn(
+            "full: go_test.test_parallelism must be a positive integer",
+            failures,
+        )
+
     def test_rejects_missing_integration_executor(self):
         config = copy.deepcopy(self.config)
         config["tiers"]["integration"]["executor"] = ""

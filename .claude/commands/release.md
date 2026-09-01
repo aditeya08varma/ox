@@ -169,12 +169,21 @@ git checkout main
 git pull
 ```
 
-Extract the changelog section for this version and create a draft release
-before the tag exists. GoReleaser uses `mode: keep`, so this preserves the
-human-written notes:
+Create and push the approved tag before the draft. Raw tag pushes do not
+publish anything, but the release workflow must be able to check out the exact
+tag it verifies:
 
 ```bash
-gh release create v0.X.0 --draft --target main --title "v0.X.0" --notes-file -
+git tag v0.X.0
+git push origin v0.X.0
+```
+
+Then extract the changelog section for this version and create the draft.
+`--verify-tag` prevents an accidental release from a different commit, and
+GoReleaser reuses the draft so the human-written notes are preserved:
+
+```bash
+gh release create v0.X.0 --draft --verify-tag --title "v0.X.0" --notes-file -
 ```
 
 Pipe the release notes (the changelog section for this version) to the command.
@@ -185,9 +194,8 @@ approved, explicitly dispatch the verified release workflow:
 gh workflow run release.yml -f tag=v0.X.0
 ```
 
-Creating a release for a missing tag may create the tag automatically, so tag
-pushes intentionally do not trigger publication. The explicit dispatch starts
-`.github/workflows/release.yml`; its verification job
+Tag pushes intentionally do not trigger publication. The explicit dispatch
+starts `.github/workflows/release.yml`; its verification job
 must pass before GoReleaser uploads artifacts and publishes the existing draft.
 Do not publish the draft manually.
 

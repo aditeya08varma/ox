@@ -218,7 +218,7 @@ test-release: check-test-tiers ## Run every enforceable in-repo release tier seq
 
 test-agents: ## Drive real coding agents and read their transcripts back through ox (opt-in, costs API calls)
 	$(call say,"Driving real coding agents — requires each agent installed and authenticated...")
-	@OX_TEST_REAL_AGENTS=1 $(GO) test -tags=agents -count=1 -v -timeout=20m ./tests/agents/
+	@OX_TEST_REAL_AGENTS=1 $(GO) test -tags=agents -count=1 -v -timeout=20m ./internal/daemon/agentwork ./tests/agents/
 
 check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .claude/rules/lfs-no-git-lfs-binary.md)
 	@if grep -r --include='*.go' -nE 'exec\.(Command|CommandContext)\("git",\s*"lfs"|exec\.(Command|CommandContext)\("git-lfs"|LookPath\("git-lfs"\)' . 2>/dev/null \
@@ -418,10 +418,10 @@ coverage-check: ## Fail if coverage is below threshold (default: 50%)
 	   echo "FAIL: coverage below threshold"; exit 1; \
 	 fi
 
-coverage-ratchet: test-cover ## Fail if protected risk-package coverage regresses
+coverage-ratchet: test-all ## Fail if protected risk-package coverage regresses
 	@python3 scripts/coverage_ratchet.py coverage.out
 
-coverage-ratchet-diff: test-cover ## Enforce package + changed-line coverage vs COVERAGE_BASE
+coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs COVERAGE_BASE
 	@python3 scripts/coverage_ratchet.py coverage.out --diff-base $(COVERAGE_BASE)
 
 coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
