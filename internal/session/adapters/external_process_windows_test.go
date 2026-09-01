@@ -42,7 +42,6 @@ func runWindowsJobHelper(t *testing.T, mode string) {
 	t.Helper()
 	switch mode {
 	case "parent":
-		time.Sleep(100 * time.Millisecond)
 		child := exec.Command(os.Args[0], "-test.run=^TestRunOneShotCommand_WindowsJobKillsDescendants$")
 		child.Env = append(os.Environ(), windowsJobHelperEnv+"=child") // safe: re-executes this test binary only
 		if err := child.Start(); err != nil {

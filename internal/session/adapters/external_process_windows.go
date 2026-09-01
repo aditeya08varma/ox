@@ -3,6 +3,7 @@
 package adapters
 
 import (
+	"errors"
 	"fmt"
 	"os/exec"
 	"syscall"
@@ -15,7 +16,9 @@ import (
 // process group. Descendant lifetime is enforced by runOneShotCommand's Job
 // Object; the group also keeps console control events scoped away from ox.
 func configureOneShotCommand(cmd *exec.Cmd) {
-	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NEW_PROCESS_GROUP}
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		CreationFlags: windows.CREATE_NEW_PROCESS_GROUP | windows.CREATE_SUSPENDED,
+	}
 }
 
 // runOneShotCommand assigns the adapter to a kill-on-close Job Object. Windows
@@ -59,8 +62,42 @@ func runOneShotCommand(cmd *exec.Cmd) error {
 		killAndWait(cmd)
 		return fmt.Errorf("assign adapter process to job object: %w", err)
 	}
+	if err := resumeProcess(uint32(cmd.Process.Pid)); err != nil {
+		killAndWait(cmd)
+		return fmt.Errorf("resume adapter process after job assignment: %w", err)
+	}
 
 	return cmd.Wait()
+}
+
+func resumeProcess(processID uint32) error {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPTHREAD, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(snapshot) //nolint:errcheck // snapshot is read-only
+
+	entry := windows.ThreadEntry32{Size: uint32(unsafe.Sizeof(windows.ThreadEntry32{}))}
+	if err := windows.Thread32First(snapshot, &entry); err != nil {
+		return err
+	}
+	for {
+		if entry.OwnerProcessID == processID {
+			thread, err := windows.OpenThread(windows.THREAD_SUSPEND_RESUME, false, entry.ThreadID)
+			if err != nil {
+				return err
+			}
+			defer windows.CloseHandle(thread) //nolint:errcheck // resumed thread owns lifecycle
+			_, err = windows.ResumeThread(thread)
+			return err
+		}
+		if err := windows.Thread32Next(snapshot, &entry); err != nil {
+			if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+				return fmt.Errorf("primary thread not found for process %d", processID)
+			}
+			return err
+		}
+	}
 }
 
 func killAndWait(cmd *exec.Cmd) {
