@@ -602,7 +602,6 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 
 	cmd := exec.CommandContext(ctx, ea.binaryPath, cmdArgs...)
 	cmd.Env = ea.buildEnv()
-	configureOneShotCommand(cmd)
 	cmd.WaitDelay = oneShotPipeDrainDelay
 
 	limit := ea.oneShotOutputLimit
@@ -615,7 +614,7 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
+	err := runOneShotCommand(cmd)
 	if timeoutCtx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("%w: %s %s", ErrAdapterTimeout, ea.binaryPath, subcommand)
 	}

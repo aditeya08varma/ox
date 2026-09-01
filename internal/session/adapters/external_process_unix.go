@@ -29,3 +29,8 @@ func configureOneShotCommand(cmd *exec.Cmd) {
 		return nil
 	}
 }
+
+func runOneShotCommand(cmd *exec.Cmd) error {
+	configureOneShotCommand(cmd)
+	return cmd.Run()
+}
