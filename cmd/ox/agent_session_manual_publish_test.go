@@ -40,6 +40,20 @@ type agentSessionFixture struct {
 }
 
 func TestManualPublishingSessionCapture_Matrix(t *testing.T) {
+	// The test binary may itself run inside Codex, Claude Code, or another AI
+	// coworker. Do not let that ambient session identity make
+	// ensurePrimeBeforeSession recursively execute the test binary as `ox`.
+	for _, key := range []string{
+		"AMP_THREAD_URL",
+		"CLAUDE_CODE_SESSION_ID",
+		"CODEX_THREAD_ID",
+		"GC_RUN_ID",
+		"OMP_SESSION_ID",
+		"PI_SESSION_ID",
+	} {
+		t.Setenv(key, "")
+	}
+
 	adapters.Register(&testCodexAdapter{})
 	t.Cleanup(func() { adapters.Unregister("codex") })
 

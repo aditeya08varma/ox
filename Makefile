@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
-.PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open
-.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-timings test-all test-slow test-browser test-integration test-agents test-preflight test-digital-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
+.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-timings test-all test-slow test-browser test-integration test-acceptance test-release test-agents test-preflight test-digital-twin test-cloud-api-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -86,7 +86,8 @@ run: build ## Build and run ox
 #
 # Test Tiers:
 #   fast  (make test)             — Unit tests <500ms. No git clone, no network, NO coverage instrumentation.
-#                                   Runs on every commit. Target: <60s wall.
+#                                   Uses both testing.Short and the `short` build tag so files marked
+#                                   `//go:build !short` are excluded. Runs on every commit. Target: <60s wall.
 #   fast+cov (make test-cover)    — Same as fast but with coverage (~15-20% slower). Local use.
 #   full  (make test-all)         — All unit tests including expensive ones (git clone, SQLite, LFS).
 #                                   Coverage collection lives here. Target: <5min wall.
@@ -94,7 +95,8 @@ run: build ## Build and run ox
 #   integration — E2E with real Claude sessions. Lives in sageox/ox-test-harness (private).
 #
 # Tier criteria for `make test` (fast):
-#   - No exec.Command (git or otherwise) except via an in-process fake.
+#   - No network or external services. Hermetic local subprocesses (for
+#     example git in t.TempDir) are allowed when bounded and <500ms.
 #   - No time.Sleep > 5ms on the success path.
 #   - No real SQLite/Bleve file I/O.
 #   - No os.Setenv (use t.Setenv); tests should call t.Parallel().
@@ -108,11 +110,20 @@ run: build ## Build and run ox
 #
 # Output: quiet by default (agent-friendly). V=1 for verbose.
 #
-GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/gotestsum@latest")
+GOTESTSUM_VERSION := v1.13.0
+GOTESTSUM := $(shell which gotestsum 2>/dev/null || echo "go run gotest.tools/gotestsum@$(GOTESTSUM_VERSION)")
 # Leave empty to create a unique artifact per local invocation. Set explicitly
 # when a caller needs a stable path (for example, CI uploads its artifact).
 TEST_TIMINGS ?=
+TEST_JUNIT ?=
 TEST_METRICS := scripts/test_metrics.py
+TEST_TIER_TOOL := python3 scripts/test_tiers.py
+FAST_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags fast)
+FULL_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags full)
+SLOW_TEST_FLAGS = $(shell $(TEST_TIER_TOOL) flags slow)
+SLOW_TEST_PACKAGES := ./cmd/ox ./internal/daemon ./internal/session ./tests/adapters
+GOTESTSUM_JUNIT = $(if $(strip $(TEST_JUNIT)),--junitfile "$(TEST_JUNIT)",)
+GOTESTSUM_TIMINGS = $(if $(strip $(TEST_TIMINGS)),--jsonfile-timing-events "$(TEST_TIMINGS)",)
 
 # Isolate test `git` invocations from the developer's global config.
 # Many tests build scratch repos in t.TempDir() and run `git init` +
@@ -142,43 +153,72 @@ TEST_GIT_ISOLATION := \
 	GIT_COMMITTER_EMAIL=test@test.sageox.ai
 
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
-test: ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
+check-test-tiers: ## Validate the machine-readable test-tier contract
+	@$(TEST_TIER_TOOL) validate
+
+test-tiers: check-test-tiers ## Print the executable test-tier contract
+	@for tier in fast full slow acceptance digital_twin integration release; do $(TEST_TIER_TOOL) describe $$tier; echo; done
+
+test: check-test-tiers ## Run fast tests — unit tests <500ms, race detection, no coverage (every commit)
 	$(call say,"Running fast tests (skipping >500ms, no coverage)...")
 	@timings='$(TEST_TIMINGS)'; \
 	if [ -z "$$timings" ]; then mkdir -p tmp; timings=$$(mktemp -p tmp test-timings.XXXXXX); else mkdir -p "$$(dirname "$$timings")"; fi; \
-	$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) --jsonfile-timing-events "$$timings" -- -short -race -p 8 -parallel 32 ./...; \
+	test_status=0; \
+	$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) --jsonfile-timing-events "$$timings" -- $(FAST_TEST_FLAGS) ./... || test_status=$$?; \
 	echo "TEST_TIMING_ARTIFACT path=$$timings"; \
-	python3 $(TEST_METRICS) "$$timings"
+	metrics_status=0; \
+	python3 $(TEST_METRICS) "$$timings" || metrics_status=$$?; \
+	if [ "$$test_status" -ne 0 ]; then exit "$$test_status"; fi; \
+	exit "$$metrics_status"
 
-test-cover: ## Run fast tests with coverage collection (~15-20% slower than `make test`)
+test-cover: check-test-tiers ## Run fast tests with coverage collection (~15-20% slower than `make test`)
 	$(call say,"Running fast tests with coverage...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -short -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FAST_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
 
 test-timings: ## Reprint metrics from the latest fast-test timing artifact
 	@test -n "$(TEST_TIMINGS)" || (echo "Set TEST_TIMINGS to an artifact printed by 'make test'." && exit 1)
 	@test -f $(TEST_TIMINGS) || (echo "No fast-test timing artifact at $(TEST_TIMINGS)." && exit 1)
 	@python3 $(TEST_METRICS) $(TEST_TIMINGS)
 
-test-all: ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
+test-all: check-test-tiers ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -p 8 -parallel 32 -coverprofile=coverage.out -covermode=atomic ./...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FULL_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
 
-test-slow: ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
+test-slow: check-test-tiers ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
 	$(call say,"Running slow tests (requires built ox binary)...")
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=slow -race -timeout=10m ./...
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- $(SLOW_TEST_FLAGS) $(SLOW_TEST_PACKAGES)
 
 test-browser: ## Run real-browser E2E (build tag: browser) — drives headless Chrome; skips if no Chrome installed
 	$(call say,"Running real-browser E2E (requires Chrome/Chromium)...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -tags=browser -run TestBrowser -count=1 -timeout=5m ./cmd/ox/...
 
 test-integration: ## Integration tests live in sageox/ox-test-harness
-	@echo "Coding agent integration tests are in sageox/ox-test-harness."
+	@$(TEST_TIER_TOOL) describe integration
 	@echo "For an in-repo real-agent smoke gate, run: make test-agents"
 	@exit 1
 
+test-acceptance: check-test-tiers ## Deterministic current-source compiled-binary acceptance journeys
+	$(call say,"Running deterministic compiled-binary acceptance tests...")
+	@listed=$$($(GO) test -tags=integration ./cmd/ox -list '.'); \
+	 for required in TestCodeActivityE2E TestFreshInstall_MockServer_InitThenDoctor; do \
+	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required acceptance test missing: $$required"; exit 1; }; \
+	 done
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- \
+		-tags=integration -race -count=1 -p 1 -parallel 1 -timeout=10m \
+		-run 'TestCodeActivityE2E|TestFreshInstall_MockServer_InitThenDoctor' \
+		./cmd/ox
+
+test-release: check-test-tiers ## Run every enforceable in-repo release tier sequentially
+	@$(MAKE) coverage-ratchet-test
+	@$(MAKE) test-all
+	@python3 scripts/coverage_ratchet.py coverage.out
+	@$(MAKE) test-slow
+	@$(MAKE) test-acceptance
+	@$(MAKE) test-digital-twin
+
 test-agents: ## Drive real coding agents and read their transcripts back through ox (opt-in, costs API calls)
 	$(call say,"Driving real coding agents — requires each agent installed and authenticated...")
-	@OX_TEST_REAL_AGENTS=1 $(GO) test -tags=agents -count=1 -v -timeout=20m ./tests/agents/
+	@OX_TEST_REAL_AGENTS=1 $(GO) test -tags=agents -count=1 -v -timeout=20m ./internal/daemon/agentwork ./tests/agents/
 
 check-no-git-lfs-shell: ## Ensure no code shells out to git-lfs binary (see .claude/rules/lfs-no-git-lfs-binary.md)
 	@if grep -r --include='*.go' -nE 'exec\.(Command|CommandContext)\("git",\s*"lfs"|exec\.(Command|CommandContext)\("git-lfs"|LookPath\("git-lfs"\)' . 2>/dev/null \
@@ -299,7 +339,11 @@ test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session
 	@# `--output-sync=target` if that's confusing.
 	@$(MAKE) -j 3 lint test-all test-slow
 
-test-digital-twin: test-ledger-twin test-kb-twin ## Digital twin tests (team_context_twin pending, see ox-au5)
+test-digital-twin: test-cloud-api-twin test-ledger-twin test-kb-twin ## Deterministic cloud-auth, ledger, and KB twins
+
+test-cloud-api-twin: ## Product auth client against in-process SageOx API twin
+	@echo "Running cloud auth API digital twin tests..."
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -count=1 -timeout=2m ./internal/auth/... ./internal/twinapi/...
 
 test-team-context-twin: ## Digital twin tests (generates fake team context for inspection)
 	@echo "Running team context digital twin tests..."
@@ -310,6 +354,7 @@ test-ledger-twin: ## Digital twin ledger tests (generates fake ledger for inspec
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=ledger_twin -v -count=1 -timeout=2m ./tests/ledger_twin/...
 
 test-kb-twin: ## Digital twin kb tests (drives syncBubbles + GC against real bare repos)
+	@command -v git >/dev/null 2>&1 || { echo "ERROR: git is required for the KB digital twin"; exit 1; }
 	@echo "Running kb digital twin tests..."
 	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=kb_twin -v -count=1 -timeout=5m ./tests/kb_twin/...
 
@@ -328,12 +373,13 @@ test-profile: ## Visualize test execution timeline (requires vgt)
 	@echo "Profile complete"
 
 test-watch: ## Run tests in watch mode (requires gotestsum)
-	@which gotestsum > /dev/null || (echo "gotestsum not found. Install with: go install gotest.tools/gotestsum@latest" && exit 1)
+	@which gotestsum > /dev/null || (echo "gotestsum not found. Install with: go install gotest.tools/gotestsum@$(GOTESTSUM_VERSION)" && exit 1)
 	gotestsum --watch
 
 # Coverage
 COVERDIR := tmp/coverage
 COVERAGE_THRESHOLD ?= 50
+COVERAGE_BASE ?= origin/main
 
 coverage: test-cover ## Run fast tests with coverage and open report
 	@$(GO) tool cover -func=coverage.out | tail -1
@@ -372,22 +418,37 @@ coverage-check: ## Fail if coverage is below threshold (default: 50%)
 	   echo "FAIL: coverage below threshold"; exit 1; \
 	 fi
 
+coverage-ratchet: test-all ## Fail if protected risk-package coverage regresses
+	@python3 scripts/coverage_ratchet.py coverage.out
+
+coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs COVERAGE_BASE
+	@python3 scripts/coverage_ratchet.py coverage.out --diff-base $(COVERAGE_BASE)
+
+coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
+	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py
+
 build-cover: ## Build ox binary with coverage instrumentation
+	@rm -rf $(COVERDIR)/integration $(COVERDIR)/merged
 	@mkdir -p bin $(COVERDIR)/integration
-	@GOCOVERDIR=$(COVERDIR)/integration $(GO) build -cover $(LDFLAGS) -o bin/$(BINARY_NAME)-cover ./cmd/ox
+	@$(GO) build -cover -covermode=atomic $(LDFLAGS) -o bin/$(BINARY_NAME)-cover ./cmd/ox
 	@echo "Instrumented binary: bin/$(BINARY_NAME)-cover"
 	@echo "Run with: GOCOVERDIR=$(COVERDIR)/integration bin/$(BINARY_NAME)-cover ..."
 
-coverage-integration: build-cover test ## Merge unit + integration coverage
+coverage-integration: test-cover build-cover ## Run instrumented ox and merge unit + integration coverage
+	@echo "Running deterministic instrumented-binary scenarios..."
+	@GOCOVERDIR=$(abspath $(COVERDIR)/integration) bin/$(BINARY_NAME)-cover version >/dev/null
+	@GOCOVERDIR=$(abspath $(COVERDIR)/integration) bin/$(BINARY_NAME)-cover help >/dev/null
+	@count=$$(find $(COVERDIR)/integration -type f -name 'covcounters.*' | wc -l | tr -d ' '); \
+	 if [ "$$count" -eq 0 ]; then \
+	   echo "ERROR: instrumented ox produced no fresh coverage counters"; exit 1; \
+	 fi; \
+	 echo "Fresh integration coverage fragments: $$count"
 	@echo "Converting integration profile..."
-	@$(GO) tool covdata textfmt -i=$(COVERDIR)/integration -o=$(COVERDIR)/integration.out 2>/dev/null || true
+	@$(GO) tool covdata textfmt -i=$(COVERDIR)/integration -o=$(COVERDIR)/integration.out
 	@echo "Merging profiles..."
-	@if [ -f $(COVERDIR)/integration.out ]; then \
-	  $(GO) tool covdata merge -i=$(COVERDIR)/integration -o=$(COVERDIR)/merged 2>/dev/null && \
-	  $(GO) tool covdata textfmt -i=$(COVERDIR)/merged -o=coverage-all.out; \
-	else \
-	  cp coverage.out coverage-all.out; \
-	fi
+	@awk 'FNR == 1 { next } { counts[$$1 " " $$2] += $$3 } END { for (block in counts) print block, counts[block] }' \
+	  coverage.out $(COVERDIR)/integration.out | LC_ALL=C sort > $(COVERDIR)/merged-body.out
+	@{ echo 'mode: atomic'; sed -n '1,$$p' $(COVERDIR)/merged-body.out; } > coverage-all.out
 	@$(GO) tool cover -func=coverage-all.out | tail -1
 	@echo "Combined profile: coverage-all.out"
 
@@ -432,7 +493,7 @@ install-hooks: ## Install git pre-commit hooks
 	@echo "Git hooks installed"
 
 # Distribution
-release: ## Create release with goreleaser (requires GITHUB_TOKEN)
+release: test-release ## Create release with goreleaser after enforceable test tiers (requires GITHUB_TOKEN)
 	@which goreleaser > /dev/null || (echo "goreleaser not found. Install from https://goreleaser.com/install/" && exit 1)
 	goreleaser release -f .config/goreleaser.yml --clean
 

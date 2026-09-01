@@ -15,7 +15,10 @@ paths:
 | Fast (<500ms) | `make test` | Every commit. Target: <30s |
 | Full (expensive) | `make test-all` | Before PRs. Includes git clone, SQLite concurrent, LFS pointer verification |
 | Slow (real binary) | `make test-slow` | Build tag: `slow`. No agent needed |
-| Integration (real sessions) | `make test-integration` | Release gate. Lives in `sageox/ox-test-harness` |
+| Acceptance (compiled binary) | `make test-acceptance` | Deterministic PR/release gate |
+| Digital twins | `make test-digital-twin` | Hermetic auth, ledger, and KB PR/release gate |
+| Integration (real sessions) | `make test-integration` | External compatibility evidence; attested gating tracked by `ox-ilrr.4` |
+| Release | `make test-release` | Enforceable in-repo full + ratchet + slow + acceptance + twin gate |
 | Pre-PR gate | `make test-preflight` | lint + full + slow (~3-5min) |
 
 **Output:** Makefile is quiet by default. Use `V=1 make test` for verbose.

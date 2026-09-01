@@ -92,7 +92,7 @@ jobs:
               "" \
               "A version bump was merged to \`main\` without a corresponding tagged, published release, so \`releases/latest\` (and the update-notify chain that reads it) is still pointing at the old version." \
               "" \
-              "**To fix:** create the git tag \`v$CURRENT\` and publish a GitHub release for it. Publishing fires \`.github/workflows/release.yml\`, which builds and uploads the release artifacts." \
+              "**To fix:** create and push \`v$CURRENT\`, create and review its draft GitHub release, then explicitly dispatch \`.github/workflows/release.yml\` with that tag. Verification must pass before GoReleaser uploads artifacts and publishes the draft. Do not publish it manually; tag creation alone does not authorize publication." \
               "" \
               "This issue was opened automatically by \`.github/workflows/release-drift.yml\` and will close automatically once the release is published.")
 

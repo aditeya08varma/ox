@@ -234,35 +234,6 @@ func TestUnmergedPathsFailure_LoudAndActionable(t *testing.T) {
 // `git config --global` — the helper above shows the canonical isolation
 // pattern.
 
-// runIsolatedGit is a test-local git runner that always pins cmd.Dir to the
-// supplied repo and never touches the global config. Tests must not
-// modify the host's git identity.
-func runIsolatedGit(t *testing.T, dir string, args ...string) (string, error) {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	// scrub HOME/XDG_CONFIG_HOME so per-user gitconfig (including merge.tool
-	// hooks that could open an editor) can't interfere with the test.
-	cmd.Env = append(os.Environ(), // safe: isolated git subprocess in temp dir, HOME/XDG/GIT_CONFIG_* scrubbed
-		"HOME="+dir,
-		"XDG_CONFIG_HOME="+filepath.Join(dir, ".config"),
-		"GIT_CONFIG_GLOBAL=/dev/null",
-		"GIT_CONFIG_SYSTEM=/dev/null",
-		"GIT_AUTHOR_NAME=Test",
-		"GIT_AUTHOR_EMAIL=test@example.com",
-		"GIT_COMMITTER_NAME=Test",
-		"GIT_COMMITTER_EMAIL=test@example.com",
-	)
-	out, err := cmd.CombinedOutput()
-	return strings.TrimSpace(string(out)), err
-}
-
-func mustRunGit(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	out, err := runIsolatedGit(t, dir, args...)
-	require.NoErrorf(t, err, "git %s: %s", strings.Join(args, " "), out)
-}
-
 // buildStuckMergeRepo creates a real git repo with a live MERGE_HEAD + UU
 // conflict. Returns the repo path. The returned repo is in EXACTLY the
 // state the ox-8zd3 incident left the ledger in.

@@ -1375,15 +1375,8 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		// session that may never reach the remote.
 		LinkageStatus(lfs.LinkageStatusStaged)
 
-	// inject sageox contribution score from cache file into meta.json,
-	// then clean up the score file to prevent stale scores leaking into future sessions
-	if scoreFile, _ := session.ReadSageoxScore(state.AgentID); scoreFile != nil {
-		metaBuilder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
-	}
-	_ = session.CleanupSageoxScore(state.AgentID)
-
-	meta := metaBuilder.Build()
-	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
+	meta, err := writeInitialSessionMeta(sessionDir, state.AgentID, metaBuilder)
+	if err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}
 
@@ -1464,6 +1457,43 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 
 	return nil
+}
+
+// writeInitialSessionMeta persists the first durable metadata snapshot before
+// consuming the per-agent contribution score. If the write fails, the score
+// remains available for a retry instead of being silently lost alongside the
+// failed meta.json write.
+func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMetaBuilder) (*lfs.SessionMeta, error) {
+	scoreFile, err := session.ReadSageoxScore(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("read SageOx score: %w", err)
+	}
+	if scoreFile != nil {
+		builder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
+	} else {
+		// A prior attempt may have persisted metadata and consumed the score
+		// carrier before a later LFS/push failure. Preserve that durable score on
+		// retry instead of overwriting meta.json with an unscored rebuild.
+		existing, readErr := lfs.ReadSessionMeta(sessionDir)
+		if readErr == nil && existing.SageoxScore != nil {
+			builder.SageoxScore(*existing.SageoxScore, existing.SageoxScoreCategory, existing.SageoxScoreReason)
+		} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("read existing session metadata: %w", readErr)
+		}
+	}
+
+	meta := builder.Build()
+	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
+		return nil, err
+	}
+
+	// Cleanup remains best-effort, but only after a successfully read score has
+	// a durable carrier. Missing scores need no cleanup; unreadable scores are
+	// preserved above for diagnosis and retry rather than silently discarded.
+	if scoreFile != nil {
+		_ = session.CleanupSageoxScore(agentID)
+	}
+	return meta, nil
 }
 
 // reconcileProducedPlansAtStop backfills the canonical session id + a
