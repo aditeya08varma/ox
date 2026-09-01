@@ -164,6 +164,21 @@ func TestReadCacheSessionMeta(t *testing.T) {
 	})
 }
 
+func TestRawJSONLReadersRejectOverlongHeader(t *testing.T) {
+	rawPath := filepath.Join(t.TempDir(), ledgerFileRaw)
+	require.NoError(t, os.WriteFile(
+		rawPath,
+		[]byte(strings.Repeat("x", rawJSONLMaxLineBytes+1)),
+		0o600,
+	))
+
+	_, _, err := readCacheSessionMeta(rawPath)
+	require.ErrorContains(t, err, "read header")
+
+	err = validateRawJSONLHeader(rawPath)
+	require.ErrorContains(t, err, "read header")
+}
+
 func findTestOrphans(t *testing.T, cacheSessionsDir, ledgerPath string) []orphanedSession {
 	t.Helper()
 	orphans, err := findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath)

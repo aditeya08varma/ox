@@ -384,3 +384,18 @@ func TestRetrySessionUpload_PendingMarkerFailureStopsBeforeMutation(t *testing.T
 	require.ErrorContains(t, err, "record pending session upload retry")
 	assert.Empty(t, calls, "ledger mutation must not begin without durable retry ownership")
 }
+
+func TestRetrySessionUpload_UnsafePointerPathRemainsRetryable(t *testing.T) {
+	fixture := newSessionUploadFixture(t)
+	fixture.refs["../escape.jsonl"] = lfs.NewFileRef([]byte("must not escape"))
+
+	var calls []string
+	err := retrySessionUploadWithEffects(
+		fixture.projectRoot,
+		fixture.ledgerPath,
+		fixture.orphan(),
+		scriptedSessionUploadEffects(&calls, fixture.refs, ""),
+	)
+	require.ErrorContains(t, err, "write LFS pointer files")
+	require.FileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile))
+}
