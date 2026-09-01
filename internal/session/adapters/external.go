@@ -38,7 +38,13 @@ var (
 	ErrAdapterOutputLimit = errors.New("adapter output exceeded limit")
 )
 
-const defaultOneShotOutputLimit = 64 * 1024 * 1024
+const (
+	defaultOneShotOutputLimit = 64 * 1024 * 1024
+	// After cancellation, a descendant may keep the adapter's inherited output
+	// pipes open even though the direct process has exited. Bound pipe draining
+	// so a timed-out one-shot call returns promptly on every platform.
+	oneShotPipeDrainDelay = 100 * time.Millisecond
+)
 
 // ExternalAdapter implements Adapter and IncrementalReader by calling an
 // external adapter binary via subprocess (one-shot) or serve-mode pipe.
@@ -596,6 +602,8 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 
 	cmd := exec.CommandContext(ctx, ea.binaryPath, cmdArgs...)
 	cmd.Env = ea.buildEnv()
+	configureOneShotCommand(cmd)
+	cmd.WaitDelay = oneShotPipeDrainDelay
 
 	limit := ea.oneShotOutputLimit
 	if limit <= 0 {

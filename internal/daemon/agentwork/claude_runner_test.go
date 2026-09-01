@@ -194,14 +194,15 @@ func TestProcessCancellationKillsDescendants(t *testing.T) {
 	cmd := exec.CommandContext(ctx, script)
 	setProcAttr(cmd)
 	require.NoError(t, cmd.Start())
+	var childPID int
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(childPIDFile)
-		return err == nil
+		rawPID, err := os.ReadFile(childPIDFile)
+		if err != nil {
+			return false
+		}
+		childPID, err = strconv.Atoi(strings.TrimSpace(string(rawPID)))
+		return err == nil && childPID > 0
 	}, 5*time.Second, 10*time.Millisecond, "process tree must become ready")
-	rawPID, err := os.ReadFile(childPIDFile)
-	require.NoError(t, err)
-	childPID, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
-	require.NoError(t, err)
 
 	cancel()
 	require.Error(t, cmd.Wait())

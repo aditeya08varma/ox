@@ -37,6 +37,12 @@ type orphanedSession struct {
 	EntryCount  int                // footer count, or recovered valid turns after a crash
 }
 
+const (
+	rawJSONLInitialScanBuffer     = 1024 * 1024
+	rawJSONLMaxLineBytes          = 10 * 1024 * 1024
+	sessionUploadRetryPendingFile = ".upload-retry-pending"
+)
+
 // checkSessionUploadRetry finds sessions in cache that failed to upload and retries them.
 func checkSessionUploadRetry() checkResult {
 	const name = "session upload retry"
@@ -104,6 +110,13 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 	}
 
 	cacheSessionsDir := filepath.Join(contextPath, "sessions")
+	return findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath)
+}
+
+// findOrphanedSessionsInDir contains the filesystem scan after project path
+// resolution. Keeping this as production code lets tests exercise the exact
+// stale-recording and uploaded-session decisions used by doctor.
+func findOrphanedSessionsInDir(cacheSessionsDir, ledgerPath string) ([]orphanedSession, error) {
 	entries, err := os.ReadDir(cacheSessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -167,7 +180,8 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 			continue
 		}
 
-		// skip if already uploaded (meta.json exists in ledger).
+		// Skip if already uploaded (meta.json exists in ledger), unless this
+		// retry recorded that post-publication work is still pending.
 		//
 		// A DRAFT placeholder does not count as uploaded. It is a
 		// meta.json-only marker published mid-recording (ADR-029) and carries
@@ -184,7 +198,9 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 		ledgerSessionDir := filepath.Join(ledgerPath, "sessions", sessionName)
 		if _, err := os.Stat(filepath.Join(ledgerSessionDir, "meta.json")); err == nil {
 			ledgerMeta, metaErr := lfs.ReadSessionMeta(ledgerSessionDir)
-			if metaErr != nil || !ledgerMeta.IsDraft() {
+			_, pendingErr := os.Stat(filepath.Join(sessionDir, sessionUploadRetryPendingFile))
+			pendingRetry := pendingErr == nil
+			if metaErr != nil || (!ledgerMeta.IsDraft() && !pendingRetry) {
 				continue
 			}
 		}
@@ -227,8 +243,7 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 		return nil, 0, fmt.Errorf("not a regular file: %s", rawPath)
 	}
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
+	scanner := newRawJSONLScanner(f)
 	if !scanner.Scan() {
 		if err := scanner.Err(); err != nil {
 			return nil, 0, fmt.Errorf("read header: %w", err)
@@ -339,6 +354,15 @@ func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphan
 	rawSrc := filepath.Join(orphan.CachePath, ledgerFileRaw)
 	if err := validateRawJSONLHeader(rawSrc); err != nil {
 		return fmt.Errorf("%s validation failed (skipping corrupt session): %w", ledgerFileRaw, err)
+	}
+
+	// Record retry ownership before mutating the ledger. Once meta.json becomes
+	// final, ordinary orphan discovery skips it to avoid replaying an already
+	// published session. This cache-side marker is what keeps failures from any
+	// later phase (including the post-push pointer commit) discoverable on the
+	// next doctor pass. A successful pass prunes the cache and marker together.
+	if err := writeSessionUploadRetryPending(orphan.CachePath); err != nil {
+		return fmt.Errorf("record pending session upload retry: %w", err)
 	}
 
 	// Supersede a draft placeholder if one was published before the agent died,
@@ -531,10 +555,12 @@ func validateRawJSONLHeader(rawPath string) error {
 		return fmt.Errorf("not a regular file: %s", rawPath)
 	}
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 64*1024), 64*1024)
+	scanner := newRawJSONLScanner(f)
 
 	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return fmt.Errorf("read header: %w", err)
+		}
 		return fmt.Errorf("empty file")
 	}
 
@@ -548,6 +574,29 @@ func validateRawJSONLHeader(rawPath string) error {
 	}
 
 	return nil
+}
+
+func newRawJSONLScanner(r io.Reader) *bufio.Scanner {
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, rawJSONLInitialScanBuffer), rawJSONLMaxLineBytes)
+	return scanner
+}
+
+func writeSessionUploadRetryPending(cachePath string) error {
+	markerPath := filepath.Join(cachePath, sessionUploadRetryPendingFile)
+	f, err := os.OpenFile(markerPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString("pending\n"); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // copyFile copies a file from src to dst.

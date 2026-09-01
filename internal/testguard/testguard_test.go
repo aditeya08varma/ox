@@ -46,19 +46,47 @@ func TestMinimalEnv_DoesNotInheritGoTestInternalCoverDir(t *testing.T) {
 }
 
 func TestResolveTestOxBinary(t *testing.T) {
-	binPath := filepath.Join(t.TempDir(), "ox")
-	require.NoError(t, os.WriteFile(binPath, []byte("test binary"), 0755))
+	tests := []struct {
+		name    string
+		setup   func(*testing.T) string
+		wantErr string
+	}{
+		{
+			name: "regular executable",
+			setup: func(t *testing.T) string {
+				path := filepath.Join(t.TempDir(), "ox")
+				require.NoError(t, os.WriteFile(path, []byte("test binary"), 0o755))
+				return path
+			},
+		},
+		{
+			name: "missing path",
+			setup: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing")
+			},
+			wantErr: "stat",
+		},
+		{
+			name: "directory",
+			setup: func(t *testing.T) string {
+				return t.TempDir()
+			},
+			wantErr: "not a regular file",
+		},
+	}
 
-	resolved, err := resolveTestOxBinary(binPath)
-	require.NoError(t, err)
-	assert.Equal(t, binPath, resolved)
-
-	_, err = resolveTestOxBinary(filepath.Join(t.TempDir(), "missing"))
-	assert.ErrorContains(t, err, "stat")
-
-	directory := t.TempDir()
-	_, err = resolveTestOxBinary(directory)
-	assert.ErrorContains(t, err, "not a regular file")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := tt.setup(t)
+			resolved, err := resolveTestOxBinary(path)
+			if tt.wantErr != "" {
+				assert.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, path, resolved)
+		})
+	}
 }
 
 func TestMinimalEnv_BlocksNonAllowlistedVars(t *testing.T) {

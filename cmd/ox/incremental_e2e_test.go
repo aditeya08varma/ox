@@ -43,8 +43,8 @@ import (
 //
 // Run with: go test -tags=slow -timeout=5m -run TestIncrementalE2E ./cmd/ox/ -v
 func TestIncrementalE2E_SingleAgent(t *testing.T) {
-	oxBin := buildOxBinary(t)
-	env := setupE2EWorkspace(t, oxBin)
+	oxBin, adapterDir := buildIncrementalE2EBinaries(t)
+	env := setupE2EWorkspace(t, adapterDir)
 
 	agentID := "OxE2E1"
 	claudeSessionID := "test-e2e-session-001"
@@ -125,8 +125,8 @@ func TestIncrementalE2E_SingleAgent(t *testing.T) {
 // on the same worktree, verifying no cross-contamination.
 // Component test with simulated data — not a real Claude E2E test.
 func TestIncrementalE2E_MultiAgent(t *testing.T) {
-	oxBin := buildOxBinary(t)
-	env := setupE2EWorkspace(t, oxBin)
+	oxBin, adapterDir := buildIncrementalE2EBinaries(t)
+	env := setupE2EWorkspace(t, adapterDir)
 
 	agentA := "OxCdA1"
 	agentB := "OxCdB2"
@@ -221,8 +221,8 @@ func TestIncrementalE2E_MultiAgent(t *testing.T) {
 // This is the core anti-entropy guarantee: no session data is lost even if the
 // CLI crashes or the user interrupts the process.
 func TestIncrementalE2E_CtrlC_AntiEntropy(t *testing.T) {
-	oxBin := buildOxBinary(t)
-	env := setupE2EWorkspace(t, oxBin)
+	oxBin, adapterDir := buildIncrementalE2EBinaries(t)
+	env := setupE2EWorkspace(t, adapterDir)
 
 	agentID := "OxCtC1"
 	claudeSessionID := "test-ctrlc-session-001"
@@ -387,13 +387,40 @@ func findFilesRecursive(root, name string) []string {
 // --- E2E test infrastructure ---
 
 type e2eEnv struct {
-	workspace string // git repo with .sageox/
-	home      string // fake HOME for isolation
-	cacheDir  string // XDG_CACHE_HOME
-	username  string // synthetic username for test isolation
+	workspace  string // git repo with .sageox/
+	home       string // fake HOME for isolation
+	cacheDir   string // XDG_CACHE_HOME
+	username   string // synthetic username for test isolation
+	adapterDir string // test-owned external adapter directory
 }
 
 func buildOxBinary(t *testing.T) string {
+	t.Helper()
+	return testguard.BuildOxBinary(t, slowTestProjectRoot(t))
+}
+
+func buildIncrementalE2EBinaries(t *testing.T) (string, string) {
+	t.Helper()
+	dir := slowTestProjectRoot(t)
+	oxBin := testguard.BuildOxBinary(t, dir)
+	adapterDir := t.TempDir()
+
+	// Also build the claude-code adapter binary in a test-owned directory and
+	// expose that directory through OX_ADAPTER_PATH.
+	// Without this the deep adapter detect fails silently, the session
+	// falls through to the generic adapter, and PostToolUse hooks never
+	// parse the fake Claude JSONL source file. In particular, do not write
+	// beside OX_TEST_OX_BINARY: callers may provide a read-only shared artifact.
+	adapterBin := filepath.Join(adapterDir, "ox-adapter-claude-code")
+	adapterCmd := exec.Command("go", "build", "-o", adapterBin, "./cmd/ox-adapter-claude-code")
+	adapterCmd.Dir = dir
+	adapterOut, adapterErr := adapterCmd.CombinedOutput()
+	require.NoError(t, adapterErr, "failed to build ox-adapter-claude-code: %s", adapterOut)
+
+	return oxBin, adapterDir
+}
+
+func slowTestProjectRoot(t *testing.T) string {
 	t.Helper()
 
 	// find project root
@@ -410,27 +437,10 @@ func buildOxBinary(t *testing.T) string {
 		require.NotEqual(t, parent, dir, "could not find project root")
 		dir = parent
 	}
-
-	oxBin := testguard.BuildOxBinary(t, dir)
-	binDir := filepath.Dir(oxBin)
-
-	// Also build the claude-code adapter binary next to ox so adapter
-	// discovery (AdapterDirs() includes filepath.Dir(exe)) finds it.
-	// Without this the deep adapter detect fails silently, the session
-	// falls through to the generic adapter, and PostToolUse hooks never
-	// parse the fake Claude JSONL source file.
-	adapterBin := filepath.Join(binDir, "ox-adapter-claude-code")
-	if _, err := os.Stat(adapterBin); err != nil {
-		adapterCmd := exec.Command("go", "build", "-o", adapterBin, "./cmd/ox-adapter-claude-code")
-		adapterCmd.Dir = dir
-		adapterOut, adapterErr := adapterCmd.CombinedOutput()
-		require.NoError(t, adapterErr, "failed to build ox-adapter-claude-code: %s", adapterOut)
-	}
-
-	return oxBin
+	return dir
 }
 
-func setupE2EWorkspace(t *testing.T, oxBin string) e2eEnv {
+func setupE2EWorkspace(t *testing.T, adapterDir string) e2eEnv {
 	t.Helper()
 
 	workspace := t.TempDir()
@@ -480,10 +490,11 @@ func setupE2EWorkspace(t *testing.T, oxBin string) e2eEnv {
 	username := "oxtest-" + strings.ReplaceAll(t.Name(), "/", "-")
 
 	return e2eEnv{
-		workspace: workspace,
-		home:      home,
-		cacheDir:  cacheDir,
-		username:  username,
+		workspace:  workspace,
+		home:       home,
+		cacheDir:   cacheDir,
+		username:   username,
+		adapterDir: adapterDir,
 	}
 }
 
@@ -495,6 +506,7 @@ func oxEnv(env e2eEnv) []string {
 		"OX_XDG_ENABLE=1",
 		"PATH=" + os.Getenv("PATH"),
 		"AGENT_ENV=claude-code",
+		"OX_ADAPTER_PATH=" + env.adapterDir,
 		"USER=" + env.username,
 		// prevent real daemon IPC
 		"OX_NO_DAEMON=1",

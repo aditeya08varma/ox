@@ -193,8 +193,9 @@ func TestOpenInspectorForCursorRejectsOutOfRangeSelection(t *testing.T) {
 	assert.Equal(t, "one.jsonl", got.store.Selected.Session.Filename)
 }
 
-func TestAsyncResultsFromSupersededRefreshAreAllDiscarded(t *testing.T) {
+func TestUpdateDiscardsAllAsyncResultsFromSupersededRefresh(t *testing.T) {
 	m := Model{effectGen: 9}
+	m.listLens = &[int(sectionCount)]int{}
 	m.store = state.Store{
 		DaemonStatus:   &daemon.StatusData{Pid: 1},
 		Sessions:       []session.SessionInfo{{Filename: "kept.jsonl"}},
@@ -220,53 +221,102 @@ func TestAsyncResultsFromSupersededRefreshAreAllDiscarded(t *testing.T) {
 	}
 
 	for _, msg := range stale {
-		got, cmd := m.reduceEffects(msg)
+		updated, cmd := m.Update(msg)
+		got := updated.(Model)
 		assert.Nil(t, cmd)
 		assert.Equal(t, m.store, got.store, "%T escaped generation cancellation", msg)
 	}
 }
 
-func TestRefreshIssuesLoadsAndSupersedesOlderWork(t *testing.T) {
+func TestUpdateRoutesRefreshAndSupersedesOlderWork(t *testing.T) {
 	m := Model{effectGen: 4}
+	m.listLens = &[int(sectionCount)]int{}
 	m.store.Generation = 4
 
-	got, cmd := m.reduceGlobal(RefreshMsg{})
+	updated, cmd := m.Update(RefreshMsg{})
+	got := updated.(Model)
 	require.NotNil(t, cmd)
 	assert.Equal(t, 5, got.effectGen)
 	assert.Equal(t, 5, got.store.Generation)
 
-	outer, ok := cmd().(tea.BatchMsg)
+	refresh, ok := cmd().(tea.BatchMsg)
 	require.True(t, ok, "refresh must issue both loads and a replacement tick")
-	require.Len(t, outer, 2)
-	loads, ok := outer[0]().(tea.BatchMsg)
+	require.Len(t, refresh, 2)
+	loads, ok := refresh[0]().(tea.BatchMsg)
 	require.True(t, ok)
 	assert.Len(t, loads, 9, "every dashboard data source must be refreshed")
 }
 
-func TestGlobalNavigationClampsAndInspectorOwnsKeys(t *testing.T) {
+func TestUpdateRoutesPaletteInputSelectionThroughOverlayStack(t *testing.T) {
+	m := NewModel(nil, nil, nil)
+	m.store.Sessions = []session.SessionInfo{
+		{Filename: "alpha.jsonl", Username: "Alpha"},
+		{Filename: "beta.jsonl", Username: "Beta"},
+	}
+	updated, cmd := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = updated.(Model)
+	assert.Nil(t, cmd)
+
+	updated, cmd = m.Update(keyPress("ctrl+k"))
+	m = updated.(Model)
+	assert.Nil(t, cmd)
+	require.NotNil(t, m.overlays.Top())
+	assert.Equal(t, overlays.OverlayPalette, m.overlays.Top().ID())
+	assert.Contains(t, m.View().Content, "Quick Search", "the active overlay must own the composed view")
+
+	for _, r := range "Beta" {
+		updated, cmd = m.Update(keyPress(string(r)))
+		m = updated.(Model)
+		assert.Nil(t, cmd)
+	}
+	assert.Contains(t, m.View().Content, "Beta")
+	assert.NotContains(t, m.View().Content, "Alpha")
+
+	updated, cmd = m.Update(keyPress("enter"))
+	m = updated.(Model)
+	assert.True(t, m.overlays.IsEmpty(), "selection must close the palette")
+	require.NotNil(t, cmd)
+
+	selection, ok := cmd().(SelectionChangedMsg)
+	require.True(t, ok)
+
+	updated, cmd = m.Update(selection)
+	m = updated.(Model)
+	assert.Nil(t, cmd)
+	require.NotNil(t, m.store.Selected)
+	require.NotNil(t, m.store.Selected.Session)
+	assert.Equal(t, "beta.jsonl", m.store.Selected.Session.Filename)
+}
+
+func TestUpdateRoutesNavigationAndInspectorOwnsFocus(t *testing.T) {
 	m := NewModel(nil, nil, nil)
 	m.section = SectionSessions
 	m.listLens[SectionSessions] = 2
+	update := func(msg tea.Msg) {
+		updated, cmd := m.Update(msg)
+		m = updated.(Model)
+		assert.Nil(t, cmd)
+	}
 
-	m, _ = m.reduceGlobal(keyPress("j"))
+	update(keyPress("j"))
 	assert.Equal(t, 1, m.cursors[SectionSessions])
-	m, _ = m.reduceGlobal(keyPress("j"))
+	update(keyPress("j"))
 	assert.Equal(t, 1, m.cursors[SectionSessions], "cursor must not run past the list")
-	m, _ = m.reduceGlobal(keyPress("k"))
+	update(keyPress("k"))
 	assert.Zero(t, m.cursors[SectionSessions])
 
 	m.inspectorOpen = true
 	m.inspectorScroll = 0
-	m, _ = m.reduceGlobal(keyPress("j"))
+	update(keyPress("j"))
 	assert.Equal(t, 1, m.inspectorScroll)
 	assert.Zero(t, m.cursors[SectionSessions], "inspector scrolling must not move list selection")
-	m, _ = m.reduceGlobal(keyPress("tab"))
+	update(keyPress("tab"))
 	assert.Equal(t, SectionSessions, m.section, "section navigation is disabled while inspecting")
-	m, _ = m.reduceGlobal(keyPress("esc"))
+	update(keyPress("esc"))
 	assert.False(t, m.inspectorOpen)
 	assert.Zero(t, m.inspectorScroll)
 
-	m, _ = m.reduceGlobal(keyPress("tab"))
+	update(keyPress("tab"))
 	assert.Equal(t, SectionFeed, m.section)
 }
 
@@ -318,6 +368,8 @@ func TestFeedSelectionPreservesMurmurDiscussionWhisperOrder(t *testing.T) {
 
 func keyPress(name string) tea.KeyPressMsg {
 	switch name {
+	case "ctrl+k":
+		return tea.KeyPressMsg(tea.Key{Code: 'k', Mod: tea.ModCtrl})
 	case "tab":
 		return tea.KeyPressMsg(tea.Key{Code: tea.KeyTab})
 	case "esc":

@@ -142,7 +142,7 @@ func isolatedGitEnv() []string {
 	env := make([]string, 0, len(os.Environ())+3)
 	for _, entry := range os.Environ() {
 		name, _, ok := strings.Cut(entry, "=")
-		if ok && (name == "GIT_CONFIG_GLOBAL" || name == "GIT_CONFIG_SYSTEM" || name == "GIT_CONFIG_NOSYSTEM" || name == "GIT_TERMINAL_PROMPT") {
+		if ok && (name == "GIT_CONFIG" || strings.HasPrefix(name, "GIT_CONFIG_") || name == "GIT_TERMINAL_PROMPT") {
 			continue
 		}
 		env = append(env, entry)

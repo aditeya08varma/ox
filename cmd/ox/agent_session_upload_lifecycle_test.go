@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +25,21 @@ type sessionUploadFixture struct {
 	result      *agentSessionResult
 	state       *session.RecordingState
 	refs        map[string]lfs.FileRef
+}
+
+func (f sessionUploadFixture) orphan() orphanedSession {
+	return orphanedSession{
+		SessionName: f.sessionName,
+		CachePath:   f.state.SessionPath,
+		Meta: &session.StoreMeta{
+			SessionID: f.state.SessionID,
+			AgentID:   f.state.AgentID,
+			AgentType: f.state.AdapterName,
+			Username:  "testuser",
+			CreatedAt: f.state.StartedAt,
+		},
+		EntryCount: f.result.EntryCount,
+	}
 }
 
 func newSessionUploadFixture(t *testing.T) sessionUploadFixture {
@@ -240,18 +258,7 @@ func TestSessionUploadOrchestration_FailedUploadThenRetryIsIdempotent(t *testing
 	))
 	assertSessionBytesPreserved(t, fixture)
 
-	orphan := orphanedSession{
-		SessionName: fixture.sessionName,
-		CachePath:   fixture.state.SessionPath,
-		Meta: &session.StoreMeta{
-			SessionID: fixture.state.SessionID,
-			AgentID:   fixture.state.AgentID,
-			AgentType: fixture.state.AdapterName,
-			Username:  "testuser",
-			CreatedAt: fixture.state.StartedAt,
-		},
-		EntryCount: fixture.result.EntryCount,
-	}
+	orphan := fixture.orphan()
 
 	var retryCalls []string
 	retryEffects := scriptedSessionUploadEffects(&retryCalls, fixture.refs, "")
@@ -286,18 +293,7 @@ func TestSessionUploadOrchestration_FailedUploadThenRetryIsIdempotent(t *testing
 
 func TestRetrySessionUpload_PointerCommitFailureRemainsIncomplete(t *testing.T) {
 	fixture := newSessionUploadFixture(t)
-	orphan := orphanedSession{
-		SessionName: fixture.sessionName,
-		CachePath:   fixture.state.SessionPath,
-		Meta: &session.StoreMeta{
-			SessionID: fixture.state.SessionID,
-			AgentID:   fixture.state.AgentID,
-			AgentType: fixture.state.AdapterName,
-			Username:  "testuser",
-			CreatedAt: fixture.state.StartedAt,
-		},
-		EntryCount: fixture.result.EntryCount,
-	}
+	orphan := fixture.orphan()
 
 	var calls []string
 	effects := scriptedSessionUploadEffects(&calls, fixture.refs, "commit_pointers")
@@ -309,4 +305,82 @@ func TestRetrySessionUpload_PointerCommitFailureRemainsIncomplete(t *testing.T) 
 	assert.Equal(t, []string{"upload_lfs", "commit_retry", "commit_pointers"}, calls)
 	_, statErr := os.Stat(fixture.state.SessionPath)
 	assert.NoError(t, statErr, "failed retry must leave authoritative cache available")
+	require.FileExists(t, filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile))
+
+	// The committed final metadata used to make the next doctor pass skip this
+	// cache directory forever. The pending marker must keep it discoverable.
+	orphans, scanErr := findOrphanedSessionsInDir(filepath.Dir(fixture.state.SessionPath), fixture.ledgerPath)
+	require.NoError(t, scanErr)
+	require.Len(t, orphans, 1)
+	assert.Equal(t, fixture.sessionName, orphans[0].SessionName)
+
+	calls = nil
+	successEffects := scriptedSessionUploadEffects(&calls, fixture.refs, "")
+	require.NoError(t, retrySessionUploadWithEffects(
+		fixture.projectRoot, fixture.ledgerPath, orphans[0], successEffects,
+	))
+	assert.Equal(t, []string{"upload_lfs", "commit_retry", "commit_pointers"}, calls)
+	assert.True(t, lfs.IsPointerFile(filepath.Join(
+		fixture.ledgerPath, "sessions", fixture.sessionName, ledgerFileRaw,
+	)))
+
+	require.NoError(t, os.RemoveAll(orphans[0].CachePath), "doctor prunes cache only after full success")
+	orphans, scanErr = findOrphanedSessionsInDir(filepath.Dir(fixture.state.SessionPath), fixture.ledgerPath)
+	require.NoError(t, scanErr)
+	assert.Empty(t, orphans)
+}
+
+func TestRetrySessionUpload_AcceptsLargeValidHeader(t *testing.T) {
+	fixture := newSessionUploadFixture(t)
+
+	var raw bytes.Buffer
+	enc := json.NewEncoder(&raw)
+	require.NoError(t, enc.Encode(map[string]any{
+		"type": "header",
+		"metadata": map[string]any{
+			"agent_id":   fixture.state.AgentID,
+			"agent_type": fixture.state.AdapterName,
+			"session_id": fixture.state.SessionID,
+			"model":      strings.Repeat("m", 70*1024),
+		},
+	}))
+	require.NoError(t, enc.Encode(map[string]any{"type": "user", "content": "preserve me"}))
+	require.NoError(t, enc.Encode(map[string]any{"type": "footer", "entry_count": 1}))
+	require.Greater(t, bytes.IndexByte(raw.Bytes(), '\n'), 64*1024)
+
+	fixture.rawContent = raw.Bytes()
+	require.NoError(t, os.WriteFile(fixture.result.RawPath, fixture.rawContent, 0o600))
+	fixture.result.EntryCount = 1
+	fixture.refs = map[string]lfs.FileRef{ledgerFileRaw: lfs.NewFileRef(fixture.rawContent)}
+
+	require.NoError(t, validateRawJSONLHeader(fixture.result.RawPath))
+	var calls []string
+	effects := scriptedSessionUploadEffects(&calls, fixture.refs, "")
+	require.NoError(t, retrySessionUploadWithEffects(
+		fixture.projectRoot, fixture.ledgerPath, fixture.orphan(), effects,
+	))
+	assert.Equal(t, []string{"upload_lfs", "commit_retry", "commit_pointers"}, calls)
+}
+
+func TestWriteSessionUploadRetryPending_RequiresExistingCache(t *testing.T) {
+	err := writeSessionUploadRetryPending(filepath.Join(t.TempDir(), "missing"))
+	require.Error(t, err)
+}
+
+func TestRetrySessionUpload_PendingMarkerFailureStopsBeforeMutation(t *testing.T) {
+	fixture := newSessionUploadFixture(t)
+	require.NoError(t, os.Mkdir(
+		filepath.Join(fixture.state.SessionPath, sessionUploadRetryPendingFile),
+		0o700,
+	))
+
+	var calls []string
+	err := retrySessionUploadWithEffects(
+		fixture.projectRoot,
+		fixture.ledgerPath,
+		fixture.orphan(),
+		scriptedSessionUploadEffects(&calls, fixture.refs, ""),
+	)
+	require.ErrorContains(t, err, "record pending session upload retry")
+	assert.Empty(t, calls, "ledger mutation must not begin without durable retry ownership")
 }

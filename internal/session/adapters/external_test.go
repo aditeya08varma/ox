@@ -252,6 +252,22 @@ func TestExternalAdapter_OneShotOutputIsBounded(t *testing.T) {
 	}
 }
 
+func TestExternalAdapter_OneShotZeroLimitUsesDefault(t *testing.T) {
+	binary := fakeBinary(t, map[string]string{
+		"read": `{"entries":[]}`,
+	})
+	ea := NewExternalAdapterWithInfo(binary, &adapterprotocol.InfoResponse{Name: "default-limit"})
+	ea.oneShotOutputLimit = 0
+
+	entries, err := ea.Read("session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries = %v, want empty response", entries)
+	}
+}
+
 func TestBoundedBufferNeverRetainsPastLimit(t *testing.T) {
 	budget := newOutputBudget(4, nil)
 	b := newBoundedBuffer(budget)
