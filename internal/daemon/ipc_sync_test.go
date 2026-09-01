@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -528,9 +529,13 @@ func TestServerClient_TeamSyncWithProgress_EmptyResults(t *testing.T) {
 // success despite the failure (regression: malformed config hidden behind a
 // successful-looking all-teams sync).
 func TestServerClient_TeamSyncWithProgress_SetupFailure(t *testing.T) {
-	// Keep the runtime path short enough for Unix-domain socket limits while
-	// using the platform's actual temporary directory (not a hard-coded /tmp).
-	tmpDir, err := os.MkdirTemp(os.TempDir(), "ox-ipc-")
+	// Unix-domain socket paths have a small fixed limit. Use the bounded
+	// conventional Unix temp root; Windows uses its platform temp directory.
+	tempRoot := os.TempDir()
+	if runtime.GOOS != "windows" {
+		tempRoot = "/tmp"
+	}
+	tmpDir, err := os.MkdirTemp(tempRoot, "ox-ipc-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
 	t.Setenv("OX_XDG_ENABLE", "1")
