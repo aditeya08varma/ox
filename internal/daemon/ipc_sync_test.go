@@ -528,7 +528,9 @@ func TestServerClient_TeamSyncWithProgress_EmptyResults(t *testing.T) {
 // success despite the failure (regression: malformed config hidden behind a
 // successful-looking all-teams sync).
 func TestServerClient_TeamSyncWithProgress_SetupFailure(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("/tmp", "ox-ipc-setup-failure-")
+	// Keep the runtime path short enough for Unix-domain socket limits while
+	// using the platform's actual temporary directory (not a hard-coded /tmp).
+	tmpDir, err := os.MkdirTemp(os.TempDir(), "ox-ipc-")
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
 	t.Setenv("OX_XDG_ENABLE", "1")
@@ -547,6 +549,7 @@ func TestServerClient_TeamSyncWithProgress_SetupFailure(t *testing.T) {
 	})
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	serverDone := make(chan error, 1)
 	go func() {
 		serverDone <- server.Start(ctx)

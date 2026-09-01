@@ -173,6 +173,9 @@ Create and push the approved tag before the draft. Raw tag pushes do not
 publish anything, but the release workflow must be able to check out the exact
 tag it verifies:
 
+Ask the user to confirm the release-tag push immediately before running these
+commands.
+
 ```bash
 git tag v0.X.0
 git push origin v0.X.0
