@@ -34,7 +34,7 @@ type orphanedSession struct {
 	SessionName string
 	CachePath   string             // full path to cache session dir
 	Meta        *session.StoreMeta // from raw.jsonl header
-	EntryCount  int                // from raw.jsonl footer
+	EntryCount  int                // footer count, or recovered valid turns after a crash
 }
 
 // checkSessionUploadRetry finds sessions in cache that failed to upload and retries them.
@@ -207,8 +207,11 @@ func findOrphanedSessions(projectRoot, ledgerPath string) ([]orphanedSession, er
 	return orphans, nil
 }
 
-// readCacheSessionMeta reads the header and footer from a raw.jsonl file.
-// Returns the StoreMeta from the header and entry_count from the footer.
+// readCacheSessionMeta reads durable metadata and counts recoverable entries
+// from raw.jsonl. A clean stop writes a footer with entry_count, but a crashed
+// process may leave a perfectly usable stream without one. In that case the
+// valid entry lines are authoritative; treating the missing footer as zero
+// made doctor discard the only copy instead of recovering it.
 func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 	f, err := os.Open(rawPath)
 	if err != nil {
@@ -225,10 +228,11 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 	}
 
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 256*1024), 256*1024) // 256KB line buffer
-
-	// read first line (header)
+	scanner.Buffer(make([]byte, 1024*1024), 10*1024*1024)
 	if !scanner.Scan() {
+		if err := scanner.Err(); err != nil {
+			return nil, 0, fmt.Errorf("read header: %w", err)
+		}
 		return nil, 0, fmt.Errorf("empty file")
 	}
 
@@ -236,36 +240,35 @@ func readCacheSessionMeta(rawPath string) (*session.StoreMeta, int, error) {
 	if err := json.Unmarshal(scanner.Bytes(), &header); err != nil {
 		return nil, 0, fmt.Errorf("parse header: %w", err)
 	}
-
-	// extract metadata from header
-	metaRaw, ok := header["metadata"]
+	metaMap, ok := header["metadata"].(map[string]any)
 	if !ok {
 		return nil, 0, fmt.Errorf("no metadata in header")
 	}
-
-	metaMap, ok := metaRaw.(map[string]any)
-	if !ok {
-		return nil, 0, fmt.Errorf("metadata is not a map")
-	}
-
 	meta := session.ParseStoreMeta(metaMap)
 
-	// read to last line for footer entry_count
-	var lastLine []byte
-	for scanner.Scan() {
-		lastLine = scanner.Bytes()
-	}
-
 	entryCount := 0
-	if len(lastLine) > 0 {
-		var footer map[string]any
-		if json.Unmarshal(lastLine, &footer) == nil {
-			if v, ok := footer["entry_count"].(float64); ok {
-				entryCount = int(v)
-			}
+	footerCount := -1
+	for scanner.Scan() {
+		var line map[string]any
+		if err := json.Unmarshal(scanner.Bytes(), &line); err != nil {
+			// Crash recovery follows ReadSessionFromPath semantics: an incomplete
+			// trailing append must not hide the valid turns already fsynced.
+			continue
+		}
+		if v, ok := line["entry_count"].(float64); ok && v >= 0 {
+			footerCount = int(v)
+			continue
+		}
+		if entryType, _ := line["type"].(string); entryType != "" && entryType != "footer" && entryType != "header" {
+			entryCount++
 		}
 	}
-
+	if err := scanner.Err(); err != nil {
+		return nil, 0, fmt.Errorf("read session: %w", err)
+	}
+	if footerCount > entryCount {
+		entryCount = footerCount
+	}
 	return meta, entryCount, nil
 }
 
@@ -316,6 +319,10 @@ func resolveOrphanSessionID(sessionDir string, orphan orphanedSession, draftPres
 // the authoritative copy; raw.jsonl is the critical file from which all others
 // can be regenerated.
 func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) error {
+	return retrySessionUploadWithEffects(projectRoot, ledgerPath, orphan, productionSessionUploadEffects())
+}
+
+func retrySessionUploadWithEffects(projectRoot, ledgerPath string, orphan orphanedSession, effects sessionUploadEffects) error {
 	// guard: never upload a session with zero substantive entries
 	if orphan.EntryCount == 0 {
 		slog.Info("skipping retry upload: zero entries", "session", orphan.SessionName)
@@ -378,7 +385,7 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	}
 
 	// upload to LFS
-	fileRefs, err := uploadSessionLFS(projectRoot, sessionDir)
+	fileRefs, err := effects.uploadLFS(projectRoot, sessionDir)
 	if err != nil {
 		return fmt.Errorf("LFS upload: %w", err)
 	}
@@ -401,15 +408,25 @@ func retrySessionUpload(projectRoot, ledgerPath string, orphan orphanedSession) 
 	}
 
 	// commit and push (meta.json + optional summary.json)
-	if err := commitAndPushLedgerWithExtras(ledgerPath, orphan.SessionName, hasSummary); err != nil {
+	if err := effects.commitRetry(ledgerPath, orphan.SessionName, hasSummary); err != nil {
 		return fmt.Errorf("commit and push: %w", err)
 	}
 
 	// push succeeded — now safe to replace content files with LFS pointer stubs.
 	// AssertUploaded: this retry path uploaded meta.Files' blobs before the push.
 	if len(meta.Files) > 0 {
-		if _, err := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(meta.Files)); err != nil {
-			slog.Warn("LFS pointer file write failed after push", "error", err, "session", orphan.SessionName)
+		written, writeErr := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(meta.Files))
+		if len(written) > 0 {
+			// Mirror the primary stop path: leaving freshly written pointers dirty
+			// lets a daemon pull autostash them and can freeze a stash conflict into
+			// a later unrelated commit. Commit every pointer that landed, even when
+			// another file in the same batch failed to rewrite.
+			if err := effects.commitPointerRewrite(ledgerPath, orphan.SessionName, written); err != nil {
+				return fmt.Errorf("commit LFS pointer rewrite: %w", err)
+			}
+		}
+		if writeErr != nil {
+			return fmt.Errorf("write LFS pointer files: %w", writeErr)
 		}
 	}
 

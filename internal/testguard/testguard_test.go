@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -25,12 +27,38 @@ func TestMinimalEnv_InheritsAllowlistedVars(t *testing.T) {
 	// set a known allowlisted var and confirm it's inherited
 	t.Setenv("GOPATH", "/tmp/testgopath")
 	t.Setenv("HOME", "/tmp/testhome")
+	t.Setenv(TestGoCoverDirEnv, "/tmp/test-coverdir")
 
 	env := MinimalEnv(nil)
 	envMap := envToMap(env)
 
 	assert.Equal(t, "/tmp/testgopath", envMap["GOPATH"])
 	assert.Equal(t, "/tmp/testhome", envMap["HOME"])
+	assert.Equal(t, "/tmp/test-coverdir", envMap["GOCOVERDIR"])
+}
+
+func TestMinimalEnv_DoesNotInheritGoTestInternalCoverDir(t *testing.T) {
+	t.Setenv("GOCOVERDIR", "/tmp/go-test-workdir")
+	t.Setenv(TestGoCoverDirEnv, "")
+
+	env := envToMap(MinimalEnv(nil))
+	assert.NotContains(t, env, "GOCOVERDIR")
+}
+
+func TestResolveTestOxBinary(t *testing.T) {
+	binPath := filepath.Join(t.TempDir(), "ox")
+	require.NoError(t, os.WriteFile(binPath, []byte("test binary"), 0755))
+
+	resolved, err := resolveTestOxBinary(binPath)
+	require.NoError(t, err)
+	assert.Equal(t, binPath, resolved)
+
+	_, err = resolveTestOxBinary(filepath.Join(t.TempDir(), "missing"))
+	assert.ErrorContains(t, err, "stat")
+
+	directory := t.TempDir()
+	_, err = resolveTestOxBinary(directory)
+	assert.ErrorContains(t, err, "not a regular file")
 }
 
 func TestMinimalEnv_BlocksNonAllowlistedVars(t *testing.T) {

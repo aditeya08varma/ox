@@ -34,6 +34,7 @@ docs/design/**/*.webm
 *.dylib
 *.test
 *.out
+*.out.provenance.json
 go.work
 
 # python tooling

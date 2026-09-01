@@ -493,7 +493,7 @@ func TestReadCacheSessionMeta_EntriesButNoFooter(t *testing.T) {
 			"created_at": time.Now().Format(time.RFC3339),
 		},
 	})
-	// entries but no footer
+	// entries but no footer: valid turns remain recoverable after a crash
 	for i := 0; i < 3; i++ {
 		enc.Encode(map[string]any{"type": "assistant", "content": "entry"})
 	}
@@ -502,8 +502,39 @@ func TestReadCacheSessionMeta_EntriesButNoFooter(t *testing.T) {
 	meta, count, err := readCacheSessionMeta(rawPath)
 	require.NoError(t, err)
 	assert.Equal(t, "OxCrash", meta.AgentID)
-	// last line is an entry, not a footer — entry_count should be 0
-	assert.Equal(t, 0, count, "entries without footer should yield entry_count=0")
+	assert.Equal(t, 3, count,
+		"doctor must recover valid entries without a footer instead of treating the only copy as empty")
+}
+
+func TestReadCacheSessionMeta_RecoversValidEntriesBeforeTornTail(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawPath := filepath.Join(tmpDir, ledgerFileRaw)
+	content := `{"type":"header","metadata":{"agent_id":"OxTorn","agent_type":"codex"}}` + "\n" +
+		`{"type":"user","content":"durable one"}` + "\n" +
+		`{"type":"assistant","content":"durable two"}` + "\n" +
+		`{"type":"assistant","content":"torn`
+	require.NoError(t, os.WriteFile(rawPath, []byte(content), 0o600))
+
+	meta, count, err := readCacheSessionMeta(rawPath)
+
+	require.NoError(t, err)
+	assert.Equal(t, "OxTorn", meta.AgentID)
+	assert.Equal(t, 2, count, "a torn final append must not hide prior fsynced turns")
+}
+
+func TestReadCacheSessionMeta_NeverTrustsStaleFooterBelowDurableTurns(t *testing.T) {
+	tmpDir := t.TempDir()
+	rawPath := filepath.Join(tmpDir, ledgerFileRaw)
+	content := `{"type":"header","metadata":{"agent_id":"OxStale","agent_type":"codex"}}` + "\n" +
+		`{"type":"user","content":"one"}` + "\n" +
+		`{"type":"assistant","content":"two"}` + "\n" +
+		`{"type":"footer","entry_count":0}` + "\n"
+	require.NoError(t, os.WriteFile(rawPath, []byte(content), 0o600))
+
+	_, count, err := readCacheSessionMeta(rawPath)
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, count, "a stale footer must not turn durable content into a zero-entry prune")
 }
 
 func TestReadCacheSessionMeta_HeaderWithNoMetadataKey(t *testing.T) {

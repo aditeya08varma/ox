@@ -1,6 +1,8 @@
 package app
 
 import (
+	"sort"
+
 	"charm.land/bubbles/v2/key"
 	tea "charm.land/bubbletea/v2"
 
@@ -201,8 +203,14 @@ func (m Model) syncTargetAtCursor(cursor int) *domain.InspectorTarget {
 	if ds == nil {
 		return nil
 	}
+	repoIDs := make([]string, 0, len(ds.Workspaces))
+	for repoID := range ds.Workspaces {
+		repoIDs = append(repoIDs, repoID)
+	}
+	sort.Strings(repoIDs)
 	idx := 0
-	for _, wsList := range ds.Workspaces {
+	for _, repoID := range repoIDs {
+		wsList := ds.Workspaces[repoID]
 		for i := range wsList {
 			if idx == cursor {
 				ws := wsList[i]

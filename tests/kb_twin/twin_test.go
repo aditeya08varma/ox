@@ -138,6 +138,9 @@ func buildScheduler(t *testing.T, projectDir string) *daemon.SyncScheduler {
 // subtest and its own XDG isolation. The multi-endpoint scenario has
 // dedicated drive logic in TestKBTwin_MultiEndpoint below.
 func TestKBTwin(t *testing.T) {
+	if len(kbTwinManifest.Scenarios) < 9 {
+		t.Fatalf("KB twin manifest has %d scenarios, want at least 9 required lifecycle scenarios", len(kbTwinManifest.Scenarios))
+	}
 	if testing.Short() {
 		t.Skip("short: kb_twin runs real git clones across multiple scenarios")
 	}

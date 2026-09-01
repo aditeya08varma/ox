@@ -1309,6 +1309,10 @@ func finalizeModeForSessionStop(userPrefersAsync bool) session.FinalizeDispatchM
 // If this fails, the session data is safe in the local cache and doctor can retry.
 // ledgerPath and sessionName are pre-computed by the caller.
 func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
+	return uploadSessionToLedgerWithEffects(projectRoot, result, state, ledgerPath, sessionName, productionSessionUploadEffects())
+}
+
+func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string, effects sessionUploadEffects) error {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 
@@ -1381,7 +1385,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 
 	// upload content files to LFS blob storage
-	fileRefs, err := uploadSessionLFS(projectRoot, sessionDir)
+	fileRefs, err := effects.uploadLFS(projectRoot, sessionDir)
 	if err != nil {
 		if errors.Is(err, api.ErrReadOnly) {
 			return err // don't wrap, don't set doctor marker
@@ -1403,7 +1407,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 
 	// commit meta.json + .gitignore and push
-	if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
+	if err := effects.commitInitial(ledgerPath, sessionName); err != nil {
 		// set marker - session saved locally but not synced to remote
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("commit and push: %w", err)
@@ -1413,7 +1417,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// is committed, so backfill it + outcome=stopped onto every plan this
 	// session produced (slugs in hand — no directory scan), then commit those
 	// plan dirs. Best-effort; any miss falls to `ox doctor`.
-	reconcileProducedPlansAtStop(projectRoot, state.ProducedPlans, sessionName, meta.EffectiveSessionID())
+	effects.reconcilePlans(projectRoot, state.ProducedPlans, sessionName, meta.EffectiveSessionID())
 
 	// push succeeded — now safe to replace content files with LFS pointer stubs
 	if len(meta.Files) > 0 {
@@ -1433,7 +1437,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 			// the stash-pop yields conflict markers that ox doctor's auto-commit
 			// will eventually freeze into a permanent commit on main.
 			// (Tactical fix; pointer-first commit ordering is a separate discussion.)
-			if err := commitPointerRewriteAndPush(ledgerPath, sessionName, written); err != nil {
+			if err := effects.commitPointerRewrite(ledgerPath, sessionName, written); err != nil {
 				slog.Warn("LFS pointer rewrite commit failed", "error", err, "session", sessionName)
 			}
 		}
@@ -1450,7 +1454,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// already-successful upload. Server-reported PR-link misses become
 	// repair tasks in the stop output — the agent still holds the session
 	// context and can fix the PR bodies with its own tooling.
-	for _, miss := range finalizeLinkageAfterPush(projectRoot, sessionDir, meta, sessionName) {
+	for _, miss := range effects.finalizeLinkage(projectRoot, sessionDir, meta, sessionName) {
 		result.PRLinkMisses = append(result.PRLinkMisses, fmt.Sprintf(
 			"PR %s is missing its session link — append this exact final line to its body: %s",
 			miss.PRURL, miss.ExpectedLine))

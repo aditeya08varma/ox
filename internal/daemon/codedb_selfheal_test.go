@@ -10,6 +10,7 @@ import (
 
 	"github.com/sageox/ox/internal/codedb"
 	"github.com/sageox/ox/internal/codedb/store"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.etcd.io/bbolt"
 )
@@ -200,6 +201,42 @@ func TestDoIndex_RestoresMarkersWhenMarkerForcedReindexFails(t *testing.T) {
 	// Marker must still be present so the NEXT freshness pass re-forces --full.
 	require.True(t, store.HasNeedsReindexMarker(dataDir, "code"),
 		"self-heal marker must be restored after failed marker-forced reindex")
+}
+
+// TestDoIndex_MarkerRecoverySurvivesManagerRestart closes the other half of
+// marker restoration: a failed full rebuild is not useful unless a fresh daemon
+// instance can consume the restored marker, repopulate the index, and clear it.
+// A canceled context is the deterministic stand-in for shutdown/network loss
+// during the first pass; the second manager models daemon restart.
+func TestDoIndex_MarkerRecoverySurvivesManagerRestart(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: exercises two real git + SQLite + Bleve indexing passes")
+	}
+
+	repoDir := t.TempDir()
+	seedGitRepo(t, repoDir)
+	dataDir := t.TempDir()
+	require.NoError(t, writeMarkerForTest(dataDir, "code"))
+
+	first := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
+	first.dataDir = dataDir
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := first.Index(canceled, CodeIndexPayload{}, nil)
+	require.Error(t, err, "canceled rebuild must not report success")
+	require.True(t, store.HasNeedsReindexMarker(dataDir, "code"),
+		"failed pass must restore the durable retry marker")
+
+	second := NewCodeDBManager(repoDir, codedbTestLogger(), nil)
+	second.dataDir = dataDir
+	ctx, stop := context.WithTimeout(context.Background(), 60*time.Second)
+	defer stop()
+	_, err = second.Index(ctx, CodeIndexPayload{}, nil)
+	require.NoError(t, err, "fresh manager must recover on retry")
+	require.False(t, store.HasNeedsReindexMarker(dataDir, "code"),
+		"successful recovery must consume the retry marker")
+	assert.Greater(t, countCommits(t, dataDir), 0,
+		"restarted manager must repopulate the index, not merely clear the marker")
 }
 
 // TestIsIndexing_ReflectsFlag verifies the IsIndexing accessor used by
