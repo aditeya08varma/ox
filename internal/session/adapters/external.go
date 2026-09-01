@@ -31,6 +31,19 @@ var (
 
 	// ErrProtocolMismatch is returned when an adapter's protocol version is incompatible.
 	ErrProtocolMismatch = errors.New("adapter protocol version mismatch")
+
+	// ErrAdapterOutputLimit is returned when an adapter writes more output than
+	// the runtime will retain. A misbehaving adapter must not be able to grow the
+	// daemon without bound before its subprocess timeout expires.
+	ErrAdapterOutputLimit = errors.New("adapter output exceeded limit")
+)
+
+const (
+	defaultOneShotOutputLimit = 64 * 1024 * 1024
+	// After cancellation, a descendant may keep the adapter's inherited output
+	// pipes open even though the direct process has exited. Bound pipe draining
+	// so a timed-out one-shot call returns promptly on every platform.
+	oneShotPipeDrainDelay = 100 * time.Millisecond
 )
 
 // ExternalAdapter implements Adapter and IncrementalReader by calling an
@@ -47,17 +60,19 @@ type ExternalAdapter struct {
 	serveSeq int
 
 	// timeouts
-	oneShotTimeout time.Duration
-	serveTimeout   time.Duration
+	oneShotTimeout     time.Duration
+	serveTimeout       time.Duration
+	oneShotOutputLimit int
 }
 
 // NewExternalAdapter creates an ExternalAdapter wrapping the binary at the given path.
 // It calls `info` to populate adapter metadata.
 func NewExternalAdapter(binaryPath string) (*ExternalAdapter, error) {
 	ea := &ExternalAdapter{
-		binaryPath:     binaryPath,
-		oneShotTimeout: 10 * time.Second,
-		serveTimeout:   100 * time.Millisecond,
+		binaryPath:         binaryPath,
+		oneShotTimeout:     10 * time.Second,
+		serveTimeout:       100 * time.Millisecond,
+		oneShotOutputLimit: defaultOneShotOutputLimit,
 	}
 
 	// call info to get adapter metadata
@@ -74,10 +89,11 @@ func NewExternalAdapter(binaryPath string) (*ExternalAdapter, error) {
 // Used when info has already been called (e.g., during discovery).
 func NewExternalAdapterWithInfo(binaryPath string, info *adapterprotocol.InfoResponse) *ExternalAdapter {
 	return &ExternalAdapter{
-		binaryPath:     binaryPath,
-		info:           info,
-		oneShotTimeout: 10 * time.Second,
-		serveTimeout:   100 * time.Millisecond,
+		binaryPath:         binaryPath,
+		info:               info,
+		oneShotTimeout:     10 * time.Second,
+		serveTimeout:       100 * time.Millisecond,
+		oneShotOutputLimit: defaultOneShotOutputLimit,
 	}
 }
 
@@ -579,19 +595,31 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 	}
 
 	cmdArgs := append([]string{subcommand}, args...)
-	ctx, cancel := context.WithTimeout(context.Background(), ea.oneShotTimeout)
-	defer cancel()
+	timeoutCtx, timeoutCancel := context.WithTimeout(context.Background(), ea.oneShotTimeout)
+	defer timeoutCancel()
+	ctx, outputCancel := context.WithCancel(timeoutCtx)
+	defer outputCancel()
 
 	cmd := exec.CommandContext(ctx, ea.binaryPath, cmdArgs...)
 	cmd.Env = ea.buildEnv()
+	cmd.WaitDelay = oneShotPipeDrainDelay
 
-	var stdout, stderr bytes.Buffer
+	limit := ea.oneShotOutputLimit
+	if limit <= 0 {
+		limit = defaultOneShotOutputLimit
+	}
+	budget := newOutputBudget(limit, outputCancel)
+	stdout := newBoundedBuffer(budget)
+	stderr := newBoundedBuffer(budget)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	err := cmd.Run()
-	if ctx.Err() == context.DeadlineExceeded {
+	err := runOneShotCommand(cmd)
+	if timeoutCtx.Err() == context.DeadlineExceeded {
 		return nil, fmt.Errorf("%w: %s %s", ErrAdapterTimeout, ea.binaryPath, subcommand)
+	}
+	if budget.wasExceeded() {
+		return nil, fmt.Errorf("%w (%d bytes): %s %s", ErrAdapterOutputLimit, limit, ea.binaryPath, subcommand)
 	}
 	if err != nil {
 		// check for error response in stdout (adapter may exit non-zero with a JSON error)
@@ -609,6 +637,69 @@ func (ea *ExternalAdapter) execOneShot(subcommand string, args ...string) ([]byt
 
 	return bytes.TrimSpace(stdout.Bytes()), nil
 }
+
+// outputBudget bounds stdout and stderr together. The first overflow cancels
+// the subprocess so an adapter that ignores a broken pipe cannot continue
+// consuming CPU until the ordinary timeout.
+type outputBudget struct {
+	mu        sync.Mutex
+	remaining int
+	exceeded  bool
+	cancel    context.CancelFunc
+}
+
+func newOutputBudget(limit int, cancel context.CancelFunc) *outputBudget {
+	return &outputBudget{remaining: limit, cancel: cancel}
+}
+
+func (b *outputBudget) claim(want int) (allowed int, exceeded bool) {
+	b.mu.Lock()
+	allowed = min(want, b.remaining)
+	b.remaining -= allowed
+	if allowed < want {
+		exceeded = true
+		b.exceeded = true
+	}
+	cancel := b.cancel
+	b.mu.Unlock()
+
+	if exceeded && cancel != nil {
+		cancel()
+	}
+	return allowed, exceeded
+}
+
+func (b *outputBudget) wasExceeded() bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.exceeded
+}
+
+// boundedBuffer implements io.Writer while retaining only bytes granted by a
+// shared output budget.
+type boundedBuffer struct {
+	buf    bytes.Buffer
+	budget *outputBudget
+}
+
+func newBoundedBuffer(budget *outputBudget) boundedBuffer {
+	return boundedBuffer{budget: budget}
+}
+
+func (b *boundedBuffer) Write(p []byte) (int, error) {
+	allowed, exceeded := b.budget.claim(len(p))
+	if allowed > 0 {
+		_, _ = b.buf.Write(p[:allowed])
+	}
+	if exceeded {
+		return allowed, ErrAdapterOutputLimit
+	}
+	return allowed, nil
+}
+
+func (b *boundedBuffer) Len() int       { return b.buf.Len() }
+func (b *boundedBuffer) Bytes() []byte  { return b.buf.Bytes() }
+func (b *boundedBuffer) String() string { return b.buf.String() }
 
 // validateRepoRootArg scans CLI args for --repo-root and validates the value
 // before spawning the subprocess. Delegates path validation to

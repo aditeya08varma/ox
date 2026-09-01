@@ -28,6 +28,13 @@ const maxIPCMessageSize = 1 * 1024 * 1024 // 1MB
 // Prevents file descriptor or memory exhaustion from connection floods.
 const maxConcurrentConnections = 100
 
+// finalResponseWriteTimeout bounds delivery of the authoritative response after
+// a long-running handler. ProgressWriter deliberately installs a very short
+// best-effort deadline; sendResponse must replace that stale deadline or a
+// handler that does work after its last progress update can complete
+// successfully while the client sees an EOF/timeout instead of the result.
+const finalResponseWriteTimeout = 5 * time.Second
+
 // Message types for IPC communication.
 const (
 	MsgTypeStatus            = "status"
@@ -1561,7 +1568,7 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 	// Tests can opt out via DisablePeerCred (set during test setup) — real
 	// production code paths never set this.
 	if !s.peerCredDisabled {
-		ownerUID := uint32(os.Geteuid())
+		ownerUID := currentProcessUID()
 		peer, err := peerUID(conn)
 		if err != nil {
 			s.logger.Warn("ipc: rejecting connection — peercred lookup failed",
@@ -1622,6 +1629,12 @@ func (s *Server) handleConnection(_ context.Context, conn net.Conn) {
 
 // sendResponse sends a response to the client.
 func (s *Server) sendResponse(conn net.Conn, resp Response) {
+	// A progress write leaves a 100ms deadline on the shared connection. Reset
+	// it for the final response, which is authoritative rather than best-effort.
+	// This also keeps a disconnected/non-reading client from blocking shutdown.
+	if err := conn.SetWriteDeadline(time.Now().Add(finalResponseWriteTimeout)); err != nil {
+		s.logger.Debug("failed to set IPC response write deadline", "error", err)
+	}
 	data, err := json.Marshal(resp)
 	if err != nil {
 		s.logger.Error("failed to marshal IPC response", "error", err)

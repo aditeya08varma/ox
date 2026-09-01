@@ -222,11 +222,12 @@ func TestFreshInstall_RealRepo_InitThenDoctor(t *testing.T) {
 	}
 }
 
-// TestFreshInstall_MockServer_InitThenSyncThenDoctor is a comparison test.
-// It runs the same flow but WITH ox sync between init and doctor.
-// By comparing reports from this test vs the no-sync test, we can see
-// exactly which issues are caused by missing sync.
-func TestFreshInstall_MockServer_InitThenSyncThenDoctor(t *testing.T) {
+// TestFreshInstall_MockServer_SyncUnavailableThenDoctorStillWorks proves an
+// unavailable sync prerequisite fails closed without preventing the next
+// diagnostic command from working. This is a survivability check, not a claim
+// that partial sync state was repaired; stateful retry coverage lives in the
+// daemon and session lifecycle suites.
+func TestFreshInstall_MockServer_SyncUnavailableThenDoctorStillWorks(t *testing.T) {
 	oxBin := buildOxBinary(t)
 	mockServer := startMockSageoxAPI(t)
 	repoDir := testGitRepo(t)
@@ -239,17 +240,25 @@ func TestFreshInstall_MockServer_InitThenSyncThenDoctor(t *testing.T) {
 		"init", "--quiet", "--team", "team_test123")
 
 	t.Logf("ox init: exit=%d duration=%s", initExit, initDuration)
-	if initExit != 0 {
-		t.Logf("WARNING: ox init exited with code %d\nOutput:\n%s", initExit, initOutput)
-	}
+	require.Equal(t, 0, initExit, "init must succeed before recovery evidence is meaningful; output:\n%s", initOutput)
+	gitAdd := testguard.OxCmd(t, "git", repoDir, nil, "add", "-A")
+	require.NoError(t, gitAdd.Run())
+	gitCommit := testguard.OxCmd(t, "git", repoDir, nil,
+		"-c", "commit.gpgsign=false", "commit", "-m", "initialize SageOx")
+	require.NoError(t, gitCommit.Run())
 
-	// step 2: ox sync (this is what users SHOULD do but often don't)
+	// step 2: sync fails at the unavailable daemon boundary
 	syncOutput, syncExit, syncDuration := testguard.RunOx(t, oxBin, repoDir, envVars, "sync")
 	t.Logf("ox sync: exit=%d duration=%s output:\n%s", syncExit, syncDuration, syncOutput)
+	require.NotEqual(t, 0, syncExit, "sync must fail when daemon startup is explicitly disabled")
+	assert.Contains(t, syncOutput, "daemon start disabled",
+		"failure must identify the unavailable boundary rather than reporting false success")
 
-	// step 3: doctor
+	// step 3: doctor remains independently usable
 	doctorOutput, doctorExit, doctorDuration := testguard.RunOx(t, oxBin, repoDir, envVars,
 		"doctor", "--json", "--verbose")
+	require.Equal(t, 0, doctorExit,
+		"doctor must recover after the failed sync without requiring repository repair; output:\n%s", doctorOutput)
 
 	doctorJSON := parseDoctorJSON(t, doctorOutput)
 	report := catalogReport(doctorJSON)
@@ -264,6 +273,16 @@ func TestFreshInstall_MockServer_InitThenSyncThenDoctor(t *testing.T) {
 	logReport(t, report)
 
 	require.NotNil(t, doctorJSON, "doctor must produce parseable JSON; output:\n%s", doctorOutput)
+	assert.Greater(t, mockServer.cloudDoctorAuthedCalls.Load(), int32(0),
+		"recovery must reach the current authenticated cloud doctor route")
+	assert.Zero(t, mockServer.cloudDoctorLegacyCalls.Load(),
+		"recovery must not hide a current-route regression behind the legacy fallback")
+	assert.Zero(t, mockServer.cloudDoctorSingularCalls.Load(),
+		"recovery must not use the obsolete singular route")
+	require.Empty(t, filterExpectedE2EIssues(report.Failures),
+		"unavailable sync must not leave an unexpected doctor failure: %+v", report.Failures)
+	require.Empty(t, filterExpectedE2EIssues(report.Warnings),
+		"unavailable sync must not leave an unexpected doctor warning: %+v", report.Warnings)
 	t.Logf("With-sync summary: passed=%d warnings=%d failed=%d skipped=%d",
 		doctorJSON.Summary.Passed, doctorJSON.Summary.Warnings,
 		doctorJSON.Summary.Failed, doctorJSON.Summary.Skipped)

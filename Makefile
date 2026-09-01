@@ -1,7 +1,7 @@
 # Makefile for ox CLI tool
 
 .PHONY: check-no-git-lfs-shell check-raw-writer-chokepoint check-session-meta-rmw check-codedb-guarded-open check-test-tiers test-tiers
-.PHONY: help build build-ox build-adapters install install-adapters clean dev run test test-cover test-timings test-all test-slow test-browser test-integration test-acceptance test-release test-agents test-preflight test-digital-twin test-cloud-api-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
+.PHONY: help build build-ox build-adapters build-acceptance install install-adapters clean dev run test test-cover test-timings test-all test-slow test-fuzz test-browser test-integration test-acceptance test-acceptance-cover test-acceptance-run test-release test-agents test-preflight test-digital-twin test-digital-twin-cover test-cloud-api-twin test-ledger-twin test-benchmark test-sequential test-profile test-watch coverage coverage-report coverage-func coverage-baseline coverage-diff coverage-check coverage-ratchet coverage-ratchet-diff coverage-ratchet-test build-cover coverage-integration smoke-test lint lint-test-env format release release-snapshot dist install-hooks docs docs-check docs-publish refresh-friction-catalog bump-version verify-version check-release-drift beads-setup
 
 # Variables
 GO := go
@@ -33,6 +33,20 @@ TIME_CMD = $(if $(filter 1,$(V)),time,)
 
 # Bundled adapters (shipped in release tarballs alongside ox)
 ADAPTERS := ox-adapter-claude-code ox-adapter-gemini ox-adapter-codex ox-adapter-amp ox-adapter-opencode ox-adapter-pi ox-adapter-omp ox-adapter-aider ox-adapter-droid ox-adapter-goose
+empty :=
+space := $(empty) $(empty)
+comma := ,
+ACCEPTANCE_DIR := $(abspath tmp/acceptance)
+ACCEPTANCE_OX_BIN ?= $(ACCEPTANCE_DIR)/$(BINARY_NAME)
+ACCEPTANCE_GO_COVER_DIR ?=
+ACCEPTANCE_INTEGRATION_COVER_FLAGS = $(if $(strip $(ACCEPTANCE_GO_COVER_DIR)),-coverprofile=$(ACCEPTANCE_GO_COVER_DIR)/integration-test.out -covermode=atomic,)
+ACCEPTANCE_SLOW_COVER_FLAGS = $(if $(strip $(ACCEPTANCE_GO_COVER_DIR)),-coverprofile=$(ACCEPTANCE_GO_COVER_DIR)/slow-test.out -covermode=atomic,)
+ACCEPTANCE_INTEGRATION_TESTS := TestCodeActivityE2E TestFreshInstall_MockServer_InitThenDoctor TestFreshInstall_MockServer_SyncUnavailableThenDoctorStillWorks
+ACCEPTANCE_SLOW_TESTS := TestIncrementalE2E_SingleAgent TestIncrementalE2E_CtrlC_AntiEntropy
+TWIN_COVER_DIR ?=
+CLOUD_TWIN_COVER_FLAGS = $(if $(strip $(TWIN_COVER_DIR)),-coverpkg=github.com/sageox/ox/internal/auth -coverprofile=$(TWIN_COVER_DIR)/cloud.out -covermode=atomic,)
+LEDGER_TWIN_COVER_FLAGS = $(if $(strip $(TWIN_COVER_DIR)),-coverpkg=github.com/sageox/ox/internal/glance$(comma)github.com/sageox/ox/internal/ledger$(comma)github.com/sageox/ox/internal/carts -coverprofile=$(TWIN_COVER_DIR)/ledger.out -covermode=atomic,)
+KB_TWIN_COVER_FLAGS = $(if $(strip $(TWIN_COVER_DIR)),-coverpkg=github.com/sageox/ox/internal/daemon$(comma)github.com/sageox/ox/internal/kb$(comma)github.com/sageox/ox/internal/gitserver -coverprofile=$(TWIN_COVER_DIR)/kb.out -covermode=atomic,)
 
 # Build targets
 # Targets below are agent-friendly by default (quiet). V=1 for verbose.
@@ -53,6 +67,12 @@ build-adapters: ## Build all bundled adapter binaries to bin/
 	done
 	$(call say,"Adapters built: $(ADAPTERS)")
 
+build-acceptance: ## Build the exact ox + adapter binaries used by acceptance tests
+	@rm -rf "$(ACCEPTANCE_DIR)"
+	@mkdir -p "$(ACCEPTANCE_DIR)"
+	@$(GO) build $(LDFLAGS) -o "$(ACCEPTANCE_OX_BIN)" ./cmd/ox
+	@$(GO) build $(ADAPTER_LDFLAGS) -o "$(ACCEPTANCE_DIR)/ox-adapter-claude-code" ./cmd/ox-adapter-claude-code
+
 install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 
 install-ox: ## Install ox to $GOPATH/bin
@@ -71,7 +91,7 @@ clean: ## Remove build artifacts
 	@echo "Cleaning build artifacts..."
 	@rm -rf bin/ dist/ tmp/
 	@rm -f $(BINARY_NAME)
-	@rm -f coverage.out coverage.html coverage-all.out .coverage-baseline.out
+	@rm -f coverage.out coverage.out.provenance.json coverage.html coverage-all.out coverage-all.out.provenance.json .coverage-baseline.out
 	@echo "Clean complete"
 
 # Development
@@ -174,6 +194,7 @@ test: check-test-tiers ## Run fast tests — unit tests <500ms, race detection, 
 test-cover: check-test-tiers ## Run fast tests with coverage collection (~15-20% slower than `make test`)
 	$(call say,"Running fast tests with coverage...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FAST_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
+	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-timings: ## Reprint metrics from the latest fast-test timing artifact
 	@test -n "$(TEST_TIMINGS)" || (echo "Set TEST_TIMINGS to an artifact printed by 'make test'." && exit 1)
@@ -183,10 +204,16 @@ test-timings: ## Reprint metrics from the latest fast-test timing artifact
 test-all: check-test-tiers ## Run all unit tests including expensive ones (git clone, SQLite, LFS) with coverage
 	$(call say,"Running all tests including expensive tests...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) $(GOTESTSUM_JUNIT) $(GOTESTSUM_TIMINGS) -- $(FULL_TEST_FLAGS) -coverprofile=coverage.out -covermode=atomic ./...
+	@python3 scripts/coverage_ratchet.py coverage.out --write-provenance coverage.out.provenance.json
 
 test-slow: check-test-tiers ## Run slow tests (build tag: slow) — requires real ox binary, no Claude needed
 	$(call say,"Running slow tests (requires built ox binary)...")
 	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- $(SLOW_TEST_FLAGS) $(SLOW_TEST_PACKAGES)
+
+test-fuzz: ## Run bounded fuzz smoke gates over untrusted parsers
+	@$(GO) test -race -run '^$$' -fuzz '^FuzzParseLayerName$$' -fuzztime=5s ./internal/conversation/format
+	@$(GO) test -race -run '^$$' -fuzz '^FuzzFolderName$$' -fuzztime=5s ./internal/conversation/read
+	@$(GO) test -race -run '^$$' -fuzz '^FuzzParseHistoryEntry$$' -fuzztime=5s ./internal/session
 
 test-browser: ## Run real-browser E2E (build tag: browser) — drives headless Chrome; skips if no Chrome installed
 	$(call say,"Running real-browser E2E (requires Chrome/Chromium)...")
@@ -197,24 +224,50 @@ test-integration: ## Integration tests live in sageox/ox-test-harness
 	@echo "For an in-repo real-agent smoke gate, run: make test-agents"
 	@exit 1
 
-test-acceptance: check-test-tiers ## Deterministic current-source compiled-binary acceptance journeys
+test-acceptance: check-test-tiers build-acceptance ## Deterministic current-source compiled-binary acceptance journeys
 	$(call say,"Running deterministic compiled-binary acceptance tests...")
+	@$(MAKE) --no-print-directory test-acceptance-run "ACCEPTANCE_OX_BIN=$(ACCEPTANCE_OX_BIN)"
+
+test-acceptance-cover: check-test-tiers build-cover ## Acceptance journeys through a coverage-instrumented current binary
+	@rm -rf $(COVERDIR)/integration
+	@mkdir -p $(COVERDIR)/integration
+	@OX_TEST_GOCOVERDIR="$(abspath $(COVERDIR)/integration)" \
+		$(MAKE) --no-print-directory test-acceptance-run \
+			"ACCEPTANCE_OX_BIN=$(abspath bin/$(BINARY_NAME)-cover)" \
+			"ACCEPTANCE_GO_COVER_DIR=$(COVERDIR)"
+	@test -s $(COVERDIR)/integration-test.out || { echo "ERROR: integration acceptance produced no Go coverage profile"; exit 1; }
+	@test -s $(COVERDIR)/slow-test.out || { echo "ERROR: session acceptance produced no Go coverage profile"; exit 1; }
+
+# Internal runner shared by ordinary and coverage-instrumented acceptance. It
+# asserts every required journey exists before execution so renames/deletions
+# cannot turn the tier green with "no tests to run".
+test-acceptance-run:
+	@test -x "$(ACCEPTANCE_OX_BIN)" || { echo "ERROR: acceptance binary missing: $(ACCEPTANCE_OX_BIN)"; exit 1; }
 	@listed=$$($(GO) test -tags=integration ./cmd/ox -list '.'); \
-	 for required in TestCodeActivityE2E TestFreshInstall_MockServer_InitThenDoctor; do \
+	 for required in $(ACCEPTANCE_INTEGRATION_TESTS); do \
 	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required acceptance test missing: $$required"; exit 1; }; \
 	 done
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- \
+	@listed=$$($(GO) test -tags=slow ./cmd/ox -list '.'); \
+	 for required in $(ACCEPTANCE_SLOW_TESTS); do \
+	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required acceptance test missing: $$required"; exit 1; }; \
+	 done
+	@OX_TEST_OX_BINARY="$(ACCEPTANCE_OX_BIN)" $(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- \
 		-tags=integration -race -count=1 -p 1 -parallel 1 -timeout=10m \
-		-run 'TestCodeActivityE2E|TestFreshInstall_MockServer_InitThenDoctor' \
+		$(ACCEPTANCE_INTEGRATION_COVER_FLAGS) \
+		-run '^($(subst $(space),|,$(strip $(ACCEPTANCE_INTEGRATION_TESTS))))$$' \
+		./cmd/ox
+	@OX_TEST_OX_BINARY="$(ACCEPTANCE_OX_BIN)" $(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- \
+		-tags=slow -race -count=1 -p 1 -parallel 1 -timeout=10m \
+		$(ACCEPTANCE_SLOW_COVER_FLAGS) \
+		-run '^($(subst $(space),|,$(strip $(ACCEPTANCE_SLOW_TESTS))))$$' \
 		./cmd/ox
 
 test-release: check-test-tiers ## Run every enforceable in-repo release tier sequentially
 	@$(MAKE) coverage-ratchet-test
-	@$(MAKE) test-all
-	@python3 scripts/coverage_ratchet.py coverage.out
+	@$(MAKE) coverage-integration
+	@python3 scripts/coverage_ratchet.py coverage-all.out --require-provenance coverage-all.out.provenance.json
 	@$(MAKE) test-slow
-	@$(MAKE) test-acceptance
-	@$(MAKE) test-digital-twin
+	@$(MAKE) test-fuzz
 
 test-agents: ## Drive real coding agents and read their transcripts back through ox (opt-in, costs API calls)
 	$(call say,"Driving real coding agents — requires each agent installed and authenticated...")
@@ -341,9 +394,28 @@ test-preflight: check-no-git-lfs-shell check-raw-writer-chokepoint check-session
 
 test-digital-twin: test-cloud-api-twin test-ledger-twin test-kb-twin ## Deterministic cloud-auth, ledger, and KB twins
 
+test-digital-twin-cover: ## Run every deterministic twin with distinct mergeable coverage profiles
+	@rm -rf $(COVERDIR)/twins
+	@mkdir -p $(COVERDIR)/twins
+	@$(MAKE) --no-print-directory test-digital-twin "TWIN_COVER_DIR=$(COVERDIR)/twins"
+	@for profile in cloud ledger kb; do \
+	  test -s $(COVERDIR)/twins/$$profile.out || { echo "ERROR: $$profile twin produced no coverage profile"; exit 1; }; \
+	 done
+	@grep -q '^github.com/sageox/ox/internal/auth/' $(COVERDIR)/twins/cloud.out || { echo "ERROR: cloud twin profile contains no product auth coverage"; exit 1; }
+	@grep -q '^github.com/sageox/ox/internal/glance/' $(COVERDIR)/twins/ledger.out || { echo "ERROR: ledger twin profile contains no product glance coverage"; exit 1; }
+	@grep -q '^github.com/sageox/ox/internal/daemon/' $(COVERDIR)/twins/kb.out || { echo "ERROR: KB twin profile contains no product daemon coverage"; exit 1; }
+	@if grep -q '^github.com/sageox/ox/tests/' $(COVERDIR)/twins/*.out; then \
+	  echo "ERROR: twin coverage must measure product packages, not harness packages"; exit 1; \
+	 fi
+
 test-cloud-api-twin: ## Product auth client against in-process SageOx API twin
 	@echo "Running cloud auth API digital twin tests..."
-	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -count=1 -timeout=2m ./internal/auth/... ./internal/twinapi/...
+	@listed=$$($(GO) test ./internal/twinapi ./internal/auth -list '^Test'); \
+	 for required in TestDeviceFlow_HappyPath TestIntrospect_FaultInjectionIsPathGeneric TestClockAdvance_JWTExpiry \
+	   TestValidateTokenServerSide_ExpiredJWT TestValidateTokenServerSide_FaultInjection TestValidateTokenServerSide_UserNotFoundError; do \
+	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required cloud twin test missing: $$required"; exit 1; }; \
+	 done
+	@$(TEST_GIT_ISOLATION) $(TIME_CMD) $(GOTESTSUM) --format $(GOTESTSUM_FMT) $(GOTESTSUM_LEAN) -- -race -count=1 -timeout=2m $(CLOUD_TWIN_COVER_FLAGS) ./internal/auth/... ./internal/twinapi/...
 
 test-team-context-twin: ## Digital twin tests (generates fake team context for inspection)
 	@echo "Running team context digital twin tests..."
@@ -351,12 +423,20 @@ test-team-context-twin: ## Digital twin tests (generates fake team context for i
 
 test-ledger-twin: ## Digital twin ledger tests (generates fake ledger for inspection)
 	@echo "Running ledger digital twin tests..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=ledger_twin -v -count=1 -timeout=2m ./tests/ledger_twin/...
+	@listed=$$($(GO) test -tags=ledger_twin ./tests/ledger_twin -list '^Test'); \
+	 for required in TestCartAnalyzeWindows TestPreCrimePositive_HotZone TestSessionConflicts_MergedWithMurmurs TestFullEnrich; do \
+	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required ledger twin test missing: $$required"; exit 1; }; \
+	 done
+	@$(TEST_GIT_ISOLATION) time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=ledger_twin -v -count=1 -timeout=2m $(LEDGER_TWIN_COVER_FLAGS) ./tests/ledger_twin/...
 
 test-kb-twin: ## Digital twin kb tests (drives syncBubbles + GC against real bare repos)
 	@command -v git >/dev/null 2>&1 || { echo "ERROR: git is required for the KB digital twin"; exit 1; }
 	@echo "Running kb digital twin tests..."
-	@time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=kb_twin -v -count=1 -timeout=5m ./tests/kb_twin/...
+	@listed=$$($(GO) test -tags=kb_twin ./tests/kb_twin -list '^Test'); \
+	 for required in TestKBTwin TestKBTwin_MultiEndpoint TestKBTwin_APIUnavailable_NoSideEffects TestKBTwin_MetaJSONShape; do \
+	   printf '%s\n' "$$listed" | grep -Fx "$$required" >/dev/null || { echo "ERROR: required KB twin test missing: $$required"; exit 1; }; \
+	 done
+	@$(TEST_GIT_ISOLATION) time $(GOTESTSUM) --format pkgname-and-test-fails -- -tags=kb_twin -v -count=1 -timeout=5m $(KB_TWIN_COVER_FLAGS) ./tests/kb_twin/...
 
 test-benchmark: ## Run prime efficiency benchmarks (requires claude CLI) - ~80 min, ~40 API calls
 	@echo "Running prime efficiency benchmarks..."
@@ -419,10 +499,10 @@ coverage-check: ## Fail if coverage is below threshold (default: 50%)
 	 fi
 
 coverage-ratchet: test-all ## Fail if protected risk-package coverage regresses
-	@python3 scripts/coverage_ratchet.py coverage.out
+	@python3 scripts/coverage_ratchet.py coverage.out --require-provenance coverage.out.provenance.json
 
 coverage-ratchet-diff: test-all ## Enforce package + changed-line coverage vs COVERAGE_BASE
-	@python3 scripts/coverage_ratchet.py coverage.out --diff-base $(COVERAGE_BASE)
+	@python3 scripts/coverage_ratchet.py coverage.out --require-provenance coverage.out.provenance.json --diff-base $(COVERAGE_BASE)
 
 coverage-ratchet-test: ## Test the coverage ratchet parser and failure semantics
 	@cd scripts && PYTHONDONTWRITEBYTECODE=1 python3 -m unittest -v coverage_ratchet_test.py test_tiers_test.py test_metrics_test.py
@@ -431,13 +511,15 @@ build-cover: ## Build ox binary with coverage instrumentation
 	@rm -rf $(COVERDIR)/integration $(COVERDIR)/merged
 	@mkdir -p bin $(COVERDIR)/integration
 	@$(GO) build -cover -covermode=atomic $(LDFLAGS) -o bin/$(BINARY_NAME)-cover ./cmd/ox
+	@$(GO) build $(ADAPTER_LDFLAGS) -o bin/ox-adapter-claude-code ./cmd/ox-adapter-claude-code
 	@echo "Instrumented binary: bin/$(BINARY_NAME)-cover"
 	@echo "Run with: GOCOVERDIR=$(COVERDIR)/integration bin/$(BINARY_NAME)-cover ..."
 
-coverage-integration: test-cover build-cover ## Run instrumented ox and merge unit + integration coverage
-	@echo "Running deterministic instrumented-binary scenarios..."
-	@GOCOVERDIR=$(abspath $(COVERDIR)/integration) bin/$(BINARY_NAME)-cover version >/dev/null
-	@GOCOVERDIR=$(abspath $(COVERDIR)/integration) bin/$(BINARY_NAME)-cover help >/dev/null
+coverage-integration: ## Run acceptance through instrumented ox and merge full + binary coverage
+	@rm -f coverage-all.out coverage-all.out.provenance.json
+	@$(MAKE) --no-print-directory test-all
+	@$(MAKE) --no-print-directory test-acceptance-cover
+	@$(MAKE) --no-print-directory test-digital-twin-cover
 	@count=$$(find $(COVERDIR)/integration -type f -name 'covcounters.*' | wc -l | tr -d ' '); \
 	 if [ "$$count" -eq 0 ]; then \
 	   echo "ERROR: instrumented ox produced no fresh coverage counters"; exit 1; \
@@ -446,9 +528,12 @@ coverage-integration: test-cover build-cover ## Run instrumented ox and merge un
 	@echo "Converting integration profile..."
 	@$(GO) tool covdata textfmt -i=$(COVERDIR)/integration -o=$(COVERDIR)/integration.out
 	@echo "Merging profiles..."
-	@awk 'FNR == 1 { next } { counts[$$1 " " $$2] += $$3 } END { for (block in counts) print block, counts[block] }' \
-	  coverage.out $(COVERDIR)/integration.out | LC_ALL=C sort > $(COVERDIR)/merged-body.out
+	@awk 'FNR == 1 { next } /\/kb_twin_export\.go:/ { next } { counts[$$1 " " $$2] += $$3 } END { for (block in counts) print block, counts[block] }' \
+	  coverage.out $(COVERDIR)/integration.out $(COVERDIR)/integration-test.out $(COVERDIR)/slow-test.out \
+	  $(COVERDIR)/twins/cloud.out $(COVERDIR)/twins/ledger.out $(COVERDIR)/twins/kb.out \
+	  | LC_ALL=C sort > $(COVERDIR)/merged-body.out
 	@{ echo 'mode: atomic'; sed -n '1,$$p' $(COVERDIR)/merged-body.out; } > coverage-all.out
+	@python3 scripts/coverage_ratchet.py coverage-all.out --write-provenance coverage-all.out.provenance.json
 	@$(GO) tool cover -func=coverage-all.out | tail -1
 	@echo "Combined profile: coverage-all.out"
 

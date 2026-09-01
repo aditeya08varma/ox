@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import math
 import re
@@ -49,6 +50,118 @@ class ChangedLineException:
     path: str
     reason: str
     expires: date
+
+
+PROVENANCE_VERSION = 2
+EVIDENCE_PREFIXES = (
+    "cmd/",
+    "internal/",
+    "pkg/",
+    "tests/",
+    "scripts/",
+    ".config/",
+    ".github/workflows/",
+)
+EVIDENCE_ROOT_FILES = {"Makefile", "go.mod", "go.sum"}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def evidence_paths(root: Path) -> list[Path]:
+    completed = subprocess.run(
+        [
+            "git",
+            "-C",
+            str(root),
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    paths = []
+    for raw_path in completed.stdout.split(b"\0"):
+        if not raw_path:
+            continue
+        relative = raw_path.decode("utf-8")
+        if not (
+            relative in EVIDENCE_ROOT_FILES
+            or relative.startswith(EVIDENCE_PREFIXES)
+        ):
+            continue
+        path = root / relative
+        if path.is_file():
+            paths.append(path)
+    return sorted(paths, key=lambda path: path.relative_to(root).as_posix())
+
+
+def evidence_sha256(root: Path, paths: list[Path] | None = None) -> tuple[str, int]:
+    digest = hashlib.sha256()
+    inputs = evidence_paths(root) if paths is None else paths
+    for path in inputs:
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        digest.update(relative)
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest(), len(inputs)
+
+
+def write_provenance(profile: Path, destination: Path, root: Path) -> None:
+    evidence_digest, evidence_files = evidence_sha256(root)
+    head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    payload = {
+        "version": PROVENANCE_VERSION,
+        "profile_sha256": file_sha256(profile),
+        "evidence_sha256": evidence_digest,
+        "evidence_files": evidence_files,
+        "git_head": head,
+    }
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.name + ".tmp")
+    temporary.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(destination)
+
+
+def verify_provenance(profile: Path, provenance: Path, root: Path) -> None:
+    payload = json.loads(provenance.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict) or payload.get("version") != PROVENANCE_VERSION:
+        raise ValueError(f"{provenance}: unsupported coverage provenance version")
+    expected_profile = payload.get("profile_sha256")
+    if expected_profile != file_sha256(profile):
+        raise ValueError(f"{profile}: content does not match coverage provenance")
+    current_head = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "HEAD"],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout.strip()
+    if payload.get("git_head") != current_head:
+        raise ValueError(f"{profile}: git HEAD changed after coverage was generated")
+    expected_evidence = payload.get("evidence_sha256")
+    current_evidence, evidence_files = evidence_sha256(root)
+    if (
+        payload.get("evidence_files") != evidence_files
+        or expected_evidence != current_evidence
+    ):
+        raise ValueError(
+            f"{profile}: code, tests, dependencies, or harness changed after coverage was generated"
+        )
 
 
 def validate_percentage(name: str, value: object) -> float:
@@ -387,9 +500,31 @@ def main() -> int:
         "--diff-base",
         help="also enforce changed-line coverage against BASE and the working tree",
     )
+    provenance = parser.add_mutually_exclusive_group()
+    provenance.add_argument(
+        "--write-provenance",
+        type=Path,
+        metavar="PATH",
+        help="bind this profile to the current production Go source contents",
+    )
+    provenance.add_argument(
+        "--require-provenance",
+        type=Path,
+        metavar="PATH",
+        help="fail unless this profile matches its recorded source contents",
+    )
     args = parser.parse_args()
 
     try:
+        root = Path.cwd()
+        if args.write_provenance:
+            write_provenance(args.profile, args.write_provenance, root)
+            print(f"Coverage provenance: {args.write_provenance}")
+            return 0
+        required_provenance = args.require_provenance or args.profile.with_name(
+            args.profile.name + ".provenance.json"
+        )
+        verify_provenance(args.profile, required_provenance, root)
         failures = check(args.profile, args.config)
         if args.diff_base:
             failures.extend(

@@ -259,6 +259,87 @@ diff --git a/deleted.go b/deleted.go
             with self.assertRaisesRegex(ValueError, "invalid Go coverage mode"):
                 coverage_ratchet.load_profile(profile, "example.com/project/")
 
+    def test_provenance_binds_profile_to_production_source_contents(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            source = root / "internal" / "risk" / "risk.go"
+            source.parent.mkdir(parents=True)
+            source.write_text("package risk\n\nfunc Risk() {}\n", encoding="utf-8")
+            profile = self.write_profile(
+                root,
+                "example.com/project/internal/risk/risk.go:3.1,3.15 1 1\n",
+            )
+            provenance = root / "coverage.provenance.json"
+
+            with mock.patch(
+                "coverage_ratchet.evidence_paths", return_value=[source]
+            ), mock.patch("coverage_ratchet.subprocess.run") as run:
+                run.return_value = mock.Mock(stdout="abc123\n")
+                coverage_ratchet.write_provenance(profile, provenance, root)
+                coverage_ratchet.verify_provenance(profile, provenance, root)
+
+                source.write_text(
+                    "package risk\n\nfunc Risk() { panic(\"changed\") }\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "code, tests, dependencies"):
+                    coverage_ratchet.verify_provenance(profile, provenance, root)
+
+    def test_provenance_rejects_substituted_profile(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            source = root / "risk.go"
+            source.write_text("package risk\n", encoding="utf-8")
+            profile = self.write_profile(
+                root,
+                "example.com/project/risk.go:1.1,1.13 1 1\n",
+            )
+            provenance = root / "coverage.provenance.json"
+
+            with mock.patch(
+                "coverage_ratchet.evidence_paths", return_value=[source]
+            ), mock.patch("coverage_ratchet.subprocess.run") as run:
+                run.return_value = mock.Mock(stdout="abc123\n")
+                coverage_ratchet.write_provenance(profile, provenance, root)
+                profile.write_text(
+                    "mode: atomic\nexample.com/project/risk.go:1.1,1.13 1 0\n",
+                    encoding="utf-8",
+                )
+                with self.assertRaisesRegex(ValueError, "content does not match"):
+                    coverage_ratchet.verify_provenance(profile, provenance, root)
+
+    def test_provenance_rejects_changed_commit_identity(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            source = root / "risk.go"
+            source.write_text("package risk\n", encoding="utf-8")
+            profile = self.write_profile(
+                root,
+                "example.com/project/risk.go:1.1,1.13 1 1\n",
+            )
+            provenance = root / "coverage.provenance.json"
+
+            with mock.patch(
+                "coverage_ratchet.evidence_paths", return_value=[source]
+            ), mock.patch("coverage_ratchet.subprocess.run") as run:
+                run.return_value = mock.Mock(stdout="first\n")
+                coverage_ratchet.write_provenance(profile, provenance, root)
+                run.return_value = mock.Mock(stdout="second\n")
+                with self.assertRaisesRegex(ValueError, "git HEAD changed"):
+                    coverage_ratchet.verify_provenance(profile, provenance, root)
+
+    def test_missing_provenance_fails_closed(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            root = Path(raw_directory)
+            profile = self.write_profile(
+                root,
+                "example.com/project/risk.go:1.1,1.13 1 1\n",
+            )
+            with self.assertRaises(FileNotFoundError):
+                coverage_ratchet.verify_provenance(
+                    profile, root / "missing.provenance.json", root
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

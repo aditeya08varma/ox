@@ -65,7 +65,9 @@
       "description": "Deterministic current-source compiled-binary journeys using isolated repositories and mock services.",
       "includes": [
         "Code activity behavior through a freshly built ox binary",
-        "Fresh-install init and doctor journey against a mock SageOx API with external network blocked"
+        "Fresh-install init and doctor journey against a mock SageOx API with external network blocked",
+        "Session start, incremental capture, and stop through the compiled binary, plus crash-artifact preservation through the production finalizer",
+        "Coverage fragments from the compiled binary merged with the full Go test profile"
       ],
       "excludes": [
         "Real cloud credentials and real AI coworker invocations",
@@ -78,7 +80,8 @@
       "includes": [
         "Product authentication client behavior against twin expiry, refresh, revocation, and injected API faults",
         "Ledger structural scenarios",
-        "Knowledge Bubble sync and garbage-collection scenarios against real bare Git repositories"
+        "Knowledge Bubble sync and garbage-collection scenarios against real bare Git repositories",
+        "Distinct twin coverage profiles merged into the authoritative full-suite report"
       ],
       "excludes": [
         "Real SageOx cloud infrastructure",

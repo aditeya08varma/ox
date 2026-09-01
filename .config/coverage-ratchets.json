@@ -3,7 +3,8 @@
   "changed_line_coverage": {
     "minimum": 90.0,
     "excluded_paths": [
-      "**/*_generated.go"
+      "**/*_generated.go",
+      "tests/**"
     ],
     "exceptions": [
       {
@@ -17,19 +18,19 @@
     {
       "path": "cmd/ox/",
       "recursive": false,
-      "minimum": 40.0,
+      "minimum": 49.0,
       "reason": "Primary CLI orchestration and user-facing failure handling"
     },
     {
       "path": "internal/daemon/",
       "recursive": false,
-      "minimum": 54.5,
+      "minimum": 63.5,
       "reason": "Sync, IPC, retry, and recovery orchestration"
     },
     {
       "path": "internal/codedb/index/",
       "recursive": false,
-      "minimum": 34.0,
+      "minimum": 68.0,
       "reason": "Repository indexing and recovery boundary"
     },
     {
@@ -47,13 +48,13 @@
     {
       "path": "internal/daemon/agentwork/",
       "recursive": false,
-      "minimum": 65.0,
+      "minimum": 72.0,
       "reason": "External AI coworker process, timeout, and output boundary"
     },
     {
       "path": "internal/session/pipeline/",
       "recursive": false,
-      "minimum": 90.0,
+      "minimum": 98.0,
       "reason": "Durable session copy and upload orchestration"
     }
   ]
