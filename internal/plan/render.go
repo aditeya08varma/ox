@@ -896,3 +896,15 @@ var leadingH1 = regexp.MustCompile(`(?s)^\s*<h1[^>]*>.*?</h1>`)
 func stripLeadingH1(html string) string {
 	return strings.TrimSpace(leadingH1.ReplaceAllString(html, ""))
 }
+
+// ScaffoldCSS returns the plan scaffold stylesheet. Exported so `ox viz render
+// --page` can wrap a bare fragment in a standalone, themed document without
+// duplicating the tokens — a viz previewed against a different stylesheet than
+// the one it ships in is not a preview.
+func ScaffoldCSS() (string, error) {
+	css, err := renderAssets.ReadFile("assets/scaffold.css")
+	if err != nil {
+		return "", fmt.Errorf("read scaffold.css: %w", err)
+	}
+	return string(css), nil
+}

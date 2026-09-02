@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### New
+
+- **See where a slow pipeline actually spends its time** — `ox viz render waterfall` draws the browser-devtools waterfall for any timed sequence: one row per stage on one clock, so overlap and serialization are obvious at a glance. Give the rows dependency edges and it computes the critical path, dims everything that didn't set the total, marks the long pole, and draws the idle wait between stages — the dead time a bar-only chart hides and the cheapest latency to delete.
+- **Preview any visualization in a browser without hand-building a page** — `ox viz render <id> --page` wraps the fragment in a standalone themed document carrying the same stylesheet the visual ships against, so what you see is what lands in the artifact.
+
 ## [0.14.3] - 2026-08-31
 
 Code indexing stays safe on every worktree layout, a wedged checkout repairs itself, and team-scoped credentials just work with `ox query`.

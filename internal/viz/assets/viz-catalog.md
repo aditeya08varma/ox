@@ -362,6 +362,16 @@ param: {"unit":"$/hr","items":[{"name":"topic detector","value":0.036},{"name":"
 <div class="barc"><div class="bar-row"><span class="bl">topic detector</span><span class="bt"><span class="bf" style="width:97%;background:var(--gold)"></span></span><span class="bv">$0.036</span></div></div>
 ```
 
+## waterfall
+use: WHERE THE TIME WENT in a multi-stage pipeline — a request cascade, a CI run, a Temporal workflow, a recorded discussion's derived artifacts. One row per timed stage on one shared clock. NOT `cost-waterfall` (that is the financial bridge chart, accumulating magnitudes); NOT `gantt` (calendar dates, no critical path).
+why: the browser-devtools chart shape, which is the most widely-read latency visualization there is — a reviewer already knows how to read it. Bars on a common clock make overlap and serialization obvious in a way a table of durations never does. Two additions carry the diagnosis the reference charts leave to the reader: give rows `after` edges and the CRITICAL PATH is computed and lit while everything off it dims (on a wide fan-out the widest bar is frequently not the bar that set the total), and the idle interval between a dependency finishing and its dependent starting is drawn as an explicit WAIT gap — dead time is invisible in every bar-only chart and is usually the cheapest latency to delete. The long pole gets a marker, because "which single row do I attack" is the question. Use `scale` + `unit` to feed raw ms and label in seconds. Keep ≤120 rows; aggregate below that or the rows stop being readable.
+param: {"title":"discussion rec_… → artifacts","unit":"s","scale":1000,"phases":[{"key":"wait","label":"queued","color":"slate"},{"key":"run","label":"running","color":"sage"}],"milestones":[{"at":0,"label":"recording stop","color":"gold"}],"rows":[{"id":"batch","label":"transcript-batch","start":0,"segments":[{"phase":"wait","dur":4000},{"phase":"run","dur":319000}]},{"id":"summary","label":"summary","start":396000,"after":"batch","segments":[{"phase":"run","dur":138000}],"note":"bedrock"},{"id":"bundle","label":"bundle complete","start":534000,"after":"summary","dur":268000,"status":"warn","note":"5-min sweep lag"}]}
+```html
+<!-- generate with: ox viz render waterfall --data spans.json
+     rows without `after` still render; they just get no critical path or wait gaps -->
+<figure class="wfall"><figcaption>discussion → artifacts</figcaption><svg class="wfall-svg" viewBox="0 0 760 90"><rect class="wfall-bar" x="214" y="33" width="180" height="8" style="fill:var(--sage)"/><text class="wfall-dur" x="399" y="40">323 s</text></svg></figure>
+```
+
 ## decision-grid
 use: a multi-option / multi-expert review — options scored across review lenses.
 why: long per-lens prose paragraphs hide the ranking; an option × lens grid with colored verdict cells shows where each option wins and where the lenses disagree, at a glance.
