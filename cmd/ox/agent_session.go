@@ -1042,16 +1042,17 @@ func processAgentSession(projectRoot string, state *session.RecordingState) (*ag
 	// carrier of the start-minted ID on the reconstruct path too (daemon
 	// orphan-finalize recovers it from here when meta.json was never written)
 	meta := &session.StoreMeta{
-		Version:      "1.0",
-		SessionID:    state.SessionID,
-		CreatedAt:    state.StartedAt,
-		AgentID:      state.AgentID,
-		AgentType:    agentTypeForMeta,
-		AgentVersion: result.AgentVersion,
-		Model:        result.Model,
-		Username:     identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
-		RepoID:       repoID,
-		OxVersion:    version.Version,
+		Version:                "1.0",
+		SessionID:              state.SessionID,
+		ContinuedFromSessionID: state.ContinuedFromSessionID,
+		CreatedAt:              state.StartedAt,
+		AgentID:                state.AgentID,
+		AgentType:              agentTypeForMeta,
+		AgentVersion:           result.AgentVersion,
+		Model:                  result.Model,
+		Username:               identity.AttributionDisplayName(projectEndpoint, config.GetDisplayName()),
+		RepoID:                 repoID,
+		OxVersion:              version.Version,
 	}
 	if err := rawWriter.WriteHeader(meta); err != nil {
 		rawWriter.Close()
@@ -1321,6 +1322,10 @@ func finalizeModeForSessionStop(userPrefersAsync bool) session.FinalizeDispatchM
 // If this fails, the session data is safe in the local cache and doctor can retry.
 // ledgerPath and sessionName are pre-computed by the caller.
 func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string) error {
+	return uploadSessionToLedgerWithEffects(projectRoot, result, state, ledgerPath, sessionName, productionSessionUploadEffects())
+}
+
+func uploadSessionToLedgerWithEffects(projectRoot string, result *agentSessionResult, state *session.RecordingState, ledgerPath, sessionName string, effects sessionUploadEffects) error {
 	sessionsDir := filepath.Join(ledgerPath, "sessions")
 	sessionDir := filepath.Join(sessionsDir, sessionName)
 
@@ -1375,6 +1380,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		EntryCount(result.EntryCount).
 		Summary(result.Summary).
 		StopReason(session.StopReasonStopped).
+		ContinuedFromSessionID(state.ContinuedFromSessionID).
 		ProducedCommits(state.ProducedCommits).
 		ProducedPlans(state.ProducedPlans).
 		LinkedPRs(state.LinkedPRs).
@@ -1386,20 +1392,13 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		// session that may never reach the remote.
 		LinkageStatus(lfs.LinkageStatusStaged)
 
-	// inject sageox contribution score from cache file into meta.json,
-	// then clean up the score file to prevent stale scores leaking into future sessions
-	if scoreFile, _ := session.ReadSageoxScore(state.AgentID); scoreFile != nil {
-		metaBuilder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
-	}
-	_ = session.CleanupSageoxScore(state.AgentID)
-
-	meta := metaBuilder.Build()
-	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
+	meta, err := writeInitialSessionMeta(sessionDir, state.AgentID, metaBuilder)
+	if err != nil {
 		return fmt.Errorf("write meta.json: %w", err)
 	}
 
 	// upload content files to LFS blob storage
-	fileRefs, err := uploadSessionLFS(projectRoot, sessionDir)
+	fileRefs, err := effects.uploadLFS(projectRoot, sessionDir)
 	if err != nil {
 		if errors.Is(err, api.ErrReadOnly) {
 			return err // don't wrap, don't set doctor marker
@@ -1421,7 +1420,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	}
 
 	// commit meta.json + .gitignore and push
-	if err := commitAndPushLedger(ledgerPath, sessionName); err != nil {
+	if err := effects.commitInitial(ledgerPath, sessionName); err != nil {
 		// set marker - session saved locally but not synced to remote
 		_ = doctor.SetNeedsDoctorAgent(projectRoot)
 		return fmt.Errorf("commit and push: %w", err)
@@ -1431,7 +1430,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// is committed, so backfill it + outcome=stopped onto every plan this
 	// session produced (slugs in hand — no directory scan), then commit those
 	// plan dirs. Best-effort; any miss falls to `ox doctor`.
-	reconcileProducedPlansAtStop(projectRoot, state.ProducedPlans, sessionName, meta.EffectiveSessionID())
+	effects.reconcilePlans(projectRoot, state.ProducedPlans, sessionName, meta.EffectiveSessionID())
 
 	// push succeeded — now safe to replace content files with LFS pointer stubs
 	if len(meta.Files) > 0 {
@@ -1440,7 +1439,9 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 		// the first failure). Always commit whatever pointers DID land — any
 		// rewritten pointer left uncommitted re-opens the autostash race for
 		// that file, even if other files in the same call failed.
-		written, writeErr := lfs.WritePointerFiles(sessionDir, meta.Files)
+		// AssertUploaded: meta.Files is the persisted manifest whose blobs were
+		// uploaded before the push that just succeeded above.
+		written, writeErr := lfs.WritePointerFiles(sessionDir, lfs.AssertUploadedManifest(meta.Files))
 		if len(written) > 0 {
 			// Commit the pointer rewrite so it doesn't sit dirty in the worktree.
 			// A dirty worktree here races against the daemon's sync-timer pull:
@@ -1449,7 +1450,7 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 			// the stash-pop yields conflict markers that ox doctor's auto-commit
 			// will eventually freeze into a permanent commit on main.
 			// (Tactical fix; pointer-first commit ordering is a separate discussion.)
-			if err := commitPointerRewriteAndPush(ledgerPath, sessionName, written); err != nil {
+			if err := effects.commitPointerRewrite(ledgerPath, sessionName, written); err != nil {
 				slog.Warn("LFS pointer rewrite commit failed", "error", err, "session", sessionName)
 			}
 		}
@@ -1466,13 +1467,50 @@ func uploadSessionToLedger(projectRoot string, result *agentSessionResult, state
 	// already-successful upload. Server-reported PR-link misses become
 	// repair tasks in the stop output — the agent still holds the session
 	// context and can fix the PR bodies with its own tooling.
-	for _, miss := range finalizeLinkageAfterPush(projectRoot, sessionDir, meta, sessionName) {
+	for _, miss := range effects.finalizeLinkage(projectRoot, sessionDir, meta, sessionName) {
 		result.PRLinkMisses = append(result.PRLinkMisses, fmt.Sprintf(
 			"PR %s is missing its session link — append this exact final line to its body: %s",
 			miss.PRURL, miss.ExpectedLine))
 	}
 
 	return nil
+}
+
+// writeInitialSessionMeta persists the first durable metadata snapshot before
+// consuming the per-agent contribution score. If the write fails, the score
+// remains available for a retry instead of being silently lost alongside the
+// failed meta.json write.
+func writeInitialSessionMeta(sessionDir, agentID string, builder *lfs.SessionMetaBuilder) (*lfs.SessionMeta, error) {
+	scoreFile, err := session.ReadSageoxScore(agentID)
+	if err != nil {
+		return nil, fmt.Errorf("read SageOx score: %w", err)
+	}
+	if scoreFile != nil {
+		builder.SageoxScore(scoreFile.Score, string(scoreFile.Category), scoreFile.Reason)
+	} else {
+		// A prior attempt may have persisted metadata and consumed the score
+		// carrier before a later LFS/push failure. Preserve that durable score on
+		// retry instead of overwriting meta.json with an unscored rebuild.
+		existing, readErr := lfs.ReadSessionMeta(sessionDir)
+		if readErr == nil && existing.SageoxScore != nil {
+			builder.SageoxScore(*existing.SageoxScore, existing.SageoxScoreCategory, existing.SageoxScoreReason)
+		} else if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+			return nil, fmt.Errorf("read existing session metadata: %w", readErr)
+		}
+	}
+
+	meta := builder.Build()
+	if err := lfs.WriteSessionMeta(sessionDir, meta); err != nil {
+		return nil, err
+	}
+
+	// Cleanup remains best-effort, but only after a successfully read score has
+	// a durable carrier. Missing scores need no cleanup; unreadable scores are
+	// preserved above for diagnosis and retry rather than silently discarded.
+	if scoreFile != nil {
+		_ = session.CleanupSageoxScore(agentID)
+	}
+	return meta, nil
 }
 
 // reconcileProducedPlansAtStop backfills the canonical session id + a

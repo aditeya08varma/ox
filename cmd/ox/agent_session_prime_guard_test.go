@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/sageox/agentx"
 )
 
 // TestEnsurePrimeBeforeSession_DoesNotRecurseUnderGoTest is the regression
@@ -26,6 +28,24 @@ func TestEnsurePrimeBeforeSession_DoesNotRecurseUnderGoTest(t *testing.T) {
 	// yet" state that used to trigger the exec.Command call.
 	agentSessionID := fmt.Sprintf("test-guard-%d", time.Now().UnixNano())
 	t.Setenv("CLAUDE_CODE_SESSION_ID", agentSessionID)
+
+	// Confirm the test actually reaches the branch it means to exercise.
+	// agentx.CurrentAgent() returns whichever agent it detects first — if a
+	// different signal in the test environment won the detection, or that
+	// agent doesn't support sessions, or reports a different session ID,
+	// ensurePrimeBeforeSession would return early via its "no session ID"
+	// path instead of the testing.Testing() guard, and this test would pass
+	// for the wrong reason.
+	agent := agentx.CurrentAgent()
+	if agent == nil {
+		t.Fatal("agentx.CurrentAgent() returned nil — CLAUDE_CODE_SESSION_ID should have made ClaudeCodeAgent detectable")
+	}
+	if !agent.SupportsSession() {
+		t.Fatalf("detected agent %q does not support sessions", agent.Name())
+	}
+	if got := agent.SessionID(agentx.NewSystemEnvironment()); got != agentSessionID {
+		t.Fatalf("detected agent %q reports SessionID() = %q, want %q — some other env signal is interfering", agent.Name(), got, agentSessionID)
+	}
 
 	if marker, err := ReadSessionMarker(agentSessionID); err != nil || marker != nil {
 		t.Fatalf("test session id %q unexpectedly already has a marker (marker=%+v err=%v)", agentSessionID, marker, err)
