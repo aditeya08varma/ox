@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"html"
 	"io"
 	"os"
 	"sort"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/sageox/ox/internal/cli"
 	"github.com/sageox/ox/internal/config"
+	"github.com/sageox/ox/internal/plan"
 	"github.com/sageox/ox/internal/viz"
 	"github.com/spf13/cobra"
 )
@@ -61,10 +63,12 @@ required shape with 'ox viz <id>'.`,
 			if dataPath == "" {
 				return fmt.Errorf("--data is required: pass a JSON data file (or - for stdin)")
 			}
-			return runVizRender(cmd, args[0], dataPath)
+			page, _ := cmd.Flags().GetBool("page")
+			return runVizRender(cmd, args[0], dataPath, page)
 		},
 	}
 	cmd.Flags().String("data", "", "JSON data file for the pattern (use - for stdin)")
+	cmd.Flags().Bool("page", false, "wrap the fragment in a standalone themed HTML document (pipe to a file and open it)")
 	return cmd
 }
 
@@ -122,7 +126,7 @@ func newVizPRCommand() *cobra.Command {
 	return cmd
 }
 
-func runVizRender(cmd *cobra.Command, pattern, dataPath string) error {
+func runVizRender(cmd *cobra.Command, pattern, dataPath string, page bool) error {
 	var raw []byte
 	var err error
 	if dataPath == "-" {
@@ -137,8 +141,42 @@ func runVizRender(cmd *cobra.Command, pattern, dataPath string) error {
 	if err != nil {
 		return err
 	}
+	if page {
+		doc, err := vizStandalonePage(pattern, frag)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), doc)
+		return nil
+	}
 	fmt.Fprintln(cmd.OutOrStdout(), frag)
 	return nil
+}
+
+// vizStandalonePage wraps a fragment in a minimal document carrying the SAME
+// scaffold stylesheet the fragment ships against. Previewing a viz under any
+// other stylesheet is not a preview — the tokens ARE the design, and a chart
+// that looks right on a default white page can be unreadable in the artifact.
+//
+// It stays inline-only: no script, no external URL, so the output is still
+// CSP-safe and openable straight from file://.
+func vizStandalonePage(pattern, frag string) (string, error) {
+	css, err := plan.ScaffoldCSS()
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">")
+	b.WriteString("<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">")
+	b.WriteString("<title>ox viz · " + html.EscapeString(pattern) + "</title><style>\n")
+	b.WriteString(css)
+	// The plan scaffold assumes a .shell grid; a bare fragment needs its own
+	// breathing room, and section padding here keeps the figure off the edge.
+	b.WriteString("\nbody{padding:34px 38px;max-width:1080px;margin:0 auto}\n")
+	b.WriteString("</style></head><body><main><section>\n")
+	b.WriteString(frag)
+	b.WriteString("\n</section></main></body></html>")
+	return b.String(), nil
 }
 
 func runVizSuggest(cmd *cobra.Command, intent string, limit int, jsonOut bool) error {
