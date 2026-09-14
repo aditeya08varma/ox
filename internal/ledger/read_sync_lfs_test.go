@@ -39,12 +39,17 @@ func newReadLFSFixture(t *testing.T, handler http.HandlerFunc) *readFixture {
 func commitReadLFSPointer(t *testing.T, f *readFixture, path string, content []byte) string {
 	t.Helper()
 	pointer := lfs.FormatPointer("sha256:"+lfs.ComputeOID(content), int64(len(content)))
+	commitReadPointer(t, f, path, pointer)
+	return pointer
+}
+
+func commitReadPointer(t *testing.T, f *readFixture, path, pointer string) {
+	t.Helper()
 	require.NoError(t, os.MkdirAll(filepath.Dir(filepath.Join(f.source, path)), 0700))
 	require.NoError(t, os.WriteFile(filepath.Join(f.source, path), []byte(pointer), 0600))
 	readTestGit(t, f.source, "add", "--", path)
 	readTestGit(t, f.source, "commit", "-m", "add LFS content")
 	readTestGit(t, f.bare, "fetch", f.source, "+refs/heads/main:refs/heads/main")
-	return pointer
 }
 
 // Failure prevented: batching mixes up out-of-order grants, repeats a shared
@@ -110,6 +115,68 @@ func TestReadSyncLFSBatchHydratesUniqueAndSharedObjects(t *testing.T) {
 	require.Equal(t, result.Head, warm.Head)
 	require.Equal(t, int32(1), batches.Load())
 	require.Equal(t, coldDownloads, downloads.Load(), "warm verified files require no object downloads")
+}
+
+// Failure prevented: a zero-byte artifact's pointer (size 0) was reported as
+// missing_hydration before any request, so one empty session file failed the
+// whole ledger read. An empty object needs no grant: its content is implied.
+func TestReadSyncLFSEmptyObjectMaterializesWithoutBatch(t *testing.T) {
+	content := []byte("session content\n")
+	var batches atomic.Int32
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			batches.Add(1)
+			var request struct {
+				Objects []lfs.BatchObject `json:"objects"`
+			}
+			assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+			for _, object := range request.Objects {
+				assert.NotZero(t, object.Size, "an empty object must never be requested")
+			}
+			response := lfs.BatchResponse{}
+			for _, object := range request.Objects {
+				response.Objects = append(response.Objects, lfs.BatchResponseObject{
+					OID: object.OID, Size: object.Size, Actions: &lfs.Actions{Download: &lfs.Action{
+						Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + object.OID,
+					}},
+				})
+			}
+			json.NewEncoder(w).Encode(response)
+			return
+		}
+		w.Write(content)
+	})
+	commitReadLFSPointer(t, f, "sessions/a/session.md", content)
+	commitReadLFSPointer(t, f, "sessions/a/context-trace.jsonl", []byte{})
+	result := ReadSync(context.Background(), f.opts)
+	require.True(t, result.Ready, "%+v", result)
+	require.Equal(t, "complete", result.Hydration.State)
+	empty, err := os.ReadFile(filepath.Join(f.opts.Path, "sessions/a/context-trace.jsonl"))
+	require.NoError(t, err)
+	require.Empty(t, empty)
+	require.Equal(t, int32(1), batches.Load(), "only the non-empty object needs a grant")
+	warm := ReadSync(context.Background(), f.opts)
+	require.True(t, warm.Ready, "%+v", warm)
+	require.Equal(t, int32(1), batches.Load(), "a verified empty file needs nothing on warm sync")
+}
+
+// Failure prevented: a size-0 pointer naming any other object is materialized
+// as an empty file, silently replacing content the pointer never described.
+func TestReadSyncLFSEmptyObjectRequiresEmptyOID(t *testing.T) {
+	var batches atomic.Int32
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		batches.Add(1)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	})
+	commitReadPointer(t, f, "sessions/a/context-trace.jsonl", lfs.FormatPointer("sha256:"+lfs.ComputeOID([]byte("not empty")), 0))
+	result := ReadSync(context.Background(), f.opts)
+	require.False(t, result.Ready)
+	require.Equal(t, "missing_hydration", result.ErrorClass)
+	require.Zero(t, batches.Load(), "an unhydratable pointer must not reach the server")
+}
+
+func TestMaterializeEmptyReadObjectMissingDir(t *testing.T) {
+	require.Error(t, materializeEmptyReadObject(filepath.Join(t.TempDir(), "missing", "context-trace.jsonl")))
 }
 
 // Failure prevented: ledgers with over 100 unique pointers exceed the backend's

@@ -513,6 +513,18 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 		if len(f.pointer) == 0 || f.hydrated {
 			continue
 		}
+		if f.ref.Size == 0 {
+			// An empty object's content is fully implied by its pointer, and GitLab
+			// may never have stored it, so never spend a grant on it: verify the OID is
+			// the empty-content hash and materialize the empty file locally.
+			if f.ref.BareOID() != lfs.ComputeOID(nil) {
+				return errors.New("missing_hydration")
+			}
+			if err := materializeEmptyReadObject(filepath.Join(dir, f.path)); err != nil {
+				return err
+			}
+			continue
+		}
 		oid := f.ref.BareOID()
 		if same := pending[oid]; len(same) != 0 {
 			if same[0].ref.Size != f.ref.Size {
@@ -589,6 +601,24 @@ func materializeReadObject(ctx context.Context, action *lfs.Action, path string,
 	if err != nil || info.Size() != ref.Size {
 		return errors.New("missing_hydration")
 	}
+	return commitReadObject(f, path)
+}
+
+// materializeEmptyReadObject replaces a size-0 pointer with the empty file it
+// describes, through the same durable path as a downloaded object, so a ready
+// receipt never covers a replacement that a crash could roll back to the pointer.
+func materializeEmptyReadObject(path string) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".ox-read-object-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	return commitReadObject(f, path)
+}
+
+// commitReadObject makes the fully written temp file f durable at path.
+func commitReadObject(f *os.File, path string) error {
 	if err := f.Sync(); err != nil {
 		return err
 	}
