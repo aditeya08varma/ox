@@ -70,6 +70,8 @@ func TestOxInPathCheck_OffPath_MessageMatchesContractD3(t *testing.T) {
 	)
 }
 
+// TestOxInPathCheck_NotInstalled verifies users with and without Homebrew both
+// receive safe installation guidance when ox is absent.
 func TestOxInPathCheck_NotInstalled(t *testing.T) {
 	check := NewOxInPathCheckForTest(
 		func(string) (string, error) { return "", assertErrNotFound() },
@@ -80,7 +82,11 @@ func TestOxInPathCheck_NotInstalled(t *testing.T) {
 
 	assert.Equal(t, doctor.StatusWarn, result.Status)
 	assert.Equal(t, "ox is not installed", result.Message)
-	assert.Contains(t, result.Fix, "brew install sageox/tap/ox")
+	assert.Equal(t,
+		"brew install sageox/tap/ox        # recommended\n"+
+			"Download a release: https://github.com/sageox/ox/releases/latest",
+		result.Fix,
+	)
 }
 
 func TestOxInPathCheck_Pass_WhenShellAgreesWithRunningBinary(t *testing.T) {
@@ -139,7 +145,7 @@ func TestOxInPathCheck_OffPathFixText_PerShell(t *testing.T) {
 	}{
 		{"zsh", shellZsh, "~/.zshenv", `export PATH="$PATH:/some/dir"`, false},
 		{"bash", shellBash, "~/.bashrc", `export PATH="$PATH:/some/dir"`, true},
-		{"fish", shellFish, "~/.config/fish/config.fish", "fish_add_path /some/dir", true},
+		{"fish", shellFish, "~/.config/fish/config.fish", `fish_add_path -- "/some/dir"`, true},
 		{"unknown", shellUnknown, "your shell's startup file", `export PATH="$PATH:/some/dir"`, true},
 	}
 	for _, tt := range tests {

@@ -90,9 +90,9 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 	@echo "  For everyday use, install a release instead:"
 	@echo ""
 	@echo "    brew install sageox/tap/ox        # recommended"
-	@echo "    curl -sSL https://raw.githubusercontent.com/sageox/ox/main/scripts/install.sh | bash"
+	@echo "    Versioned downloads: https://github.com/sageox/ox/releases/latest"
 	@echo ""
-	@echo "  Both self-update via \`ox upgrade\` and keep ox and its 10 adapter"
+	@echo "  Releases self-update via \`ox upgrade\` and keep ox and its 10 adapter"
 	@echo "  binaries together on PATH."
 	@echo "─────────────────────────────────────────────────────────────────────"
 	@case ":$$PATH:" in \
@@ -103,7 +103,7 @@ install: install-ox install-adapters ## Install ox and adapters to $GOPATH/bin
 			case "$$shell_name" in \
 				zsh) rc_file="~/.zshenv"; path_line="export PATH=\"\$$PATH:$(INSTALL_BIN)\""; explanation="AI coding tools run hooks in a non-interactive shell, which reads ~/.zshenv but not ~/.zshrc." ;; \
 				bash) rc_file="~/.bashrc"; path_line="export PATH=\"\$$PATH:$(INSTALL_BIN)\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
-				fish) rc_file="~/.config/fish/config.fish"; path_line="fish_add_path $(INSTALL_BIN)"; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
+				fish) rc_file="~/.config/fish/config.fish"; path_line="fish_add_path -- \"$(INSTALL_BIN)\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
 				*) rc_file="the startup file for your shell"; path_line="export PATH=\"\$$PATH:$(INSTALL_BIN)\""; restart_line="Then restart your AI coding tool from a new terminal so it picks up the change."; explanation="AI coding tools inherit the environment of the terminal they were started from, not any change made after they launched." ;; \
 			esac; \
 			echo ""; \
