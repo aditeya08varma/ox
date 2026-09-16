@@ -383,8 +383,17 @@ func safeReadOID(oid string) string {
 	return oid
 }
 
+// readInterrupted reports whether the operation itself stopped, rather than one
+// object failing. The caller's context is not the only evidence: lfs.Client
+// carries its own request deadline, and a request that exceeds it fails with an
+// error wrapping context.DeadlineExceeded while ctx is still live. Hydration and
+// classification must read that the same way, so both ask here.
+func readInterrupted(ctx context.Context, err error) bool {
+	return ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
 func readErrorClass(ctx context.Context, err error) string {
-	if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if readInterrupted(ctx, err) {
 		return "interrupted"
 	}
 	if errors.Is(err, gitserver.ErrReadTokenUnavailable) || errors.Is(err, auth.ErrReadTokenUnavailable) {
@@ -670,11 +679,47 @@ func dehydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport,
 	return nil
 }
 
+// readSkips keeps the first failure hydration walked past, and decides which
+// failures it may walk past at all.
+type readSkips struct{ first error }
+
+// skip records err and reports whether hydration may continue past it.
+//
+// An interrupted operation, an unusable read credential, and a 401/403 are
+// about the operation or the grant rather than one object: no later object
+// could be materialized either, so they stop hydration where they happen.
+// Everything else is about a single object, and stopping there would leave
+// every later object a stub for as long as the condition lasts.
+func (s *readSkips) skip(ctx context.Context, err error) bool {
+	var httpErr *lfs.HTTPError
+	switch {
+	case readInterrupted(ctx, err),
+		errors.Is(err, auth.ErrReadTokenUnavailable),
+		errors.As(err, &httpErr) && (httpErr.StatusCode == 401 || httpErr.StatusCode == 403):
+		return false
+	}
+	if s.first == nil {
+		s.first = err
+	}
+	return true
+}
+
+// hydrateReadFiles materializes every object it can, then reports the first one
+// it could not. A ledger accumulates objects for as long as the team works, so
+// an object the server will not serve is a steady state rather than an
+// exception; returning at the first one left every later object a stub forever,
+// however healthy those objects were (ox #947).
+//
+// Skipping never relaxes readiness. verifyReadCheckout recounts the worktree
+// afterwards, so a partial hydration still reports hydration.state "missing"
+// and ready false; the returned failure replaces verification's own detail
+// because it names why the object was skipped, which the worktree cannot say.
 func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, dir string, opts ReadSyncOptions, dirs []string) error {
 	files, err := readFiles(ctx, transport, dir, dirs, true)
 	if err != nil {
 		return err
 	}
+	var skips readSkips
 	requests := make([]lfs.BatchObject, 0)
 	pending := make(map[string][]readFile)
 	for _, f := range files {
@@ -686,10 +731,14 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 			// may never have stored it, so never spend a grant on it: verify the OID is
 			// the empty-content hash and materialize the empty file locally.
 			if f.ref.BareOID() != lfs.ComputeOID(nil) {
-				return missingHydration(ReadFailureDetail{Reason: "empty_object_oid_mismatch",
+				err := missingHydration(ReadFailureDetail{Reason: "empty_object_oid_mismatch",
 					Path: f.path, OID: f.ref.BareOID(), ExpectedOID: lfs.ComputeOID(nil)})
+				if !skips.skip(ctx, err) {
+					return err
+				}
+				continue
 			}
-			if err := materializeEmptyReadObject(filepath.Join(dir, f.path)); err != nil {
+			if err := materializeEmptyReadObject(filepath.Join(dir, f.path)); err != nil && !skips.skip(ctx, err) {
 				return err
 			}
 			continue
@@ -697,8 +746,22 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 		oid := f.ref.BareOID()
 		if same := pending[oid]; len(same) != 0 {
 			if same[0].ref.Size != f.ref.Size {
-				return missingHydration(ReadFailureDetail{Reason: "shared_object_size_conflict", Path: f.path,
+				// At most one of the two pointers can be right, and which one is
+				// not knowable until the bytes arrive. Both files stay pending so
+				// that each one's own size verification decides whether it may
+				// commit: dropping either here would pick the winner by path
+				// order and strand the correct pointer when it sorts second.
+				//
+				// The conflict is a property of the pair, so it names no path.
+				// Naming one would have to choose before the bytes settle it, and
+				// the file it chose would be the hydrated one half the time — an
+				// operator sent to a file that is fine. The losing file names
+				// itself later through downloaded_size_mismatch.
+				err := missingHydration(ReadFailureDetail{Reason: "shared_object_size_conflict",
 					OID: oid, ExpectedSize: readSize(same[0].ref.Size), ActualSize: readSize(f.ref.Size)})
+				if !skips.skip(ctx, err) {
+					return err
+				}
 			}
 		} else {
 			requests = append(requests, lfs.BatchObject{OID: oid, Size: f.ref.Size})
@@ -706,7 +769,7 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 		pending[oid] = append(pending[oid], f)
 	}
 	if len(requests) == 0 {
-		return nil
+		return skips.first
 	}
 	client, err := lfs.NewReadClient(opts.Endpoint, opts.RepoID, opts.ReadURL)
 	if err != nil {
@@ -714,64 +777,101 @@ func hydrateReadFiles(ctx context.Context, transport *gitserver.ReadTransport, d
 	}
 	// The read route allows 100 objects and 64 KiB of request JSON. Fixed-size
 	// SHA-256 OIDs keep each batch well below that body limit. Materialize one
-	// validated batch at a time so grants stay bounded and failures retain progress.
+	// batch at a time so grants stay bounded and failures retain progress.
 	const batchSize = 100
 	for start := 0; start < len(requests); start += batchSize {
 		batch := requests[start:min(start+batchSize, len(requests))]
 		resp, err := client.BatchDownloadContext(ctx, batch)
 		if err != nil {
-			return err
+			if !skips.skip(ctx, err) {
+				return err
+			}
+			continue
 		}
-		if len(resp.Objects) != len(batch) {
+		// Only a short response is a counting defect. A surplus one is always a
+		// specific entry — unrequested or repeated — and the loop below names it;
+		// recording the count here first would mask that with a vaguer reason,
+		// since the first failure walked past is the one reported.
+		if len(resp.Objects) < len(batch) {
 			// The count itself is the defect. No OID is identifiable as the one
 			// at fault, so this failure names the batch rather than an object.
-			return missingHydration(ReadFailureDetail{Reason: "batch_response_incomplete"})
+			// The objects the response does describe are still materialized; the
+			// ones it omits keep their stubs and verification counts them.
+			err := missingHydration(ReadFailureDetail{Reason: "batch_response_incomplete"})
+			if !skips.skip(ctx, err) {
+				return err
+			}
 		}
-		actions := make(map[string]*lfs.Action, len(batch))
+		// requested maps this batch's OIDs to whether the response has described
+		// one yet, so an unrequested or repeated object is identifiable on its own.
+		requested := make(map[string]bool, len(batch))
 		for _, object := range batch {
-			actions[object.OID] = nil
+			requested[object.OID] = false
 		}
+		// actions holds only the objects this batch may download. A requested OID
+		// absent from it was refused, described incorrectly, or never answered.
+		actions := make(map[string]*lfs.Action, len(batch))
 		for _, object := range resp.Objects {
-			action, requested := actions[object.OID]
-			if !requested {
-				return missingHydration(ReadFailureDetail{Reason: "batch_object_unrequested", OID: object.OID})
+			answered, inBatch := requested[object.OID]
+			var err error
+			switch {
+			case !inBatch:
+				err = missingHydration(ReadFailureDetail{Reason: "batch_object_unrequested", OID: object.OID})
+			case answered:
+				err = missingHydration(ReadFailureDetail{Reason: "batch_object_duplicated", OID: object.OID})
 			}
-			if action != nil {
-				return missingHydration(ReadFailureDetail{Reason: "batch_object_duplicated", OID: object.OID})
+			if err != nil {
+				if !skips.skip(ctx, err) {
+					return err
+				}
+				continue
 			}
+			requested[object.OID] = true
 			// pending is keyed by the OIDs this batch was built from, so a
 			// requested object always has at least one file waiting on it.
-			file := pending[object.OID][0]
-			if object.Error != nil {
+			waiting := pending[object.OID]
+			file := waiting[0]
+			switch {
+			case object.Error != nil:
 				// Refusal is checked before size. A refused object carries no
 				// meaningful size, so checking size first reports a size mismatch
-				// for what is really a refusal.
-				detail := ReadFailureDetail{Reason: "object_refused", Path: file.path, OID: object.OID, ServerCode: object.Error.Code}
-				if object.Error.Code == 401 || object.Error.Code == 403 {
-					return &readFailure{detail: detail, err: &lfs.HTTPError{StatusCode: object.Error.Code}}
-				}
-				return missingHydration(detail)
-			}
-			switch {
-			case file.ref.Size != object.Size:
-				return missingHydration(ReadFailureDetail{Reason: "object_size_mismatch", Path: file.path,
+				// for what is really a refusal. The status is wrapped so that a
+				// 401/403 — about the grant, not this object — stops hydration
+				// under the same rule that classifies it as "denied".
+				err = &readFailure{err: &lfs.HTTPError{StatusCode: object.Error.Code},
+					detail: ReadFailureDetail{Reason: "object_refused", Path: file.path, OID: object.OID, ServerCode: object.Error.Code}}
+			// The grant is accepted when any waiting file declares the granted
+			// size, not only the one whose size was requested. When two pointers
+			// disagree, a server that reports the object's own size is what says
+			// which of them to believe, and the download verifies it again.
+			case !slices.ContainsFunc(waiting, func(f readFile) bool { return f.ref.Size == object.Size }):
+				err = missingHydration(ReadFailureDetail{Reason: "object_size_mismatch", Path: file.path,
 					OID: object.OID, ExpectedSize: readSize(file.ref.Size), ActualSize: readSize(object.Size)})
 			case object.Actions == nil:
-				return missingHydration(ReadFailureDetail{Reason: "object_missing_actions", Path: file.path, OID: object.OID})
+				err = missingHydration(ReadFailureDetail{Reason: "object_missing_actions", Path: file.path, OID: object.OID})
 			case object.Actions.Download == nil:
-				return missingHydration(ReadFailureDetail{Reason: "object_missing_download_action", Path: file.path, OID: object.OID})
+				err = missingHydration(ReadFailureDetail{Reason: "object_missing_download_action", Path: file.path, OID: object.OID})
+			default:
+				actions[object.OID] = object.Actions.Download
+				continue
 			}
-			actions[object.OID] = object.Actions.Download
+			if !skips.skip(ctx, err) {
+				return err
+			}
 		}
 		for _, object := range batch {
+			action, granted := actions[object.OID]
+			if !granted {
+				continue
+			}
 			for _, f := range pending[object.OID] {
-				if err := materializeReadObject(ctx, actions[object.OID], dir, f.path, f.ref); err != nil {
+				if err := materializeReadObject(ctx, action, dir, f.path, f.ref); err != nil && !skips.skip(ctx, err) {
 					return err
 				}
 			}
 		}
 	}
-	return nil
+	return skips.first
 }
 
 // materializeReadObject downloads one object into rel under dir. rel is the

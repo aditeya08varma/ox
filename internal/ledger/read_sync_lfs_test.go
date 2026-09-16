@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sageox/ox/internal/auth"
 	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/gitutil"
 	"github.com/sageox/ox/internal/lfs"
@@ -190,6 +192,9 @@ func TestReadSyncLFSBoundedBatchesPreserveProgress(t *testing.T) {
 	for _, tc := range []struct{ name, errorClass string }{
 		{name: "complete"},
 		{name: "later batch foreign", errorClass: "missing_hydration"},
+		// A batch the server cannot serve right now is the transient case: it
+		// must not stop hydration, only leave its own objects unmaterialized.
+		{name: "later batch unavailable", errorClass: "missing_hydration"},
 		{name: "later batch denied", errorClass: "denied"},
 		{name: "later batch canceled", errorClass: "interrupted"},
 	} {
@@ -238,6 +243,9 @@ func TestReadSyncLFSBoundedBatchesPreserveProgress(t *testing.T) {
 				}
 				if batch == 2 {
 					switch tc.name {
+					case "later batch unavailable":
+						w.WriteHeader(http.StatusInternalServerError)
+						return
 					case "later batch denied":
 						w.WriteHeader(http.StatusForbidden)
 						return
@@ -301,9 +309,12 @@ func TestReadSyncLFSBoundedBatchesPreserveProgress(t *testing.T) {
 	}
 }
 
-// Failure prevented: an incomplete or mismatched batch partially hydrates files
-// before discovering that another object's identity, size, or action is invalid.
-func TestReadSyncLFSBatchRejectsInvalidResponsesBeforeMaterialization(t *testing.T) {
+// Failure prevented: a response entry whose identity, size, or action is
+// invalid is materialized anyway — or, the other way, it condemns the entries
+// beside it, which is how one malformed entry made a whole batch permanently
+// unreadable (ox #947). Each entry is judged on its own: the invalid one leaves
+// its stub in place and the valid ones in the same response still hydrate.
+func TestReadSyncLFSBatchRejectsInvalidResponseObjectsIndividually(t *testing.T) {
 	firstPath, secondPath := "sessions/a/session.md", "sessions/b/session.md"
 	firstOID, secondOID := lfs.ComputeOID([]byte(firstPath+"\n")), lfs.ComputeOID([]byte(secondPath+"\n"))
 	secondSize := int64(len(secondPath + "\n"))
@@ -327,7 +338,11 @@ func TestReadSyncLFSBatchRejectsInvalidResponsesBeforeMaterialization(t *testing
 			f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
 				if !strings.HasSuffix(r.URL.Path, "/batch") {
 					downloads.Add(1)
-					http.Error(w, "invalid batch must not start a download", http.StatusInternalServerError)
+					if !assert.Equal(t, firstOID, filepath.Base(r.URL.Path), "only the valid entry may be downloaded") {
+						http.NotFound(w, r)
+						return
+					}
+					_, _ = w.Write([]byte(firstPath + "\n"))
 					return
 				}
 				batches.Add(1)
@@ -381,14 +396,78 @@ func TestReadSyncLFSBatchRejectsInvalidResponsesBeforeMaterialization(t *testing
 			}
 			require.Nil(t, result.LastSuccessfulSync)
 			require.Equal(t, int32(1), batches.Load())
-			require.Zero(t, downloads.Load(), "validate the entire grant before materializing any object")
-			for path, pointer := range pointers {
-				actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
-				require.NoError(t, err)
-				require.Equal(t, pointer, string(actual), path)
-			}
+			require.Equal(t, int32(1), downloads.Load(), "the entry beside the invalid one is still materialized")
+			require.Equal(t, ReadHydration{State: "missing", Required: 2, Completed: 1}, result.Hydration)
+			first, err := os.ReadFile(filepath.Join(f.opts.Path, firstPath))
+			require.NoError(t, err)
+			require.Equal(t, firstPath+"\n", string(first))
+			second, err := os.ReadFile(filepath.Join(f.opts.Path, secondPath))
+			require.NoError(t, err)
+			require.Equal(t, pointers[secondPath], string(second), "the object the response got wrong keeps its stub")
 			require.False(t, CheckReadiness(context.Background(), f.opts.Path, f.opts.RepoID, f.opts.Endpoint).Ready)
 		})
+	}
+}
+
+// Failure prevented: a response holding MORE objects than the batch reports
+// batch_response_incomplete — a reason the contract defines as "fewer objects
+// than the batch" — and, being recorded before the per-object loop runs, that
+// vaguer reason is the one retained, hiding which entry was actually surplus.
+func TestReadSyncLFSSurplusBatchResponseNamesTheSurplusEntry(t *testing.T) {
+	firstPath, secondPath := "sessions/a/session.md", "sessions/b/session.md"
+	firstOID := lfs.ComputeOID([]byte(firstPath + "\n"))
+	contents := map[string][]byte{
+		firstOID: []byte(firstPath + "\n"), lfs.ComputeOID([]byte(secondPath + "\n")): []byte(secondPath + "\n"),
+	}
+	var batches, downloads atomic.Int32
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/batch") {
+			downloads.Add(1)
+			content, ok := contents[filepath.Base(r.URL.Path)]
+			if !assert.True(t, ok) {
+				http.NotFound(w, r)
+				return
+			}
+			_, _ = w.Write(content)
+			return
+		}
+		batches.Add(1)
+		var request struct {
+			Objects []lfs.BatchObject `json:"objects"`
+		}
+		assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		if !assert.Len(t, request.Objects, 2) {
+			http.Error(w, "expected a single combined batch", http.StatusBadRequest)
+			return
+		}
+		objects := make([]lfs.BatchResponseObject, 0, 3)
+		for _, object := range request.Objects {
+			objects = append(objects, lfs.BatchResponseObject{
+				OID: object.OID, Size: object.Size, Actions: &lfs.Actions{Download: &lfs.Action{
+					Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + object.OID,
+				}},
+			})
+		}
+		// One entry too many: the first object repeated.
+		objects = append(objects, objects[0])
+		assert.NoError(t, json.NewEncoder(w).Encode(lfs.BatchResponse{Objects: objects}))
+	})
+	require.True(t, ReadSync(context.Background(), f.opts).Ready)
+	for _, path := range []string{firstPath, secondPath} {
+		commitReadLFSPointer(t, f, path, []byte(path+"\n"))
+	}
+
+	result := ReadSync(context.Background(), f.opts)
+	require.Equal(t, "missing_hydration", result.ErrorClass)
+	require.Equal(t, &ReadFailureDetail{Reason: "batch_object_duplicated", OID: firstOID}, result.ErrorDetail,
+		"a surplus entry is named, not counted")
+	require.Equal(t, int32(1), batches.Load())
+	// Both requested objects were described correctly, so both still materialize.
+	require.Equal(t, int32(2), downloads.Load())
+	for _, path := range []string{firstPath, secondPath} {
+		actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+		require.NoError(t, err)
+		require.Equal(t, path+"\n", string(actual), path)
 	}
 }
 
@@ -433,25 +512,80 @@ func TestSafeReadOIDAcceptsOnlyCanonicalIdentifiers(t *testing.T) {
 
 // Failure prevented: two files naming one object at different sizes are batched
 // under a single size, so at most one of them can ever verify — and the failure
-// does not say which pointer disagrees.
-func TestReadSyncLFSSharedObjectSizeConflictNamesTheFile(t *testing.T) {
+// does not say which pointer disagrees. The file whose pointer the bytes match
+// hydrates whichever path order it happens to have: picking the winner by path
+// order strands the correct pointer whenever it sorts second, which is the ox
+// #947 defect one level down.
+func TestReadSyncLFSSharedObjectSizeConflictHydratesTheCorrectPointer(t *testing.T) {
 	content := []byte("one object claimed at two sizes\n")
 	oid := lfs.ComputeOID(content)
-	var batches atomic.Int32
-	f := newReadLFSFixture(t, func(w http.ResponseWriter, _ *http.Request) {
-		batches.Add(1)
-		http.Error(w, "unexpected", http.StatusInternalServerError)
-	})
-	require.True(t, ReadSync(context.Background(), f.opts).Ready)
-	commitReadPointer(t, f, "sessions/a/session.md", lfs.FormatPointer("sha256:"+oid, int64(len(content))))
-	commitReadPointer(t, f, "sessions/b/session.md", lfs.FormatPointer("sha256:"+oid, int64(len(content))+1))
+	// The truthful size is the content's; the other pointer is the wrong one
+	// whichever path it sits on. "a" sorts before "b" in the committed tree.
+	const first, second = "sessions/a/session.md", "sessions/b/session.md"
+	for _, tc := range []struct{ name, correct, wrong string }{
+		{"correct pointer sorts first", first, second},
+		{"correct pointer sorts second", second, first},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var batches, downloads atomic.Int32
+			f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/batch") {
+					downloads.Add(1)
+					_, _ = w.Write(content)
+					return
+				}
+				batches.Add(1)
+				var request struct {
+					Objects []lfs.BatchObject `json:"objects"`
+				}
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+				assert.Len(t, request.Objects, 1, "one object, however many pointers name it")
+				assert.Equal(t, oid, request.Objects[0].OID)
+				response := lfs.BatchResponse{}
+				for _, object := range request.Objects {
+					// Echo the requested size, the least helpful thing a server may
+					// do here: the grant then carries no evidence of which pointer
+					// is right, so only the download can settle it.
+					response.Objects = append(response.Objects, lfs.BatchResponseObject{
+						OID: object.OID, Size: object.Size, Actions: &lfs.Actions{Download: &lfs.Action{
+							Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + object.OID,
+						}},
+					})
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(response))
+			})
+			require.True(t, ReadSync(context.Background(), f.opts).Ready)
+			wrongPointer := lfs.FormatPointer("sha256:"+oid, int64(len(content))+1)
+			pointers := map[string]string{
+				tc.correct: lfs.FormatPointer("sha256:"+oid, int64(len(content))),
+				tc.wrong:   wrongPointer,
+			}
+			for _, path := range []string{first, second} {
+				commitReadPointer(t, f, path, pointers[path])
+			}
 
-	result := ReadSync(context.Background(), f.opts)
-	require.False(t, result.Ready)
-	require.Equal(t, "missing_hydration", result.ErrorClass)
-	require.Equal(t, &ReadFailureDetail{Reason: "shared_object_size_conflict", Path: "sessions/b/session.md",
-		OID: oid, ExpectedSize: readSize(int64(len(content))), ActualSize: readSize(int64(len(content)) + 1)}, result.ErrorDetail)
-	require.Zero(t, batches.Load(), "a self-contradicting pointer set must not reach the server")
+			result := ReadSync(context.Background(), f.opts)
+			require.False(t, result.Ready)
+			require.Equal(t, "missing_hydration", result.ErrorClass)
+			require.Equal(t, "shared_object_size_conflict", result.ErrorDetail.Reason)
+			require.Equal(t, oid, result.ErrorDetail.OID)
+			// Naming a file here would have to choose before the bytes settle
+			// which pointer is wrong, and would name the hydrated file in one of
+			// these two orderings — sending an operator to a file that is fine.
+			require.Empty(t, result.ErrorDetail.Path, "a conflict between two pointers names neither")
+			require.NotNil(t, result.ErrorDetail.ExpectedSize)
+			require.NotNil(t, result.ErrorDetail.ActualSize)
+			require.Equal(t, ReadHydration{State: "missing", Required: 2, Completed: 1}, result.Hydration)
+			require.Equal(t, int32(1), batches.Load())
+
+			hydrated, err := os.ReadFile(filepath.Join(f.opts.Path, tc.correct))
+			require.NoError(t, err)
+			require.Equal(t, content, hydrated, "the pointer the bytes match hydrates regardless of path order")
+			stub, err := os.ReadFile(filepath.Join(f.opts.Path, tc.wrong))
+			require.NoError(t, err)
+			require.Equal(t, wrongPointer, string(stub), "the pointer the bytes contradict keeps its stub")
+		})
+	}
 }
 
 // Failure prevented: a refused object reports only "missing_hydration", so
@@ -522,6 +656,153 @@ func TestReadSyncLFSRefusedObjectNamesItselfWithoutLeakingTheResponse(t *testing
 			recovered := ReadSync(context.Background(), f.opts)
 			require.True(t, recovered.Ready, "%+v", recovered)
 			require.Nil(t, recovered.ErrorDetail, "a recovered sync carries no stale detail")
+		})
+	}
+}
+
+// Failure prevented: one object the server will not serve stops hydration for
+// every object after it, so a ledger that accumulated thousands of objects over
+// years is permanently unreadable through this path the moment one of them
+// becomes unservable (ox #947). The counter-risk is walking past a failure that
+// makes the remaining work pointless: a denied grant must still stop on the spot.
+func TestReadSyncLFSRefusedObjectLeavesTheRestOfTheLedgerHydrated(t *testing.T) {
+	const refusedPath = "sessions/bulk/object-002.md"
+	paths := make([]string, 0, 5)
+	contents := make(map[string][]byte)
+	oids := make(map[string]string)
+	for i := range 5 {
+		path := fmt.Sprintf("sessions/bulk/object-%03d.md", i)
+		content := []byte(fmt.Sprintf("bulk object %03d\n", i))
+		paths = append(paths, path)
+		oids[path] = lfs.ComputeOID(content)
+		contents[oids[path]] = content
+	}
+	for _, tc := range []struct {
+		name, errorClass string
+		code, hydrated   int
+	}{
+		{"object not found", "missing_hydration", http.StatusNotFound, 4},
+		{"object gone", "missing_hydration", http.StatusGone, 4},
+		{"object forbidden", "denied", http.StatusForbidden, 0},
+		{"object unauthorized", "denied", http.StatusUnauthorized, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var refuse atomic.Bool
+			var batched, downloads atomic.Int32
+			f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				if !strings.HasSuffix(r.URL.Path, "/batch") {
+					downloads.Add(1)
+					content, ok := contents[filepath.Base(r.URL.Path)]
+					if !assert.True(t, ok, "only a requested object may be downloaded") {
+						http.NotFound(w, r)
+						return
+					}
+					_, _ = w.Write(content)
+					return
+				}
+				var request struct {
+					Objects []lfs.BatchObject `json:"objects"`
+				}
+				assert.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+				batched.Store(int32(len(request.Objects)))
+				response := lfs.BatchResponse{}
+				for _, object := range request.Objects {
+					granted := lfs.BatchResponseObject{OID: object.OID, Size: object.Size}
+					if refuse.Load() && object.OID == oids[refusedPath] {
+						granted.Error = &lfs.ObjectError{Code: tc.code, Message: "refused"}
+					} else {
+						granted.Actions = &lfs.Actions{Download: &lfs.Action{
+							Href: "https://" + r.Host + strings.TrimSuffix(r.URL.Path, "/batch") + "/" + object.OID,
+						}}
+					}
+					response.Objects = append(response.Objects, granted)
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(response))
+			})
+			require.True(t, ReadSync(context.Background(), f.opts).Ready)
+			refuse.Store(true)
+			pointers := make(map[string]string, len(paths))
+			for _, path := range paths {
+				pointers[path] = commitReadLFSPointer(t, f, path, contents[oids[path]])
+			}
+
+			result := ReadSync(context.Background(), f.opts)
+			require.False(t, result.Ready, "a listed gap is still not coverage")
+			require.Equal(t, tc.errorClass, result.ErrorClass, "%+v", result)
+			require.Equal(t, &ReadFailureDetail{Reason: "object_refused", Path: refusedPath,
+				OID: oids[refusedPath], ServerCode: tc.code}, result.ErrorDetail)
+			require.Equal(t, ReadHydration{State: "missing", Required: len(paths), Completed: tc.hydrated}, result.Hydration)
+			require.Equal(t, int32(tc.hydrated), downloads.Load())
+			require.Equal(t, int32(len(paths)), batched.Load(), "every object is requested in one batch")
+			for _, path := range paths {
+				actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+				require.NoError(t, err)
+				if path == refusedPath || tc.hydrated == 0 {
+					require.Equal(t, pointers[path], string(actual), path)
+				} else {
+					require.Equal(t, contents[oids[path]], actual, path)
+				}
+			}
+
+			refuse.Store(false)
+			recovered := ReadSync(context.Background(), f.opts)
+			require.True(t, recovered.Ready, "%+v", recovered)
+			require.Nil(t, recovered.ErrorDetail)
+			require.Equal(t, ReadHydration{State: "complete", Required: len(paths), Completed: len(paths)}, recovered.Hydration)
+			require.Equal(t, int32(len(paths)-tc.hydrated), batched.Load(), "a retry requests only the objects still missing")
+			require.Equal(t, int32(len(paths)), downloads.Load(), "an object materialized before the refusal is not downloaded twice")
+			for _, path := range paths {
+				actual, err := os.ReadFile(filepath.Join(f.opts.Path, path))
+				require.NoError(t, err)
+				require.Equal(t, contents[oids[path]], actual, path)
+			}
+		})
+	}
+}
+
+// Failure prevented: hydration walks past a failure that makes every remaining
+// object unreachable — a canceled operation, an unusable read credential, a
+// denied grant — spending the rest of the budget on requests that cannot
+// succeed; or it stops at a per-object failure it could have walked past,
+// which is the defect ox #947 is about.
+func TestReadSkipsStopOnlyWhereContinuingCannotMaterialize(t *testing.T) {
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	refused := func(code int) error {
+		return &readFailure{err: &lfs.HTTPError{StatusCode: code},
+			detail: ReadFailureDetail{Reason: "object_refused", ServerCode: code}}
+	}
+	for _, tc := range []struct {
+		name  string
+		ctx   context.Context
+		err   error
+		stops bool
+	}{
+		{"object not found", context.Background(), refused(http.StatusNotFound), false},
+		{"object gone", context.Background(), refused(http.StatusGone), false},
+		{"batch request failed", context.Background(), &lfs.HTTPError{StatusCode: http.StatusInternalServerError}, false},
+		{"grant invalid", context.Background(), missingHydration(ReadFailureDetail{Reason: "object_size_mismatch"}), false},
+		{"local write failed", context.Background(), os.ErrPermission, false},
+		{"object forbidden", context.Background(), refused(http.StatusForbidden), true},
+		{"object unauthorized", context.Background(), refused(http.StatusUnauthorized), true},
+		{"credential unusable", context.Background(), fmt.Errorf("download: %w", auth.ErrReadTokenUnavailable), true},
+		{"canceled", canceled, refused(http.StatusNotFound), true},
+		// lfs.Client carries its own request deadline, so a timed-out request
+		// reports a deadline while the caller's context is still live. Walking
+		// past it spends that deadline again on every batch that remains.
+		{"client deadline", context.Background(), fmt.Errorf("batch request: %w", context.DeadlineExceeded), true},
+		{"client canceled", context.Background(), fmt.Errorf("batch request: %w", context.Canceled), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var skips readSkips
+			require.Equal(t, !tc.stops, skips.skip(tc.ctx, tc.err))
+			if tc.stops {
+				require.NoError(t, skips.first, "a failure hydration stops at is returned directly, never accumulated")
+				return
+			}
+			require.Equal(t, tc.err, skips.first)
+			require.True(t, skips.skip(tc.ctx, errors.New("a later object")))
+			require.Equal(t, tc.err, skips.first, "the first failure walked past is the one reported")
 		})
 	}
 }

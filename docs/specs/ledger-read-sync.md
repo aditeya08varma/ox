@@ -85,7 +85,7 @@ The sample paths and counts are illustrative; the returned coverage describes th
 | `coverage.paths` | Required materialized paths/patterns for the receipt. Sessions and plans are always retained. |
 | `coverage.files`, `coverage.empty` | Verified file count and whether the selected committed tree is empty. Empty is distinct from failed discovery or missing hydration. An unborn HEAD does not qualify and remains unavailable. |
 | `hydration.state` | `complete`, `missing`, or `unknown`. |
-| `hydration.required`, `hydration.completed` | Required current-worktree LFS objects and successfully verified objects. |
+| `hydration.required`, `hydration.completed` | Current-worktree files whose committed blob is an LFS pointer, and how many of those are materialized and verified. Files that name one shared object are counted separately. |
 | `error_class` | Sanitized failure category, omitted when none. |
 | `error_detail` | What failed, omitted when the failure carries no recognized reason. See [Failure detail](#failure-detail). |
 
@@ -131,7 +131,7 @@ An `oid` or `expected_oid` is omitted when the value supplied for it is not a ca
 | `malformed_pointer` | `missing_hydration` | An LFS pointer in the checkout cannot be parsed. |
 | `nested_stub` | `missing_hydration` | A materialized file's content is itself a pointer, and not the one HEAD commits. |
 | `empty_object_oid_mismatch` | `missing_hydration` | A size-0 pointer names an object other than the empty one. |
-| `shared_object_size_conflict` | `missing_hydration` | Two files name one object with different sizes. |
+| `shared_object_size_conflict` | `missing_hydration` | Two files name one object with different sizes. Carries `oid` and both declared sizes, and no `path`: the conflict belongs to the pair, and which pointer is wrong is not known until the object's bytes arrive. It is detected before the object is requested, so it is the failure a conflict reports — a later per-file `downloaded_size_mismatch` does not replace it. Identify the file still unmaterialized from the checkout, where it remains a pointer. |
 | `batch_response_incomplete` | `missing_hydration` | The batch response holds fewer objects than the batch. |
 | `batch_object_unrequested` | `missing_hydration` | The batch response holds an object that was not requested. |
 | `batch_object_duplicated` | `missing_hydration` | The batch response repeats an object. |
@@ -147,7 +147,7 @@ An `oid` or `expected_oid` is omitted when the value supplied for it is not a ca
 
 Detail obeys the same redaction rules as the rest of the result: no credential, credential-bearing URL, response body, or subprocess output. Server-supplied and pointer-supplied identifiers are validated before they are carried, never sanitized in place. There is no server message field. The client replaces a read route's per-object error prose with the status text for that error's code before any caller sees it, so a message field could only restate `server_code` and would misrepresent a client-generated string as the server's own.
 
-Consumers must tolerate three things: additional reasons; a detail carrying `reason` alone, because a batch-level failure such as `batch_response_incomplete` identifies no single object; and an absent `error_detail`, because a failure raised without a reason — a denied batch request, a Git failure, a canceled operation — carries none.
+Consumers must tolerate four things: additional reasons; a detail that names no file, because some failures identify none — `batch_response_incomplete` describes a whole batch, and `shared_object_size_conflict` belongs to a pair of files rather than to either one; an absent `error_detail`, because a failure raised without a reason — a denied batch request, a Git failure, a canceled operation — carries none; and a detail that names one object when hydration skipped several, because it reports the first one skipped. `hydration.required` minus `hydration.completed` is how many pointer files are still stubs — both count files, not unique objects, so several files naming one unservable object each add to that difference.
 
 ## Remote evidence and local recovery
 
@@ -159,7 +159,9 @@ A cold clone materializes into an unpublished staging directory beside the check
 
 Previously hydrated objects whose committed pointers change or disappear are retained under `<path>/.sageox/cache/read-sync/objects/<OID>` before worktree replacement. The OID is the bare SHA-256 object identifier. Unchanged hydrated files remain materialized through refresh.
 
-LFS hydration requests at most 100 unique objects per batch, within the backend's 64 KiB request limit. Batch responses are limited to 1 MiB before JSON decoding, including responses without a declared length. Each batch's object identities, sizes, and actions are validated before its files are materialized. A later failed or canceled batch preserves earlier verified files while readiness stays false; a retry requests only the remaining objects.
+LFS hydration requests at most 100 unique objects per batch, within the backend's 64 KiB request limit. Batch responses are limited to 1 MiB before JSON decoding, including responses without a declared length. An object's identity, size, and action are validated before its files are materialized.
+
+Hydration attempts every object and then reports. An object the server refuses, describes incorrectly, or fails to deliver is skipped: its files keep their stubs, every other object is still materialized, and `error_detail` names the first object skipped. A canceled operation, an unusable read credential, and a 401/403 stop hydration where they happen — no later object could be materialized either. Skipping never relaxes readiness: any required object still missing keeps `ready` false, `hydration.state` at `missing`, and a hydration `error_class`, while `hydration.required` and `hydration.completed` carry the real counts. A failed or canceled batch preserves earlier verified files; a retry requests only the objects still missing.
 
 `--check` acquires the materialization lock, verifies local state without contacting the server or triggering lazy fetches, and can republish recovered local readiness. It requires an existing identity-matched receipt; an arbitrary checkout or missing/corrupt receipt remains unavailable until an authorized refresh. It never advances freshness. A retained observation timestamp is usable only when its recorded HEAD still matches the verified HEAD. Recovery at a different or unconfirmed HEAD yields unknown remote freshness. Missing local objects/hydration remain unavailable offline.
 
