@@ -183,7 +183,9 @@ func TestReadSyncLFSEmptyObjectRequiresEmptyOID(t *testing.T) {
 }
 
 func TestMaterializeEmptyReadObjectMissingDir(t *testing.T) {
-	require.Error(t, materializeEmptyReadObject(filepath.Join(t.TempDir(), "missing", "context-trace.jsonl")))
+	landed, err := materializeEmptyReadObject(filepath.Join(t.TempDir(), "missing", "context-trace.jsonl"))
+	require.Error(t, err)
+	require.False(t, landed)
 }
 
 // Failure prevented: ledgers with over 100 unique pointers exceed the backend's
@@ -1266,6 +1268,8 @@ func TestReadSyncColdStageSurvivesCanceledInspection(t *testing.T) {
 	require.False(t, result.Ready)
 	require.Equal(t, "interrupted", result.ErrorClass)
 	require.NoDirExists(t, c.opts.Path)
+	require.True(t, result.Resumable, "the stage it kept is still one the next attempt continues from")
+	require.Equal(t, ReadHydration{State: "unknown"}, result.Hydration, "canceled before counting, it reports no progress of its own")
 	kept, err := os.ReadFile(filepath.Join(stage, "sessions/cold/a.md"))
 	require.NoError(t, err)
 	require.Equal(t, c.contents[c.paths["sessions/cold/a.md"]], kept, "cancellation is not evidence against the stage")

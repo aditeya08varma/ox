@@ -165,12 +165,15 @@ func TestReadSyncLFSSkippedAccountsForEveryFailureWalkedPast(t *testing.T) {
 				require.Contains(t, string(rendered), `"skipped":{"total":9,"reasons":{"download_refused":2,"object_refused":7},"sample":[{"reason":"object_refused","path":"sessions/skipped/object-000.md",`,
 					"the summary's wire names are the contract a consumer parses")
 			}
-			switch {
-			case tc.cold:
+			if tc.cold {
 				require.NoDirExists(t, f.opts.Path, "a cold clone with a missing object is never published")
-			case len(tc.denyDownload) == 0:
+				require.True(t, result.Resumable, "the stage it kept is the next attempt's starting point")
+			}
+			if len(tc.denyDownload) == 0 {
 				// A denial cancels the downloads beside it, so how many of them
-				// finished first is timing; the counts are exact everywhere else.
+				// finished first is timing; the counts are exact everywhere else —
+				// on the unpublished stage of a cold clone too, which reports what
+				// hydration counted rather than zeros (ox #983).
 				failed := len(tc.refuseGrant) + len(tc.refuseDownload)
 				require.Equal(t, ReadHydration{State: "missing", Required: objects, Completed: objects - failed}, result.Hydration)
 			}
