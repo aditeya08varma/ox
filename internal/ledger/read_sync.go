@@ -264,7 +264,14 @@ func readSyncLocked(ctx context.Context, opts ReadSyncOptions, transport *gitser
 
 	// Verification can recover readiness after a remote failure, but only a
 	// completed fetch of this exact HEAD may establish new remote evidence.
-	result = verifyReadCheckout(ctx, opts, transport, workPath, dirs)
+	verified := verifyReadCheckout(ctx, opts, transport, workPath, dirs)
+	if verified.Hydration.State == "unknown" {
+		// Verification returns before counting when HEAD, its history, or a
+		// file fails it, or when the budget runs out. The counts hydration took
+		// are then the last this attempt has.
+		verified.Coverage, verified.Hydration = result.Coverage, result.Hydration
+	}
+	result = verified
 	if previous != nil && previous.Head == result.Head && validReadTime(previous.LastSuccessfulSync) {
 		result.LastSuccessfulSync = previous.LastSuccessfulSync
 	}
@@ -586,19 +593,31 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 			return nil, err
 		}
 		file := readFile{path: name, oid: fields[2]}
+		var malformed error
 		if len(pointer) != 0 {
 			if oid, pointerSize, err := lfs.ParsePointer(string(pointer)); err == nil {
 				file.pointer, file.ref = pointer, lfs.FileRef{OID: oid, Size: pointerSize}
 			} else if strings.HasPrefix(string(pointer), "version https://git-lfs.github.com/spec/v1\n") {
-				return nil, missingHydration(ReadFailureDetail{Reason: "malformed_pointer", Path: name})
+				malformed = missingHydration(ReadFailureDetail{Reason: "malformed_pointer", Path: name})
 			}
 		}
+		if gitOID == file.oid && malformed != nil {
+			// HEAD commits this pointer and it cannot be parsed, so no object can
+			// be hydrated in its place.
+			return nil, malformed
+		}
 		if gitOID != file.oid {
-			if len(file.pointer) != 0 {
-				// The worktree file is itself a pointer, and not the one HEAD
-				// commits. It names some other object, so it is not this file's
-				// content and no OID here would be the one worth reporting.
-				return nil, missingHydration(ReadFailureDetail{Reason: "nested_stub", Path: name})
+			// Bytes that differ from HEAD's blob must be the object HEAD's pointer
+			// names, at that OID and size. Their shape cannot stand in for that
+			// check: an object's own content can be a pointer — what a file
+			// cleaned a second time stores — even one this reader cannot parse. So
+			// bytes shaped like a pointer are a stale or malformed stub only once
+			// the check fails; any other file that fails it is a local edit.
+			mismatch := errors.New("dirty")
+			if malformed != nil {
+				mismatch = malformed
+			} else if len(file.pointer) != 0 {
+				mismatch = missingHydration(ReadFailureDetail{Reason: "nested_stub", Path: name})
 			}
 			blobSize, err := runReadGit(ctx, transport, false, dir, "cat-file", "-s", file.oid)
 			if err != nil {
@@ -606,7 +625,7 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 			}
 			n, err := strconv.ParseInt(blobSize, 10, 64)
 			if err != nil || n > 1024 {
-				return nil, errors.New("dirty")
+				return nil, mismatch
 			}
 			cmd, err := transport.LocalCommand(ctx, dir, "cat-file", "blob", file.oid)
 			if err != nil {
@@ -618,7 +637,7 @@ func readFiles(ctx context.Context, transport *gitserver.ReadTransport, dir stri
 			}
 			oid, pointerSize, err := lfs.ParsePointer(string(blob))
 			if err != nil || size != pointerSize || lfsOID != strings.TrimPrefix(oid, "sha256:") {
-				return nil, errors.New("dirty")
+				return nil, mismatch
 			}
 			file.pointer = blob
 			file.ref, file.hydrated = lfs.FileRef{OID: oid, Size: pointerSize}, true
