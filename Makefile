@@ -50,6 +50,10 @@ ACCEPTANCE_INTEGRATION_TESTS := TestCodeActivityE2E TestFreshInstall_MockServer_
 ifneq ($(filter darwin linux freebsd,$(shell $(GO) env GOOS)),)
 ACCEPTANCE_INTEGRATION_TESTS += TestBackgroundDaemonSurvivesCommandCleanup
 endif
+ifneq ($(filter darwin linux,$(shell $(GO) env GOOS)),)
+# Exercise terminal output modes against the instrumented binary in CI.
+ACCEPTANCE_INTEGRATION_TESTS += TestConfigCLIOutputModes
+endif
 ACCEPTANCE_SLOW_TESTS := TestIncrementalE2E_SingleAgent TestIncrementalE2E_CtrlC_AntiEntropy
 TWIN_COVER_DIR ?=
 CLOUD_TWIN_COVER_FLAGS = $(if $(strip $(TWIN_COVER_DIR)),-coverpkg=github.com/sageox/ox/internal/auth -coverprofile=$(TWIN_COVER_DIR)/cloud.out -covermode=atomic,)
