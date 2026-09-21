@@ -5,13 +5,11 @@ package skillmanager
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -20,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sageox/ox/extensions/rulecatalog"
 	"github.com/sageox/ox/internal/teamskills"
 
 	"github.com/sageox/agentx"
@@ -102,9 +101,10 @@ type ReconcilePlan struct {
 	// alone, and the human needs to be told which and why.
 	TeamSkills []TeamSkillDecision
 
-	repoRoot    string
-	nextLock    lockFile
-	lockChanged bool
+	repoRoot     string
+	nextLock     lockFile
+	lockChanged  bool
+	stateChanged bool
 
 	// teamIncomplete is non-empty when the catalog could not see the team's
 	// skills. It suppresses REMOVALS of team-owned files only; installs and
@@ -182,6 +182,18 @@ type builtInCatalog struct{}
 func (builtInCatalog) Digest() (string, error) { return skills.Digest() }
 func (builtInCatalog) Select(version string, desired DesiredSkills) ([]skills.Skill, error) {
 	return selectDesiredSkills(version, desired)
+}
+
+type ruleCatalogSource interface {
+	Digest() (string, error)
+	Select(adapterprotocol.SkillTarget) ([]rulecatalog.File, error)
+}
+
+type builtInRuleCatalog struct{}
+
+func (builtInRuleCatalog) Digest() (string, error) { return rulecatalog.Digest() }
+func (builtInRuleCatalog) Select(target adapterprotocol.SkillTarget) ([]rulecatalog.File, error) {
+	return rulecatalog.Select(target)
 }
 
 type journalAction struct {
@@ -338,6 +350,25 @@ func LegacyBundles(repoRoot string, target adapterprotocol.SkillTarget) ([]strin
 	return sortedUnique(bundles), nil
 }
 
+// HasLegacyRules reports whether a native rule target contains content from
+// the pre-inventory adapter installer. A verified generated stamp is authority
+// to adopt the target; filenames alone are deliberately insufficient.
+func HasLegacyRules(repoRoot string, target adapterprotocol.SkillTarget) (bool, error) {
+	target, err := normalizeTarget(repoRoot, target)
+	if err != nil {
+		return false, err
+	}
+	if target.Format != adapterprotocol.RuleFormatMarkdownV1 {
+		return false, nil
+	}
+	discovered, err := discoverLegacyRules(
+		repoRoot,
+		map[string]adapterprotocol.SkillTarget{target.Key: target},
+		nil,
+	)
+	return len(discovered) > 0, err
+}
+
 // CanonicalizeTargets validates, normalizes, and deduplicates target
 // descriptors. A shared root with incompatible metadata is an error.
 func CanonicalizeTargets(repoRoot string, targets []adapterprotocol.SkillTarget) ([]adapterprotocol.SkillTarget, error) {
@@ -430,7 +461,7 @@ func LoadDesired(repoRoot string) (DesiredSkills, []adapterprotocol.SkillTarget,
 
 // InstalledSource reports what the last successful apply recorded: the catalog
 // revision it projected from, the ox version that did it, and whether the
-// project has any skill targets selected at all.
+// project has any native inventory targets selected at all.
 //
 // It exists for the session hot path. `ox agent prime` must answer "is what is
 // on disk still what this binary ships?" on every session start, and the full
@@ -521,7 +552,7 @@ func Plan(repoRoot, version string, desired DesiredSkills, targets []adapterprot
 	if err != nil {
 		return nil, err
 	}
-	plan, err := planWithSource(repoRoot, version, desired, targets, source)
+	plan, err := planWithCatalogs(repoRoot, version, desired, targets, source, builtInRuleCatalog{})
 	if plan != nil {
 		// Carried even on the refusal paths (schema-newer, downgrade guard), which
 		// return a plan with no actions: a human looking at a repo that is not
@@ -532,6 +563,10 @@ func Plan(repoRoot, version string, desired DesiredSkills, targets []adapterprot
 }
 
 func planWithSource(repoRoot, version string, desired DesiredSkills, targets []adapterprotocol.SkillTarget, source catalogSource) (*ReconcilePlan, error) {
+	return planWithCatalogs(repoRoot, version, desired, targets, source, builtInRuleCatalog{})
+}
+
+func planWithCatalogs(repoRoot, version string, desired DesiredSkills, targets []adapterprotocol.SkillTarget, source catalogSource, ruleSource ruleCatalogSource) (*ReconcilePlan, error) {
 	desired = normalizeDesired(desired)
 	targets, err := CanonicalizeTargets(repoRoot, targets)
 	if err != nil {
@@ -582,10 +617,17 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 		plan.teamIncomplete = incomplete.IncompleteReason()
 	}
 
-	digest, err := source.Digest()
+	skillDigest, err := source.Digest()
 	if err != nil {
 		return nil, err
 	}
+	if _, err := ruleSource.Digest(); err != nil {
+		return nil, err
+	}
+	// Source.Revision predates typed targets and is observable through
+	// InstalledSource, so it remains the skill-catalog revision for schema 2.
+	// Rule drift is still exact because every projected rule has its own digest.
+	digest := skillDigest
 	sourceVersion := version
 	if sourceVersion == "" {
 		sourceVersion = old.Source.Version
@@ -604,17 +646,19 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 	if err != nil {
 		return nil, err
 	}
+	selectedTargets := stringSet(desired.Targets)
+	legacyRules, err := discoverLegacyRules(repoRoot, targetByKey, old.ManagedFiles)
+	if err != nil {
+		return nil, err
+	}
+	old.ManagedFiles = append(old.ManagedFiles, legacyRules...)
 	oldFiles := make(map[string]managedFile, len(old.ManagedFiles))
 	for _, file := range old.ManagedFiles {
 		oldFiles[file.Path] = file
 	}
 	journalFiles := journalOwnership(journal)
 	desiredPaths := map[string]struct{}{}
-	selectedTargets := stringSet(desired.Targets)
 	plan.TargetCount = len(selectedTargets)
-	for _, skill := range selectedSkills {
-		plan.DesiredFileCount += len(skill.Files) * len(selectedTargets)
-	}
 
 	keys := make([]string, 0, len(targetByKey))
 	for key := range targetByKey {
@@ -630,7 +674,22 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 			continue
 		}
 		next.Targets = append(next.Targets, target)
+		if target.Format == adapterprotocol.RuleFormatMarkdownV1 {
+			ruleFiles, selectErr := ruleSource.Select(target)
+			if selectErr != nil {
+				return nil, selectErr
+			}
+			plan.DesiredFileCount += len(ruleFiles)
+			if err := planRuleFiles(repoRoot, target, ruleFiles, oldFiles, journalFiles, desiredPaths, plan, &next); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if target.Format != adapterprotocol.SkillFormatAgentSkillsV1 {
+			return nil, fmt.Errorf("unsupported inventory target format %q", target.Format)
+		}
 		for _, skill := range selectedSkills {
+			plan.DesiredFileCount += len(skill.Files)
 			skillRoot := filepath.ToSlash(filepath.Join(target.Root, skill.Name))
 			// Defense in depth. A skill name reaches here from a team-context
 			// repository any teammate can push to, and it becomes a PATH:
@@ -687,25 +746,38 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 						actualDigest := digestBytes(data)
 						migrationOwned = migrationOwned || actualDigest == action.PreviousDigest || actualDigest == action.Digest
 					}
-					// A skill whose NAME is in a reserved namespace is ox's by contract,
-					// so an unrecorded copy on disk is reclaimed rather than preserved.
-					// This is the 0.15.0 inversion: preserve-on-edit was right while
-					// these files were TRACKED (an edit showed up in git diff, so it was
-					// visible and plausibly deliberate), and becomes harmful once they
-					// are gitignored — a preserved edit is then permanent silent drift
-					// that no teammate can see and ox can never repair.
-					// The reclaim keys on skill.Name — ox's OWN catalog name, which is
-					// always reserved — so on a case-insensitive filesystem (macOS APFS
-					// by default, and Windows) it would reclaim a directory that is not
-					// actually named a reserved name. A user skill at `OX-CLI-Plan` is
+					// This is the first-install reclaim, and it is the one place ox
+					// takes a file on the strength of its NAME alone: it runs only when
+					// the skill is absent from the lockfile, i.e. exactly when ox holds
+					// no recorded claim on what is sitting there.
+					//
+					// A PREFIXED name is ox's by contract, so an unrecorded copy on disk
+					// is reclaimed rather than preserved. This is the 0.15.0 inversion:
+					// preserve-on-edit was right while these files were TRACKED (an edit
+					// showed up in git diff, so it was visible and plausibly deliberate),
+					// and becomes harmful once they are gitignored — a preserved edit is
+					// then permanent silent drift that no teammate can see and ox can
+					// never repair.
+					//
+					// The predicate is IsReclaimableName, never catalog membership. An
+					// unprefixed name such as "post-cutoff" carries no namespace signal
+					// whatsoever — it names what the skill IS, and a repository may
+					// already hold a hand-authored skill at that exact path. Such names
+					// earn ownership only from the three recorded claims checked directly
+					// above — lockfile digest, recovery journal, or legacy stamp.
+					//
+					// The reclaim keys on skill.Name — ox's OWN catalog name, which always
+					// satisfies the predicate — so on a case-insensitive filesystem (macOS
+					// APFS by default, and Windows) it would reclaim a directory that is
+					// not actually named a reserved name. A user skill at `OX-CLI-Plan` is
 					// the same directory on disk as `ox-cli-plan`, but it is theirs:
-					// IsReservedName("OX-CLI-Plan") is false, and git's `skills/ox-cli-*/`
-					// ignore glob is case-sensitive, so it was never even ignored. Without
-					// this check ox overwrites their SKILL.md with its own, reports no
-					// conflict, and the next commit ships ox's content from their tracked
-					// file. Falling through leaves migrationOwned false, which routes to
-					// the conflict-and-preserve branch below.
-					if !migrationOwned && IsReservedName(skill.Name) &&
+					// IsReclaimableName("OX-CLI-Plan") is false, and git's
+					// `skills/ox-cli-*/` ignore glob is case-sensitive, so it was never
+					// even ignored. Without this check ox overwrites their SKILL.md with
+					// its own, reports no conflict, and the next commit ships ox's content
+					// from their tracked file. Falling through leaves migrationOwned false,
+					// which routes to the conflict-and-preserve branch below.
+					if !migrationOwned && IsReclaimableName(skill.Name) &&
 						!caseVariantDirOnDisk(repoRoot, skillRoot, skill.Name) {
 						migrationOwned = true
 					}
@@ -746,12 +818,38 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 				if !owned && migrationOwned && (file.Path == skills.SkillFileName || actualDigest == want) {
 					owned = true
 				}
-				// Inside a reserved namespace ox owns the bytes unconditionally: a
-				// local edit is restored on the next reconcile rather than becoming a
-				// preserved conflict. Editing one of these files to experiment is fine
-				// and expected — truth is restored, nothing is reported. Customizing
-				// means forking to a name of your own OUTSIDE the prefixes.
-				if !owned && IsReservedName(skill.Name) {
+				// The last ownership arm, and the one that decides whether a local edit
+				// is REPAIRED or reported. Three things earn that, and a bare catalog
+				// name is not among them.
+				//
+				// A prefixed name earns it outright: inside a namespace ox declared,
+				// ox owns the bytes unconditionally, so experimenting with one of
+				// these files is fine and expected — truth is restored, nothing is
+				// reported. Customizing means forking to a name of your own OUTSIDE
+				// the prefixes.
+				//
+				// This name-only grant is safe ONLY because the skill-root and file
+				// containment checks at the top of this loop have already proved path
+				// stays beneath target.Root. IsReclaimableName does not inspect a path;
+				// never reuse this arm before those checks or without an equivalent.
+				//
+				// `locked` and `migrationOwned` earn it by RECORD: this exact file has
+				// a lockfile digest, or the skill verified against a legacy stamp or
+				// the recovery journal above. That is what keeps an unprefixed catalog
+				// skill ox genuinely installed repairable — an edit to it is drift in
+				// a gitignored file, exactly the case the 0.15.0 inversion is for.
+				//
+				// Nothing else may reach here, and the reason is a second door into
+				// the reclaim's room. The reclaim runs only when SKILL.md is readable;
+				// when it is ABSENT the whole block is skipped, so a directory ox has
+				// no record of arrives here with migrationOwned false and `locked`
+				// false. Keying on the catalog name alone would then overwrite a
+				// hand-authored sibling — post-cutoff/references/jev.md written by a
+				// human, taken because the folder shares a name with something ox
+				// ships. It falls to conflict-and-preserve below instead. A first
+				// install is unaffected: a file that does not exist routes to Creates
+				// above and never reaches this arm at all.
+				if !owned && (IsReclaimableName(skill.Name) || migrationOwned || locked) {
 					owned = true
 				}
 				if !owned {
@@ -798,6 +896,15 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 		if action, ok := journalFiles[oldFile.Path]; ok && (actualDigest == action.PreviousDigest || actualDigest == action.Digest) {
 			owned = true
 		}
+		// Team Skills live in a reserved, gitignored namespace whose bytes ox
+		// owns unconditionally. Apply the same contract during retirement that
+		// the active-file path applies above: a local edit must not turn a
+		// now-withheld executable into an unmanaged file that survives forever.
+		// The incomplete-source guard above still wins, so a temporarily blind
+		// Team Context never causes destructive cleanup.
+		if isTeamOwnedPath(targetByKey, oldFile) {
+			owned = true
+		}
 		if !owned {
 			plan.addConflict(oldFile.Target, oldFile.Path, "retired managed file was modified and will be preserved")
 			plan.Preserves = append(plan.Preserves, oldFile.Path)
@@ -814,6 +921,28 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 			return nil, retiredErr
 		}
 		plan.Removes = append(plan.Removes, retired...)
+	}
+
+	// Local state is disposable, so it cannot be the only inventory capable of
+	// retiring a Team Skill. When Team Context discovery is authoritative, the
+	// reserved namespace itself proves ownership: sweep regular files that exist
+	// under sageox-team-* but are absent from desired state. If discovery is
+	// incomplete, do nothing — an unseen source is not an authoritative deletion.
+	if plan.teamIncomplete == "" {
+		scheduled := make(map[string]struct{}, len(plan.Removes))
+		for _, action := range plan.Removes {
+			scheduled[action.Path] = struct{}{}
+		}
+		for _, key := range keys {
+			orphaned, orphanErr := orphanedTeamFiles(repoRoot, targetByKey[key], desiredPaths, oldFiles, scheduled)
+			if orphanErr != nil {
+				return nil, orphanErr
+			}
+			for _, action := range orphaned {
+				scheduled[action.Path] = struct{}{}
+			}
+			plan.Removes = append(plan.Removes, orphaned...)
+		}
 	}
 
 	neededTargets := stringSet(next.Desired.Targets)
@@ -835,15 +964,182 @@ func planWithSource(repoRoot, version string, desired DesiredSkills, targets []a
 		return nil, err
 	}
 	plan.lockChanged = !bytes.Equal(oldBytes, nextBytes)
+	oldStateBytes, err := marshalLocalState(old)
+	if err != nil {
+		return nil, err
+	}
+	nextStateBytes, err := marshalLocalState(next)
+	if err != nil {
+		return nil, err
+	}
+	plan.stateChanged = !bytes.Equal(oldStateBytes, nextStateBytes)
 	plan.journal = makeJournal(plan, next)
 	plan.sort()
 	return plan, nil
+}
+
+// discoverLegacyRules turns the old adapter stamps into ordinary inventory
+// ownership. It intentionally discovers by verified content, not by a list of
+// historical filenames: after adoption, the normal desired-state diff removes
+// anything the current catalog no longer contains.
+func discoverLegacyRules(
+	repoRoot string,
+	targets map[string]adapterprotocol.SkillTarget,
+	managed []managedFile,
+) ([]managedFile, error) {
+	known := make(map[string]struct{}, len(managed))
+	for _, file := range managed {
+		known[file.Path] = struct{}{}
+	}
+	repo, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = repo.Close() }()
+	var discovered []managedFile
+	for key, target := range targets {
+		if target.Format != adapterprotocol.RuleFormatMarkdownV1 {
+			continue
+		}
+		targetRoot, openErr := openRepoDir(repo, target.Root, false)
+		if os.IsNotExist(openErr) {
+			continue
+		}
+		if openErr != nil {
+			return nil, fmt.Errorf("discover legacy rules in %s: %w", target.Root, openErr)
+		}
+		walkErr := fs.WalkDir(targetRoot.FS(), ".", func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if entry.Type()&os.ModeSymlink != 0 {
+				if entry.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if entry.IsDir() || !entry.Type().IsRegular() || !strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+				return nil
+			}
+			rel := filepath.ToSlash(filepath.Join(target.Root, filepath.FromSlash(path)))
+			if _, exists := known[rel]; exists {
+				return nil
+			}
+			data, mode, readErr := inspectRootFile(targetRoot, filepath.FromSlash(path))
+			if readErr != nil {
+				return readErr
+			}
+			owned := false
+			for _, description := range rulecatalog.LegacyDescriptions() {
+				if adapterstamp.RuleStampVerifies(data, agentx.DefaultStampPrefix, description) {
+					owned = true
+					break
+				}
+			}
+			if !owned {
+				return nil
+			}
+			known[rel] = struct{}{}
+			discovered = append(discovered, managedFile{
+				Target: key, Path: rel, Digest: digestBytes(data), Mode: modeString(mode),
+			})
+			return nil
+		})
+		_ = targetRoot.Close()
+		if walkErr != nil {
+			return nil, fmt.Errorf("discover legacy rules in %s: %w", target.Root, walkErr)
+		}
+	}
+	return discovered, nil
+}
+
+func planRuleFiles(
+	repoRoot string,
+	target adapterprotocol.SkillTarget,
+	files []rulecatalog.File,
+	oldFiles map[string]managedFile,
+	journalFiles map[string]journalAction,
+	desiredPaths map[string]struct{},
+	plan *ReconcilePlan,
+	next *lockFile,
+) error {
+	rootPath := filepath.FromSlash(target.Root)
+	for _, file := range files {
+		filePath := filepath.FromSlash(file.Path)
+		joined := filepath.Join(rootPath, filePath)
+		rel, relErr := filepath.Rel(rootPath, joined)
+		if file.Path == "" || filepath.IsAbs(filePath) || relErr != nil || rel == "." ||
+			ensureWithin(rootPath, joined) != nil {
+			return fmt.Errorf("rule file %q escapes target %q", file.Path, target.Key)
+		}
+
+		path := filepath.ToSlash(joined)
+		desiredPaths[path] = struct{}{}
+		want := digestBytes(file.Content)
+		mode := fs.FileMode(0o644)
+		oldFile, locked := oldFiles[path]
+		actual, actualMode, readErr := inspectRepoFile(repoRoot, path)
+		if readErr != nil && !os.IsNotExist(readErr) {
+			return readErr
+		}
+		if os.IsNotExist(readErr) {
+			plan.Creates = append(plan.Creates, FileAction{
+				TargetKey: target.Key, Path: path, Content: file.Content, Mode: mode, Digest: want,
+			})
+			next.ManagedFiles = append(next.ManagedFiles, managedFile{
+				Target: target.Key, Path: path, Digest: want, Mode: modeString(mode),
+			})
+			continue
+		}
+
+		actualDigest := digestBytes(actual)
+		owned := locked && actualDigest == oldFile.Digest
+		if action, ok := journalFiles[path]; ok && (actualDigest == action.PreviousDigest || actualDigest == action.Digest) {
+			owned = true
+		}
+		name := strings.TrimSuffix(filepath.Base(file.Path), filepath.Ext(file.Path))
+		if !owned && IsReclaimableName(name) && !caseVariantEntryOnDisk(repoRoot, path, filepath.Base(file.Path)) {
+			owned = true
+		}
+		if !owned {
+			plan.addConflict(target.Key, path, "existing rule is not managed by ox")
+			plan.Preserves = append(plan.Preserves, path)
+			if locked {
+				next.ManagedFiles = append(next.ManagedFiles, oldFile)
+			}
+			continue
+		}
+		if actualDigest != want || modeDrift(actualMode, mode) {
+			plan.Updates = append(plan.Updates, FileAction{
+				TargetKey: target.Key, Path: path, Content: file.Content, Mode: mode,
+				PreviousDigest: actualDigest, Digest: want,
+			})
+		} else {
+			plan.Preserves = append(plan.Preserves, path)
+		}
+		next.ManagedFiles = append(next.ManagedFiles, managedFile{
+			Target: target.Key, Path: path, Digest: want, Mode: modeString(mode),
+		})
+	}
+	return nil
 }
 
 // Apply executes a previously built plan. Files are updated individually and
 // the lockfile is committed last. The journal makes old and new action digests
 // valid recovery states if the process exits between those steps.
 func Apply(plan *ReconcilePlan) error {
+	return apply(plan, true)
+}
+
+// applyAutomatic applies only machine-local projection changes. Automatic
+// callers run at session start and from daemon ticks, where changing a tracked
+// .gitignore or selection lock is surprising repository churn. Explicit
+// lifecycle commands continue to use Apply, which owns repository setup.
+func applyAutomatic(plan *ReconcilePlan) error {
+	return apply(plan, false)
+}
+
+func apply(plan *ReconcilePlan, repairTrackedSetup bool) error {
 	if plan == nil {
 		return fmt.Errorf("nil skill reconcile plan")
 	}
@@ -870,11 +1166,23 @@ func Apply(plan *ReconcilePlan) error {
 	// already current can still be missing the ignore file, and that is exactly the
 	// state that quietly commits vendor files.
 	//
-	// Best-effort. A repository that cannot take the ignore block still gets its
-	// skills; failing the whole reconcile over it would be a worse trade.
-	_, unprotected, err := EnsureScopedIgnoreFilesForDirs(plan.repoRoot, plan.agentDirs())
-	if err != nil {
-		slog.Debug("skills: could not write ox ignore rules", "repo", plan.repoRoot, "error", err)
+	// Repair is best-effort when no file will be materialized. For a target ox is
+	// about to write, the proof below is mandatory.
+	var unprotected []string
+	ignoreFiles := ScopedIgnoreFiles()
+	if repairTrackedSetup {
+		_, unprotected, err = ensureScopedIgnoreFilesIn(plan.repoRoot, plan.agentDirs(), ignoreFiles)
+		if err != nil {
+			slog.Debug("skills: could not write ox ignore rules", "repo", plan.repoRoot, "error", err)
+		}
+	} else {
+		if plan.lockChanged {
+			return fmt.Errorf("automatic skill reconcile requires a tracked selection update; run `ox doctor`")
+		}
+		unprotected, err = unprotectedScopedIgnoreDirs(plan.repoRoot, plan.materializingDirs(), ignoreFiles)
+		if err != nil {
+			return err
+		}
 	}
 	// Best-effort ONLY where nothing is being materialized. If ox is about to write
 	// reserved-prefix files into a directory it could not protect — a symlinked
@@ -887,7 +1195,7 @@ func Apply(plan *ReconcilePlan) error {
 			"(a symlinked directory or .gitignore); the files would be visible to git", strings.Join(blocked, ", "))
 	}
 
-	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && !plan.lockChanged {
+	if len(plan.Creates)+len(plan.Updates)+len(plan.Removes) == 0 && !plan.lockChanged && !plan.stateChanged {
 		_ = removeRootFile(repo, journalRelativePath)
 		return nil
 	}
@@ -958,6 +1266,13 @@ func Apply(plan *ReconcilePlan) error {
 		}
 		if err := atomicWriteInRoot(repo, lockRelativePath, lockBytes, 0o644); err != nil {
 			return fmt.Errorf("write skills lockfile: %w", err)
+		}
+	}
+	if repairTrackedSetup {
+		// Re-assert the ignore block once removal has finished. Failure is
+		// non-fatal and visible to doctor as stale setup.
+		if _, _, cleanupErr := ensureScopedIgnoreFilesIn(plan.repoRoot, plan.agentDirs(), ScopedIgnoreFiles()); cleanupErr != nil {
+			slog.Debug("skills: could not retire obsolete ox ignore rules", "repo", plan.repoRoot, "error", cleanupErr)
 		}
 	}
 	if err := removeRootFile(repo, journalRelativePath); err != nil && !os.IsNotExist(err) {
@@ -1081,7 +1396,7 @@ func ReconcileUpdateNonBlocking(repoRoot, version string, update DesiredUpdate) 
 		if err != nil {
 			return err
 		}
-		return Apply(plan)
+		return applyAutomatic(plan)
 	})
 	var timeout *fileutil.ErrLockTimeout
 	if errors.As(err, &timeout) {
@@ -1271,7 +1586,11 @@ func selectDesiredSkills(version string, desired DesiredSkills) ([]skills.Skill,
 	if len(names) == 0 {
 		return nil, nil
 	}
-	return skills.Selected(version, sortedUnique(names))
+	selected, err := skills.Selected(version, sortedUnique(names))
+	if err != nil {
+		return nil, err
+	}
+	return selected, nil
 }
 
 func bundleIDs(refs []BundleRef) []string {
@@ -1481,6 +1800,87 @@ func retiredLegacyFiles(repoRoot string, target adapterprotocol.SkillTarget, des
 	return actions, nil
 }
 
+// orphanedTeamFiles rebuilds the removable half of the Team Skill inventory
+// from the reserved on-disk namespace when machine-local state is missing.
+// Every path returned is a regular file read through descriptor-pinned roots;
+// symlinks and other foreign filesystem objects are never followed.
+func orphanedTeamFiles(repoRoot string, target adapterprotocol.SkillTarget, desired map[string]struct{}, old map[string]managedFile, scheduled map[string]struct{}) ([]FileAction, error) {
+	repo, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = repo.Close() }()
+
+	targetRoot, err := openRepoDir(repo, target.Root, false)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = targetRoot.Close() }()
+
+	dir, err := targetRoot.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	entries, err := dir.ReadDir(-1)
+	_ = dir.Close()
+	if err != nil {
+		return nil, err
+	}
+
+	var actions []FileAction
+	for _, skillEntry := range entries {
+		if !skillEntry.IsDir() || !strings.HasPrefix(skillEntry.Name(), TeamPrefix) {
+			continue
+		}
+		skillRoot, openErr := openRepoDir(targetRoot, skillEntry.Name(), false)
+		if openErr != nil {
+			return nil, openErr
+		}
+		walkErr := fs.WalkDir(skillRoot.FS(), ".", func(path string, walkEntry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if path == "." || walkEntry.IsDir() {
+				return nil
+			}
+			info, infoErr := walkEntry.Info()
+			if infoErr != nil {
+				return infoErr
+			}
+			if !info.Mode().IsRegular() {
+				return nil
+			}
+
+			relative := filepath.ToSlash(filepath.Join(target.Root, skillEntry.Name(), filepath.FromSlash(path)))
+			if _, wanted := desired[relative]; wanted {
+				return nil
+			}
+			if _, tracked := old[relative]; tracked {
+				return nil
+			}
+			if _, exists := scheduled[relative]; exists {
+				return nil
+			}
+			content, _, inspectErr := inspectRootFile(skillRoot, filepath.FromSlash(path))
+			if inspectErr != nil {
+				return inspectErr
+			}
+			actions = append(actions, FileAction{
+				TargetKey: target.Key, Path: relative, PreviousDigest: digestBytes(content),
+			})
+			return nil
+		})
+		_ = skillRoot.Close()
+		if walkErr != nil {
+			return nil, walkErr
+		}
+	}
+	return actions, nil
+}
+
 func validLegacyStamp(data []byte) bool {
 	hash, _, body := adapterstamp.ExtractStampAnywhere(data, stampPrefix)
 	return hash != "" && agentx.ContentHash(body) == hash
@@ -1498,233 +1898,6 @@ func inspectRepoFile(repoRoot, relative string) ([]byte, fs.FileMode, error) {
 func readRepoFile(repoRoot, relative string) ([]byte, error) {
 	data, _, err := inspectRepoFile(repoRoot, relative)
 	return data, err
-}
-
-// ErrNonRegularFile marks a path ox declined to read because it is a symlink or
-// otherwise not a regular file. Callers that are INSPECTING A FILE OX MANAGES
-// must treat it as fatal — following a symlink out of the repo is the
-// path-escape this refusal exists to prevent. Callers that are merely SCANNING
-// a shared directory to discover which skills are ox's should skip it: a file
-// ox cannot read is a file ox does not manage, which is an answer, not a
-// failure.
-var ErrNonRegularFile = errors.New("refusing non-regular or symlink file")
-
-// openRepoDir returns a descriptor pinned to one real directory beneath root.
-// Each component is checked with Lstat, then identity-checked after OpenRoot so
-// a concurrent directory-to-symlink swap cannot redirect later operations.
-func openRepoDir(root *os.Root, relative string, create bool) (*os.Root, error) {
-	clean := filepath.Clean(filepath.FromSlash(relative))
-	if filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || clean == ".." ||
-		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return nil, fmt.Errorf("path escapes repository")
-	}
-	current, err := root.OpenRoot(".")
-	if err != nil {
-		return nil, err
-	}
-	for _, part := range strings.Split(clean, string(filepath.Separator)) {
-		if part == "" || part == "." {
-			continue
-		}
-		info, statErr := current.Lstat(part)
-		if os.IsNotExist(statErr) && create {
-			if mkErr := current.Mkdir(part, 0o755); mkErr != nil && !os.IsExist(mkErr) {
-				_ = current.Close()
-				return nil, mkErr
-			}
-			info, statErr = current.Lstat(part)
-		}
-		if statErr != nil {
-			_ = current.Close()
-			return nil, statErr
-		}
-		if !info.IsDir() {
-			_ = current.Close()
-			return nil, fmt.Errorf("refusing non-directory or symlink path component %s", part)
-		}
-		child, openErr := current.OpenRoot(part)
-		if openErr != nil {
-			_ = current.Close()
-			return nil, openErr
-		}
-		actual, actualErr := child.Stat(".")
-		if actualErr != nil || !os.SameFile(info, actual) {
-			_ = child.Close()
-			_ = current.Close()
-			if actualErr != nil {
-				return nil, actualErr
-			}
-			return nil, fmt.Errorf("repository directory changed while opening %s", part)
-		}
-		_ = current.Close()
-		current = child
-	}
-	return current, nil
-}
-
-func openRepoParent(root *os.Root, relative string, create bool) (*os.Root, string, error) {
-	clean := filepath.Clean(filepath.FromSlash(relative))
-	if clean == "." || filepath.IsAbs(clean) || filepath.VolumeName(clean) != "" || clean == ".." ||
-		strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
-		return nil, "", fmt.Errorf("path escapes repository")
-	}
-	base := filepath.Base(clean)
-	if base == "." || base == ".." || base == "" {
-		return nil, "", fmt.Errorf("invalid repository file path %q", relative)
-	}
-	parent, err := openRepoDir(root, filepath.Dir(clean), create)
-	return parent, base, err
-}
-
-func inspectRootFile(root *os.Root, relative string) ([]byte, fs.FileMode, error) {
-	parent, base, err := openRepoParent(root, relative, false)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer func() { _ = parent.Close() }()
-	info, err := parent.Lstat(base)
-	if err != nil {
-		return nil, 0, err
-	}
-	if !info.Mode().IsRegular() {
-		return nil, 0, fmt.Errorf("%w: %s", ErrNonRegularFile, relative)
-	}
-	file, err := parent.Open(base)
-	if err != nil {
-		return nil, 0, err
-	}
-	defer func() { _ = file.Close() }()
-	actual, err := file.Stat()
-	if err != nil {
-		return nil, 0, err
-	}
-	if !actual.Mode().IsRegular() || !os.SameFile(info, actual) {
-		return nil, 0, fmt.Errorf("%w: %s changed while opening", ErrNonRegularFile, relative)
-	}
-	data, err := io.ReadAll(file)
-	return data, actual.Mode(), err
-}
-
-func createRootTemp(root *os.Root) (*os.File, string, error) {
-	for range 10 {
-		var nonce [16]byte
-		if _, err := rand.Read(nonce[:]); err != nil {
-			return nil, "", err
-		}
-		name := ".ox-skill-" + hex.EncodeToString(nonce[:])
-		file, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if os.IsExist(err) {
-			continue
-		}
-		return file, name, err
-	}
-	return nil, "", fmt.Errorf("skill temporary file name collision")
-}
-
-func atomicWriteInRoot(root *os.Root, relative string, content []byte, mode fs.FileMode) error {
-	parent, base, err := openRepoParent(root, relative, true)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = parent.Close() }()
-	if info, statErr := parent.Lstat(base); statErr == nil && !info.Mode().IsRegular() {
-		return fmt.Errorf("refusing non-regular or symlink file %s", relative)
-	} else if statErr != nil && !os.IsNotExist(statErr) {
-		return statErr
-	}
-	tmp, tmpName, err := createRootTemp(parent)
-	if err != nil {
-		return err
-	}
-	success := false
-	defer func() {
-		if !success {
-			_ = parent.Remove(tmpName)
-		}
-	}()
-	if _, err := tmp.Write(content); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(mode.Perm()); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := parent.Rename(tmpName, base); err != nil {
-		return err
-	}
-	if dir, err := parent.Open("."); err == nil {
-		_ = dir.Sync()
-		_ = dir.Close()
-	}
-	success = true
-	return nil
-}
-
-func removeRootFile(root *os.Root, relative string) error {
-	parent, base, err := openRepoParent(root, relative, false)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = parent.Close() }()
-	return parent.Remove(base)
-}
-
-func checkDir(root, dir string) error {
-	if err := ensureWithin(root, dir); err != nil {
-		return err
-	}
-	rel, _ := filepath.Rel(root, dir)
-	cur := root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		if part == "." || part == "" {
-			continue
-		}
-		cur = filepath.Join(cur, part)
-		info, err := os.Lstat(cur)
-		if os.IsNotExist(err) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if info.Mode()&fs.ModeSymlink != 0 || !info.IsDir() {
-			return fmt.Errorf("refusing non-directory or symlink path %s", cur)
-		}
-	}
-	return nil
-}
-
-func ensureWithin(root, target string) error {
-	rel, err := filepath.Rel(root, target)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-		return fmt.Errorf("path escapes repository")
-	}
-	return nil
-}
-
-func removeEmptyParentsInRoot(root *os.Root, relative string) {
-	dir := filepath.Clean(relative)
-	if filepath.IsAbs(dir) || dir == ".." || strings.HasPrefix(dir, ".."+string(filepath.Separator)) {
-		return
-	}
-	for dir != "." && dir != "" {
-		info, err := root.Lstat(dir)
-		if err != nil || !info.IsDir() {
-			return
-		}
-		if err := root.Remove(dir); err != nil {
-			return
-		}
-		dir = filepath.Dir(dir)
-	}
 }
 
 func digestBytes(data []byte) string {
@@ -1759,7 +1932,11 @@ func modeString(mode fs.FileMode) string { return fmt.Sprintf("%04o", mode.Perm(
 // On a case-sensitive filesystem the two paths are genuinely different
 // directories, so this always returns false and costs one ReadDir.
 func caseVariantDirOnDisk(repoRoot, skillRoot, want string) bool {
-	parent := filepath.Dir(filepath.Join(repoRoot, filepath.FromSlash(skillRoot)))
+	return caseVariantEntryOnDisk(repoRoot, skillRoot, want)
+}
+
+func caseVariantEntryOnDisk(repoRoot, relPath, want string) bool {
+	parent := filepath.Dir(filepath.Join(repoRoot, filepath.FromSlash(relPath)))
 	entries, err := os.ReadDir(parent)
 	if err != nil {
 		return false // nothing readable to collide with
@@ -1837,9 +2014,14 @@ func conflictSkills(root string, conflicts []Conflict) []string {
 
 // isTeamOwnedPath reports whether a managed file belongs to a team-sourced
 // skill, by reading the skill directory name out of the path under its target's
-// root. Keyed on the reserved prefix rather than on provenance recorded in the
+// root. skillName is the containment gate: an out-of-root path returns "" and
+// can never earn Team ownership from a prefix elsewhere in the path. The prefix
+// test below classifies only that already-contained first path segment.
+//
+// Keyed on the reserved prefix rather than on provenance recorded in the
 // lockfile, because the lockfile does not record provenance and adding it would
-// change the committed half.
+// change the committed half. Keep the containment gate and prefix classification
+// together; the prefix alone is not a resolved-path ownership proof.
 func isTeamOwnedPath(targetByKey map[string]adapterprotocol.SkillTarget, file managedFile) bool {
 	target, ok := targetByKey[file.Target]
 	if !ok {

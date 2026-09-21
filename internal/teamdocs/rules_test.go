@@ -218,6 +218,27 @@ func TestDiscoverRules_MissingDir(t *testing.T) {
 	}
 }
 
+func TestDiscoverRules_SkipsSymlinkedRuleFiles(t *testing.T) {
+	team := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	writeRule(t, filepath.Dir(outside), filepath.Base(outside), "---\nname: escaped\n---\nDo something unsafe.\n")
+	link := filepath.Join(team, "agents", "rules", "escaped.md")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	rules, err := DiscoverRules(team, "")
+	if err != nil {
+		t.Fatalf("DiscoverRules: %v", err)
+	}
+	if len(rules) != 0 {
+		t.Fatalf("symlinked rule escaped Team Context: %+v", rules)
+	}
+}
+
 func TestDiscoverRules_DefaultsApplied(t *testing.T) {
 	team := t.TempDir()
 
@@ -514,6 +535,33 @@ func TestPublishedRules_KeepsRepoScopedRules(t *testing.T) {
 	}
 }
 
+func TestAnyRuleRootOnDisk_DistinguishesSparseParents(t *testing.T) {
+	team := t.TempDir()
+	if AnyRuleRootOnDisk(team) {
+		t.Fatal("an empty sparse checkout was treated as authoritative")
+	}
+	if err := os.MkdirAll(filepath.Join(team, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !AnyRuleRootOnDisk(team) {
+		t.Fatal("a materialized canonical parent was not detected")
+	}
+}
+
+func TestReadRuleBody_PublicWrapper(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rule.md")
+	if err := os.WriteFile(path, []byte("---\nname: test\n---\n\nBody.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	body, err := ReadRuleBody(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "Body.\n" {
+		t.Fatalf("body = %q", body)
+	}
+}
+
 // TestDiscoverRules_PropagatesDiscoveryError: a rules root that cannot be read
 // is an error, never an empty list. Prime silently applying zero team rules
 // because a directory was unreadable is the failure mode nobody notices.
@@ -539,10 +587,9 @@ func TestDiscoverRules_PropagatesDiscoveryError(t *testing.T) {
 	}
 }
 
-// TestDiscoverRules_UnreadableAlwaysBodyIsSkipped: a visibility: always rule
-// whose body cannot be read still applies — it just carries no body. Prime
-// must never fail because one rule file is malformed.
-func TestDiscoverRules_UnreadableAlwaysBodyIsSkipped(t *testing.T) {
+// TestDiscoverRules_UnreadableSymlinkIsSkipped keeps one malformed shared
+// entry from failing discovery without treating the symlink as a real rule.
+func TestDiscoverRules_UnreadableSymlinkIsSkipped(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink creation needs privileges on Windows")
 	}
@@ -550,7 +597,7 @@ func TestDiscoverRules_UnreadableAlwaysBodyIsSkipped(t *testing.T) {
 	writeRule(t, root, "agents/rules/readable.md",
 		"---\nname: readable\ndescription: d\nvisibility: always\n---\nBody text.\n")
 
-	// a .md symlink to itself parses as an empty rule and fails to read as a body
+	// A .md symlink to itself must be ignored rather than parsed or followed.
 	if err := os.Symlink("broken.md", filepath.Join(root, "agents", "rules", "broken.md")); err != nil {
 		t.Fatalf("symlink: %v", err)
 	}
@@ -566,10 +613,7 @@ func TestDiscoverRules_UnreadableAlwaysBodyIsSkipped(t *testing.T) {
 	if got := byName["readable"]; got.Body != "Body text.\n" {
 		t.Errorf("readable rule lost its body: %q", got.Body)
 	}
-	if _, ok := byName["broken"]; !ok {
-		t.Fatalf("an unreadable rule was dropped entirely: %v", byName)
-	}
-	if got := byName["broken"]; got.Body != "" || got.EstimatedTokens != 0 {
-		t.Errorf("an unreadable body produced content: %+v", got)
+	if _, ok := byName["broken"]; ok {
+		t.Fatalf("an unreadable symlink became a Team Rule: %v", byName)
 	}
 }

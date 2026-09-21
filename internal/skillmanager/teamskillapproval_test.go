@@ -310,7 +310,6 @@ func TestApproval_NarrowingToInstructionsOnlySweepsTheScript(t *testing.T) {
 // gitignored and inside a reserved namespace, where the same plan already asserts
 // ox owns the bytes unconditionally, so the two halves disagree.
 func TestApproval_SweepsAStaleCopyThatWasEditedLocally(t *testing.T) {
-	t.Skip("ox-zrpi.1: a locally edited installed team-skill file is preserved and dropped from ox's inventory forever, so a withdrawn approval never sweeps it")
 	t.Parallel()
 
 	const skillName = "deploy"
@@ -373,7 +372,6 @@ func TestApproval_SweepsAStaleCopyThatWasEditedLocally(t *testing.T) {
 // Deleting the cache is not a hypothetical: a clean checkout, a pruned build
 // cache, or a `rm -rf .sageox/cache` all produce it.
 func TestApproval_SweepsAStaleCopyAfterLocalStateIsLost(t *testing.T) {
-	t.Skip("ox-zrpi.2: losing the gitignored skills-state.json empties ManagedFiles, so the retirement prune has nothing to iterate and a withheld skill's copy is orphaned")
 	t.Parallel()
 
 	const skillName = "deploy"

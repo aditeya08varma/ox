@@ -3,6 +3,7 @@ package skillmanager
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -98,8 +99,8 @@ func TestEnsureScopedIgnoreFiles_MissingRepoRootIsAnError(t *testing.T) {
 // pull request.
 func TestScopedIgnoreFiles_CoversTheRuleNameWithNoTrailingHyphen(t *testing.T) {
 	for _, f := range ScopedIgnoreFiles() {
-		if f.Dir == ".agents" {
-			continue // skills-only projection; it has no rules root
+		if f.Dir != ".claude" && f.Dir != ".factory" {
+			continue // runtime ox-cli rules exist only on these two surfaces
 		}
 		var exact bool
 		for _, e := range f.Entries {
@@ -110,6 +111,54 @@ func TestScopedIgnoreFiles_CoversTheRuleNameWithNoTrailingHyphen(t *testing.T) {
 		if !exact {
 			t.Errorf("%s has no exact rule for %s.md; the glob alone does not match it: %v", f.Dir, CLIBase, f.Entries)
 		}
+	}
+}
+
+// TestScopedIgnoreFiles_EmitsOnlyPrefixGlobsAndTheOxCLIRuleName is the
+// structural replacement for the old per-name guard. scopedIgnoreFiles no
+// longer accepts a name list at all, so every entry it can ever emit is either
+// a stable prefix glob or the one exact "ox-cli.md" rule name — there is no
+// code path left that could reserve an unselected catalog name.
+func TestScopedIgnoreFiles_EmitsOnlyPrefixGlobsAndTheOxCLIRuleName(t *testing.T) {
+	ruleExact := "rules/" + CLIBase + ".md"
+	for _, f := range ScopedIgnoreFiles() {
+		for _, entry := range f.Entries {
+			if entry == ruleExact {
+				continue
+			}
+			if !strings.HasSuffix(strings.TrimSuffix(entry, "/"), "*") {
+				t.Fatalf("%s has entry %q that is neither a prefix glob nor the exact ox-cli rule name", f.Dir, entry)
+			}
+		}
+	}
+}
+
+func TestScopedIgnoreFiles_CopilotRuleRequiresInstructionsDirectory(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	written, err := EnsureScopedIgnoreFiles(repo)
+	if err != nil {
+		t.Fatalf("ensure with only .github: %v", err)
+	}
+	if len(written) != 0 {
+		t.Fatalf("a generic .github directory acquired agent-specific footprint: %v", written)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".github", ".gitignore")); !os.IsNotExist(err) {
+		t.Fatalf("generic .github directory acquired .gitignore: %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Join(repo, ".github", "instructions"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	written, err = EnsureScopedIgnoreFiles(repo)
+	if err != nil {
+		t.Fatalf("ensure with Copilot instructions root: %v", err)
+	}
+	want := filepath.Join(".github", "instructions", ".gitignore")
+	if len(written) != 1 || written[0].Rel != want {
+		t.Fatalf("expected only %s, got %v", want, written)
 	}
 }
 

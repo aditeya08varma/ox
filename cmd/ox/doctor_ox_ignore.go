@@ -28,24 +28,44 @@ func checkOxIgnoreRules(fix bool) checkResult {
 
 func checkOxIgnoreRulesIn(gitRoot string, fix bool) checkResult {
 
-	// A representative reserved path per agent directory that ox actually uses.
-	probes := map[string]string{
-		".claude":  ".claude/skills/ox-cli-probe/SKILL.md",
-		".agents":  ".agents/skills/ox-cli-probe/SKILL.md",
-		".factory": ".factory/rules/ox-cli.md",
+	// Representative paths for every reserved namespace ox projects into each
+	// agent directory. Checking only ox-cli-* lets a broken sageox-team-* rule
+	// report healthy while Team Skills leak into git status.
+	probes := map[string][]string{
+		".claude": {
+			".claude/skills/ox-cli-probe/SKILL.md",
+			".claude/skills/sageox-team-probe/SKILL.md",
+			".claude/rules/sageox-team-probe.md",
+		},
+		".agents": {
+			".agents/skills/ox-cli-probe/SKILL.md",
+			".agents/skills/sageox-team-probe/SKILL.md",
+		},
+		".factory": {
+			".factory/rules/ox-cli.md",
+			".factory/rules/sageox-team-probe.md",
+		},
+		".cursor":              {".cursor/rules/sageox-team-probe.mdc"},
+		".github/instructions": {".github/instructions/sageox-team-probe.md"},
+		".clinerules":          {".clinerules/sageox-team-probe.md"},
+		".kiro":                {".kiro/steering/sageox-team-probe.md"},
+		".windsurf":            {".windsurf/rules/sageox-team-probe.md"},
 	}
 
 	var broken []string
 	for _, f := range scopedIgnoreFiles() {
-		probe, ok := probes[f.Dir]
+		dirProbes, ok := probes[f.Dir]
 		if !ok {
 			continue
 		}
 		if !dirExists(filepath.Join(gitRoot, f.Dir)) {
 			continue
 		}
-		if !gitPathIsIgnored(gitRoot, probe) {
-			broken = append(broken, f.Dir)
+		for _, probe := range dirProbes {
+			if !gitPathIsIgnored(gitRoot, probe) {
+				broken = append(broken, f.Dir)
+				break
+			}
 		}
 	}
 	if len(broken) == 0 {
@@ -62,8 +82,11 @@ func checkOxIgnoreRulesIn(gitRoot string, fix bool) checkResult {
 
 	var stillBroken []string
 	for _, dir := range broken {
-		if !gitPathIsIgnored(gitRoot, probes[dir]) {
-			stillBroken = append(stillBroken, dir)
+		for _, probe := range probes[dir] {
+			if !gitPathIsIgnored(gitRoot, probe) {
+				stillBroken = append(stillBroken, dir)
+				break
+			}
 		}
 	}
 	if len(stillBroken) > 0 {

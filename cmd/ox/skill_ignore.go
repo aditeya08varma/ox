@@ -1,9 +1,11 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/sageox/ox/internal/adapterstamp"
 	"github.com/sageox/ox/internal/skillmanager"
 )
 
@@ -39,14 +41,26 @@ func isReservedManagedPath(repoRoot, absPath string) bool {
 		return false
 	}
 	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) == 2 && parts[0] == ".clinerules" {
+		return skillmanager.IsReservedName(parts[1])
+	}
 	if len(parts) < 3 {
 		return false
 	}
 	switch parts[0] + "/" + parts[1] {
 	case ".claude/skills", ".agents/skills":
 		// <agent>/skills/<name>/SKILL.md — ownership is decided by the directory.
-		return skillmanager.IsReservedName(parts[2])
-	case ".claude/rules", ".factory/rules", ".agents/rules", ".claude/commands":
+		if skillmanager.IsReservedName(parts[2]) {
+			return true
+		}
+		// Legacy repository-scoped catalog installs may have ordinary-language
+		// names. Their verified manifest stamp, not catalog membership, proves ox
+		// wrote the directory and keeps init from force-staging it.
+		manifest := filepath.Join(repoRoot, parts[0], parts[1], parts[2], "SKILL.md")
+		data, readErr := os.ReadFile(manifest)
+		return readErr == nil && adapterstamp.StampVerifies(data, "ox")
+	case ".claude/rules", ".factory/rules", ".agents/rules", ".claude/commands",
+		".cursor/rules", ".github/instructions", ".kiro/steering", ".windsurf/rules":
 		// A rule or command file: ownership is decided by the basename. A nested
 		// legacy path (rules/sageox/foo.md) is deliberately NOT reserved — it is
 		// retired by the adapter's legacy sweep, not hidden from git.

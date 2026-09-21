@@ -123,7 +123,7 @@ type doctorOptions struct {
 // When fixSlugs has entries, returns true only if slug is in the list.
 func (opts doctorOptions) shouldFix(slug string) bool {
 	// auto-fix checks always apply their fix (they're non-destructive and always safe)
-	if check, ok := DoctorCheckRegistry[slug]; ok && check.IsAutoFixable() {
+	if check := GetDoctorCheck(slug); check != nil && check.IsAutoFixable() {
 		return true
 	}
 	if len(opts.fixSlugs) == 0 {
@@ -335,7 +335,7 @@ common issues, or --fix-slug to target specific checks.`,
 
 		opts := doctorOptions{
 			fix:      fix || len(fixSlugs) > 0, // --fix-slug implies fix mode
-			fixSlugs: fixSlugs,
+			fixSlugs: canonicalFixSlugs(fixSlugs),
 			forceYes: forceYes,
 			verbose:  verbose,
 		}
@@ -398,11 +398,34 @@ var gcCmd = &cobra.Command{
 	},
 }
 
+// canonicalFixSlugs resolves retired public slugs to the check that replaced
+// them, so every membership test downstream compares canonical names only.
+// Users keep typing the retired spelling and nothing past this point has to
+// know that — without it, each call site has to hand-OR both spellings, which
+// means the NEXT alias silently fixes nothing. Unknown and adapter slugs pass
+// through untouched so validation still reports what the user actually typed.
+func canonicalFixSlugs(slugs []string) []string {
+	if len(slugs) == 0 {
+		return slugs
+	}
+	canonical := make([]string, 0, len(slugs))
+	for _, slug := range slugs {
+		if replacement, ok := DoctorCheckAliases[slug]; ok {
+			slug = replacement
+		}
+		canonical = append(canonical, slug)
+	}
+	return canonical
+}
+
 // getAvailableSlugs returns a sorted list of all registered check slugs.
 func getAvailableSlugs() []string {
-	var slugs []string
+	slugs := make([]string, 0, len(DoctorCheckRegistry)+len(DoctorCheckAliases))
 	for slug := range DoctorCheckRegistry {
 		slugs = append(slugs, slug)
+	}
+	for alias := range DoctorCheckAliases {
+		slugs = append(slugs, alias)
 	}
 	sort.Strings(slugs)
 	return slugs
@@ -772,11 +795,6 @@ func runDoctorChecksWithState(parent context.Context, opts doctorOptions, state 
 		checkAgentFileExists(),
 		checkAgentsIntegrationWithFix(os.Stdout, opts.shouldFix(CheckSlugClaudeCodeHooks)),
 		checkInstructionFileMarkers(),
-	}
-	// detect adapter rules drift across all rules-installing adapters (claude, droid);
-	// runs unconditionally and is skipped gracefully when no rules adapter is present
-	if rulesCheck := checkAdapterRules(opts.shouldFix(CheckSlugAdapterRules)); !rulesCheck.skipped {
-		integrationChecks = append(integrationChecks, rulesCheck)
 	}
 	if detectClaudeCode() {
 		integrationChecks = append(integrationChecks, checkClaudeCodeHooks(opts.shouldFix(CheckSlugClaudeCodeHooks)))

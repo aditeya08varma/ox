@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path"
@@ -14,7 +13,9 @@ import (
 	"github.com/sageox/ox/internal/daemon"
 	"github.com/sageox/ox/internal/repotools"
 	"github.com/sageox/ox/internal/skillmanager"
+	"github.com/sageox/ox/internal/teamconverge"
 	"github.com/sageox/ox/internal/teamdocs"
+	"github.com/sageox/ox/pkg/adapterprotocol"
 	"github.com/spf13/cobra"
 )
 
@@ -35,11 +36,14 @@ import (
 var skillsCmd = &cobra.Command{
 	Use:   "skills",
 	Short: "Inspect the skills your AI coworkers have",
-	Long: `Inspect the skills installed for this repository.
+	Long: `Inspect and manage the skills your AI coworkers have here.
 
-Skills come from two places: the ones ox itself ships, and the ones your team
-publishes to its Team Context. This command shows both, and — when a team skill
-is missing — which of the several possible reasons is the actual one.`,
+Skills reach a repository from three places: the ones ox itself ships, the ones
+your team publishes to its Team Context, and the ones you wrote yourself. "list"
+shows all three. "status" answers the harder question — when a team skill is
+missing, which of the several possible reasons is the actual one. "approve" and
+"revoke" are the trust boundary for runnable team-skill content; "publish" sends
+a skill you wrote the other way, into your team's Team Context.`,
 }
 
 var skillsStatusCmd = &cobra.Command{
@@ -61,11 +65,18 @@ func init() {
 // than only in the human rendering, so Codex and Droid get the next action too —
 // the CLI owns behavior, skills are thin relays over it.
 type skillsStatusOutput struct {
-	TeamContext *teamContextStatus `json:"team_context"`
-	Repo        repoSkillStatus    `json:"repo"`
-	TeamSkills  []teamSkillStatus  `json:"team_skills"`
-	Problems    []string           `json:"problems,omitempty"`
-	Guidance    string             `json:"guidance,omitempty"`
+	TeamContext *teamContextStatus          `json:"team_context"`
+	Convergence *teamconverge.PendingRecord `json:"convergence,omitempty"`
+	Repo        repoSkillStatus             `json:"repo"`
+	Summary     teamSkillSummary            `json:"summary"`
+	TeamSkills  []teamSkillStatus           `json:"team_skills"`
+	Problems    []string                    `json:"problems,omitempty"`
+	Guidance    string                      `json:"guidance,omitempty"`
+}
+
+type teamSkillSummary struct {
+	AutoInstalledProse int `json:"auto_installed_prose"`
+	Withheld           int `json:"withheld"`
 }
 
 type teamContextStatus struct {
@@ -121,9 +132,7 @@ func runSkillsStatus(cmd *cobra.Command, _ []string) error {
 	out := collectSkillsStatus(gitRoot)
 
 	if asJSON {
-		enc := json.NewEncoder(cmd.OutOrStdout())
-		enc.SetIndent("", "  ")
-		return enc.Encode(out)
+		return encodeSkillsJSON(cmd.OutOrStdout(), out)
 	}
 	renderSkillsStatus(cmd.OutOrStdout(), out)
 	return nil
@@ -133,14 +142,31 @@ func runSkillsStatus(cmd *cobra.Command, _ []string) error {
 // the JSON shape are both testable without a terminal.
 func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 	out := skillsStatusOutput{TeamSkills: []teamSkillStatus{}}
+	pending, pendingErr := teamconverge.LoadPending(gitRoot)
+	if pendingErr != nil {
+		out.Problems = append(out.Problems, fmt.Sprintf("Team Context convergence status is unreadable: %v", pendingErr))
+	} else if pending != nil {
+		out.Convergence = pending
+		if teamconverge.AutomaticRetryAllowed(pending, pending.TeamPath) {
+			out.Problems = append(out.Problems, fmt.Sprintf(
+				"Team Context convergence is pending and will retry automatically (attempt %d): %s", pending.Attempts, pending.Reason))
+		} else if pending.Status == teamconverge.PendingRetry {
+			out.Problems = append(out.Problems, fmt.Sprintf(
+				"Team Context convergence is pending after %d attempts; automatic retry limit reached — run `ox sync`: %s",
+				pending.Attempts, pending.Reason))
+		} else {
+			out.Problems = append(out.Problems, fmt.Sprintf(
+				"Team Context convergence failed and needs attention: %s", pending.Reason))
+		}
+	}
 
 	slug := repotools.RepoSlug(gitRoot)
 	fromRemote := slug != filepath.Base(gitRoot)
 	out.Repo = repoSkillStatus{Slug: slug, SlugFromRemote: fromRemote}
 
-	_, _, selected := skillmanager.InstalledSource(gitRoot)
-	out.Repo.Selected = selected
 	targets, desiredErr := skillTargetRoots(gitRoot)
+	selected := len(targets) > 0
+	out.Repo.Selected = selected
 	out.Repo.Targets = targets
 	if desiredErr != nil {
 		// A missing lockfile is a valid empty state; anything else means ox cannot
@@ -264,6 +290,12 @@ func collectSkillsStatus(gitRoot string) skillsStatusOutput {
 			decision := decisions[sk.Name]
 			row.NeedsApproval = decision.NeedsApprove
 			row.State, row.Detail = installedState(gitRoot, targets, decision, planned)
+			if row.State == skillInstalled && decision.AutoInstalledProse {
+				out.Summary.AutoInstalledProse++
+			}
+			if decision.NeedsApprove {
+				out.Summary.Withheld++
+			}
 		}
 		out.TeamSkills = append(out.TeamSkills, row)
 	}
@@ -302,6 +334,9 @@ func skillsStatusGuidance(out skillsStatusOutput) string {
 	if out.TeamContext == nil {
 		return "This project has no Team Context, so there are no team skills to install."
 	}
+	if out.Summary.AutoInstalledProse > 0 {
+		return fmt.Sprintf("Team skills are current. %d auto-installed as prose without approval; nothing is withheld.", out.Summary.AutoInstalledProse)
+	}
 	return "Team skills are current. Nothing to do."
 }
 
@@ -314,7 +349,9 @@ func skillTargetRoots(gitRoot string) ([]string, error) {
 	}
 	roots := make([]string, 0, len(targets))
 	for _, t := range targets {
-		roots = append(roots, t.Root)
+		if t.Format == adapterprotocol.SkillFormatAgentSkillsV1 {
+			roots = append(roots, t.Root)
+		}
 	}
 	return roots, nil
 }
@@ -418,7 +455,7 @@ func roundedAge(t time.Time) string {
 }
 
 func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsStatusOutput) {
-	p := func(format string, args ...any) { fmt.Fprintf(w, format+"\n", args...) }
+	p := skillsPrintf(w)
 
 	if out.TeamContext != nil {
 		name := out.TeamContext.Name
@@ -434,6 +471,16 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 		}
 	} else {
 		p("%s  none configured for this project", cli.StyleAccent.Render("Team Context"))
+	}
+	if out.Convergence != nil {
+		p("  convergence  %s (attempt %d)", out.Convergence.Status, out.Convergence.Attempts)
+		if out.Convergence.TeamCommit != "" {
+			commit := out.Convergence.TeamCommit
+			if len(commit) > 12 {
+				commit = commit[:12]
+			}
+			p("  source       %s", commit)
+		}
 	}
 
 	p("")
@@ -452,6 +499,8 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 		p("%s  none found", cli.StyleAccent.Render("Team skills"))
 	} else {
 		p("%s", cli.StyleAccent.Render("Team skills"))
+		p("  trust summary            %d auto-installed as prose without approval; %d withheld pending approval",
+			out.Summary.AutoInstalledProse, out.Summary.Withheld)
 		for _, s := range out.TeamSkills {
 			detail := s.Detail
 			if detail != "" {
@@ -463,10 +512,7 @@ func renderSkillsStatus(w interface{ Write([]byte) (int, error) }, out skillsSta
 
 	if len(out.Problems) > 0 {
 		p("")
-		p("%s", cli.StyleWarning.Render("Why something may be missing"))
-		for _, problem := range out.Problems {
-			p("  • %s", problem)
-		}
+		writeSkillsProblems(w, cli.StyleWarning.Render("Why something may be missing"), out.Problems)
 	}
 }
 

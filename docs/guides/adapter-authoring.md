@@ -150,6 +150,12 @@ func runInfo() {
 			Scope: adapterprotocol.SkillScopeProject,
 			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
 		}},
+		RuleTargets: []adapterprotocol.SkillTarget{{
+			Key: "myagent-rules", Root: ".myagent/rules",
+			Format: adapterprotocol.RuleFormatMarkdownV1,
+			Scope: adapterprotocol.SkillScopeProject,
+			LinkPolicy: adapterprotocol.SkillLinkPolicyReject,
+		}},
         ServeMode:       true,
     })
 }
@@ -165,12 +171,25 @@ func runInfo() {
 | `serve_mode` | Supports `--serve` flag |
 | `file_watcher` | Pushes entry events automatically after `find-session` (no explicit subscribe) |
 | `skills_installer` | Implements the compatibility skill RPCs; native-capable adapters should also declare `skill_targets` so ox can centrally reconcile and deduplicate projections |
+| `rules_installer` | **Deprecated — removed in ox 0.18.0.** Implements the legacy compatibility rule RPCs; declare `rule_targets` instead |
 
 **`skill_targets`** — optional native Agent Skills discovery roots. Roots must
 be project-relative. Multiple adapters may declare the same target key/root;
 ox writes that projection once. New adapters should use target descriptors;
-the imperative install/check/uninstall RPCs remain for one compatibility
-release.
+the imperative install/check/uninstall RPCs remain available to protocol-v1
+third-party adapters.
+
+**`rule_targets`** — optional native rule roots. Built-in rule content comes
+from ox's catalog and is reconciled by the same digest-owned Plan/Apply engine
+as skills. New adapters should declare `markdown-rules/v1` targets rather than
+implementing rule installer RPCs.
+
+The imperative `install-rules` / `check-rules` / `uninstall-rules` RPCs remain
+for one compatibility release. They were announced in ox 0.6.2, superseded by
+`rule_targets` in ox 0.17.0, and are **removed in ox 0.18.0**. No ox-bundled
+adapter declares `rules_installer` any more; if yours still does, migrate it to
+a `markdown-rules/v1` `rule_targets` entry before 0.18.0 — after that release ox
+stops calling the RPCs and your rules will silently stop being installed.
 
 **`hook_env_values`** — the value(s) of `AGENT_ENV` that your hook installs. ox uses this to
 route hook calls to your adapter. Must match what your `install-hooks` writes.

@@ -35,11 +35,18 @@ type ScopedIgnoreFile struct {
 
 // ScopedIgnoreFiles returns the ignore files for the agent directories ox writes.
 //
-// The sageox-team-* globs ship from day one even though that source is not
-// implemented yet. Reserving a namespace before anything can occupy it is free,
-// and it means the team-sync release never has to touch a customer's ignore file
-// again — one fewer commit into somebody's repository, forever.
+// The sageox-team-* globs protect Team Skill and Team Rule projections. They are
+// present before reconciliation writes any derived file, so an ox-managed cache
+// can never appear in the customer's pull request.
 func ScopedIgnoreFiles() []ScopedIgnoreFile {
+	return scopedIgnoreFiles()
+}
+
+// scopedIgnoreFiles lists the ignore rules for every agent directory ox writes
+// into. Every entry is a stable prefix glob or the one exact ox-cli.md rule name
+// — never a per-skill name — so the set never depends on what a repository
+// selected.
+func scopedIgnoreFiles() []ScopedIgnoreFile {
 	skillGlob := "skills/" + CLIPrefix + "*/"
 	teamSkillGlob := "skills/" + TeamPrefix + "*/"
 	teamRuleGlob := "rules/" + TeamPrefix + "*"
@@ -62,6 +69,15 @@ func ScopedIgnoreFiles() []ScopedIgnoreFile {
 		}},
 		{Dir: ".agents", Entries: []string{skillGlob, teamSkillGlob}},
 		{Dir: ".factory", Entries: []string{ruleExact, ruleGlob, teamRuleGlob}},
+		// Team Rules use each tool's native rule root only when the format can
+		// preserve semantics. These entries are existence-gated like the original
+		// three, so supporting a tool never creates its directory in an unrelated
+		// repository.
+		{Dir: ".cursor", Entries: []string{"rules/" + TeamPrefix + "*"}},
+		{Dir: ".github/instructions", Entries: []string{TeamPrefix + "*"}},
+		{Dir: ".clinerules", Entries: []string{TeamPrefix + "*"}},
+		{Dir: ".kiro", Entries: []string{"steering/" + TeamPrefix + "*"}},
+		{Dir: ".windsurf", Entries: []string{"rules/" + TeamPrefix + "*"}},
 	}
 }
 
@@ -84,7 +100,7 @@ type IgnoreFileResult struct {
 }
 
 func EnsureScopedIgnoreFiles(repoRoot string) ([]IgnoreFileResult, error) {
-	written, _, err := ensureScopedIgnoreFilesIn(repoRoot, nil)
+	written, _, err := ensureScopedIgnoreFilesIn(repoRoot, nil, ScopedIgnoreFiles())
 	return written, err
 }
 
@@ -103,10 +119,10 @@ func EnsureScopedIgnoreFiles(repoRoot string) ([]IgnoreFileResult, error) {
 // NOT proceed — the files would land visible to git with no rule hiding them,
 // which is the exact state that puts vendor files in a customer's pull request.
 func EnsureScopedIgnoreFilesForDirs(repoRoot string, force map[string]bool) ([]IgnoreFileResult, []string, error) {
-	return ensureScopedIgnoreFilesIn(repoRoot, force)
+	return ensureScopedIgnoreFilesIn(repoRoot, force, ScopedIgnoreFiles())
 }
 
-func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool) ([]IgnoreFileResult, []string, error) {
+func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool, files []ScopedIgnoreFile) ([]IgnoreFileResult, []string, error) {
 	// Anchor every operation to the repository root.
 	//
 	// Checking a path with Lstat and then writing it by path leaves a window in
@@ -121,7 +137,7 @@ func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool) ([]Ignore
 
 	var written []IgnoreFileResult
 	var unprotected []string
-	for _, f := range ScopedIgnoreFiles() {
+	for _, f := range files {
 		// Lstat, not Stat: Stat follows symlinks, so a repository that makes an
 		// agent directory a symlink could steer ox into writing outside repoRoot.
 		info, err := root.Lstat(f.Dir)
@@ -166,6 +182,41 @@ func ensureScopedIgnoreFilesIn(repoRoot string, force map[string]bool) ([]Ignore
 		}
 	}
 	return written, unprotected, nil
+}
+
+// unprotectedScopedIgnoreDirs inspects, but never repairs, the managed ignore
+// policy for required agent directories. It is intentionally used by automatic
+// reconciliation: session start and daemon ticks may update machine-local,
+// gitignored projections, but they must never create a tracked repository diff.
+func unprotectedScopedIgnoreDirs(repoRoot string, required map[string]bool, files []ScopedIgnoreFile) ([]string, error) {
+	root, err := os.OpenRoot(repoRoot)
+	if err != nil {
+		return nil, fmt.Errorf("open repository root: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+
+	var unprotected []string
+	for _, f := range files {
+		if !required[f.Dir] {
+			continue
+		}
+		info, statErr := root.Lstat(f.Dir)
+		if statErr != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			unprotected = append(unprotected, f.Dir)
+			continue
+		}
+		name := path.Join(f.Dir, ".gitignore")
+		info, statErr = root.Lstat(name)
+		if statErr != nil || !info.Mode().IsRegular() {
+			unprotected = append(unprotected, f.Dir)
+			continue
+		}
+		data, readErr := root.ReadFile(name)
+		if readErr != nil || !sageoxignore.HasManagedBlock(data, f.Entries) {
+			unprotected = append(unprotected, f.Dir)
+		}
+	}
+	return unprotected, nil
 }
 
 // IsManagedOnlyScopedIgnore reports whether rel names one of the scoped ignore
