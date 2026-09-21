@@ -2,14 +2,18 @@ package ledger
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/sageox/ox/internal/gitserver"
 	"github.com/sageox/ox/internal/lfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -106,6 +110,146 @@ func TestReadSyncLFSUnparseableCommittedPointerIsNeverServed(t *testing.T) {
 	require.Equal(t, "missing_hydration", result.ErrorClass)
 	require.Equal(t, &ReadFailureDetail{Reason: "malformed_pointer", Path: path}, result.ErrorDetail)
 	require.Zero(t, requests.Load(), "an unparseable pointer names no object to request")
+}
+
+// Failure prevented: a warm refresh started Git processes for every hydrated
+// file — two object lookups in each verification pass and a pointer lookup
+// before dehydration — so its duration grew with the ledger past any freshness
+// bound a hosted reader can meet (ox #1022).
+func TestReadSyncGitProcessesDoNotGrowWithHydratedFiles(t *testing.T) {
+	const total = 12
+	contents := make([][]byte, total)
+	byOID := make(map[string][]byte, total)
+	for i := range contents {
+		contents[i] = []byte(fmt.Sprintf("hydrated object %02d\n", i))
+		byOID[lfs.ComputeOID(contents[i])] = contents[i]
+	}
+	f := newReadLFSFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/batch") {
+			grantReadLFSBatch(t, w, r)
+			return
+		}
+		_, _ = w.Write(byOID[filepath.Base(r.URL.Path)])
+	})
+	// Count every Git process the sync starts by wrapping the fixture's git.
+	fixtureGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	bin, log := t.TempDir(), filepath.Join(t.TempDir(), "spawns")
+	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho >> '"+log+"'\nexec '"+fixtureGit+"' \"$@\"\n"), 0700))
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// warmSpawns hydrates objects [from, to), then counts the Git processes a
+	// warm refresh of the fully hydrated checkout starts.
+	warmSpawns := func(from, to int) int {
+		t.Helper()
+		for i := from; i < to; i++ {
+			commitReadLFSPointer(t, f, fmt.Sprintf("sessions/many/object-%02d.md", i), contents[i])
+		}
+		require.True(t, ReadSync(context.Background(), f.opts).Ready)
+		require.NoError(t, os.WriteFile(log, nil, 0600))
+		warm := ReadSync(context.Background(), f.opts)
+		require.True(t, warm.Ready, "%+v", warm)
+		require.Equal(t, ReadHydration{State: "complete", Required: to, Completed: to}, warm.Hydration)
+		spawns, err := os.ReadFile(log)
+		require.NoError(t, err)
+		return strings.Count(string(spawns), "\n")
+	}
+	few := warmSpawns(0, 2)
+	require.Equal(t, few, warmSpawns(2, total), "refreshing %d hydrated files starts as many Git processes as refreshing 2", total)
+}
+
+// newLocalReadTransport returns a transport for tests that run only local Git.
+func newLocalReadTransport(t *testing.T) *gitserver.ReadTransport {
+	t.Helper()
+	transport, err := gitserver.NewReadTransport("https://sageox.ai", readRepoID, "https://sageox.ai/api/v1/cli/repos/"+readRepoID+"/ledger.git")
+	require.NoError(t, err)
+	return transport
+}
+
+// Failure prevented: a lookup reads the rest of the previous answer as its own
+// — after a blob too large to be a pointer, or an object not present locally —
+// so a file is verified against another object's bytes.
+func TestReadBlobsKeepEachAnswerWithItsLookup(t *testing.T) {
+	dir := t.TempDir()
+	readTestGit(t, dir, "init", "-q")
+	store := func(content string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "object")
+		require.NoError(t, os.WriteFile(path, []byte(content), 0600))
+		return readTestGit(t, dir, "hash-object", "-w", "--", path)
+	}
+	pointer := lfs.FormatPointer("sha256:"+lfs.ComputeOID([]byte("content")), 7)
+	pointerOID := store(pointer)
+	// Larger than a pipe buffer, so an answer left unread would block Git.
+	largeOID := store(strings.Repeat("large plain content\n", 5000))
+	missingOID := strings.Repeat("0", len(pointerOID))
+	blobs, err := startReadBlobs(context.Background(), newLocalReadTransport(t), dir)
+	require.NoError(t, err)
+	defer blobs.close()
+
+	blob, err := blobs.small(largeOID, 1024)
+	require.NoError(t, err)
+	require.Nil(t, blob, "a blob too large to be a pointer is not returned")
+	blob, err = blobs.small(pointerOID, 1024)
+	require.NoError(t, err)
+	require.Equal(t, pointer, string(blob))
+	_, err = blobs.small(missingOID, 1024)
+	require.Error(t, err, "an object not present locally is an error, not an empty blob")
+	blob, err = blobs.small(pointerOID, 1024)
+	require.NoError(t, err)
+	require.Equal(t, pointer, string(blob))
+}
+
+// Failure prevented: the lookup process starts outside the transport's policy
+// — under a checkout's unsafe config, where Git runs configured commands — or a
+// Git that cannot start is reported as a working lookup process.
+func TestStartReadBlobsRefusesWhatTheTransportRefuses(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, dir string)
+		want  error
+	}{
+		{"unsafe config", func(t *testing.T, dir string) {
+			require.NoError(t, os.Mkdir(filepath.Join(dir, ".git"), 0700))
+			require.NoError(t, os.WriteFile(filepath.Join(dir, ".git", "config"), []byte("[core]\n\tfsmonitor = evil-command\n"), 0600))
+		}, gitserver.ErrUnsafeReadTransport},
+		{"git is not installed", func(t *testing.T, _ string) { t.Setenv("PATH", t.TempDir()) }, exec.ErrNotFound},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			tc.setup(t, dir)
+			blobs, err := startReadBlobs(context.Background(), newLocalReadTransport(t), dir)
+			require.ErrorIs(t, err, tc.want)
+			require.Nil(t, blobs)
+		})
+	}
+}
+
+// Failure prevented: Git dying mid-answer hands verification an empty or
+// truncated blob as if it were the object, or leaves the lookup waiting.
+func TestReadBlobsFailWhenGitDoesNotAnswerInFull(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("stands in for cat-file with a POSIX shell script on PATH")
+	}
+	for _, tc := range []struct{ name, answer string }{
+		{"no answer", `read oid`},
+		{"size that is not a number", `read oid; printf '%s blob many\n' "$oid"`},
+		{"content cut short", `read oid; printf '%s blob 10\nshort' "$oid"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\n"+tc.answer+"\n"), 0700))
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			// Without a .git directory the transport inspects no config, so the
+			// script stands in for cat-file alone.
+			blobs, err := startReadBlobs(context.Background(), newLocalReadTransport(t), t.TempDir())
+			require.NoError(t, err)
+			defer blobs.close()
+			blob, err := blobs.small(strings.Repeat("a", 40), 1024)
+			require.Error(t, err)
+			require.Nil(t, blob)
+		})
+	}
 }
 
 // Failure prevented: a cold clone that stops short keeps a stage holding a
