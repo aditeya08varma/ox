@@ -6,14 +6,30 @@ sidebar_position: 11
 
 ## ox addons
 
-Choose and update the add-ons your team owns
+Install skills, rules, and the context each skill carries
 
 ### Synopsis
 
 Browse, install, update and remove Add-ons for your team.
 
-An add-on is a versioned bundle of skills and rules your team selects once. It
-installs into your Team Context — never into a single repository — so every
+An add-on is a versioned bundle of three things your team selects once:
+
+  skills   what an AI coworker should DO, and when
+  rules    conventions it should follow
+  context  the reference material those skills carry with them
+
+That third one is the point people miss, so be precise about what it means
+here: NOT your Team Context, and not arbitrary documents. It is the material
+a specific skill needs in order to be worth following — the briefs, tables,
+examples and source material that ship inside that skill, in its
+`references/` and `assets/`.
+
+Bundling it into the skill is deliberate. A document nothing points at is
+never opened; material carried by a skill is found exactly when that skill
+is. So an add-on hands a coworker the instruction and the evidence together,
+rather than an instruction and a hope that it goes looking.
+
+It installs into your Team Context — never into a single repository — so every
 repository on the team receives it, and every teammate's AI coworker sees the
 same selection. `ox sync` distributes it; this command chooses it.
 
