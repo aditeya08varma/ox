@@ -26,10 +26,12 @@ import (
 // hand-authored team content already travels — which is why installing an
 // add-on needs no repository-side step and offers none.
 //
-// The whole surface is registered only when the add-ons gate is on
-// (syncFeatureGatedCommands in root.go). Cobra resolves commands and renders
-// help before PersistentPreRunE, so a RunE-only guard would still advertise
-// these verbs and a Hidden-only guard would still let them run.
+// This surface used to be registered only behind FEATURE_ADDONS. The flag is
+// gone (ADR-032, amended): gating the MECHANISM guarded nothing, because the
+// only provider is compiled into this binary and ships bytes we wrote. The
+// risk a gate exists to hold back is untrusted content, so the gate moved to
+// the thing that will actually introduce it — a remote/third-party provider,
+// which lands behind its own flag, default off.
 
 var addonsCmd = &cobra.Command{
 	Use:     "addons",
@@ -48,12 +50,31 @@ the ones its new version no longer ships: they are not yours to edit, and your
 Team Context git history is the undo. ox never overwrites a file it does not
 own — a name that collides with something hand-authored is refused, not merged.
 
-Add-ons may be published by SageOx, by your own team, or in future by a third
-party. Add-on files are written non-executable, always — a provider cannot
-choose otherwise. Content that arrives with runnable scripts still needs
+Today every add-on comes from the catalog compiled into this ox binary, so
+` + "`ox addons list`" + ` shows what this build ships and nothing else — not
+team-published skills (those are ` + "`ox skills publish`" + `) and not any remote
+source. Add-ons from outside this binary are future work and will arrive behind
+their own opt-in.
+
+Add-on files are written non-executable, always — a provider cannot choose
+otherwise. Content that arrives with runnable scripts still needs
 ` + "`ox skills approve <name>`" + ` before an AI coworker may read it, and that
 command's ` + "`--allow-scripts`" + ` before anything becomes runnable. Installing an
 add-on grants neither.`,
+	// Same reasoning as `ox skills`: an unknown verb is named rather than
+	// swallowed into generic help that reads like the command ran.
+	Args: cobra.ArbitraryArgs,
+	RunE: runAddonsDispatch,
+}
+
+// runAddonsDispatch prints help for a bare `ox addons` and fails loudly on an
+// unknown verb. Valid subcommands are routed by cobra before RunE is reached,
+// so anything arriving here is a token cobra could not match.
+func runAddonsDispatch(cmd *cobra.Command, args []string) error {
+	if len(args) == 0 {
+		return cmd.Help()
+	}
+	return fmt.Errorf("unknown subcommand %q for %q\nRun 'ox addons --help' to see available commands", args[0], cmd.CommandPath())
 }
 
 var addonsListCmd = &cobra.Command{
@@ -96,8 +117,7 @@ func init() {
 	}
 	addonsInstallCmd.Flags().String("version", "", "Install an exact version instead of the catalog's current one")
 	addonsCmd.AddCommand(addonsListCmd, addonsInstallCmd, addonsUpdateCmd, addonsRemoveCmd)
-	// NOT rootCmd.AddCommand: addonsCmd is registered by
-	// syncFeatureGatedCommands once the add-ons gate has resolved.
+	rootCmd.AddCommand(addonsCmd)
 }
 
 // teamContextForAddons resolves the Team Context every add-on verb writes.
