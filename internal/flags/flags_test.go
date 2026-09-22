@@ -35,9 +35,6 @@ func TestDefaults(t *testing.T) {
 	if d.AttestEnabled {
 		t.Error("AttestEnabled should default false")
 	}
-	if d.BulletinEnabled {
-		t.Error("BulletinEnabled should default false (server-enrolled pilot)")
-	}
 	if d.DisableFileDeleteTools {
 		t.Error("DisableFileDeleteTools should default false")
 	}
@@ -135,10 +132,9 @@ func TestDaemonProviderNilSettings(t *testing.T) {
 func TestDaemonProviderStaleCache(t *testing.T) {
 	stale := &flags.CLISettingsResponse{
 		Features: flags.CLIFeatures{
-			CodeDB:   bp(false), // server wanted codedb off
-			Whisper:  bp(true),
-			Distill:  bp(true),
-			Bulletin: bp(true), // pilot enrollment that a dead daemon must not keep alive
+			CodeDB:  bp(false), // server wanted codedb off
+			Whisper: bp(true),
+			Distill: bp(true),
 		},
 		FetchedAt: time.Now().Add(-3 * time.Hour), // older than 2× max age
 	}
@@ -147,9 +143,6 @@ func TestDaemonProviderStaleCache(t *testing.T) {
 	// stale cache should be ignored — defaults apply
 	if !f.CodeDBEnabled {
 		t.Error("stale cache should be ignored; CodeDBEnabled should be default true")
-	}
-	if f.BulletinEnabled {
-		t.Error("stale cache should be ignored; BulletinEnabled should be default false")
 	}
 }
 
@@ -215,9 +208,6 @@ func TestRemoteSettingsOmittedFieldsPreserveDefaults(t *testing.T) {
 	if patch.AttestEnabled != nil {
 		t.Error("AttestEnabled should be nil for omitted field")
 	}
-	if patch.BulletinEnabled != nil {
-		t.Error("BulletinEnabled should be nil for omitted field")
-	}
 
 	// resolve should preserve defaults for omitted fields
 	f := flags.Resolve(context.Background(), flags.DaemonProvider{
@@ -234,9 +224,6 @@ func TestRemoteSettingsOmittedFieldsPreserveDefaults(t *testing.T) {
 	}
 	if f.AttestEnabled {
 		t.Error("AttestEnabled should remain default false (omitted)")
-	}
-	if f.BulletinEnabled {
-		t.Error("BulletinEnabled should remain default false (omitted)")
 	}
 }
 
@@ -493,6 +480,59 @@ type testPatchProvider struct {
 
 func (p *testPatchProvider) Patch(_ context.Context) (*flags.Patch, flags.Source, error) {
 	return p.patch, flags.SourceEnv, nil
+}
+
+// TestAddonsGate_DefaultsOffAndFollowsBothRolloutLevers pins the addons gate
+// across every layer that can move it. ADR-032 requires the mechanism to land
+// dark: a selection model is the hardest feature to take back, because once a
+// team records a choice, withdrawing the feature orphans the file that recorded
+// it — the exact situation the withdrawn `ox skills catalog | install` surface
+// created.
+//
+// Failure prevented: add-ons defaulting on, or becoming a developer-only escape
+// hatch that no central rollout can reach.
+func TestAddonsGate_DefaultsOffAndFollowsBothRolloutLevers(t *testing.T) {
+	if flags.Defaults().AddonsEnabled {
+		t.Error("AddonsEnabled must default false: ADR-032 lands the mechanism dark")
+	}
+
+	for _, tc := range []struct {
+		name   string
+		env    string // "" means leave FEATURE_ADDONS unset
+		remote *bool
+		want   bool
+	}{
+		{name: "no opinion anywhere", want: false},
+		{name: "env enables for local work", env: "true", want: true},
+		{name: "env accepts 1", env: "1", want: true},
+		{name: "remote rollout enables centrally", remote: bp(true), want: true},
+		{name: "remote omits add-ons, default holds", remote: nil, want: false},
+		// The escape hatch cuts both ways, matching FEATURE_ATTEST: a developer
+		// must be able to switch add-ons off locally mid-rollout to reproduce what
+		// an un-flagged user sees.
+		{name: "env false overrides a server-side enable", env: "false", remote: bp(true), want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("FEATURE_ADDONS", tc.env)
+			} else {
+				t.Setenv("FEATURE_ADDONS", "")
+			}
+
+			providers := []flags.Provider{}
+			if tc.remote != nil {
+				providers = append(providers, flags.DaemonProvider{CachedSettings: &flags.CLISettingsResponse{
+					Features:  flags.CLIFeatures{Addons: tc.remote},
+					FetchedAt: time.Now(),
+				}})
+			}
+			providers = append(providers, flags.EnvProvider{})
+
+			if got := flags.Resolve(context.Background(), providers...).AddonsEnabled; got != tc.want {
+				t.Errorf("AddonsEnabled = %v, want %v", got, tc.want)
+			}
+		})
+	}
 }
 
 // TestBulletinFlagResolvesFromRemotePayload decodes real settings payloads
