@@ -172,8 +172,8 @@ func TestPlanLintFile_RoutesByFileName(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
 
-	if err := runPlanLintFile(cmd, page, false, ""); err != nil && strings.Contains(err.Error(), "does not look like an authored HTML page") {
-		t.Errorf("lint refused a doctype-less .html page: %v", err)
+	if err := runPlanLintFile(cmd, page, false, ""); err != nil {
+		t.Errorf("lint failed on a doctype-less .html page: %v", err)
 	}
 	err := runPlanLintFile(cmd, md, false, "")
 	if err == nil || !strings.Contains(err.Error(), "does not look like an authored HTML page") {
