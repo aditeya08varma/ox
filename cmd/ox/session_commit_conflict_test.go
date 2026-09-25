@@ -53,6 +53,25 @@ func TestRunSessionCommit_RefusesUnmergedSessionFile(t *testing.T) {
 	assert.NotEmpty(t, unmerged, "the conflict must stay unmerged")
 }
 
+// TestRunSessionCommit_RefusesStagedConflictMarkers covers a conflict someone already `git add`ed by hand.
+// Without it, the stage-0 file passes the unmerged check and its markers are committed.
+func TestRunSessionCommit_RefusesStagedConflictMarkers(t *testing.T) {
+	project, meta := newSessionCommitProject(t)
+	require.NoError(t, os.WriteFile(meta, []byte("{\n<<<<<<< Updated upstream\n  \"title\": \"upstream\"\n=======\n  \"title\": \"local\"\n>>>>>>> Stashed changes\n}\n"), 0o644))
+	mustRunGit(t, project, "add", ".sageox/sessions")
+	fresh := filepath.Join(project, ".sageox", "sessions", "2026-09-24T12-00-carol-OxCCCC", "raw.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(fresh), 0o755))
+	require.NoError(t, os.WriteFile(fresh, []byte("{}\n"), 0o644))
+	before, _ := runIsolatedGit(t, project, "log", "--oneline")
+
+	err := runSessionCommit(sessionCommitCmd, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "conflict markers")
+	after, _ := runIsolatedGit(t, project, "log", "--oneline")
+	assert.Equal(t, before, after, "no commit may be created")
+}
+
 // TestRunSessionCommit_CommitsCleanSessionOnly guards the normal path and the sessions scope.
 // Without it, the guard could block healthy sessions or sweep the user's other staged files into the commit.
 func TestRunSessionCommit_CommitsCleanSessionOnly(t *testing.T) {

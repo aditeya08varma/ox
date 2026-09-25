@@ -109,6 +109,35 @@ func TestDoctorFix_AutostashConflictNeverCommittedAsSessionUpdate(t *testing.T) 
 	assert.True(t, json.Valid([]byte(head)), "HEAD meta.json must stay valid JSON: %s", head)
 }
 
+// TestSessionCommit_RefusesSeveralUnmergedPaths covers a stash pop that leaves more than one session unmerged.
+// Without it, the refusal could under-report how many files need manual resolution.
+func TestSessionCommit_RefusesSeveralUnmergedPaths(t *testing.T) {
+	ledgerPath := newDoctorLedgerProject(t)
+	second := "sessions/2026-09-24T12-00-carol-OxCCCC/meta.json"
+	writeSessionFile(t, ledgerPath, second, "{\n  \"title\": \"base\"\n}\n")
+	mustRunGit(t, ledgerPath, "add", "--sparse", "sessions/")
+	mustRunGit(t, ledgerPath, "commit", "-m", "second session")
+	metas := []string{conflictedSession + "/meta.json", second}
+	for _, rel := range metas {
+		writeSessionFile(t, ledgerPath, rel, "{\n  \"title\": \"local\"\n}\n")
+	}
+	mustRunGit(t, ledgerPath, "stash", "push", "-m", "autostash")
+	for _, rel := range metas {
+		writeSessionFile(t, ledgerPath, rel, "{\n  \"title\": \"upstream\"\n}\n")
+	}
+	mustRunGit(t, ledgerPath, "commit", "-am", "upstream")
+	out, err := runIsolatedGit(t, ledgerPath, "stash", "pop")
+	require.Error(t, err, "stash pop must conflict: %s", out)
+	before := headLog(t, ledgerPath)
+
+	r := checkSessionCommit(true)
+
+	assert.False(t, r.passed, "must refuse: %+v", r)
+	assert.Contains(t, r.detail, "2 unmerged file(s)")
+	assert.Contains(t, r.detail, "(+1 more)")
+	assert.Equal(t, before, headLog(t, ledgerPath), "no commit may be created")
+}
+
 // TestSessionCommit_RefusesStagedConflictMarkers covers markers already staged
 // with no U-state left (e.g. a human `git add` on the conflict).
 // Without it, the bare commit publishes the markers.
