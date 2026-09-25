@@ -121,6 +121,12 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// refuse before `git add`, which would mark a conflict resolved with its markers (#1055)
+	if unmerged := parseUnmergedPaths(string(output)); len(unmerged) > 0 {
+		return fmt.Errorf("refusing to commit: %d unresolved conflict(s) in %s, e.g. %s; resolve them by hand (git status, then git checkout --ours/--theirs <file>) and rerun",
+			len(unmerged), sessionsDir, unmerged[0].Path)
+	}
+
 	// stage session files
 	addCmd := exec.Command("git", "-C", projectRoot, "add", sessionsDir)
 	if err := addCmd.Run(); err != nil {
@@ -144,8 +150,8 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// commit
-	commitCmd := exec.Command("git", "-C", projectRoot, "commit", "-m", commitMsg)
+	// commit only the sessions dir, so the user's other staged files stay staged
+	commitCmd := exec.Command("git", "-C", projectRoot, "commit", "-m", commitMsg, "--", sessionsDir)
 	commitOutput, err := commitCmd.CombinedOutput()
 	if err != nil {
 		// check if nothing to commit
