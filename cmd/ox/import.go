@@ -135,6 +135,7 @@ type importResult struct {
 	RecordingID string `json:"recording_id,omitempty"`
 }
 
+// runImport uploads a document to the team context's LFS store and commits its pointer files.
 func runImport(cmd *cobra.Command, args []string) error {
 	jsonOutput, _ := cmd.Flags().GetBool("json")
 
@@ -239,9 +240,6 @@ func runImport(cmd *cobra.Command, args []string) error {
 	if _, statErr := os.Stat(docDir); statErr == nil && !importFlags.force {
 		return fmt.Errorf("document directory already exists for this date — use --force to reimport: %s", docDir)
 	}
-	if err := os.MkdirAll(docDir, 0o755); err != nil {
-		return fmt.Errorf("create doc directory: %w", err)
-	}
 
 	// prepare LFS batch objects
 	batchObjects := []lfs.BatchObject{
@@ -290,6 +288,11 @@ func runImport(cmd *cobra.Command, args []string) error {
 	}
 	if len(uploadErrors) > 0 {
 		return fmt.Errorf("LFS upload failed:\n  %s", strings.Join(uploadErrors, "\n  "))
+	}
+
+	// created only after the upload succeeds, so a failed import leaves nothing that blocks a retry
+	if err := os.MkdirAll(docDir, 0o755); err != nil {
+		return fmt.Errorf("create doc directory: %w", err)
 	}
 
 	// write LFS pointer files (~200 bytes each, referencing content on LFS server).
