@@ -33,6 +33,7 @@ type importRetryFixture struct {
 	text        string // --text path, empty for none
 	batchFails  atomic.Bool
 	uploadFails atomic.Bool
+	onUpload    atomic.Pointer[func()] // runs inside an object upload, e.g. to simulate a concurrent import
 }
 
 // newImportRetryFixture builds the fixture: a team context clone, an LFS test server and a source document.
@@ -103,6 +104,9 @@ func (f *importRetryFixture) serveLFS(w http.ResponseWriter, r *http.Request) {
 		if f.uploadFails.Load() {
 			http.Error(w, "storage unavailable", http.StatusInternalServerError)
 			return
+		}
+		if hook := f.onUpload.Load(); hook != nil {
+			(*hook)()
 		}
 		w.WriteHeader(http.StatusOK)
 	default:
@@ -242,6 +246,30 @@ func TestImport_UncreatableDocDirFailsAfterUpload(t *testing.T) {
 
 	require.ErrorContains(t, err, "create doc directory")
 	assert.NoFileExists(t, filepath.Join(f.docDir(), "metadata.json"))
+}
+
+// TestImport_ConcurrentImportIsNotOverwritten checks an import refuses a document directory another import created during its upload.
+// Without this, two overlapping imports of the same document both pass the existence check and the second overwrites the first without --force.
+func TestImport_ConcurrentImportIsNotOverwritten(t *testing.T) {
+	f := newImportRetryFixture(t)
+	other := filepath.Join(f.docDir(), "metadata.json")
+	hook := func() {
+		// the other import finishes first and writes its document
+		_ = os.MkdirAll(f.docDir(), 0o755)
+		_ = os.WriteFile(other, []byte(`{"from":"the other import"}`), 0o644)
+	}
+	f.onUpload.Store(&hook)
+
+	_, err := f.importDoc(false)
+
+	require.ErrorContains(t, err, "created by another import")
+	data, readErr := os.ReadFile(other)
+	require.NoError(t, readErr)
+	assert.JSONEq(t, `{"from":"the other import"}`, string(data), "the other import's document must not be overwritten")
+
+	f.onUpload.Store(nil)
+	_, err = f.importDoc(true)
+	require.NoError(t, err, "--force must still reimport over an existing document")
 }
 
 // readDocFiles returns each file in dir mapped to its content.

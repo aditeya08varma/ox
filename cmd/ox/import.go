@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"os"
@@ -290,8 +292,19 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("LFS upload failed:\n  %s", strings.Join(uploadErrors, "\n  "))
 	}
 
-	// created only after the upload succeeds, so a failed import leaves nothing that blocks a retry
-	if err := os.MkdirAll(docDir, 0o755); err != nil {
+	// created only after the upload succeeds, so a failed import leaves nothing that blocks a retry;
+	// Mkdir, not MkdirAll, so an import that created docDir during our upload is not overwritten without --force
+	err = os.MkdirAll(filepath.Dir(docDir), 0o755)
+	if err == nil {
+		err = os.Mkdir(docDir, 0o755)
+	}
+	if errors.Is(err, fs.ErrExist) && importFlags.force {
+		err = nil
+	}
+	if errors.Is(err, fs.ErrExist) {
+		return fmt.Errorf("document directory was created by another import while this one was uploading, use --force to reimport: %s", docDir)
+	}
+	if err != nil {
 		return fmt.Errorf("create doc directory: %w", err)
 	}
 
