@@ -321,11 +321,12 @@ func hangReadGitCall(t *testing.T, arg string, before int, reached string) {
 	fixtureGit, err := exec.LookPath("git")
 	require.NoError(t, err)
 	bin, calls := t.TempDir(), filepath.Join(t.TempDir(), "calls")
+	quote := func(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 	script := "#!/bin/sh\nfor arg in \"$@\"; do\n" +
-		"\tif [ \"$arg\" = '" + arg + "' ]; then\n" +
-		"\t\techo >> '" + calls + "'\n" +
-		"\t\tif [ $(wc -l < '" + calls + "') -eq " + strconv.Itoa(before+1) + " ]; then : > '" + reached + "'; exec sleep 60; fi\n" +
-		"\tfi\ndone\nexec '" + fixtureGit + "' \"$@\"\n"
+		"\tif [ \"$arg\" = " + quote(arg) + " ]; then\n" +
+		"\t\techo >> " + quote(calls) + "\n" +
+		"\t\tif [ $(wc -l < " + quote(calls) + ") -eq " + strconv.Itoa(before+1) + " ]; then : > " + quote(reached) + "; exec sleep 60; fi\n" +
+		"\tfi\ndone\nexec " + quote(fixtureGit) + " \"$@\"\n"
 	require.NoError(t, os.WriteFile(filepath.Join(bin, "git"), []byte(script), 0700))
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
