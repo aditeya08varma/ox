@@ -323,3 +323,56 @@ func TestScanLegacyGitHubFiles_RelativePaths(t *testing.T) {
 	require.Len(t, legacy, 1)
 	assert.Equal(t, filepath.Join("data", "github", "2026", "04", "01", "pr", "42.json"), legacy[0])
 }
+
+// TestGitHubFileCleanup_KeepsValidFilesThatMentionMarkers verifies that a valid PR file whose
+// text merely mentions conflict markers is never reported, repaired, or deleted.
+// Failure prevented: the old substring check deleted any file containing "<<<<<<<" anywhere,
+// so a PR discussing a merge conflict was silently removed from the Ledger.
+func TestGitHubFileCleanup_KeepsValidFilesThatMentionMarkers(t *testing.T) {
+	now := time.Date(2026, 4, 1, 10, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		write func(t *testing.T, ledger string) string
+	}{
+		{"hand-written JSON with a marker mid-line", func(t *testing.T, ledger string) string {
+			dir := DateDir(ledger, now, "pr")
+			require.NoError(t, os.MkdirAll(dir, 0755))
+			path := filepath.Join(dir, "7.json")
+			body := "{\n  \"number\": 7,\n  \"title\": \"resolve <<<<<<< HEAD ======= >>>>>>> by hand\"\n}\n"
+			require.NoError(t, os.WriteFile(path, []byte(body), 0644))
+			return path
+		}},
+		{"ox-written PR whose body quotes a whole conflict", func(t *testing.T, ledger string) string {
+			pr := &PRFile{
+				Number: 8, Title: "Fix merge", State: "open", Author: "alice",
+				Body:      "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> branch\n",
+				CreatedAt: now, UpdatedAt: now,
+			}
+			require.NoError(t, WriteGitHubPR(ledger, pr))
+			files, err := ListGitHubDataFiles(ledger, "pr")
+			require.NoError(t, err)
+			require.Len(t, files, 1)
+			return files[0]
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ledger := t.TempDir()
+			path := tt.write(t, ledger)
+
+			_, corrupted, err := ScanLegacyGitHubFiles(ledger)
+			require.NoError(t, err)
+			assert.Empty(t, corrupted)
+			repaired, err := RepairConflictMarkerFiles(ledger, slog.Default())
+			require.NoError(t, err)
+			assert.Zero(t, repaired)
+			_, deleted, err := MigrateLegacyGitHubFiles(ledger, slog.Default())
+			require.NoError(t, err)
+			assert.Zero(t, deleted)
+			// a legacy name may be migrated to a hash name; the file itself must survive
+			files, err := ListGitHubDataFiles(ledger, "pr")
+			require.NoError(t, err)
+			assert.Len(t, files, 1, "valid file %s must not be deleted", filepath.Base(path))
+		})
+	}
+}
