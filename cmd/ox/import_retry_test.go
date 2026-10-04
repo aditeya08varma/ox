@@ -33,6 +33,7 @@ type importRetryFixture struct {
 	text        string // --text path, empty for none
 	batchFails  atomic.Bool
 	uploadFails atomic.Bool
+	uploads     atomic.Int32           // successful object uploads
 	onUpload    atomic.Pointer[func()] // runs inside an object upload, e.g. to simulate a concurrent import
 }
 
@@ -108,6 +109,7 @@ func (f *importRetryFixture) serveLFS(w http.ResponseWriter, r *http.Request) {
 		if hook := f.onUpload.Load(); hook != nil {
 			(*hook)()
 		}
+		f.uploads.Add(1)
 		w.WriteHeader(http.StatusOK)
 	default:
 		http.NotFound(w, r)
@@ -245,6 +247,7 @@ func TestImport_UncreatableDocDirFailsAfterUpload(t *testing.T) {
 	_, err := f.importDoc(false)
 
 	require.ErrorContains(t, err, "create doc directory")
+	assert.Positive(t, f.uploads.Load(), "the directory must be created only after the upload")
 	assert.NoFileExists(t, filepath.Join(f.docDir(), "metadata.json"))
 }
 
