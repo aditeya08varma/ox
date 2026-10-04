@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -129,7 +128,7 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 			len(unmerged), sessionsDir, unmerged[0].Path)
 	}
 	// a conflict already `git add`ed by hand is stage-0 but still carries its markers
-	marked, err := sessionFileWithConflictMarkers(projectRoot, string(output))
+	marked, err := sessionFileWithConflictMarkers(projectRoot, sessionsDir)
 	if err != nil {
 		return fmt.Errorf("failed to check session files for conflict markers: %w", err)
 	}
@@ -192,37 +191,43 @@ func runSessionCommit(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// contains checks if a string slice contains a value
-// sessionFileWithConflictMarkers returns the first changed session file, from
-// `git status --porcelain` output, whose working-tree content has conflict markers.
-func sessionFileWithConflictMarkers(projectRoot, porcelain string) (string, error) {
-	for _, line := range strings.Split(porcelain, "\n") {
-		if len(line) < 4 || strings.ContainsRune(line[:2], 'D') {
-			continue
+// sessionFileWithConflictMarkers returns the first session file `git add` would stage whose
+// working-tree content has conflict markers: changed and untracked files, plus files already
+// staged by hand. git lists them relative to projectRoot, which need not be the repo root,
+// and -z keeps unusual names unquoted.
+func sessionFileWithConflictMarkers(projectRoot, sessionsDir string) (string, error) {
+	listings := [][]string{
+		{"ls-files", "-z", "--modified", "--others", "--exclude-standard", "--", sessionsDir},
+		{"diff", "--cached", "--name-only", "-z", "--relative", "--diff-filter=d", "--", sessionsDir},
+	}
+	for _, args := range listings {
+		out, err := exec.Command("git", append([]string{"-C", projectRoot}, args...)...).Output()
+		if err != nil {
+			return "", fmt.Errorf("git %s: %w", args[0], err)
 		}
-		rel := line[3:]
-		if i := strings.Index(rel, " -> "); i >= 0 {
-			rel = rel[i+len(" -> "):]
-		}
-		// untracked directories are listed once, so walk them
-		var marked string
-		err := filepath.WalkDir(filepath.Join(projectRoot, rel), func(path string, d fs.DirEntry, err error) error {
-			if err != nil || d.IsDir() || marked != "" {
-				return err
+		for _, rel := range strings.Split(string(out), "\x00") {
+			if rel == "" {
+				continue
+			}
+			path := filepath.Join(projectRoot, rel)
+			// regular files only: a deleted file has nothing to scan, git commits a symlink as
+			// the link itself, and a FIFO or device must never be read
+			if info, err := os.Lstat(path); err != nil || !info.Mode().IsRegular() {
+				continue
 			}
 			has, err := gitutil.HasConflictMarkers(path)
-			if has {
-				marked = path
+			if err != nil {
+				return "", err
 			}
-			return err
-		})
-		if err != nil || marked != "" {
-			return marked, err
+			if has {
+				return path, nil
+			}
 		}
 	}
 	return "", nil
 }
 
+// contains checks if a string slice contains a value
 func contains(slice []string, val string) bool {
 	for _, s := range slice {
 		if s == val {

@@ -17,6 +17,7 @@ func newSessionCommitProject(t *testing.T) (string, string) {
 	t.Setenv("HOME", project)
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	t.Setenv("GIT_CONFIG_SYSTEM", "/dev/null")
+	t.Setenv("OX_PROJECT_ROOT", "")
 	mustRunGit(t, project, "init", "--initial-branch=main")
 	mustRunGit(t, project, "config", "user.name", "Test")
 	mustRunGit(t, project, "config", "user.email", "test@example.com")
@@ -88,4 +89,20 @@ func TestRunSessionCommit_CommitsCleanSessionOnly(t *testing.T) {
 	assert.Contains(t, subject, "Update sessions")
 	status, _ := runIsolatedGit(t, project, "status", "--porcelain=v1")
 	assert.Equal(t, "A  wip.go", status, "session committed, unrelated staged file left alone")
+}
+
+// TestRunSessionCommit_ProjectInRepoSubdirectory covers a .sageox/ that is not at the repo root.
+// Without it, git's root-relative paths are joined onto the project dir and every commit fails.
+func TestRunSessionCommit_ProjectInRepoSubdirectory(t *testing.T) {
+	repo, _ := newSessionCommitProject(t)
+	project := filepath.Join(repo, "services", "api")
+	meta := filepath.Join(project, ".sageox", "sessions", "2026-09-24T13-00-dana-OxDDDD", "meta.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(meta), 0o755))
+	require.NoError(t, os.WriteFile(meta, []byte(`{"title":"d"}`+"\n"), 0o644))
+	t.Chdir(project)
+
+	require.NoError(t, runSessionCommit(sessionCommitCmd, nil))
+
+	status, _ := runIsolatedGit(t, repo, "status", "--porcelain=v1")
+	assert.Empty(t, status, "the subdirectory session must be committed")
 }

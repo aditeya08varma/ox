@@ -80,14 +80,23 @@ func checkSessionCommit(fix bool) checkResult {
 
 	// commit only sessions/ through the validated snapshot so markers or invalid meta.json are refused
 	commitMsg := buildSessionCommitMessage(sessionIDs)
-	committed, err := gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, commitMsg, "sessions/")
+	var committed bool
+	err = gitutil.WithRepoLock(context.Background(), ledgerPath, func() error {
+		var commitErr error
+		committed, commitErr = gitutil.CommitLedgerSnapshot(context.Background(), ledgerPath, commitMsg, "sessions/")
+		return commitErr
+	})
+	if gitutil.IsRepoLockBusy(err) {
+		return SkippedCheck("staged session commit", "ledger busy with another ox process",
+			"Rerun `ox doctor --fix` in a moment")
+	}
+	// no discard hint: some refusals (a missing LFS pointer) name content that exists only locally
 	if err != nil {
 		return FailedCheck("staged session commit",
 			"refusing to auto-commit",
 			fmt.Sprintf("%v\n       "+
-				"Fix the named file by hand (remove the markers, or `git -C %s checkout HEAD -- <file>` "+
-				"to discard the local change), then `git add` it and rerun `ox doctor --fix`.",
-				err, ledgerPath))
+				"Fix the file the error names by hand, `git add` it, then rerun `ox doctor --fix`.",
+				err))
 	}
 	if !committed {
 		return PassedCheck("staged session commit", "nothing to commit")
