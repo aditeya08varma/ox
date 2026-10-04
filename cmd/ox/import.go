@@ -292,7 +292,7 @@ func runImport(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("LFS upload failed:\n  %s", strings.Join(uploadErrors, "\n  "))
 	}
 
-	// created only after the upload succeeds, so a failed import leaves nothing that blocks a retry;
+	// created only after the upload succeeds, so a failed upload leaves nothing that blocks a retry;
 	// Mkdir, not MkdirAll, so an import that created docDir during our upload is not overwritten without --force
 	err = os.MkdirAll(filepath.Dir(docDir), 0o755)
 	if err == nil {
