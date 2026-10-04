@@ -143,3 +143,20 @@ func TestSessionRecoveryMarker_UntrackedUnderOldGitignoreIsNotReportedAsIndexed(
 	assert.NotContains(t, result.detail, "git rm --cached")
 	assert.NotContains(t, result.detail, "git add .sageox/")
 }
+
+// TestSessionRecoveryMarker_RenamedIntoPlaceIsFlaggedByDestination: without it, a staged rename
+// onto the marker is either nudged to commit or given an unusable "git rm --cached old -> new" hint.
+func TestSessionRecoveryMarker_RenamedIntoPlaceIsFlaggedByDestination(t *testing.T) {
+	gitRoot := newMarkerTestRepo(t)
+	require.NoError(t, createSageoxGitignore(filepath.Join(gitRoot, ".sageox", ".gitignore")))
+	require.NoError(t, os.WriteFile(filepath.Join(gitRoot, ".sageox", "notes.json"), []byte("{}\n"), 0o644))
+	markerGit(t, gitRoot, "add", ".sageox")
+	markerGit(t, gitRoot, "commit", "-q", "-m", "init sageox")
+
+	markerGit(t, gitRoot, "mv", ".sageox/notes.json", recoveryMarkerRel)
+
+	result := checkGitRepoState()
+	assert.True(t, result.warning)
+	assert.Contains(t, result.detail, "git rm --cached "+recoveryMarkerRel+"'")
+	assert.NotContains(t, result.detail, "->")
+}

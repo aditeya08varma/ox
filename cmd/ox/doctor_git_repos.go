@@ -236,6 +236,10 @@ func perMachineStatusPath(line string) (string, bool) {
 		return "", false
 	}
 	path := line[3:]
+	// a staged rename reads "old -> new"; the destination is what sits in the index
+	if _, dest, ok := strings.Cut(path, " -> "); ok {
+		path = dest
+	}
 	return path, filepath.Dir(path) == ".sageox" && slices.Contains(requiredGitignoreEntries, filepath.Base(path))
 }
 
