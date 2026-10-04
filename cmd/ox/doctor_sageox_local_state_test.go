@@ -109,3 +109,37 @@ func TestSessionRecoveryMarker_IgnoredAfterDoctorUpgradesOldGitignore(t *testing
 	assert.True(t, gitPathIsIgnored(gitRoot, recoveryMarkerRel), "doctor must add the marker rule to an existing .sageox/.gitignore")
 	assert.NotContains(t, markerGit(t, gitRoot, "status", "--porcelain", "--untracked-files=all"), recoveryMarkerRel)
 }
+
+// TestSessionRecoveryMarker_StagedRemovalIsNudgedToCommitNotRmAgain: without it, a user who
+// followed the `git rm --cached` hint is told to run it again, and that second run fails.
+func TestSessionRecoveryMarker_StagedRemovalIsNudgedToCommitNotRmAgain(t *testing.T) {
+	gitRoot := newMarkerTestRepo(t)
+	require.NoError(t, createSageoxGitignore(filepath.Join(gitRoot, ".sageox", ".gitignore")))
+	writeRecoveryMarker(t, gitRoot)
+	markerGit(t, gitRoot, "add", ".sageox")
+	markerGit(t, gitRoot, "add", "-f", recoveryMarkerRel)
+	markerGit(t, gitRoot, "commit", "-q", "-m", "marker committed before the fix")
+
+	markerGit(t, gitRoot, "rm", "-q", "--cached", recoveryMarkerRel)
+
+	result := checkGitRepoState()
+	assert.NotContains(t, result.detail, "git rm --cached")
+	assert.Contains(t, result.detail, "git commit")
+}
+
+// TestSessionRecoveryMarker_UntrackedUnderOldGitignoreIsNotReportedAsIndexed: without it, a
+// marker git has never seen is reported as "in the index" with an unstage command that fails.
+func TestSessionRecoveryMarker_UntrackedUnderOldGitignoreIsNotReportedAsIndexed(t *testing.T) {
+	gitRoot := newMarkerTestRepo(t)
+	legacy := strings.ReplaceAll(sageoxGitignoreContent, ".session-recovery.json\n", "")
+	require.NoError(t, os.WriteFile(filepath.Join(gitRoot, ".sageox", ".gitignore"), []byte(legacy), 0o644))
+	markerGit(t, gitRoot, "add", ".sageox")
+	markerGit(t, gitRoot, "commit", "-q", "-m", "old sageox gitignore")
+
+	writeRecoveryMarker(t, gitRoot)
+
+	result := checkGitRepoState()
+	assert.NotContains(t, result.message, "in the index")
+	assert.NotContains(t, result.detail, "git rm --cached")
+	assert.NotContains(t, result.detail, "git add .sageox/")
+}

@@ -191,9 +191,12 @@ func checkGitRepoState() checkResult {
 			if line == "" {
 				continue
 			}
-			// a file ox's own .gitignore excludes is per-machine state, not config to commit (#1062)
-			if len(line) > 3 && slices.Contains(requiredGitignoreEntries, filepath.Base(line[3:])) {
-				perMachine = append(perMachine, line[3:])
+			// a staged deletion falls through: committing it is how the file leaves the repo
+			if path, ok := perMachineStatusPath(line); ok && line[0] != 'D' {
+				// untracked waits on the .gitignore check; anything else is in the index and must come out
+				if line[:2] != "??" {
+					perMachine = append(perMachine, path)
+				}
 				continue
 			}
 			count++
@@ -221,6 +224,18 @@ func checkGitRepoState() checkResult {
 	}
 
 	return PassedCheck("Repo state", "committed and up to date")
+}
+
+// perMachineStatusPath returns the path from a `git status --porcelain` line when it names
+// a file ox's own .gitignore excludes: per-machine state, not config to commit (#1062).
+// ox writes these only directly under .sageox/, which also keeps the path in the doctor hint
+// a fixed name rather than arbitrary text from the working tree.
+func perMachineStatusPath(line string) (string, bool) {
+	if len(line) <= 3 {
+		return "", false
+	}
+	path := line[3:]
+	return path, filepath.Dir(path) == ".sageox" && slices.Contains(requiredGitignoreEntries, filepath.Base(path))
 }
 
 // checkGitRemotes validates configured git remotes.
