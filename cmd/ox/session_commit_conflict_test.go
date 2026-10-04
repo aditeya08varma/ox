@@ -106,3 +106,36 @@ func TestRunSessionCommit_ProjectInRepoSubdirectory(t *testing.T) {
 	status, _ := runIsolatedGit(t, repo, "status", "--porcelain=v1")
 	assert.Empty(t, status, "the subdirectory session must be committed")
 }
+
+// TestRunSessionCommit_ScansOnlyWhatGitWouldStage covers session files git reports in unusual forms.
+// Without it, a quoted non-ASCII path fails the commit, and a symlink is read through to its target.
+func TestRunSessionCommit_ScansOnlyWhatGitWouldStage(t *testing.T) {
+	tests := []struct {
+		name  string
+		setup func(t *testing.T, project string)
+	}{
+		{"non-ASCII username in the session path", func(t *testing.T, project string) {
+			meta := filepath.Join(project, ".sageox", "sessions", "2026-09-24T14-00-josé-OxEEEE", "meta.json")
+			require.NoError(t, os.MkdirAll(filepath.Dir(meta), 0o755))
+			require.NoError(t, os.WriteFile(meta, []byte(`{"title":"e"}`+"\n"), 0o644))
+		}},
+		{"symlink to a file outside the sessions dir", func(t *testing.T, project string) {
+			outside := filepath.Join(t.TempDir(), "merge-notes.txt")
+			require.NoError(t, os.WriteFile(outside, []byte("<<<<<<< ours\n=======\n>>>>>>> theirs\n"), 0o644))
+			link := filepath.Join(project, ".sageox", "sessions", "2026-09-24T15-00-erin-OxFFFF", "notes.txt")
+			require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o755))
+			require.NoError(t, os.Symlink(outside, link))
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			project, _ := newSessionCommitProject(t)
+			tt.setup(t, project)
+
+			require.NoError(t, runSessionCommit(sessionCommitCmd, nil))
+
+			status, _ := runIsolatedGit(t, project, "status", "--porcelain=v1")
+			assert.Empty(t, status, "the session must be committed")
+		})
+	}
+}
